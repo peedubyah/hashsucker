@@ -4,6 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "search": "node src/scripts/search.js"
+    "search": "node --env-file=.env.local src/scripts/search.js"
   }
 }

@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises';
 
+import { checkTorBoxCached } from '../lib/providers/torbox.js';
+
 import { buildStreamUrl } from '../lib/stremio/manifest.js';
 import {
   normalizeStream,
@@ -85,11 +87,31 @@ for (const batch of batches) {
 
 results = sortStreams(results);
 
-console.error(`\n${results.length} unique result(s)\n`);
+console.error(`\n${results.length} unique result(s)`);
+
+const hashes = results
+  .map((result) => result.infoHash)
+  .filter(Boolean);
+
+console.error(`Checking TorBox cache for ${hashes.length} hashes...`);
+
+const torbox = await checkTorBoxCached(hashes);
+
+results = results.map((item) => ({
+  ...item,
+  torboxCached: item.infoHash
+    ? torbox.cached.has(item.infoHash.toLowerCase())
+    : false,
+}));
+
+console.error(
+  `${torbox.cached.size} TorBox cached result(s)\n`
+);
 
 const summary = {
   uniqueResults: results.length,
   withInfoHash: results.filter((r) => r.infoHash).length,
+  torboxCached: results.filter((r) => r.torboxCached).length,
   withUrl: results.filter((r) => r.url).length,
   withNzb: results.filter((r) => r.nzbUrl).length,
 };
@@ -106,7 +128,7 @@ console.table(
     sizeGB: item.size ? (item.size / 1024 ** 3).toFixed(2) : null,
     hash: item.infoHash ? item.infoHash.slice(0, 12) : null,
     url: Boolean(item.url),
-    cachedHint: item.cached,
+    torbox: item.torboxCached ? 'CACHED' : '-',
     filename: item.filename,
   }))
 );
