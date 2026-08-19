@@ -253,7 +253,21 @@ fi
 if [[ "$MEDIA_TYPE" == "movie" ]]; then
     case "$JOB_STATE" in
         inspected|downloading|downloaded|evaluating|importing|cleaning|already_present)
-            "$SCRIPTS_DIR/validate-movie-request-match.sh" "$REQUEST_ID" "$JOB_ID" >/dev/null
+            if ! MATCH_OUTPUT="$("$SCRIPTS_DIR/validate-movie-request-match.sh" "$REQUEST_ID" "$JOB_ID" 2>&1)"; then
+                MATCH_ERROR="${MATCH_OUTPUT:-Movie request identity does not match classified release}"
+                log "movie validation failed: $MATCH_ERROR"
+                sqlq_err="$(printf '%s' "$MATCH_ERROR" | sed "s/'/''/g")"
+                sqlite3 "$DB" "
+                    UPDATE requests
+                    SET state='failed',
+                        torbox_id=$JOB_ID,
+                        last_error='$sqlq_err',
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE request_id=$(printf "'%s'" "${REQUEST_ID//\'/\'\'}");
+                "
+                "$SCRIPTS_DIR/settle-request.sh" "$REQUEST_ID"
+                exit 1
+            fi
             ;;
     esac
 fi
@@ -279,6 +293,27 @@ case "$JOB_STATE" in
 
         if ! "$PROCESSOR" "$JOB_ID"; then
             if [[ "$MEDIA_TYPE" == "movie" ]]; then
+                JOB_STATE="$(get_job_state)"
+
+                case "$JOB_STATE" in
+                    failed|done|already_present)
+                        ;;
+                    *)
+                        PROCESSOR_ERROR="Movie processor exited unexpectedly while job was ${JOB_STATE:-unknown}"
+                        PROCESSOR_ERROR_SQL="$(printf '%s' "$PROCESSOR_ERROR" | sed "s/'/''/g")"
+
+                        log "$PROCESSOR_ERROR"
+
+                        sqlite3 "$DB" "
+                            UPDATE jobs
+                            SET state='failed',
+                                last_error='$PROCESSOR_ERROR_SQL',
+                                updated_at=CURRENT_TIMESTAMP
+                            WHERE torbox_id=$JOB_ID;
+                        "
+                        ;;
+                esac
+
                 "$SCRIPTS_DIR/sync-movie-request-state.sh" "$REQUEST_ID" "$JOB_ID" >/dev/null || true
             fi
 

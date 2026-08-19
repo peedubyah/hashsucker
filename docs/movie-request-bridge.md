@@ -8,14 +8,15 @@ The complete proposed importer diff is in `docs/torbox-importer-movie-bridge.pat
 
 ## Minimal importer changes
 
-- `process-request.sh` explicitly permits only `tv/episode` and `movie/movie`, retains all other fail-closed behavior, dispatches classified movies to the existing `process-movie.sh`, synchronizes terminal job state, and settles the queue artifact.
-- `validate-movie-request-match.sh` proves the requested movie ID matches the selected file's Radarr-authoritative TMDB classification before processing. `tmdb:<id>` compares directly; IMDb `tt...` resolves the classified TMDB movie through Radarr and compares exact IMDb ID. Ambiguous, unsupported, or mismatched IDs fail closed.
+- `worker.sh` guards legacy unattended movie selection with a `NOT EXISTS` clause against any request matching `torbox_id` or `info_hash`. Truly unrequested movie jobs continue through legacy processing; request-linked movie jobs (whether active or failed) are strictly excluded from legacy crawler execution, eliminating double-processing races and ensuring failed validations never fall through to unintended downloads.
+- `process-request.sh` explicitly permits only `tv/episode` and `movie/movie`, retains all other fail-closed behavior, validates movie classification against explicit request intent (failing closed to `/requests/failed/` on mismatch without retrying), dispatches classified movies to the existing `process-movie.sh`, synchronizes terminal job state, and settles the queue artifact.
+- `validate-movie-request-match.sh` proves the requested movie ID matches the selected file's Radarr-authoritative TMDB classification before processing. `tmdb:<id>` compares directly; IMDb `tt...` resolves the classified TMDB movie through Radarr and compares exact IMDb ID. Ambiguous, unsupported, or mismatched IDs fail closed, and `process-request.sh` immediately marks the request `failed`, records the error, and settles to `/requests/failed/` without modifying jobs or downloading.
 - `sync-movie-request-state.sh` maps only the exact linked processing movie request from terminal job `done`, `already_present`, or `failed`; non-terminal jobs and unrelated TV requests are untouched.
 - `movie-cleanup-policy.sh` returns one of:
   - `delete-legacy`: no linked request, preserving proven legacy behavior;
-  - `delete-request-owned`: a linked processing movie request has `provider_created=1`;
-  - `retain-preexisting`: linked requests exist but none owns the provider source.
-- `process-movie.sh` consults that policy only at cleanup. Request-owned cleanup additionally re-verifies that the current TorBox ID hash equals the job/request hash. Pre-existing queued sources are retained. Failed requests retain provider material through existing settlement behavior.
+  - `delete-request-owned`: a single linked processing movie request has `provider_created=1`;
+  - `retain-preexisting`: linked requests exist without provider ownership, OR multiple active processing requests share the same job/hash (fail-safe retention to prevent breaking concurrent/subsequent requests).
+- `process-movie.sh` consults that policy only at cleanup. Request-owned cleanup additionally re-verifies that the current TorBox ID hash equals the job/request hash. Pre-existing queued sources and multi-request sources are retained. Failed requests retain provider material through existing settlement behavior.
 
 Already-present movies retain the established no-upgrade rule. The processor sets job `already_present`, the bridge propagates it to the request, and `settle-request.sh` deletes only a request-created source after its existing ownership/hash proof; pre-existing sources remain untouched.
 

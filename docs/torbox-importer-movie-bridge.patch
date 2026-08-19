@@ -1,6 +1,6 @@
 # process-request
 --- original/scripts/process-request.sh	2026-08-19 02:43:16.892469108 -0500
-+++ scripts/process-request.sh	2026-08-19 02:43:57.541613374 -0500
++++ scripts/process-request.sh	2026-08-19 03:22:55.150281490 -0500
 @@ -4,6 +4,7 @@
  FILE="${1:?usage: process-request.sh REQUEST.json}"
  
@@ -158,7 +158,7 @@
                  exit 0
                  ;;
          esac
-@@ -214,24 +244,48 @@
+@@ -214,24 +244,62 @@
      case "$STATE" in
          already_present|done|failed)
              log "request became terminal during selection: $STATE"
@@ -172,7 +172,21 @@
 +if [[ "$MEDIA_TYPE" == "movie" ]]; then
 +    case "$JOB_STATE" in
 +        inspected|downloading|downloaded|evaluating|importing|cleaning|already_present)
-+            "$SCRIPTS_DIR/validate-movie-request-match.sh" "$REQUEST_ID" "$JOB_ID" >/dev/null
++            if ! MATCH_OUTPUT="$("$SCRIPTS_DIR/validate-movie-request-match.sh" "$REQUEST_ID" "$JOB_ID" 2>&1)"; then
++                MATCH_ERROR="${MATCH_OUTPUT:-Movie request identity does not match classified release}"
++                log "movie validation failed: $MATCH_ERROR"
++                sqlq_err="$(printf '%s' "$MATCH_ERROR" | sed "s/'/''/g")"
++                sqlite3 "$DB" "
++                    UPDATE requests
++                    SET state='failed',
++                        torbox_id=$JOB_ID,
++                        last_error='$sqlq_err',
++                        updated_at=CURRENT_TIMESTAMP
++                    WHERE request_id=$(printf "'%s'" "${REQUEST_ID//\'/\'\'}");
++                "
++                "$SCRIPTS_DIR/settle-request.sh" "$REQUEST_ID"
++                exit 1
++            fi
 +            ;;
 +    esac
 +fi
@@ -211,7 +225,7 @@
              fi
  
              exit 1
-@@ -239,12 +293,16 @@
+@@ -239,12 +307,16 @@
          ;;
  
      awaiting_selection)
@@ -229,7 +243,7 @@
          exit 1
          ;;
  
-@@ -254,11 +312,15 @@
+@@ -254,11 +326,15 @@
          ;;
  esac
  
@@ -311,6 +325,48 @@
  "
  
 
+# worker
+--- original/scripts/worker.sh	2026-08-19 03:31:24.690611441 -0500
++++ scripts/worker.sh	2026-08-19 03:31:53.337971141 -0500
+@@ -82,15 +82,16 @@
+     #
+     # Process exactly one legacy movie job at a time.
+     #
+-    # Explicit request-driven TV jobs are handled above by process-request.sh.
++    # Explicit request-driven movie and TV jobs are handled above by process-request.sh.
++    # Exclude any movie job that is associated with a queue request (by torbox_id or info_hash).
+     #
+     MOVIE_JOB="$(
+         sqlite3 "$DB" "
+-            SELECT torbox_id
+-            FROM jobs
+-            WHERE media_type='movie'
+-              AND arr_target='radarr'
+-              AND state IN (
++            SELECT j.torbox_id
++            FROM jobs j
++            WHERE j.media_type='movie'
++              AND j.arr_target='radarr'
++              AND j.state IN (
+                   'inspected',
+                   'downloading',
+                   'downloaded',
+@@ -98,7 +99,13 @@
+                   'importing',
+                   'cleaning'
+               )
+-            ORDER BY first_seen
++              AND NOT EXISTS (
++                  SELECT 1
++                  FROM requests r
++                  WHERE r.torbox_id=j.torbox_id
++                     OR (r.info_hash IS NOT NULL AND lower(r.info_hash)=lower(j.info_hash))
++              )
++            ORDER BY j.first_seen
+             LIMIT 1;
+         "
+     )"
+
 # sync
 --- /dev/null	2026-08-18 11:00:40.666704137 -0500
 +++ scripts/sync-movie-request-state.sh	2026-08-19 02:40:00.148959319 -0500
@@ -386,22 +442,37 @@
 
 # policy
 --- /dev/null	2026-08-18 11:00:40.666704137 -0500
-+++ scripts/movie-cleanup-policy.sh	2026-08-19 02:40:00.199831152 -0500
-@@ -0,0 +1,37 @@
++++ scripts/movie-cleanup-policy.sh	2026-08-19 03:23:43.979447797 -0500
+@@ -0,0 +1,56 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +
 +JOB_ID="${1:?usage: movie-cleanup-policy.sh TORBOX_ID}"
 +DB="${TORBOX_DB:-/config/state/torbox-importer.db}"
 +
++JOB_HASH="$(
++    sqlite3 "$DB" "
++        SELECT lower(info_hash)
++        FROM jobs
++        WHERE torbox_id=$JOB_ID;
++    "
++)"
++
++sqlq() {
++    local value="$1"
++    value="${value//\'/\'\'}"
++    printf "'%s'" "$value"
++}
++
 +REQUEST_COUNT="$(
 +    sqlite3 "$DB" "
 +        SELECT COUNT(*)
 +        FROM requests
 +        WHERE state='processing'
-+          AND media_type='movie'
-+          AND scope='movie'
-+          AND torbox_id=$JOB_ID;
++          AND (
++            torbox_id=$JOB_ID
++            OR ($([[ -n "$JOB_HASH" ]] && printf 'lower(info_hash)=%s' "$(sqlq "$JOB_HASH")" || printf '0=1'))
++          );
 +    "
 +)"
 +
@@ -410,16 +481,20 @@
 +        SELECT COUNT(*)
 +        FROM requests
 +        WHERE state='processing'
-+          AND media_type='movie'
-+          AND scope='movie'
 +          AND provider IN ('torbox', 'auto')
 +          AND provider_created=1
-+          AND torbox_id=$JOB_ID;
++          AND (
++            torbox_id=$JOB_ID
++            OR ($([[ -n "$JOB_HASH" ]] && printf 'lower(info_hash)=%s' "$(sqlq "$JOB_HASH")" || printf '0=1'))
++          );
 +    "
 +)"
 +
 +if [[ "$REQUEST_COUNT" -eq 0 ]]; then
 +    printf '%s\n' 'delete-legacy'
++elif [[ "$REQUEST_COUNT" -gt 1 ]]; then
++    # Multiple active requests reference this job or hash; retain fail-safe to prevent breaking concurrent/pending requests
++    printf '%s\n' 'retain-preexisting'
 +elif [[ "$OWNED_COUNT" -gt 0 ]]; then
 +    printf '%s\n' 'delete-request-owned'
 +else
@@ -501,8 +576,8 @@
 
 # tests
 --- /dev/null	2026-08-18 11:00:40.666704137 -0500
-+++ tests/movie-request-bridge.sh	2026-08-19 02:44:28.891160660 -0500
-@@ -0,0 +1,115 @@
++++ tests/movie-request-bridge.sh	2026-08-19 03:33:12.494018858 -0500
+@@ -0,0 +1,181 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +
@@ -514,6 +589,7 @@
 +sqlite3 "$DB" <<'SQL'
 +CREATE TABLE jobs (
 +  torbox_id INTEGER PRIMARY KEY,
++  info_hash TEXT,
 +  state TEXT NOT NULL,
 +  last_error TEXT
 +);
@@ -525,18 +601,23 @@
 +  provider TEXT NOT NULL DEFAULT 'torbox',
 +  provider_created INTEGER NOT NULL DEFAULT 0,
 +  torbox_id INTEGER,
++  info_hash TEXT,
 +  last_error TEXT,
 +  updated_at TEXT
 +);
-+INSERT INTO jobs VALUES (10, 'processing', NULL);
-+INSERT INTO jobs VALUES (11, 'done', NULL);
-+INSERT INTO jobs VALUES (12, 'already_present', 'Movie already has a file; upgrade policy not enabled');
-+INSERT INTO jobs VALUES (13, 'failed', 'Radarr rejected candidate');
++INSERT INTO jobs VALUES (10, 'hash10', 'processing', NULL);
++INSERT INTO jobs VALUES (11, 'hash11', 'done', NULL);
++INSERT INTO jobs VALUES (12, 'hash12', 'already_present', 'Movie already has a file; upgrade policy not enabled');
++INSERT INTO jobs VALUES (13, 'hash13', 'failed', 'Radarr rejected candidate');
 +INSERT INTO requests (request_id,state,media_type,scope,torbox_id) VALUES ('processing','processing','movie','movie',10);
 +INSERT INTO requests (request_id,state,media_type,scope,torbox_id) VALUES ('done','processing','movie','movie',11);
 +INSERT INTO requests (request_id,state,media_type,scope,torbox_id) VALUES ('present','processing','movie','movie',12);
 +INSERT INTO requests (request_id,state,media_type,scope,torbox_id) VALUES ('failed','processing','movie','movie',13);
 +INSERT INTO requests (request_id,state,media_type,scope,torbox_id) VALUES ('tv','processing','tv','episode',11);
++INSERT INTO jobs VALUES (20, 'hash20', 'cleaning', NULL);
++INSERT INTO jobs VALUES (21, 'hash21', 'cleaning', NULL);
++INSERT INTO jobs VALUES (22, 'hash22', 'cleaning', NULL);
++INSERT INTO jobs VALUES (23, 'hash23', 'cleaning', NULL);
 +SQL
 +
 +if TORBOX_DB="$DB" "$ROOT/scripts/sync-movie-request-state.sh" processing 10; then
@@ -553,16 +634,21 @@
 +[[ "$(sqlite3 "$DB" "SELECT state FROM requests WHERE request_id='tv';")" == processing ]]
 +
 +sqlite3 "$DB" <<'SQL'
-+INSERT INTO jobs VALUES (20, 'cleaning', NULL);
-+INSERT INTO jobs VALUES (21, 'cleaning', NULL);
-+INSERT INTO jobs VALUES (22, 'cleaning', NULL);
 +INSERT INTO requests (request_id,state,media_type,scope,provider,provider_created,torbox_id) VALUES ('owned','processing','movie','movie','torbox',1,21);
 +INSERT INTO requests (request_id,state,media_type,scope,provider,provider_created,torbox_id) VALUES ('preexisting','processing','movie','movie','torbox',0,22);
++-- Multiple requests sharing the same hash / torbox_id:
++INSERT INTO requests (request_id,state,media_type,scope,provider,provider_created,torbox_id,info_hash) VALUES ('owned-a','processing','movie','movie','torbox',1,23,'hash23');
++INSERT INTO requests (request_id,state,media_type,scope,provider,provider_created,torbox_id,info_hash) VALUES ('owned-b','processing','movie','movie','torbox',0,23,'hash23');
 +SQL
 +
 +[[ "$(TORBOX_DB="$DB" "$ROOT/scripts/movie-cleanup-policy.sh" 20)" == delete-legacy ]]
 +[[ "$(TORBOX_DB="$DB" "$ROOT/scripts/movie-cleanup-policy.sh" 21)" == delete-request-owned ]]
 +[[ "$(TORBOX_DB="$DB" "$ROOT/scripts/movie-cleanup-policy.sh" 22)" == retain-preexisting ]]
++# While request B is still processing, request A completion must NOT delete the provider resource:
++[[ "$(TORBOX_DB="$DB" "$ROOT/scripts/movie-cleanup-policy.sh" 23)" == retain-preexisting ]]
++# When request A finishes to done, request B (provider_created=0) still protects/retains the resource:
++sqlite3 "$DB" "UPDATE requests SET state='done' WHERE request_id='owned-a';"
++[[ "$(TORBOX_DB="$DB" "$ROOT/scripts/movie-cleanup-policy.sh" 23)" == retain-preexisting ]]
 +
 +# End-to-end orchestration test with the proven movie processor mocked at its
 +# boundary: process-request must select movie (never TV), propagate done, settle.
@@ -570,19 +656,21 @@
 +MOCKS="$TMP/scripts"
 +mkdir -p "$MOCKS"
 +sqlite3 "$DB2" <<'SQL'
-+CREATE TABLE jobs (torbox_id INTEGER PRIMARY KEY, info_hash TEXT, state TEXT, media_type TEXT, arr_target TEXT, last_error TEXT, updated_at TEXT);
++CREATE TABLE jobs (torbox_id INTEGER PRIMARY KEY, info_hash TEXT, state TEXT, media_type TEXT, arr_target TEXT, last_error TEXT, first_seen TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT);
 +CREATE TABLE files (torbox_id INTEGER, selected INTEGER, arr_match TEXT, arr_rejection TEXT, updated_at TEXT);
-+CREATE TABLE requests (request_id TEXT PRIMARY KEY, state TEXT, media_type TEXT, scope TEXT, media_id TEXT, torbox_id INTEGER, last_error TEXT, updated_at TEXT);
-+INSERT INTO jobs VALUES (30, '0123456789abcdef0123456789abcdef01234567', 'inspected', 'movie', 'radarr', NULL, NULL);
++CREATE TABLE requests (request_id TEXT PRIMARY KEY, state TEXT, media_type TEXT, scope TEXT, media_id TEXT, torbox_id INTEGER, info_hash TEXT, last_error TEXT, updated_at TEXT);
++INSERT INTO jobs VALUES (30, '0123456789abcdef0123456789abcdef01234567', 'inspected', 'movie', 'radarr', NULL, CURRENT_TIMESTAMP, NULL);
 +INSERT INTO files VALUES (30, 1, 'tmdb:123', NULL, NULL);
-+INSERT INTO requests VALUES ('movie-request', 'processing', 'movie', 'movie', 'tmdb:123', 30, NULL, NULL);
-+INSERT INTO requests VALUES ('season-request', 'processing', 'tv', 'season', 'tt1', NULL, NULL, NULL);
-+INSERT INTO requests VALUES ('wrong-movie', 'processing', 'movie', 'movie', 'tmdb:999', 30, NULL, NULL);
-+INSERT INTO requests VALUES ('imdb-movie', 'processing', 'movie', 'movie', 'tt0123456', 30, NULL, NULL);
++INSERT INTO requests VALUES ('movie-request', 'processing', 'movie', 'movie', 'tmdb:123', 30, '0123456789abcdef0123456789abcdef01234567', NULL, NULL);
++INSERT INTO requests VALUES ('season-request', 'processing', 'tv', 'season', 'tt1', NULL, NULL, NULL, NULL);
++INSERT INTO jobs VALUES (31, '0123456789abcdef0123456789abcdef01234568', 'inspected', 'movie', 'radarr', NULL, CURRENT_TIMESTAMP, NULL);
++INSERT INTO files VALUES (31, 1, 'tmdb:123', NULL, NULL);
++INSERT INTO requests VALUES ('wrong-movie', 'processing', 'movie', 'movie', 'tmdb:999', 31, '0123456789abcdef0123456789abcdef01234568', NULL, NULL);
++INSERT INTO requests VALUES ('imdb-movie', 'processing', 'movie', 'movie', 'tt0123456', 30, '0123456789abcdef0123456789abcdef01234567', NULL, NULL);
 +SQL
 +
 +printf '%s\n' '#!/bin/sh' 'exit 0' > "$MOCKS/ingest-request.sh"
-+printf '%s\n' '#!/bin/sh' 'printf "30\n"' > "$MOCKS/ensure-torbox-job.sh"
++printf '%s\n' '#!/bin/sh' 'sqlite3 "$TORBOX_DB" "SELECT COALESCE(torbox_id, 30) FROM requests WHERE request_id='\''$1'\'';"' > "$MOCKS/ensure-torbox-job.sh"
 +printf '%s\n' '#!/bin/sh' 'exit 0' > "$MOCKS/dispatch-job.sh"
 +printf '%s\n' '#!/bin/sh' 'exit 99' > "$MOCKS/process-tv.sh"
 +printf '%s\n' '#!/bin/sh' 'sqlite3 "$TORBOX_DB" "UPDATE jobs SET state=char(100,111,110,101) WHERE torbox_id=$1;"' > "$MOCKS/process-movie.sh"
@@ -606,16 +694,68 @@
 +  [[ "$?" -eq 3 ]]
 +fi
 +
-+if TORBOX_DB="$DB2" RADARR_API_KEY=test RADARR_URL=http://radarr \
-+  "$ROOT/scripts/validate-movie-request-match.sh" wrong-movie 30; then
-+  echo 'mismatched movie request unexpectedly validated' >&2
++# Intentional movie identity mismatch in process-request.sh must fail closed:
++# mark request failed, record error, settle to /requests/failed/, leave job unmutated.
++printf '%s\n' '{"requestId":"wrong-movie"}' > "$TMP/wrong-movie.json"
++if TORBOX_DB="$DB2" TORBOX_SCRIPTS_DIR="$MOCKS" SETTLE_MARKER="$TMP/settled-wrong" RADARR_API_KEY=test RADARR_URL=http://radarr \
++  "$ROOT/scripts/process-request.sh" "$TMP/wrong-movie.json"; then
++  echo 'mismatched movie request unexpectedly succeeded' >&2
 +  exit 1
 +fi
++[[ "$(sqlite3 "$DB2" "SELECT state FROM requests WHERE request_id='wrong-movie';")" == failed ]]
++[[ "$(sqlite3 "$DB2" "SELECT last_error FROM requests WHERE request_id='wrong-movie';")" == 'unsupported or mismatched movie request ID: tmdb:999' ]]
++[[ "$(sqlite3 "$DB2" "SELECT state FROM jobs WHERE torbox_id=31;")" == inspected ]]
++[[ "$(cat "$TMP/settled-wrong")" == wrong-movie ]]
 +
 +printf '%s\n' '#!/bin/sh' 'printf "%s\n" "[{\"tmdbId\":123,\"imdbId\":\"tt0123456\"}]"' > "$MOCKS/curl"
 +chmod +x "$MOCKS/curl"
 +[[ "$(PATH="$MOCKS:$PATH" TORBOX_DB="$DB2" RADARR_API_KEY=test RADARR_URL=http://radarr \
 +  "$ROOT/scripts/validate-movie-request-match.sh" imdb-movie 30)" == 'MATCHED: tt0123456 -> tmdb:123' ]]
 +
++# Regression test for legacy worker movie selection NOT EXISTS guard:
++# - Truly unlinked inspected movie (job 40) MUST be selected;
++# - Active request-linked movie (job 41) MUST be excluded;
++# - Failed request-linked movie (job 42) MUST be excluded.
++sqlite3 "$DB2" <<'SQL'
++INSERT INTO jobs (torbox_id, info_hash, state, media_type, arr_target, first_seen)
++  VALUES (40, 'hash40', 'inspected', 'movie', 'radarr', CURRENT_TIMESTAMP);
++INSERT INTO jobs (torbox_id, info_hash, state, media_type, arr_target, first_seen)
++  VALUES (41, 'hash41', 'inspected', 'movie', 'radarr', CURRENT_TIMESTAMP);
++INSERT INTO jobs (torbox_id, info_hash, state, media_type, arr_target, first_seen)
++  VALUES (42, 'hash42', 'inspected', 'movie', 'radarr', CURRENT_TIMESTAMP);
++INSERT INTO requests (request_id, state, media_type, scope, media_id, torbox_id, info_hash)
++  VALUES ('active-req', 'processing', 'movie', 'movie', 'tmdb:41', 41, 'hash41');
++INSERT INTO requests (request_id, state, media_type, scope, media_id, torbox_id, info_hash)
++  VALUES ('failed-req', 'failed', 'movie', 'movie', 'tmdb:42', 42, 'hash42');
++SQL
++
++WORKER_SQL="
++    SELECT j.torbox_id
++    FROM jobs j
++    WHERE j.media_type='movie'
++      AND j.arr_target='radarr'
++      AND j.state IN (
++          'inspected',
++          'downloading',
++          'downloaded',
++          'evaluating',
++          'importing',
++          'cleaning'
++      )
++      AND NOT EXISTS (
++          SELECT 1
++          FROM requests r
++          WHERE r.torbox_id=j.torbox_id
++             OR (r.info_hash IS NOT NULL AND lower(r.info_hash)=lower(j.info_hash))
++      )
++    ORDER BY j.first_seen
++    LIMIT 1;
++"
++
++[[ "$(sqlite3 "$DB2" "$WORKER_SQL")" == "40" ]]
++
++# When unlinked job 40 is removed or completed, legacy worker query returns nothing (jobs 41 & 42 remain excluded):
++sqlite3 "$DB2" "UPDATE jobs SET state='done' WHERE torbox_id=40;"
++[[ -z "$(sqlite3 "$DB2" "$WORKER_SQL")" ]]
++
 +echo 'movie request bridge helper tests passed'
-

@@ -56,9 +56,11 @@ Read-only TorBox account view, recent activity, rich progress implementation, an
 
 ## Verification state
 
-- VERIFIED locally after latest polish: `npm test` passes 5 test files, 0 failures. Tests cover deployment identity/group, request invariants, queue lifecycle, release/filter/category/max-size/utility/selection/pane models, cache/timings, versioned API/static behavior, and browser-secret exclusion. `node --check` and `git diff --check` pass.
+- VERIFIED locally after latest polish: `npm test` passes 6 test files (16 tests), 0 failures. Tests cover deployment identity/group, TV episode & movie request invariants, queue lifecycle, release/filter/category/max-size/utility/selection/pane models, cache/timings, versioned API/static behavior, and browser-secret exclusion.
+- VERIFIED locally for movie bridge: `handoff/movie-importer-bridge/tests/movie-request-bridge.sh` passes 100%, proving `worker.sh` `NOT EXISTS` legacy query exclusion (preventing request-linked or failed-validation jobs from falling through to legacy processing while preserving unrequested legacy movie processing), fail-safe TorBox retention when multiple active requests share a hash/job, fail-closed immediate settlement to `/requests/failed/` on identity mismatch, non-terminal job protection, and terminal state synchronization.
+- VERIFIED syntax: `bash -n` and `sh -n` pass for all scripts in `handoff/movie-importer-bridge/scripts/`.
 - VERIFIED live externally: Docker build/listener/browser/importer/Sonarr acceptance flow described above.
-- IMPLEMENTED BUT NOT LIVE-VERIFIED: the new stabilization UI and timing display. The Codex sandbox cannot bind localhost; production TCP architecture remains normal and already proved live before this pass.
+- STAGED: `docs/torbox-importer-movie-bridge.patch` regenerated against verified Tower originals and ready for deliberate deployment.
 - Keep both this file and the `# Current Implementation Handoff` section of `CODEX.md` accurate after each substantial milestone.
 
 ## Repository state

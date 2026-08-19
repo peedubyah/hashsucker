@@ -109,11 +109,15 @@ MOVIE_JSON="$(
       -H "X-Api-Key: $RADARR_API_KEY" \
       "$RADARR_URL/api/v3/movie" |
     jq --argjson tmdb "$TMDB_ID" '
-      [.[] | select(.tmdbId == $tmdb)][0] // empty
+      [.[] | select(.tmdbId == $tmdb)][0] // {}
     '
 )"
 
 MOVIE_ID="$(printf '%s' "$MOVIE_JSON" | jq -r '.id // 0')"
+case "$MOVIE_ID" in
+    ''|*[!0-9]*) fail_job "Invalid Radarr movie ID: $MOVIE_ID" ;;
+esac
+
 
 # Add it if this is a new acquisition.
 if [ "$MOVIE_ID" -eq 0 ]; then
