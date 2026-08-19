@@ -1,5 +1,6 @@
 import { createRequestIntent } from '../lib/requests/intent.js';
 import { searchMedia } from '../lib/search.js';
+import { createHandoff } from '../lib/requests/handoff.js';
 
 const [type, mediaId] = process.argv.slice(2);
 
@@ -52,3 +53,18 @@ console.table(
     filename: item.filename,
   }))
 );
+
+const selected = results.find(
+  (item) => item.providers.torbox.cached
+);
+
+if (selected) {
+  const handoff = createHandoff({
+    intent,
+    release: selected,
+    provider: 'torbox',
+  });
+
+  console.log('\nExample handoff using first TorBox-cached result:');
+  console.log(JSON.stringify(handoff, null, 2));
+}
