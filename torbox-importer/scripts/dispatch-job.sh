@@ -4,6 +4,8 @@ set -euo pipefail
 JOB_ID="${1:?usage: dispatch-job.sh TORBOX_ID}"
 
 DB="${TORBOX_DB:-/config/state/torbox-importer.db}"
+APP_ROOT="${APP_ROOT:-/app}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${TORBOX_SCRIPTS_DIR:-$APP_ROOT/scripts}}"
 
 log() {
     printf '%s\n' "dispatch[$JOB_ID]: $*" >&2
@@ -91,7 +93,7 @@ if printf '%s\n' "$VIDEO_NAMES" |
 then
     log "explicit episode token found → TV candidate"
 
-    exec /config/scripts/select-tv-files.sh "$JOB_ID"
+    exec "$SCRIPTS_DIR/select-tv-files.sh" "$JOB_ID"
 fi
 
 #
@@ -100,4 +102,4 @@ fi
 #
 log "no episode token → movie candidate"
 
-exec /config/scripts/inspect-job.sh "$JOB_ID"
+exec "$SCRIPTS_DIR/inspect-job.sh" "$JOB_ID"

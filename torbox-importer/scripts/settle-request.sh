@@ -6,6 +6,8 @@ REQUEST_ID="${1:?usage: settle-request.sh REQUEST_ID}"
 : "${TORBOX_API_KEY:?TORBOX_API_KEY required}"
 
 DB="${TORBOX_DB:-/config/state/torbox-importer.db}"
+APP_ROOT="${APP_ROOT:-/app}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${TORBOX_SCRIPTS_DIR:-$APP_ROOT/scripts}}"
 TORBOX_API_URL="${TORBOX_API_URL:-https://api.torbox.app/v1/api}"
 
 log() {
@@ -59,7 +61,7 @@ fi
 #
 if [ "$STATE" = "failed" ]; then
     log "failed request; provider source retained"
-    /config/scripts/finalize-request.sh "$SOURCE_PATH"
+    "$SCRIPTS_DIR/finalize-request.sh" "$SOURCE_PATH"
     exit 0
 fi
 
@@ -182,4 +184,4 @@ fi
 # state=done already implies the processor performed and verified provider
 # cleanup. At this point the queue file can simply be finalized.
 #
-/config/scripts/finalize-request.sh "$SOURCE_PATH"
+"$SCRIPTS_DIR/finalize-request.sh" "$SOURCE_PATH"

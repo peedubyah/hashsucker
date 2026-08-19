@@ -4,6 +4,7 @@ set -euo pipefail
 incoming="/requests/incoming"
 processing="/requests/processing"
 failed="/requests/failed"
+APP_ROOT="${APP_ROOT:-/app}"
 
 mkdir -p "$incoming" "$processing" "$failed"
 
@@ -26,7 +27,7 @@ for src in "$incoming"/*.json; do
 
     log "claimed $dst"
 
-    if /config/validate-request.sh "$dst" >&2; then
+    if "$APP_ROOT/validate-request.sh" "$dst" >&2; then
         printf '%s\n' "$dst"
         exit 0
     fi

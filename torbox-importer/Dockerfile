@@ -12,6 +12,9 @@ RUN apk add --no-cache \
     nano \
     coreutils
 
+COPY scripts/ /app/scripts/
+COPY claim-request.sh validate-request.sh /app/
+
 WORKDIR /config
 
 CMD ["sleep", "infinity"]

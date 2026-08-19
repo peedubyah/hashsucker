@@ -3,6 +3,8 @@ set -eu
 
 POLL_INTERVAL="${POLL_INTERVAL:-10}"
 DB="${TORBOX_DB:-/config/state/torbox-importer.db}"
+APP_ROOT="${APP_ROOT:-/app}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${TORBOX_SCRIPTS_DIR:-$APP_ROOT/scripts}}"
 
 log() {
     printf '%s\n' "worker: $*" >&2
@@ -11,7 +13,7 @@ log() {
 log "starting TorBox importer"
 log "poll interval: ${POLL_INTERVAL}s"
 
-/config/scripts/db-init.sh >/dev/null
+"$SCRIPTS_DIR/db-init.sh" >/dev/null
 
 while :; do
 
@@ -30,7 +32,7 @@ while :; do
     done
 
     if [ -z "$REQUEST_FILE" ]; then
-        if CLAIMED="$(/config/claim-request.sh)"; then
+        if CLAIMED="$("$APP_ROOT/claim-request.sh")"; then
             REQUEST_FILE="$CLAIMED"
         else
             CLAIM_RC=$?
@@ -44,7 +46,7 @@ while :; do
     if [ -n "$REQUEST_FILE" ]; then
         log "processing request $REQUEST_FILE"
 
-        if /config/scripts/process-request.sh "$REQUEST_FILE"; then
+        if "$SCRIPTS_DIR/process-request.sh" "$REQUEST_FILE"; then
             log "request processing complete"
         else
             REQUEST_RC=$?
@@ -55,7 +57,7 @@ while :; do
     #
     # Refresh TorBox inventory.
     #
-    if ! /config/scripts/scan-torbox.sh; then
+    if ! "$SCRIPTS_DIR/scan-torbox.sh"; then
         log "TorBox scan failed"
         sleep "$POLL_INTERVAL"
         continue
@@ -74,7 +76,7 @@ while :; do
     ); do
         log "dispatching new job $JOB_ID"
 
-        if ! /config/scripts/dispatch-job.sh "$JOB_ID"; then
+        if ! "$SCRIPTS_DIR/dispatch-job.sh" "$JOB_ID"; then
             log "dispatcher error on job $JOB_ID"
         fi
     done
@@ -113,7 +115,7 @@ while :; do
     if [ -n "$MOVIE_JOB" ]; then
         log "processing movie job $MOVIE_JOB"
 
-        if ! /config/scripts/process-movie.sh "$MOVIE_JOB"; then
+        if ! "$SCRIPTS_DIR/process-movie.sh" "$MOVIE_JOB"; then
             MOVIE_STATE="$(
                 sqlite3 "$DB" "
                     SELECT COALESCE(state, '')

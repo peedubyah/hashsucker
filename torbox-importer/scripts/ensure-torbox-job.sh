@@ -6,6 +6,8 @@ REQUEST_ID="${1:?usage: ensure-torbox-job.sh REQUEST_ID}"
 : "${TORBOX_API_KEY:?TORBOX_API_KEY required}"
 
 DB="${TORBOX_DB:-/config/state/torbox-importer.db}"
+APP_ROOT="${APP_ROOT:-/app}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${TORBOX_SCRIPTS_DIR:-$APP_ROOT/scripts}}"
 TORBOX_API_URL="${TORBOX_API_URL:-https://api.torbox.app/v1/api}"
 
 log() {
@@ -130,7 +132,7 @@ sqlite3 "$DB" "
 #
 for _ in $(seq 1 20); do
 
-    /config/scripts/scan-torbox.sh >/dev/null ||
+    "$SCRIPTS_DIR/scan-torbox.sh" >/dev/null ||
         true
 
     MATCHES="$(find_job)"

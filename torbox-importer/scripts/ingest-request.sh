@@ -3,13 +3,15 @@ set -euo pipefail
 
 FILE="${1:?usage: ingest-request.sh REQUEST.json}"
 DB="${TORBOX_DB:-/config/state/torbox-importer.db}"
+APP_ROOT="${APP_ROOT:-/app}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${TORBOX_SCRIPTS_DIR:-$APP_ROOT/scripts}}"
 
 if [[ ! -f "$FILE" ]]; then
     echo "request file not found: $FILE" >&2
     exit 1
 fi
 
-/config/validate-request.sh "$FILE" >/dev/null
+"$APP_ROOT/validate-request.sh" "$FILE" >/dev/null
 
 sqlq() {
     local value="$1"

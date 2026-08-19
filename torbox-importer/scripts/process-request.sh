@@ -4,7 +4,8 @@ set -euo pipefail
 FILE="${1:?usage: process-request.sh REQUEST.json}"
 
 DB="${TORBOX_DB:-/config/state/torbox-importer.db}"
-SCRIPTS_DIR="${TORBOX_SCRIPTS_DIR:-/config/scripts}"
+APP_ROOT="${APP_ROOT:-/app}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${TORBOX_SCRIPTS_DIR:-$APP_ROOT/scripts}}"
 
 log() {
     printf '%s\n' "request-consumer: $*" >&2

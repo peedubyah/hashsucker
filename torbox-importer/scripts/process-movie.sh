@@ -12,6 +12,8 @@ JOB_ID="${1:?usage: process-movie.sh TORBOX_ID}"
 : "${RADARR_PROFILE_4K_BLU:=8}"
 
 DB="${TORBOX_DB:-/config/state/torbox-importer.db}"
+APP_ROOT="${APP_ROOT:-/app}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${TORBOX_SCRIPTS_DIR:-$APP_ROOT/scripts}}"
 TORBOX_API_URL="${TORBOX_API_URL:-https://api.torbox.app/v1/api}"
 
 log() {
@@ -409,7 +411,7 @@ fi
 # CLEANUP
 # Legacy jobs preserve their proven cleanup behavior. Explicit requests delete
 # only request-created provider material; pre-existing sources are retained.
-CLEANUP_POLICY="$(/config/scripts/movie-cleanup-policy.sh "$JOB_ID")"
+CLEANUP_POLICY="$("$SCRIPTS_DIR/movie-cleanup-policy.sh" "$JOB_ID")"
 EVENT_MESSAGE="Radarr import verified; TorBox source retained"
 
 if [ "$CLEANUP_POLICY" != "retain-preexisting" ]; then
