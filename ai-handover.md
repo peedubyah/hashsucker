@@ -12,7 +12,7 @@ This is the product baseline. Do not regress it.
 
 ## Runtime and permissions
 
-- One Node container serves static UI and `/api/*`; normal production TCP listener remains in `src/server/index.js`.
+- One Node container serves static UI and `/api/*`; normal production TCP listener remains in `media-search/src/server/index.js`.
 - Shared queue command/status transport: `/requests/{incoming,processing,done,failed}` through `QueueImporterClient`.
 - Image user remains `node` UID/GID 1000. The live spool is owned `99:100`, directories mode `2775`/setgid. Compose must add supplementary GID 100. Verified created request ownership is `1000:100`.
 - Server-side configuration names: `TORBOX_API_KEY`, `STREMIO_ADDON_MANIFEST_URL`, `REQUESTS_ROOT`, `PORT`, `HOST`; Compose also uses `MEDIA_SEARCH_PORT` and `REQUESTS_HOST_PATH`.
@@ -20,7 +20,7 @@ This is the product baseline. Do not regress it.
 
 ## Stabilization implementation state
 
-- IMPLEMENTED + LOCALLY VERIFIED: `compose.yaml` adds supplementary GID 100 and preserves non-root `USER node`; README documents the `99:100`, `2775`/setgid queue model and host-port collision avoidance.
+- IMPLEMENTED + LOCALLY VERIFIED: `media-search/compose.yaml` adds supplementary GID 100 and preserves non-root `USER node`; `media-search/README.md` documents the `99:100`, `2775`/setgid queue model and host-port collision avoidance.
 - IMPLEMENTED + LOCALLY VERIFIED: exact-infoHash-only deduplication, cached-first then resolution/size stable ordering, cached/resolution/codec/HDR filters, summary counts, and 100-row incremental rendering. Distinct hashes remain distinct even when titles match; large season packs remain available.
 - IMPLEMENTED BUT NOT LIVE-VERIFIED: compact release workspace with sticky episode context and desktop selection/status pane; mobile uses a sticky bottom pane. The panel preserves Requested, Selected release, Cache state, and `Requested episode only` plus an always-reachable Request action.
 - IMPLEMENTED BUT NOT LIVE-VERIFIED: debounced 325 ms search-as-you-type with minimum two characters, AbortController cancellation, latest-query sequence protection, and retained Search/Enter behavior.
@@ -56,8 +56,8 @@ Read-only TorBox account view, recent activity, rich progress implementation, an
 
 ## Verification state
 
-- VERIFIED locally after latest polish: `npm test` passes 6 test files (16 tests), 0 failures. Tests cover deployment identity/group, TV episode & movie request invariants, queue lifecycle, release/filter/category/max-size/utility/selection/pane models, cache/timings, versioned API/static behavior, and browser-secret exclusion.
-- VERIFIED locally for movie bridge: `handoff/movie-importer-bridge/tests/movie-request-bridge.sh` passes 100%, proving `worker.sh` `NOT EXISTS` legacy query exclusion (preventing request-linked or failed-validation jobs from falling through to legacy processing while preserving unrequested legacy movie processing), fail-safe TorBox retention when multiple active requests share a hash/job, fail-closed immediate settlement to `/requests/failed/` on identity mismatch, non-terminal job protection, and terminal state synchronization.
+- VERIFIED locally after latest polish: `cd media-search && npm test` passes 6 test files (16 tests), 0 failures. Tests cover deployment identity/group, TV episode & movie request invariants, queue lifecycle, release/filter/category/max-size/utility/selection/pane models, cache/timings, versioned API/static behavior, and browser-secret exclusion.
+- VERIFIED locally for movie bridge (historical): `handoff/movie-importer-bridge/tests/movie-request-bridge.sh` passes 100%, proving `worker.sh` `NOT EXISTS` legacy query exclusion (preventing request-linked or failed-validation jobs from falling through to legacy processing while preserving unrequested legacy movie processing), fail-safe TorBox retention when multiple active requests share a hash/job, fail-closed immediate settlement to `/requests/failed/` on identity mismatch, non-terminal job protection, and terminal state synchronization. NOTE: `handoff/` is historical provenance; canonical importer source is `torbox-importer/`.
 - VERIFIED syntax: `bash -n` and `sh -n` pass for all scripts in `handoff/movie-importer-bridge/scripts/`.
 - VERIFIED live externally: Docker build/listener/browser/importer/Sonarr acceptance flow described above.
 - STAGED: `docs/torbox-importer-movie-bridge.patch` regenerated against verified Tower originals and ready for deliberate deployment.
@@ -65,11 +65,15 @@ Read-only TorBox account view, recent activity, rich progress implementation, an
 
 ## Repository state
 
-- Branch: `master`; latest existing commit: `da8667d Add atomic request queue handoff`.
-- Current modified tracked files: `.gitignore`, `Dockerfile`, `compose.yaml`, `deploy.sh`, `package.json`, `src/lib/requests/queue.js`, `src/lib/search.js`, `src/lib/stremio/search.js`.
-- Current untracked work: `.dockerignore`, `.env.example`, `CODEX.md`, `README.md`, `ai-handover.md`, `docs/`, `src/lib/importer/`, `src/lib/metadata/`, `src/server/`, `src/ui/`, `test/`.
-- No commits were made in these implementation sessions.
-- Run `npm test` before and after meaningful changes. Do not commit unless requested.
+- Branch: `unify-media-search-importer`.
+- media-search service relocated under `media-search/` (src/, test/, config/, data/, Dockerfile, compose.yaml, deploy.sh, package.json, README.md, .env.example, .dockerignore).
+- torbox-importer captured as canonical importer source (scripts/, tests/, Dockerfile, README.md, claim-request.sh, validate-request.sh).
+- Importer application scripts packaged under `/app` in the image via `APP_ROOT`/`SCRIPTS_DIR`; persistent state remains under `/config`.
+- Standalone media-search compose/deploy paths preserved under `media-search/` until a unified root compose is established.
+- Unified root compose not yet created.
+- Live deployment migration not yet performed.
+- No commits have been made in these implementation sessions.
+- Run `cd media-search && npm test` before and after meaningful changes. Do not commit unless requested.
 
 ## Continuation rule
 

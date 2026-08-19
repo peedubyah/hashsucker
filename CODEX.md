@@ -72,17 +72,17 @@ Before implementing anything, inventory and understand the existing repository.
 The following existing modules represent working backend primitives and should
 be preserved and built around rather than rewritten for convenience:
 
-- `src/lib/search.js`
-- `src/lib/providers/torbox.js`
-- `src/lib/requests/intent.js`
-- `src/lib/requests/handoff.js`
-- `src/lib/requests/queue.js`
-- `src/lib/stremio/normalize.js`
-- `src/lib/stremio/manifest.js`
+- `media-search/src/lib/search.js`
+- `media-search/src/lib/providers/torbox.js`
+- `media-search/src/lib/requests/intent.js`
+- `media-search/src/lib/requests/handoff.js`
+- `media-search/src/lib/requests/queue.js`
+- `media-search/src/lib/stremio/normalize.js`
+- `media-search/src/lib/stremio/manifest.js`
 
 Inspect their actual APIs before designing routes or components.
 
-Do not perform a broad rewrite of `src/lib`.
+Do not perform a broad rewrite of `media-search/src/lib`.
 
 Do not replace working provider/search/request primitives merely to fit a UI
 framework.
@@ -142,7 +142,7 @@ The server should listen on a configurable port.
 
 ## Unraid requirements
 
-Provide and maintain:
+Provide and maintain under `media-search/`:
 
 - `Dockerfile`
 - `.dockerignore`
@@ -210,10 +210,10 @@ Suggested conceptual interface:
     getRequestStatus(...)
     getRequest(...)
 
-A reasonable implementation layout is:
+The current implementation layout:
 
-    src/lib/importer/client.js
-    src/lib/importer/queue-client.js
+    media-search/src/lib/importer/client.js
+    media-search/src/lib/importer/queue-client.js
 
 Do not make unrelated code know how queue files are stored.
 
@@ -381,43 +381,30 @@ Never commit real credentials.
 
 ## Suggested application organization
 
-Do not reorganize existing working modules gratuitously, but a target shape may
-look like:
+The current repository layout already reflects this separation:
 
-    media-search/
-    ├── CODEX.md
-    ├── README.md
-    ├── Dockerfile
-    ├── compose.yaml
-    ├── .dockerignore
-    ├── .env.example
-    ├── package.json
-    ├── deploy.sh
-    │
-    ├── src/
-    │   ├── lib/
-    │   │   ├── search.js
-    │   │   ├── providers/
-    │   │   ├── requests/
-    │   │   ├── importer/
-    │   │   │   ├── client.js
-    │   │   │   └── queue-client.js
-    │   │   └── stremio/
-    │   │
-    │   ├── server/
-    │   │   ├── index.js
-    │   │   ├── routes/
-    │   │   └── ...
-    │   │
-    │   └── ui/
-    │       ├── ...
-    │       └── ...
-    │
-    └── tests/
+    (repo root)
+    ├── AGENTS.md          # repo-wide operator guidance
+    ├── CODEX.md           # this file, repo-wide implementation contract
+    ├── ai-handover.md     # repo-wide operational record
+    ├── media-search/      # user-facing search + request service
+    │   ├── src/
+    │   ├── test/
+    │   ├── config/
+    │   ├── data/
+    │   ├── package.json
+    │   ├── Dockerfile
+    │   ├── compose.yaml   # standalone service compose (preserved)
+    │   ├── deploy.sh      # standalone deploy helper (preserved)
+    │   ├── README.md
+    │   ├── .dockerignore
+    │   └── .env.example
+    ├── torbox-importer/   # canonical importer source
+    └── handoff/           # historical provenance only
 
 Follow the existing repository where it already has sensible structure.
 
-The point is separation of concerns, not achieving this exact tree.
+The point is separation of concerns, not achieving a different tree.
 
 ---
 
@@ -758,9 +745,9 @@ handoff.
 
 ## Architecture as implemented
 
-- One production Node process serves both static files in `src/ui` and `/api/*` from the same origin. There is no UI compilation step or frontend dependency; the static ES-module UI is copied into the production image.
-- `src/server/index.js` starts the HTTP server; `src/server/app.js` owns routing and browser-safe response projection.
-- Title and episode metadata are fetched server-side from Cinemeta through `src/lib/metadata/cinemeta.js`.
+- One production Node process serves both static files in `media-search/src/ui` and `/api/*` from the same origin. There is no UI compilation step or frontend dependency; the static ES-module UI is copied into the production image.
+- `media-search/src/server/index.js` starts the HTTP server; `media-search/src/server/app.js` owns routing and browser-safe response projection.
+- Title and episode metadata are fetched server-side from Cinemeta through `media-search/src/lib/metadata/cinemeta.js`.
 - Release discovery calls the existing `searchMedia()` path. Stremio normalized releases are enriched server-side through the existing TorBox cache API adapter.
 - `QueueImporterClient` implements the importer-client boundary. Submission delegates to the existing atomic `queueHandoff()` writer with an explicit `incoming` directory.
 - Status is observed read-only by locating `<requestId>.json` in `/requests/incoming`, `/requests/processing`, `/requests/done`, or `/requests/failed`.
@@ -782,35 +769,40 @@ handoff.
 
 ## Files changed
 
-- `package.json`: adds production start, development, and Node test scripts.
-- `src/lib/search.js`: retains authoritative discovery behavior, adds dependency injection for tests, and maps TorBox enrichment failures to explicit unknown state instead of losing all releases.
-- `src/lib/requests/queue.js`: retains atomic write/rename and accepts an optional target directory; legacy default behavior remains when no request root is configured.
-- `src/lib/importer/client.js`: future-compatible importer-client interface.
-- `src/lib/importer/queue-client.js`: shared-spool submission and lifecycle observation.
-- `src/lib/metadata/cinemeta.js`: server-side title search and TV episode metadata, including optional episode thumbnail/date fields for the anchored picker.
-- `src/server/app.js`: validated HTTP API, browser-safe release projection, static UI serving, health endpoint.
-- `src/server/index.js`: production entry point.
-- `src/ui/index.html`, `src/ui/styles.css`, `src/ui/app.js`: functional single-episode workflow and status polling.
-- `src/ui/release-model.js`: pure exact-hash deduplication, cached/resolution/size ordering, filtering, and summary logic shared by UI and Node tests.
-- `test/*.test.js`: intent/release invariant, queue lifecycle, cache-state, secret-boundary, static/API, and request validation tests.
-- `Dockerfile`, `compose.yaml`, `.dockerignore`, `.env.example`: non-root single-container production packaging and shared queue configuration.
-- `README.md`, `deploy.sh`: exact Unraid instructions and host-configurable project copy helper; no development host is hard-coded.
+- `media-search/package.json`: adds production start, development, and Node test scripts.
+- `media-search/src/lib/search.js`: retains authoritative discovery behavior, adds dependency injection for tests, and maps TorBox enrichment failures to explicit unknown state instead of losing all releases.
+- `media-search/src/lib/requests/queue.js`: retains atomic write/rename and accepts an optional target directory; legacy default behavior remains when no request root is configured.
+- `media-search/src/lib/importer/client.js`: future-compatible importer-client interface.
+- `media-search/src/lib/importer/queue-client.js`: shared-spool submission and lifecycle observation.
+- `media-search/src/lib/metadata/cinemeta.js`: server-side title search and TV episode metadata, including optional episode thumbnail/date fields for the anchored picker.
+- `media-search/src/server/app.js`: validated HTTP API, browser-safe release projection, static UI serving, health endpoint.
+- `media-search/src/server/index.js`: production entry point.
+- `media-search/src/ui/index.html`, `media-search/src/ui/styles.css`, `media-search/src/ui/app.js`: functional single-episode workflow and status polling.
+- `media-search/src/ui/release-model.js`: pure exact-hash deduplication, cached/resolution/size ordering, filtering, and summary logic shared by UI and Node tests.
+- `media-search/test/*.test.js`: intent/release invariant, queue lifecycle, cache-state, secret-boundary, static/API, and request validation tests.
+- `media-search/Dockerfile`, `media-search/compose.yaml`, `media-search/.dockerignore`, `media-search/.env.example`: non-root single-container production packaging and shared queue configuration.
+- `media-search/README.md`, `media-search/deploy.sh`: exact Unraid instructions and host-configurable project copy helper; no development host is hard-coded.
 - `docs/importer-progress-design.md`: DESIGNED/DEFERRED importer-authored atomic structured progress contract; no log/SQLite parsing and no implementation claim.
 
 ## Existing authoritative modules
 
-- `src/lib/requests/intent.js` remains unchanged and authoritative for parsing Stremio episode IDs from the end, including IDs whose base contains a colon.
-- `src/lib/requests/handoff.js` remains unchanged and authoritative for handoff schema and release projection.
-- `src/lib/requests/queue.js` remains authoritative for atomic write-then-rename; only optional destination injection was added so the queue client can target `incoming`.
-- `src/lib/search.js` remains authoritative for normalized discovery and TorBox enrichment; it was minimally adapted to expose unknown provider state and permit isolated tests.
-- `src/lib/providers/torbox.js`, `src/lib/stremio/manifest.js`, `src/lib/stremio/normalize.js`, and `src/lib/stremio/search.js` remain unchanged.
+- `media-search/src/lib/search.js` retains authoritative discovery behavior, adds dependency injection for tests, and maps TorBox enrichment failures to explicit unknown state instead of losing all releases.
+- `media-search/src/lib/providers/torbox.js` remains unchanged.
+- `media-search/src/lib/requests/intent.js` remains unchanged and authoritative for parsing Stremio episode IDs from the end, including IDs whose base contains a colon.
+- `media-search/src/lib/requests/handoff.js` remains unchanged and authoritative for handoff schema and release projection.
+- `media-search/src/lib/requests/queue.js` retains atomic write-then-rename and accepts an optional target directory; legacy default behavior remains when no request root is configured.
+- `media-search/src/lib/importer/client.js` is the future-compatible importer-client interface.
+- `media-search/src/lib/importer/queue-client.js` implements shared-spool submission and lifecycle observation.
+- `media-search/src/lib/stremio/manifest.js` remains unchanged.
+- `media-search/src/lib/stremio/normalize.js` remains unchanged.
+- `media-search/src/lib/stremio/search.js` remains unchanged.
 
 ## Tests and verification
 
-- Baseline before changes: `npm test` failed because no test script existed.
-- Most recent `npm test`: VERIFIED, 6 test files passed (16 tests), 0 failed (2026-08-19).
+- Baseline before relocation: `npm test` failed because no test script existed.
+- Current verification: `cd media-search && npm test` — VERIFIED, 6 test files passed (16 tests), 0 failed (2026-08-19).
 - VERIFIED: intent/handoff season-pack invariant, movie request acceptance and handoff, queue filesystem lifecycle, cache enrichment/unknown state, route/static behavior, request validation, handoff construction, TorBox state through API projection, and secret/raw-data exclusion.
-- VERIFIED LOCALLY (MOVIE BRIDGE): `handoff/movie-importer-bridge/tests/movie-request-bridge.sh` passes 100%, covering `worker.sh` `NOT EXISTS` legacy query exclusion (ensuring request-linked and failed-validation jobs are never processed by the legacy crawler while unrequested legacy jobs remain supported), multi-request shared-hash fail-safe retention, non-terminal job filtering, terminal state sync (`done`, `already_present`, `failed`), Radarr TMDB/IMDb match validation, and fail-closed settlement on identity mismatch.
+- VERIFIED LOCALLY (MOVIE BRIDGE, historical): `handoff/movie-importer-bridge/tests/movie-request-bridge.sh` passes 100%, covering `worker.sh` `NOT EXISTS` legacy query exclusion (ensuring request-linked and failed-validation jobs are never processed by the legacy crawler while unrequested legacy jobs remain supported), multi-request shared-hash fail-safe retention, non-terminal job filtering, terminal state sync (`done`, `already_present`, `failed`), Radarr TMDB/IMDb match validation, and fail-closed settlement on identity mismatch. NOTE: `handoff/` is historical provenance; canonical importer source is `torbox-importer/`.
 - VERIFIED LOCALLY: Compose regression test preserves `USER node`, supplementary GID 100, and rejects a root user override; release-model tests prove exact-hash-only deduplication, cached-first/resolution/size ordering, distinct hashes with identical titles, filtering, and counts.
 - VERIFIED LOCALLY: release filter choices are derived from the complete normalized dataset in stable `2160p`, `1440p`, `1080p`, `720p`, `576p`, `480p`, then other ordering; codecs are stable alphabetical. Selection identity tests prove null/different hashes are not selected and case-equivalent exact hashes are selected. Static server tests prove all stable-name UI assets revalidate with `no-cache`.
 - VERIFIED LOCALLY: pure pane-state tests cover processing, done, and failed terminology/action state. Full suite remains 6 test files, 0 failures.
@@ -830,7 +822,7 @@ handoff.
 - Queue mount: `${REQUESTS_HOST_PATH}` -> `/requests`; Compose sets `REQUESTS_ROOT=/requests`.
 - Queue permission requirement: keep container user `node` UID/GID 1000 and add supplementary GID 100 in Compose so it can write a host spool owned `99:100` with mode `2775`. Verified request files are created as `1000:100`.
 - Healthcheck URL is `GET /health`.
-- On Unraid: copy `.env.example` to `.env`, set required values, then run `docker compose build && docker compose up -d && docker compose ps && curl --fail http://localhost:${MEDIA_SEARCH_PORT:-3000}/health`.
+- On Unraid: copy `media-search/.env.example` to `media-search/.env`, set required values, then run `cd media-search && docker compose build && docker compose up -d && docker compose ps && curl --fail http://localhost:${MEDIA_SEARCH_PORT:-3000}/health`.
 - `MEDIA_SEARCH_PORT` must not collide with another Unraid host service; 3000 is valid but commonly occupied.
 
 ## Current blockers / known issues
@@ -853,9 +845,9 @@ handoff.
 
 ## Repository state
 
-- Branch: `master`.
-- Latest existing commit: `da8667d Add atomic request queue handoff`.
-- Current `git status --short`: modified `.gitignore`, `Dockerfile`, `compose.yaml`, `deploy.sh`, `package.json`, `src/lib/requests/queue.js`, `src/lib/search.js`, and `src/lib/stremio/search.js`; untracked `.dockerignore`, `.env.example`, `CODEX.md`, `README.md`, `ai-handover.md`, `docs/`, `src/lib/importer/`, `src/lib/metadata/`, `src/server/`, `src/ui/`, and `test/`.
+- Branch: `unify-media-search-importer`.
+- The media-search service has been relocated under `media-search/`; the importer application is packaged under `/app` in the importer image.
+- Standalone media-search compose/deploy paths are preserved under `media-search/` until a unified root compose is established.
 - No commits have been made during this session.
 
 ## Continuation instructions
