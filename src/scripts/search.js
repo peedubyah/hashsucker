@@ -1,5 +1,5 @@
-import { searchStremio } from '../lib/stremio/search.js';
-import { checkTorBoxCached } from '../lib/providers/torbox.js';
+import { createRequestIntent } from '../lib/requests/intent.js';
+import { searchMedia } from '../lib/search.js';
 
 const [type, mediaId] = process.argv.slice(2);
 
@@ -10,42 +10,27 @@ if (!type || !mediaId) {
   process.exit(1);
 }
 
-console.error(`Searching Stremio for ${type} ${mediaId}...`);
-
-let results = await searchStremio({
+const intent = createRequestIntent({
   type,
   mediaId,
 });
 
-console.error(`${results.length} unique result(s)`);
-
-const hashes = results
-  .map((item) => item.infoHash)
-  .filter(Boolean);
+console.log('\nRequest intent:');
+console.log(JSON.stringify(intent, null, 2));
 
 console.error(
-  `Checking TorBox cache for ${hashes.length} hashes...`
+  `\nSearching Stremio for ${intent.streamType} ${intent.mediaId}...`
 );
 
-const torbox = await checkTorBoxCached(hashes);
-
-results = results.map((item) => ({
-  ...item,
-  torboxCached:
-    Boolean(item.infoHash) &&
-    torbox.cached.has(item.infoHash.toLowerCase()),
-}));
-
-// For now, prefer TorBox-cached results before normal Stremio ordering.
-results.sort(
-  (a, b) =>
-    Number(b.torboxCached) - Number(a.torboxCached)
-);
+const search = await searchMedia(intent);
+const results = search.results;
 
 const summary = {
   uniqueResults: results.length,
   withInfoHash: results.filter((r) => r.infoHash).length,
-  torboxCached: results.filter((r) => r.torboxCached).length,
+  torboxCached: results.filter(
+    (r) => r.providers.torbox.cached
+  ).length,
 };
 
 console.log('\nSummary:');
@@ -61,7 +46,9 @@ console.table(
       ? (item.size / 1024 ** 3).toFixed(2)
       : null,
     hash: item.infoHash?.slice(0, 12) ?? null,
-    torbox: item.torboxCached ? 'CACHED' : '-',
+    torbox: item.providers.torbox.cached
+      ? 'CACHED'
+      : '-',
     filename: item.filename,
   }))
 );
