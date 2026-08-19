@@ -74,3 +74,11 @@ Read-only TorBox account view, recent activity, rich progress implementation, an
 ## Continuation rule
 
 Read `CODEX.md`, inspect the cited implementation, run tests, then continue from the current iteration list. Do not redo verified work unless verification shows it is broken.
+
+## Pre-unification inventory
+
+Read `docs/inventory/2026-08-19-live-unification-inventory.md` for the initial read-only
+inventory of media-search and torbox-importer.
+
+Important: it contains known stale claims documented at the top of the file. Do not treat
+it as authoritative without re-verification.
