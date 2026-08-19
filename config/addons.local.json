@@ -1,0 +1,18 @@
+[
+  {
+    "id": 1,
+    "addon_id": "stremio.comet.fast",
+    "name": "Comet | TB",
+    "manifest_url": "https://comet.feels.legal/eyJtYXhSZXN1bHRzUGVyUmVzb2x1dGlvbiI6MCwibWF4U2l6ZSI6MCwiY2FjaGVkT25seSI6dHJ1ZSwic29ydENhY2hlZFVuY2FjaGVkVG9nZXRoZXIiOmZhbHNlLCJyZW1vdmVUcmFzaCI6dHJ1ZSwicmVzdWx0Rm9ybWF0IjpbImFsbCJdLCJkZWJyaWRTZXJ2aWNlcyI6W3sic2VydmljZSI6InRvcmJveCIsImFwaUtleSI6IjExMmY1NzA2LTNiMzgtNDFiYi05MWZjLTEwNTA0Y2ZjODI3NSJ9XSwiZW5hYmxlVG9ycmVudCI6ZmFsc2UsImRlZHVwbGljYXRlU3RyZWFtcyI6dHJ1ZSwic2NyYXBlRGVicmlkQWNjb3VudFRvcnJlbnRzIjpmYWxzZSwiZGVicmlkU3RyZWFtUHJveHlQYXNzd29yZCI6IiIsImxhbmd1YWdlcyI6eyJyZXF1aXJlZCI6W10sImFsbG93ZWQiOltdLCJleGNsdWRlIjpbXSwicHJlZmVycmVkIjpbXX0sInJlc29sdXRpb25zIjp7fSwib3B0aW9ucyI6eyJyZW1vdmVfcmFua3NfdW5kZXIiOi0xMDAwMDAwMDAwMCwiYWxsb3dfZW5nbGlzaF9pbl9sYW5ndWFnZXMiOmZhbHNlLCJyZW1vdmVfdW5rbm93bl9sYW5ndWFnZXMiOmZhbHNlfX0=/manifest.json",
+    "enabled": 1,
+    "sort_order": 0
+  },
+  {
+    "id": 2,
+    "addon_id": "com.stremio.torrentio.addon",
+    "name": "Torrentio TB",
+    "manifest_url": "https://torrentio.strem.fun/torbox=112f5706-3b38-41bb-91fc-10504cfc8275/manifest.json",
+    "enabled": 0,
+    "sort_order": 1
+  }
+]

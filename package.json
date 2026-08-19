@@ -1,0 +1,9 @@
+{
+  "name": "media-search",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "search": "node src/scripts/search.js"
+  }
+}
