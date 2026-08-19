@@ -21,7 +21,12 @@ Before any non-trivial change, inspect:
    - Current deployment state.
    - Outstanding tasks and known problems.
 
-3. Relevant files under `docs/`.
+3. - `docs/inventory/2026-08-19-live-unification-inventory.md`
+    - Historical observed-state inventory.
+    - Contains explicitly marked stale claims.
+    - Use as evidence, not authority.
+
+4. Relevant files under `docs/`.
    - Architecture.
    - Request/import lifecycle.
    - Deployment.
