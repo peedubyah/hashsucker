@@ -31,6 +31,15 @@ async function runPool(tasks, limit) {
 }
 
 export async function loadDiscoveryAddons() {
+  if (process.env.STREMIO_ADDON_MANIFEST_URL) {
+    return [{
+      addon_id: 'configured.discovery',
+      name: 'Configured Discovery',
+      manifest_url: process.env.STREMIO_ADDON_MANIFEST_URL,
+      enabled: true,
+      sort_order: 0,
+    }];
+  }
   const configUrl = new URL(
     '../../../config/addons.discovery.local.json',
     import.meta.url

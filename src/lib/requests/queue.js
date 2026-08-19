@@ -1,17 +1,22 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-const REQUEST_DIR = path.resolve('data/requests');
+const LEGACY_REQUEST_DIR = path.resolve('data/requests');
 
-export async function queueHandoff(handoff) {
+export async function queueHandoff(handoff, options = {}) {
   if (!handoff?.requestId) {
     throw new Error('handoff requestId is required');
   }
 
-  await fs.mkdir(REQUEST_DIR, { recursive: true });
+  const requestDir = options.requestDir ||
+    (process.env.REQUESTS_ROOT
+      ? path.resolve(process.env.REQUESTS_ROOT, 'incoming')
+      : LEGACY_REQUEST_DIR);
+
+  await fs.mkdir(requestDir, { recursive: true });
 
   const filename = `${handoff.requestId}.json`;
-  const finalPath = path.join(REQUEST_DIR, filename);
+  const finalPath = path.join(requestDir, filename);
   const tempPath = `${finalPath}.tmp`;
 
   const body = `${JSON.stringify(handoff, null, 2)}\n`;

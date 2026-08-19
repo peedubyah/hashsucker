@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+data
+test
+coverage
+config/*.local.json
+CODEX.md
+README.md
+deploy.sh

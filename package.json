@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "search": "node --env-file=.env.local src/scripts/search.js"
+    "start": "node src/server/index.js",
+    "dev": "node --watch --env-file-if-exists=.env.local src/server/index.js",
+    "search": "node --env-file=.env.local src/scripts/search.js",
+    "test": "node --test"
   }
 }
