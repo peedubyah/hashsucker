@@ -1,6 +1,7 @@
 import { createRequestIntent } from '../lib/requests/intent.js';
 import { searchMedia } from '../lib/search.js';
 import { createHandoff } from '../lib/requests/handoff.js';
+import { queueHandoff } from '../lib/requests/queue.js';
 
 const [type, mediaId] = process.argv.slice(2);
 
@@ -67,4 +68,7 @@ if (selected) {
 
   console.log('\nExample handoff using first TorBox-cached result:');
   console.log(JSON.stringify(handoff, null, 2));
+
+  const queuedPath = await queueHandoff(handoff);
+  console.log(`\nQueued request: ${queuedPath}`);
 }
