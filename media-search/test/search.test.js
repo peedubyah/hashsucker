@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createRequestIntent } from '../src/lib/requests/intent.js';
-import { searchMedia } from '../src/lib/search.js';
+import { searchMedia, _resetCacheForTests, _getCacheForTests } from '../src/lib/search.js';
 import { checkTorBoxCached } from '../src/lib/providers/torbox.js';
 import { normalizeStream } from '../src/lib/stremio/normalize.js';
+
+// Use in-memory cache for tests to avoid filesystem dependencies
+process.env.DISCOVERY_CACHE_PATH = ':memory:';
 
 const HASH = 'abcdef0123456789abcdef0123456789abcdef01';
 
@@ -26,6 +29,7 @@ function installFetchMock(handler) {
 }
 
 test('TorBox cached state is enrichment and provider failures become unknown', async () => {
+  _resetCacheForTests();
   process.env.TORBOX_API_KEY = 'test-key';
 
   try {
@@ -132,6 +136,7 @@ test('non-auth batch failure preserves successful results and exposes failed has
 });
 
 test('searchMedia produces providerStatus partial with mixed cache results', async () => {
+  _resetCacheForTests();
   const restore = installFetchMock(async (url) => {
     const hashCount = url.toString().match(/hash=/g)?.length || 0;
     if (hashCount === 10) {
@@ -181,6 +186,7 @@ test('searchMedia produces providerStatus partial with mixed cache results', asy
 });
 
 test('global auth failure produces providerStatus unknown', async () => {
+  _resetCacheForTests();
   const restore = installFetchMock(async () => {
     return {
       ok: false,
@@ -201,6 +207,142 @@ test('global auth failure produces providerStatus unknown', async () => {
     assert.equal(result.results[0].providers.torbox.cached, null);
   } finally {
     restore();
+    delete process.env.TORBOX_API_KEY;
+  }
+});
+
+// =============================================================================
+// Cache Read Path Integration Tests (TDD — must fail before implementation)
+// =============================================================================
+
+test('fresh cache hit avoids live discovery adapters', async () => {
+  _resetCacheForTests();
+  process.env.TORBOX_API_KEY = 'test-key';
+
+  try {
+    const intent = createRequestIntent({ type: 'series', mediaId: 'tt1:7:3' });
+
+    // Pre-populate cache with a fresh candidate for this search key
+    const cache = _getCacheForTests();
+    cache.upsertCandidate({
+      infoHash: HASH,
+      fileIndex: null,
+      searchKey: 'tt1:7:3',
+      title: 'Cached Release',
+      filename: 'cached.mkv',
+      size: 2048,
+      seeders: 5,
+      leechers: 1,
+      sources: [{ id: 'stremio.torbox', kind: 'stremio' }],
+      metadata: { resolution: '1080p' },
+      firstSeen: Date.now(),
+      lastSeen: Date.now(),
+    });
+
+    let adapterCalled = false;
+    const result = await searchMedia(intent, {
+      searchStremio: async () => { adapterCalled = true; return []; },
+      searchTorznab: async () => { adapterCalled = true; return []; },
+      checkTorBoxCached: async () => ({ cached: new Set(), details: new Map() }),
+    });
+
+    assert.equal(adapterCalled, false, 'adapters should not be called on fresh cache hit');
+    assert.ok(result.results.length > 0, 'results should come from cache');
+    assert.equal(result.results[0].infoHash, HASH);
+    assert.equal(result.results[0].title, 'Cached Release');
+    assert.equal(result.fromCache, true);
+  } finally {
+    _resetCacheForTests();
+    delete process.env.TORBOX_API_KEY;
+  }
+});
+
+test('cache miss invokes live discovery adapters', async () => {
+  _resetCacheForTests();
+  process.env.TORBOX_API_KEY = 'test-key';
+
+  try {
+    const intent = createRequestIntent({ type: 'series', mediaId: 'tt1:7:3' });
+
+    let adapterCalled = false;
+    const result = await searchMedia(intent, {
+      searchStremio: async () => { adapterCalled = true; return [release(HASH, 'Live Release')]; },
+      searchTorznab: async () => { adapterCalled = true; return []; },
+      checkTorBoxCached: async () => ({ cached: new Set(), details: new Map() }),
+    });
+
+    assert.equal(adapterCalled, true, 'adapters should be called on cache miss');
+    assert.ok(result.results.length > 0, 'results should come from live discovery');
+    assert.equal(result.results[0].infoHash, HASH);
+    assert.equal(result.fromCache, undefined);
+  } finally {
+    _resetCacheForTests();
+    delete process.env.TORBOX_API_KEY;
+  }
+});
+
+test('stale cache returns results immediately and refreshes in background', async () => {
+  _resetCacheForTests();
+  process.env.TORBOX_API_KEY = 'test-key';
+
+  try {
+    const intent = createRequestIntent({ type: 'series', mediaId: 'tt1:7:3' });
+
+    const cache = _getCacheForTests();
+    cache.upsertCandidate({
+      infoHash: HASH,
+      fileIndex: null,
+      searchKey: 'tt1:7:3',
+      title: 'Stale Release',
+      filename: 'stale.mkv',
+      size: 1024,
+      seeders: 3,
+      leechers: 1,
+      sources: [{ id: 'stremio.torbox', kind: 'stremio' }],
+      metadata: { resolution: '720p' },
+      firstSeen: Date.now() - 120000,
+      lastSeen: Date.now() - 120000,
+    });
+
+    let adapterCalled = false;
+    const result = await searchMedia(intent, {
+      searchStremio: async () => { adapterCalled = true; return []; },
+      searchTorznab: async () => { adapterCalled = true; return []; },
+      checkTorBoxCached: async () => ({ cached: new Set(), details: new Map() }),
+    });
+
+    assert.equal(result.fromCache, true, 'stale results should be served from cache');
+    assert.equal(result.results[0].title, 'Stale Release');
+    assert.equal(adapterCalled, true, 'background refresh should trigger adapters');
+  } finally {
+    _resetCacheForTests();
+    delete process.env.TORBOX_API_KEY;
+  }
+});
+
+test('live discovery results write through to cache', async () => {
+  _resetCacheForTests();
+  process.env.TORBOX_API_KEY = 'test-key';
+
+  try {
+    const intent = createRequestIntent({ type: 'series', mediaId: 'tt1:7:3' });
+
+    const result = await searchMedia(intent, {
+      searchStremio: async () => [release(HASH, 'Fresh Release')],
+      searchTorznab: async () => [],
+      checkTorBoxCached: async () => ({ cached: new Set([HASH]), details: new Map() }),
+    });
+
+    assert.equal(result.results[0].infoHash, HASH);
+
+    // Verify write-through occurred
+    const cache = _getCacheForTests();
+    const cached = cache.queryCachedCandidates({ searchKey: 'tt1:7:3' });
+    assert.ok(cached.length > 0, 'live results should be written to cache');
+    assert.equal(cached[0].infoHash, HASH);
+    assert.equal(cached[0].searchKey, 'tt1:7:3');
+  } finally {
+    _resetCacheForTests();
     delete process.env.TORBOX_API_KEY;
   }
 });

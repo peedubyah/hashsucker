@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS candidates (
   info_hash TEXT NOT NULL,
   file_index INTEGER,
   file_index_key INTEGER NOT NULL DEFAULT -1,
+  search_key TEXT,
   title TEXT,
   filename TEXT,
   size INTEGER,
@@ -48,18 +49,33 @@ CREATE TABLE IF NOT EXISTS provider_observations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidates_last_seen ON candidates(last_seen);
+CREATE INDEX IF NOT EXISTS idx_candidates_search_key ON candidates(search_key);
 CREATE INDEX IF NOT EXISTS idx_observations_checked_at ON provider_observations(checked_at);
+
+CREATE TABLE IF NOT EXISTS candidate_media (
+  info_hash TEXT NOT NULL,
+  file_index_key INTEGER NOT NULL DEFAULT -1,
+  media_id TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'search',
+  confidence REAL NOT NULL DEFAULT 1.0,
+  evidence TEXT,
+  associated_at INTEGER NOT NULL,
+  PRIMARY KEY (info_hash, file_index_key, media_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidate_media_media_id ON candidate_media(media_id);
 `;
 
 const INSERT_CANDIDATE = `
 INSERT INTO candidates (
-  info_hash, file_index, file_index_key, title, filename, size, seeders, leechers,
+  info_hash, file_index, file_index_key, search_key, title, filename, size, seeders, leechers,
   publish_date, magnet, download_url, metadata, sources, first_seen, last_seen
 ) VALUES (
-  @info_hash, @file_index, @file_index_key, @title, @filename, @size, @seeders, @leechers,
+  @info_hash, @file_index, @file_index_key, @search_key, @title, @filename, @size, @seeders, @leechers,
   @publish_date, @magnet, @download_url, @metadata, @sources, @first_seen, @last_seen
 )
 ON CONFLICT(info_hash, file_index_key) DO UPDATE SET
+  search_key = COALESCE(EXCLUDED.search_key, candidates.search_key),
   title = COALESCE(EXCLUDED.title, candidates.title),
   filename = COALESCE(EXCLUDED.filename, candidates.filename),
   size = COALESCE(EXCLUDED.size, candidates.size),
@@ -83,6 +99,14 @@ FROM provider_observations
 WHERE info_hash = @info_hash AND file_index_key = @file_index_key;
 `;
 
+const SELECT_ALL_CANDIDATES = `
+SELECT * FROM candidates ORDER BY last_seen DESC;
+`;
+
+const SELECT_CANDIDATES_BY_KEY = `
+SELECT * FROM candidates WHERE search_key = @search_key ORDER BY last_seen DESC;
+`;
+
 const UPSERT_OBSERVATION = `
 INSERT INTO provider_observations (
   info_hash, file_index, file_index_key, provider, cached, evidence, checked_at
@@ -95,6 +119,45 @@ ON CONFLICT(info_hash, file_index_key, provider) DO UPDATE SET
   checked_at = EXCLUDED.checked_at;
 `;
 
+const INSERT_MEDIA_ASSOCIATION = `
+INSERT INTO candidate_media (
+  info_hash, file_index_key, media_id, source, confidence, evidence, associated_at
+) VALUES (
+  @info_hash, @file_index_key, @media_id, @source, @confidence, @evidence, @associated_at
+)
+ON CONFLICT(info_hash, file_index_key, media_id) DO UPDATE SET
+  source = EXCLUDED.source,
+  confidence = EXCLUDED.confidence,
+  evidence = EXCLUDED.evidence,
+  associated_at = EXCLUDED.associated_at;
+`;
+
+const UPSERT_MEDIA_ASSOCIATION = `
+INSERT INTO candidate_media (
+  info_hash, file_index_key, media_id, source, confidence, evidence, associated_at
+) VALUES (
+  @info_hash, @file_index_key, @media_id, @source, @confidence, @evidence, @associated_at
+)
+ON CONFLICT(info_hash, file_index_key, media_id) DO UPDATE SET
+  source = EXCLUDED.source,
+  confidence = EXCLUDED.confidence,
+  evidence = COALESCE(EXCLUDED.evidence, candidate_media.evidence),
+  associated_at = EXCLUDED.associated_at;
+`;
+
+const GET_MEDIA_ASSOCIATIONS = `
+SELECT media_id, source, confidence, evidence, associated_at
+FROM candidate_media
+WHERE info_hash = @info_hash AND file_index_key = @file_index_key;
+`;
+
+const GET_CANDIDATES_BY_MEDIA = `
+SELECT c.*
+FROM candidate_media cm
+JOIN candidates c ON c.info_hash = cm.info_hash AND c.file_index_key = cm.file_index_key
+WHERE cm.media_id = @media_id;
+`;
+
 export function createDiscoveryCache({ dbPath = ':memory:', database = null } = {}) {
   const db = database || new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
@@ -104,6 +167,13 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const getCandidateStmt = db.prepare(GET_CANDIDATE);
   const upsertObservationStmt = db.prepare(UPSERT_OBSERVATION);
   const getObservationsStmt = db.prepare(GET_OBSERVATIONS);
+  const selectAllCandidatesStmt = db.prepare(SELECT_ALL_CANDIDATES);
+  const selectCandidatesByKeyStmt = db.prepare(SELECT_CANDIDATES_BY_KEY);
+  const insertMediaAssocStmt = db.prepare(INSERT_MEDIA_ASSOCIATION);
+  const upsertMediaAssocStmt = db.prepare(UPSERT_MEDIA_ASSOCIATION);
+  const getMediaAssocStmt = db.prepare(GET_MEDIA_ASSOCIATIONS);
+  const getCandidatesByMediaStmt = db.prepare(GET_CANDIDATES_BY_MEDIA);
+
 
   function fileIndexKey(fileIndex) {
     return fileIndex == null ? -1 : fileIndex;
@@ -115,6 +185,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       info_hash: candidate.infoHash,
       file_index: candidate.fileIndex ?? null,
       file_index_key: fileIndexKey(candidate.fileIndex),
+      search_key: candidate.searchKey ?? null,
       title: candidate.title ?? null,
       filename: candidate.filename ?? null,
       size: candidate.size ?? null,
@@ -135,6 +206,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     return {
       infoHash: row.info_hash,
       fileIndex: row.file_index,
+      searchKey: row.search_key,
       title: row.title,
       filename: row.filename,
       size: row.size,
@@ -208,6 +280,42 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   }
 
   /**
+   * Query cached candidates with optional filtering and observation attachment.
+   *
+   * Options:
+   * - searchKey: filter candidates by search key (exact match)
+   * - predicate(candidate): filter function applied to each candidate
+   * - maxAgeMs: exclude candidates older than this many milliseconds
+   * - withObservations: attach provider observations to each candidate
+   *
+   * Returns an array of candidates (never throws).
+   */
+  function queryCachedCandidates(options = {}) {
+    const { searchKey, predicate, maxAgeMs, withObservations } = options;
+    const rows = searchKey != null
+      ? selectCandidatesByKeyStmt.all({ search_key: searchKey })
+      : selectAllCandidatesStmt.all();
+    let candidates = rows.map(rowToCandidate);
+
+    if (maxAgeMs != null) {
+      const cutoff = Date.now() - maxAgeMs;
+      candidates = candidates.filter((c) => c.lastSeen >= cutoff);
+    }
+
+    if (predicate) {
+      candidates = candidates.filter(predicate);
+    }
+
+    if (withObservations) {
+      for (const candidate of candidates) {
+        candidate.observations = getProviderObservations(candidate.infoHash, candidate.fileIndex);
+      }
+    }
+
+    return candidates;
+  }
+
+  /**
    * Write-through batch ingest: upsert candidate + merge sources from a
    * discovery result. Returns the merged candidate. Never throws — cache
    * errors are caught and returned as part of the result so callers can
@@ -225,7 +333,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
   function mergeCandidateIntoCache(existing, incoming) {
     if (!existing) {
-      return { ...incoming, firstSeen: incoming.firstSeen ?? Date.now(), lastSeen: Date.now() };
+      const now = Date.now();
+      return { ...incoming, firstSeen: incoming.firstSeen ?? now, lastSeen: incoming.lastSeen ?? now };
     }
     return {
       ...existing,
@@ -273,7 +382,83 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     return [source.id, source.kind, source.instance, source.indexer, source.capability].join('|');
   }
 
+  /**
+   * Associate a candidate with a media identifier.
+   * Multiple media identifiers can be associated with the same candidate.
+   * Idempotent — re-associating the same (candidate, media) pair updates metadata.
+   */
+  function associateMedia(infoHash, fileIndex, mediaId, options = {}) {
+    const evidenceJson = options.evidence != null ? JSON.stringify(options.evidence) : null;
+    insertMediaAssocStmt.run({
+      info_hash: infoHash,
+      file_index_key: fileIndexKey(fileIndex),
+      media_id: mediaId,
+      source: options.source || 'search',
+      confidence: options.confidence != null ? options.confidence : 1.0,
+      evidence: evidenceJson,
+      associated_at: options.associatedAt ?? Date.now(),
+    });
+  }
+
+  function upsertMediaAssociation(infoHash, fileIndex, mediaId, options = {}) {
+    const evidenceJson = options.evidence != null ? JSON.stringify(options.evidence) : null;
+    upsertMediaAssocStmt.run({
+      info_hash: infoHash,
+      file_index_key: fileIndexKey(fileIndex),
+      media_id: mediaId,
+      source: options.source || 'search',
+      confidence: options.confidence != null ? options.confidence : 1.0,
+      evidence: evidenceJson,
+      associated_at: options.associatedAt ?? Date.now(),
+    });
+  }
+
+  /**
+   * Get all media associations for a candidate.
+   * Returns empty array if candidate has no associations.
+   */
+  function getMediaAssociations(infoHash, fileIndex) {
+    const rows = getMediaAssocStmt.all({
+      info_hash: infoHash,
+      file_index_key: fileIndexKey(fileIndex),
+    });
+    return rows.map((row) => ({
+      mediaId: row.media_id,
+      source: row.source,
+      confidence: row.confidence,
+      evidence: row.evidence ? JSON.parse(row.evidence) : null,
+      associatedAt: row.associated_at,
+    }));
+  }
+
+  /**
+   * Query candidates by media identifier.
+   * Joins candidate_media with candidates to return full candidate data.
+   */
+  function queryCandidatesByMedia(mediaId) {
+    const rows = getCandidatesByMediaStmt.all({ media_id: mediaId });
+    return rows.map(rowToCandidate);
+  }
+
+  let closed = false;
+
+  function isClosed() {
+    return closed;
+  }
+
   function close() {
+    if (closed) return;
+    closed = true;
+    try { insertCandidateStmt.finalize(); } catch {}
+    try { getCandidateStmt.finalize(); } catch {}
+    try { upsertObservationStmt.finalize(); } catch {}
+    try { getObservationsStmt.finalize(); } catch {}
+    try { selectAllCandidatesStmt.finalize(); } catch {}
+    try { selectCandidatesByKeyStmt.finalize(); } catch {}
+    try { insertMediaAssocStmt.finalize(); } catch {}
+    try { upsertMediaAssocStmt.finalize(); } catch {}
+    try { getMediaAssocStmt.finalize(); } catch {}
+    try { getCandidatesByMediaStmt.finalize(); } catch {}
     db.close();
   }
 
@@ -282,11 +467,75 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getCandidate,
     recordProviderObservation,
     getProviderObservations,
+    queryCachedCandidates,
+    associateMedia,
+    getMediaAssociations,
+    queryCandidatesByMedia,
     ingestCandidate,
+    isClosed,
     close,
     // Exposed for testing/inspection
     get db() { return db; },
   };
+}
+
+/**
+ * Stale-While-Refresh cache query wrapper.
+ *
+ * Serves cache hits when fresh (age <= maxAgeMs), serves stale hits while
+ * triggering a background refresh, or triggers a refresh on miss. The cache
+ * is never mutated by the refresher — refresh is the caller's responsibility
+ * (typically via live discovery write-through).
+ *
+ * Guarantees:
+ * - Never throws: refresh failures are swallowed, stale data is preserved.
+ * - Never blocks the caller on refresh; refresh runs asynchronously.
+ * - Cache is a read substrate; discovery behavior is unchanged.
+ */
+export class StaleWhileRefresher {
+  constructor({ cache, maxAgeMs = 300000, predicate, withObservations = false, refresh } = {}) {
+    if (!cache) throw new Error('StaleWhileRefresher requires a cache');
+    if (typeof refresh !== 'function') throw new Error('StaleWhileRefresher requires a refresh function');
+    this.cache = cache;
+    this.maxAgeMs = maxAgeMs;
+    this.predicate = predicate;
+    this.withObservations = withObservations;
+    this.refresh = refresh;
+  }
+
+  /**
+   * Query the cache and determine freshness status.
+   *
+   * Returns { status, candidates } where status is one of:
+   * - 'fresh': cache hit within maxAgeMs, no refresh needed
+   * - 'stale': cache hit but older than maxAgeMs, stale data returned while refresh triggered
+   * - 'miss': no cache hit, refresh triggered
+   */
+  async query() {
+    const options = { predicate: this.predicate, withObservations: this.withObservations };
+    const candidates = this.cache.queryCachedCandidates(options);
+
+    if (candidates.length === 0) {
+      this._triggerRefresh();
+      return { status: 'miss', candidates: [] };
+    }
+
+    const oldest = Math.min(...candidates.map((c) => c.lastSeen));
+    const age = Date.now() - oldest;
+
+    if (age <= this.maxAgeMs) {
+      return { status: 'fresh', candidates };
+    }
+
+    this._triggerRefresh();
+    return { status: 'stale', candidates };
+  }
+
+  _triggerRefresh() {
+    Promise.resolve()
+      .then(() => this.refresh())
+      .catch(() => {});
+  }
 }
 
 /**

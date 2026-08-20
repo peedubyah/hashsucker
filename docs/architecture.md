@@ -1,186 +1,234 @@
-# Architecture
+# HashSucker Architecture
 
-Source-of-truth architecture document for the media-search project.
+Source-of-truth architecture document for the HashSucker project.
 
 ## Project Purpose
 
-Unified media discovery/search layer.
+HashSucker is a media discovery, ingestion, and enrichment pipeline. It discovers media candidates from multiple sources (user searches, hashlists, scrapers), stores them with verified identity, and enriches them with media metadata.
 
-The application is a single-container browser application for finding media releases and submitting explicit TV episode requests to the torbox-importer shared queue. It is the user-facing request producer.
-
-## Current Architecture
+## Current Pipeline
 
 ```
-User request
+External sources (DMM, Stremio, Torznab, scrapers)
     |
     v
-API/search layer
+Ingestion (ingestCandidates — source-agnostic boundary)
     |
     v
-Discovery adapters
+Candidate cache (SQLite: candidates + provider_observations)
     |
     v
-Candidate normalization/merging
+Enrichment worker (filename/title → media identity)
     |
     v
-Provider enrichment
+Candidate_media (associations with confidence + evidence)
     |
     v
-Response
+Search layer (user-facing API + UI)
 ```
 
-### Component Responsibilities
+## Layer Responsibilities
 
-- **`media-search/src/server/`** — HTTP server, API routes, static UI serving
-- **`media-search/src/lib/discovery/`** — Discovery adapters (Stremio, Torznab), candidate normalization, source registry
-- **`media-search/src/lib/providers/`** — Provider-specific cache checks (TorBox)
-- **`media-search/src/lib/importer/`** — Importer client abstraction (queue-based)
-- **`media-search/src/lib/requests/`** — Request intent, handoff, queue primitives
-- **`media-search/src/ui/`** — Browser application
+### 1. Ingestion Layer
 
-## Discovery Model
+**Source-agnostic boundary** that normalizes external data into the candidate cache.
 
-### Candidate Identity
+- `src/lib/discovery/ingest.js` — `ingestCandidates()` writes candidates through cache APIs
+- `src/lib/discovery/adapters/dmm.js` — DMM hashlist adapter (LZString + JSON parse)
+- Source adapters convert raw data → `{ infoHash, fileIndex, title, filename, size, sources[] }`
+- Ingestion does NOT infer media identity — it stores what the source provides
 
-A discovery candidate is identified by exactly `(infoHash, fileIndex)`.
+**Contract:**
+- Ingestion must go through `ingestCandidates()` — never bypasses cache APIs
+- Ingestion preserves candidate identity `(infoHash, fileIndex)`
+- Ingestion does NOT create `candidate_media` associations
+- Ingestion does NOT create provider observations
 
-- **`infoHash`** — 40-character hex SHA-1 hash of the torrent info dictionary
-- **`fileIndex`** — Optional integer index for multi-file torrents; `null` for single-file
+### 2. Candidate Cache
 
-**No fuzzy merge.** Same hash = same candidate. Different hash = different candidate, even if titles match.
+**SQLite-backed persistent storage** with two tables:
 
-### infoHash + fileIndex Semantics
+- `candidates` — normalized torrent identity + metadata
+- `provider_observations` — provider-specific state (cached, evidence, timestamps)
 
-- `infoHash` alone identifies a torrent
-- `infoHash + fileIndex` identifies a specific file within a torrent
-- `fileIndex: null` is treated as `-1` for database identity (distinct from `fileIndex: 0`)
+Key APIs:
+- `createDiscoveryCache()` — factory with `:memory:` or file path
+- `upsertCandidate()` — identity-merge (no fuzzy merge)
+- `queryCachedCandidates()` — read-through with `searchKey`, `maxAgeMs`, `withObservations`
+- `StaleWhileRefresher` — SWR wrapper for cache-first queries
+- `withCacheFailureIsolation()` — swallows cache errors, returns safe result
 
-### Sources
+### 3. Media Associations (`candidate_media`)
 
-A candidate's `sources` array tracks which discovery sources contributed to this candidate. Multiple sources can contribute the same candidate; they are merged by set-union using a composite key:
+**Separate table** linking candidates to media identifiers:
 
+| Column | Type | Notes |
+|--------|------|-------|
+| `info_hash` | TEXT | FK to candidates |
+| `file_index_key` | INTEGER | FK to candidates |
+| `media_id` | TEXT | Media identifier (e.g., `tt2085059:7:3`) |
+| `source` | TEXT | Source of association: `search`, `filename-parser`, etc. |
+| `confidence` | REAL | 0.0–1.0 |
+| `evidence` | TEXT | JSON array: why this association exists |
+| `associated_at` | INTEGER | Epoch ms |
+
+Key APIs:
+- `associateMedia()` — create association (overwrites on conflict)
+- `upsertMediaAssociation()` — merge association (preserves existing evidence on conflict)
+- `getMediaAssociations()` — get all associations for a candidate
+- `queryCandidatesByMedia()` — find candidates for a media ID
+
+**Invariants:**
+- Candidate identity is independent of media association
+- Multiple media identifiers can associate with same candidate
+- Same candidate from different sources merges by identity only
+- Media association is additive — never removes existing associations
+- Unknown media identity is valid — candidate with no associations is still retrievable
+
+### 4. Enrichment Boundary
+
+**Filename/title → media identity** resolution.
+
+- `src/lib/discovery/enrichment.js` — `enrichCandidate()`, `enrichCandidates()`, `getUnenrichedCandidates()`
+
+**Contract:**
+- Input: candidate identity + available metadata (filename, title)
+- Output: media associations with confidence + evidence
+- Enrichment may associate candidates with media identifiers
+- Enrichment MUST NOT mutate candidate identity
+- Enrichment MUST NOT create provider observations
+- Unknown matches remain unknown (no forced associations)
+- Confidence is always explicit (default 0.5 if not provided)
+- Evidence is optional but recommended (array of string tags)
+
+### 5. Enrichment Worker
+
+**Orchestration layer** that processes unenriched candidates.
+
+- `src/lib/discovery/worker.js` — `runEnrichmentWorker()`, `createEnrichmentWorker()`, `enrichSingleCandidate()`
+
+Pipeline:
 ```
-sourceKey = id|kind|instance|indexer|capability
+getUnenrichedCandidates() → worker → enrichCandidates()
 ```
 
-### Metadata Merging
+**Contract:**
+- Per-candidate failure isolation (one failure doesn't affect others)
+- All writes go through `enrichCandidates()` — never direct SQLite
+- Worker is source-agnostic — enrichment function is injected
+- Worker does NOT create provider observations
+- Worker does NOT trigger importer behavior
+- Progress callbacks available for observability
 
-On update (same identity):
-- Scalar fields (title, size, seeders, etc.): incoming non-null values **overwrite** existing values
-- `sources`: set-union by source key
-- `metadata`: shallow merge — incoming keys fill existing missing keys (no overwrite)
+### 6. Search Layer
+
+**User-facing API** for searching candidates and submitting requests.
+
+- `src/lib/search.js` — `searchMedia()` integrates cache read-through + live discovery
+- `src/server/` — HTTP API routes
+- `src/ui/` — Browser application
+
+## Data Ownership Boundaries
+
+### Candidates
+- Torrent/hash identity: `(infoHash, fileIndex)` — physical file identity
+- Source provenance: `sources[]` array — which discovery sources contributed
+- Metadata: title, size, seeders, leechers, publish date, magnet, etc.
+- Provider-agnostic: no provider-specific state stored here
+
+### Candidate_media
+- Inferred/confirmed media identity: `mediaId` — what media this represents
+- Confidence: 0.0–1.0 — how certain is this association
+- Source: which enrichment source created this association
+- Evidence: array of string tags explaining WHY this association exists
+- Timestamps: when the association was created/updated
 
 ### Provider Observations
+- Provider-specific state: cached availability, evidence payloads
+- Timestamps: when the observation was checked
+- TTL: observations expire independently per provider
+- NEVER store provider observations in candidates
 
-Provider state is intentionally **separated** from candidates:
+## Ingestion Contract
 
-- **Candidate** = normalized torrent/media identity (provider-agnostic)
-- **Observation** = provider-specific state (cached status, evidence, timestamp)
+### DMM Hashlists (Verified)
 
-This separation allows:
-- Multiple providers to observe the same candidate independently
-- Provider observations to expire and refresh without mutating the candidate
-- New providers to be added without schema migration
+**Repository:** github.com/debridmediamanager/hashlists
 
-## Cache Architecture
+**Format:** HTML wrapper → LZString-compressed JSON → `{ torrents: [...] }` or flat array
 
-SQLite-backed persistent cache using Node.js built-in `node:sqlite` (available in Node 24+).
+**Per-record fields (only 3):**
+| DMM Field | HashSucker Field | Notes |
+|-----------|-----------------|-------|
+| `hash` | `infoHash` | Required, 40-char hex |
+| `filename` | `title`, `filename` | Required, release title |
+| `bytes` | `size` | Optional, file size in bytes |
 
-### Tables
+**DMM does NOT provide:**
+- Media identity (no mediaId, imdb, tmdb)
+- Confidence score
+- Seeders/leechers
+- Magnet URI
+- fileIndex
 
-**`candidates`** — Normalized torrent/media candidates
+**Update cadence:** Every 6 hours
+**Reference:** github.com/mhdzumair/MediaFusion/blob/main/python-deprecated/workers/scrapers/dmm_hashlist.py
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `info_hash` | TEXT | 40-char hex hash |
-| `file_index` | INTEGER | Original fileIndex (nullable) |
-| `file_index_key` | INTEGER | `COALESCE(file_index, -1)` — used for PK |
-| `title` | TEXT | |
-| `filename` | TEXT | |
-| `size` | INTEGER | Bytes |
-| `seeders` | INTEGER | |
-| `leechers` | INTEGER | |
-| `publish_date` | TEXT | ISO 8601 |
-| `magnet` | TEXT | Magnet URI |
-| `download_url` | TEXT | Direct download URL |
-| `metadata` | TEXT | JSON object (resolution, codec, HDR, etc.) |
-| `sources` | TEXT | JSON array of source objects |
-| `first_seen` | INTEGER | Epoch ms |
-| `last_seen` | INTEGER | Epoch ms |
+### General Ingestion Rules
 
-**Primary key**: `(info_hash, file_index_key)`
+- Ingestion is source-agnostic — same boundary for all sources
+- Ingestion stores what the source provides — no inference
+- DMM is hash-first ingestion — media identity comes later via enrichment
+- Ingestion adapters are pure parsers — no network calls, no cache writes
 
-**`provider_observations`** — Provider-specific cache state
+## Enrichment Contract
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `info_hash` | TEXT | |
-| `file_index` | INTEGER | |
-| `file_index_key` | INTEGER | `COALESCE(file_index, -1)` |
-| `provider` | TEXT | Provider name (e.g., `torbox`) |
-| `cached` | INTEGER | Boolean as 0/1/NULL |
-| `evidence` | TEXT | JSON object |
-| `checked_at` | INTEGER | Epoch ms |
+### Input
+- Candidate identity: `{ infoHash, fileIndex }`
+- Available metadata: `{ title, filename, size, sources[] }`
 
-**Primary key**: `(info_hash, file_index_key, provider)`
-
-### Why Provider State is Separated
-
-1. **Independence**: Each provider's cached state can be refreshed independently without touching the candidate
-2. **Extensibility**: New providers are added by inserting observations, not by altering the candidates table
-3. **Failure isolation**: A provider observation failure does not corrupt the candidate
-4. **TTL flexibility**: Each observation has its own `checked_at` for independent expiration
-
-### Write-Through Integration
-
-Current integration is **write-only** (additive):
-
-```
-Live discovery
-    |
-    v
-Candidate normalization
-    |
-    v
-Write-through to cache (fire-and-forget)
-    |
-    v
-Response (unchanged)
+### Output
+```js
+{
+  infoHash: "...",
+  fileIndex: null,
+  matches: [
+    { mediaId: "tt2085059:7:3", confidence: 0.94 }
+  ],
+  source: "filename-parser",
+  evidence: ["title_exact_match", "year_match", "movie_pattern"]
+}
 ```
 
-Cache write failures are swallowed and logged. Live discovery remains authoritative.
+### Rules
+- Enrichment may associate candidates with media identifiers
+- Enrichment MUST NOT mutate candidate identity
+- Enrichment MUST NOT create provider observations
+- Unknown matches remain unknown (return `null` or empty `matches`)
+- Confidence is always explicit (0.0–1.0)
+- Evidence is optional but recommended (array of string tags)
+- Higher confidence wins on conflict (equal confidence → latest wins)
 
-### Configuration
+## Cache Read-Through
 
-- **`DISCOVERY_CACHE_PATH`** — SQLite database file path (default: `/config/discovery-cache.db`)
-- WAL mode enabled for concurrent read performance
+**Stale-while-refresh semantics:**
 
-## Current Implementation Status
+```js
+const refresher = new StaleWhileRefresher({
+  cache,
+  maxAgeMs: 30000,
+  searchKey: intent.mediaId,
+  refresh: async () => { /* live discovery */ },
+});
 
-### Implemented
-- Discovery abstraction (Stremio, Torznab adapters)
-- Candidate normalization and merging
-- Source registry
-- SQLite discovery cache (candidates + provider observations)
-- Write-through caching (fire-and-forget, failure-isolated)
-- Provider-neutral search result structure
+const result = await refresher.query();
+// result.status: 'fresh' | 'stale' | 'miss'
+// result.candidates: array of candidates
+```
 
-### Not Implemented
-- Read-through cache (cache-first query path)
-- Background ingestion
-- DMM hashlist ingestion
-- Ranking system (RTN integration)
-- UI overhaul (current UI is functional but has known polish issues)
-
-## Design Constraints
-
-The following constraints are **explicitly preserved**:
-
-- **No trash filtering**: Do not add aggressive quality/size filtering rules
-- **No ranking overhaul**: Do not implement torrent ranking/scoring yet
-- **No behavior changes**: Cache is additive; live discovery is authoritative
-- **Cache failures must not break search**: All write paths are wrapped to swallow errors
-- **No fuzzy merge**: Same hash = same candidate; different hash = different candidate
+- **Fresh** → cache hit within `maxAgeMs`, no refresh
+- **Stale** → cache hit but older, returns stale data + triggers background refresh
+- **Miss** → no candidates, triggers refresh
 
 ## Secrets Boundary
 
@@ -210,9 +258,36 @@ shared request transport (/requests)
 torbox-importer container
 ```
 
-## See Also
+## Design Constraints
 
-- `docs/decisions/001-discovery-cache.md` — Architecture decision record for cache design
-- `ai-handover.md` — Current implementation state and next work
-- `AGENTS.md` — Product boundaries and safety invariants
-- `CODEX.md` — Implementation contract
+The following constraints are **explicitly preserved**:
+
+- **No trash filtering**: Do not add aggressive quality/size filtering rules
+- **No ranking overhaul**: Do not implement torrent ranking/scoring yet
+- **No behavior changes**: Cache is additive; live discovery is authoritative
+- **Cache failures must not break search**: All write paths are wrapped to swallow errors
+- **No fuzzy merge**: Same hash = same candidate; different hash = different candidate
+- **Provider observations separated**: Never store provider state in candidates
+- **Enrichment is additive**: Never removes existing media associations
+
+## Future Work
+
+### Zurg-style enrichment research
+- Zurg public release architecture investigation
+- Metadata enrichment sources beyond filename parsing
+- Title resolution via external APIs (TMDB, IMDB)
+
+### Metadata enrichment sources
+- Filename/title parsing (PTT-style)
+- External metadata provider integration
+- Season/episode pattern matching
+
+### Provider expansion
+- Additional debrid providers beyond TorBox
+- Usenet (NZB) support
+- Direct download support
+
+### Ranking system
+- RTN integration for quality-based ranking
+- User preference learning
+- Release scoring heuristics

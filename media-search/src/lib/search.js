@@ -2,7 +2,7 @@ import { searchStremio, loadDiscoveryAddons } from './stremio/search.js';
 import { mergeStreams } from './stremio/normalize.js';
 import { searchTorznab } from './torznab/torznab.js';
 import { checkTorBoxCached } from './providers/torbox.js';
-import { createDiscoveryCache, withCacheFailureIsolation } from './discovery/cache.js';
+import { createDiscoveryCache, withCacheFailureIsolation, StaleWhileRefresher } from './discovery/cache.js';
 
 // Module-level cache singleton. Cache is additive: live discovery remains
 // authoritative. Cache write failures never affect search responses.
@@ -22,21 +22,43 @@ function getCache() {
 }
 
 /**
+ * Reset the module-level cache singleton. Used by tests to isolate cache state
+ * between test cases. Not part of the public API.
+ */
+export function _resetCacheForTests() {
+  if (cacheInstance) {
+    try { cacheInstance.close(); } catch {}
+  }
+  cacheInstance = null;
+  cacheInitError = null;
+}
+
+/**
+ * Get the current cache instance for test inspection. Not part of the public API.
+ */
+export function _getCacheForTests() {
+  return getCache();
+}
+
+/**
  * Write-through discovery results to cache. Never throws — cache failures
  * are logged but do not affect the returned results.
  */
-async function writeToCache(results, providerStatus) {
+async function writeToCache(results, providerStatus, searchKey = null) {
   const cache = getCache();
-  if (!cache) return;
+  if (!cache || cache.isClosed()) return;
 
   const safe = withCacheFailureIsolation(cache, (error) => {
-    console.error(`Discovery cache write failed: ${error.message}`);
+    if (!cache.isClosed()) {
+      console.error(`Discovery cache write failed: ${error.message}`);
+    }
   });
 
   for (const item of results) {
     const candidate = {
       infoHash: item.infoHash,
       fileIndex: item.fileIndex ?? null,
+      searchKey,
       title: item.title,
       filename: item.filename,
       size: item.size,
@@ -78,16 +100,35 @@ function getProvidersForResult(result) {
   return providers;
 }
 
-export async function searchMedia(intent, dependencies = {}) {
-  const startedAt = performance.now();
-  const search = dependencies.searchStremio || searchStremio;
-  const torznabSearch = dependencies.searchTorznab || searchTorznab;
-  const cacheCheck = dependencies.checkTorBoxCached || checkTorBoxCached;
-  const loadAddons = dependencies.loadDiscoveryAddons || loadDiscoveryAddons;
+/**
+ * Convert a cache candidate into a normalized search result shape.
+ * Preserves all candidate fields and adds a sources array from the candidate.
+ */
+function candidateToResult(candidate) {
+  return {
+    key: candidate.infoHash ? `ih:${candidate.infoHash}` : null,
+    infoHash: candidate.infoHash,
+    fileIndex: candidate.fileIndex,
+    title: candidate.title,
+    filename: candidate.filename,
+    size: candidate.size,
+    seeders: candidate.seeders,
+    leechers: candidate.leechers,
+    publishDate: candidate.publishDate,
+    magnet: candidate.magnet,
+    downloadUrl: candidate.downloadUrl,
+    metadata: candidate.metadata || {},
+    sources: candidate.sources || [],
+    behaviorHints: {},
+    raw: null,
+  };
+}
 
-  const mergeStreamsFn = dependencies.mergeStreams || mergeStreams;
-
-  // Execute Stremio and Torznab searches independently
+/**
+ * Execute live discovery pipeline (Stremio + Torznab adapters).
+ * Extracted for reuse by both cache miss and background refresh paths.
+ */
+async function runLiveDiscovery(intent, search, torznabSearch, mergeStreamsFn) {
   const [stremioResults, torznabResults] = await Promise.allSettled([
     search({
       type: intent.streamType,
@@ -106,17 +147,23 @@ export async function searchMedia(intent, dependencies = {}) {
   if (torznabResults.status === 'fulfilled') {
     results = mergeStreamsFn(results, torznabResults.value);
   }
+  return results;
+}
 
-  const discoveryMs = performance.now() - startedAt;
+/**
+ * Enrich results with provider cache state and write through to discovery cache.
+ * Shared by both live discovery and cache read paths.
+ */
+async function enrichAndFinalize(results, intent, dependencies) {
+  const loadAddons = dependencies.loadDiscoveryAddons || loadDiscoveryAddons;
+  const cacheCheck = dependencies.checkTorBoxCached || checkTorBoxCached;
 
+  const startedAt = performance.now();
   const addons = await loadAddons();
   const configuredProviders = new Set(addons?.map((a) => a.provider) || []);
 
-  // Determine if TorBox bulk enrichment should run
   const hasTorboxKey = configuredProviders.has('torbox');
-  const hashes = results
-    .map((item) => item.infoHash)
-    .filter(Boolean);
+  const hashes = results.map((item) => item.infoHash).filter(Boolean);
 
   let torbox;
   let torboxStatus = 'known';
@@ -125,64 +172,36 @@ export async function searchMedia(intent, dependencies = {}) {
   if (hasTorboxKey && hashes.length > 0) {
     try {
       torbox = await cacheCheck(hashes);
-
-      const failed = torbox.failed instanceof Set
-        ? torbox.failed
-        : new Set();
-
+      const failed = torbox.failed instanceof Set ? torbox.failed : new Set();
       if (failed.size > 0) {
-        torboxStatus = failed.size >= new Set(hashes).size
-          ? 'unknown'
-          : 'partial';
+        torboxStatus = failed.size >= new Set(hashes).size ? 'unknown' : 'partial';
       }
     } catch (error) {
       torboxStatus = 'unknown';
-      torbox = {
-        cached: new Set(),
-        details: new Map(),
-        failed: new Set(hashes),
-      };
+      torbox = { cached: new Set(), details: new Map(), failed: new Set(hashes) };
       console.error(`TorBox cache enrichment unavailable: ${error.message}`);
     }
   }
 
-  const torboxFailed = torbox?.failed instanceof Set
-    ? torbox.failed
-    : new Set();
+  const torboxFailed = torbox?.failed instanceof Set ? torbox.failed : new Set();
 
-  // Build multi-provider state for each result
   results = results.map((item) => {
-    const hash = item.infoHash
-      ? item.infoHash.toLowerCase()
-      : null;
-
+    const hash = item.infoHash ? item.infoHash.toLowerCase() : null;
     const resultProviders = getProvidersForResult(item);
-
     const providers = {};
 
-    // TorBox state
     if (resultProviders.has('torbox') || configuredProviders.has('torbox')) {
       const cached = !hash
         ? (torboxStatus === 'unknown' ? null : false)
-        : torboxFailed.has(hash)
-          ? null
-          : torbox?.cached.has(hash) || false;
+        : torboxFailed.has(hash) ? null : torbox?.cached.has(hash) || false;
       providers.torbox = { cached };
     }
-
-    // Real-Debrid state — preserved for future availability semantics
     if (resultProviders.has('realdebrid') || configuredProviders.has('realdebrid')) {
       providers.realdebrid = { cached: null };
     }
-
-    return {
-      ...item,
-      providers,
-    };
+    return { ...item, providers };
   });
 
-  // Stable sort: cached releases first while preserving
-  // Stremio's existing ordering within each group.
   results.sort((a, b) => {
     const aCached = Object.values(a.providers).some((p) => p.cached === true);
     const bCached = Object.values(b.providers).some((p) => p.cached === true);
@@ -190,16 +209,76 @@ export async function searchMedia(intent, dependencies = {}) {
   });
 
   const providerStatus = {};
-  if (configuredProviders.has('torbox')) {
-    providerStatus.torbox = torboxStatus;
-  }
-  if (configuredProviders.has('realdebrid')) {
-    providerStatus.realdebrid = 'configured';
+  if (configuredProviders.has('torbox')) providerStatus.torbox = torboxStatus;
+  if (configuredProviders.has('realdebrid')) providerStatus.realdebrid = 'configured';
+
+  writeToCache(results, providerStatus, intent.mediaId).catch(() => {});
+
+  return { results, providerStatus, cacheStartedAt, startedAt };
+}
+
+export async function searchMedia(intent, dependencies = {}) {
+  const startedAt = performance.now();
+  const search = dependencies.searchStremio || searchStremio;
+  const torznabSearch = dependencies.searchTorznab || searchTorznab;
+  const mergeStreamsFn = dependencies.mergeStreams || mergeStreams;
+  const cache = getCache();
+
+  // Cache read path: stale-while-refresh
+  if (cache) {
+    const refresher = new StaleWhileRefresher({
+      cache,
+      maxAgeMs: 30000,
+      searchKey: intent.mediaId,
+      withObservations: false,
+      refresh: async () => {
+        const liveResults = await runLiveDiscovery(intent, search, torznabSearch, mergeStreamsFn);
+        await enrichAndFinalize(liveResults, intent, dependencies);
+      },
+    });
+
+    const cacheResult = await refresher.query();
+
+    if (cacheResult.status === 'fresh') {
+      const candidates = cacheResult.candidates.map(candidateToResult);
+      const { results, providerStatus } = await enrichAndFinalize(candidates, intent, dependencies);
+      return {
+        intent,
+        results,
+        providerStatus,
+        fromCache: true,
+        timings: {
+          discoveryMs: Math.round(performance.now() - startedAt),
+          torboxMs: 0,
+          totalMs: Math.round(performance.now() - startedAt),
+        },
+      };
+    }
+
+    if (cacheResult.status === 'stale') {
+      const candidates = cacheResult.candidates.map(candidateToResult);
+      const { results, providerStatus } = await enrichAndFinalize(candidates, intent, dependencies);
+      return {
+        intent,
+        results,
+        providerStatus,
+        fromCache: true,
+        timings: {
+          discoveryMs: Math.round(performance.now() - startedAt),
+          torboxMs: 0,
+          totalMs: Math.round(performance.now() - startedAt),
+        },
+      };
+    }
+    // fall through to live discovery on miss
   }
 
-  // Write-through to discovery cache. Fire-and-forget: cache failures
-  // never affect the search response.
-  writeToCache(results, providerStatus).catch(() => {});
+  // Live discovery path (cache miss or no cache)
+  const discoveryMs = performance.now() - startedAt;
+  const liveResults = await runLiveDiscovery(intent, search, torznabSearch, mergeStreamsFn);
+  const { results, providerStatus, cacheStartedAt } = await enrichAndFinalize(
+    liveResults, intent, dependencies
+  );
 
   return {
     intent,
