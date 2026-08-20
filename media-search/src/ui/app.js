@@ -129,17 +129,27 @@ $('#change-episode').onclick = () => { if (state.media?.type === 'movie') startN
 
 async function findReleases() {
   state.release = null; state.visible = 100; resetSelection();
-  message('Discovering releases and checking TorBox cache…');
+  message('Searching releases…');
   $('#release-section').hidden = false; $('#release-loading').hidden = false; $('#filters').hidden = true; $('#release-workspace').hidden = true;
   $('#release-summary').replaceChildren(element('strong', '', 'Loading releases…')); $('#release-timing').textContent = ''; $('#releases').replaceChildren();
   try {
-    const streamType = state.media.type;
-    const mediaId = streamType === 'movie' ? state.media.id : state.episode.id;
-    const data = await api(`/api/releases?type=${streamType}&mediaId=${encodeURIComponent(mediaId)}`);
+    const mediaId = state.media.type === 'movie' ? state.media.id : state.episode.id;
+    // Build search query from title + season/episode
+    let query = state.media.name;
+    if (state.episode) {
+      query = `${state.media.name} S${String(state.episode.season).padStart(2, '0')}E${String(state.episode.episode).padStart(2, '0')}`;
+    }
+    const params = new URLSearchParams({
+      q: query,
+      mediaId: mediaId,
+      type: state.media.type,
+    });
+    const data = await api(`/api/search?${params.toString()}`);
     state.releases = prepareReleases(data.results);
     populateFilters(); renderReleases();
     const timing = data.timings;
-    $('#release-timing').textContent = timing ? `Discovery ${timing.discoveryMs} ms · TorBox ${timing.torboxMs} ms · total ${timing.totalMs} ms` : '';
+    const total = data.total ?? data.results.length;
+    $('#release-timing').textContent = timing ? `Search ${timing.totalMs} ms · ${total} results` : '';
     $('#release-loading').hidden = true; $('#filters').hidden = false; $('#release-workspace').hidden = false;
     message(state.releases.length ? '' : 'No torrent releases found.');
   } catch (error) { $('#release-loading').hidden = true; message(error.message, true); }

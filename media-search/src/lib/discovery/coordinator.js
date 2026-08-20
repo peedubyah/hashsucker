@@ -8,10 +8,12 @@
 import { loadSourceRegistry } from '../sources.js';
 import { discoverViaStremio } from './adapters/stremio.js';
 import { discoverViaTorznab } from './adapters/torznab.js';
+import { discoverViaTorrentio } from './adapters/torrentio.js';
 
 const ADAPTER_MAP = {
   stremio: discoverViaStremio,
   torznab: discoverViaTorznab,
+  torrentio: discoverViaTorrentio,
 };
 
 export async function discoverMedia(request, options = {}) {

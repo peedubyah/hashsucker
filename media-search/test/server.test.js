@@ -49,7 +49,7 @@ test('server serves UI and secret-free release API', async () => {
   const uiModule = await request('/release-model.js');
   assert.match(uiModule.text, /prepareReleases/);
   assert.equal(uiModule.headers['cache-control'], 'no-cache');
-  const response = await request('/api/releases?type=series&mediaId=tt2085059:7:3');
+  const response = await request('/api/search?type=series&mediaId=tt2085059:7:3');
   assert.equal(response.status, 200);
   const text = response.text;
   assert.match(text, /"cached":true/);
@@ -95,7 +95,7 @@ test('public release API strips all secret-bearing and internal fields', async (
   });
 
   const input = Readable.from([]);
-  input.method = 'GET'; input.url = '/api/releases?type=series&mediaId=tt2085059:7:3';
+  input.method = 'GET'; input.url = '/api/search?type=series&mediaId=tt2085059:7:3';
   const response = await new Promise((resolve, reject) => {
     const chunks = [];
     const res = {
@@ -298,6 +298,198 @@ test('GET /api/search/internal returns fileIndex in results', async () => {
   assert.equal(response.status, 200);
   const body = JSON.parse(response.text);
   assert.equal(body.results[0].fileIndex, null);
+});
+
+test('GET /api/search for live discovery with mediaId returns releases', async () => {
+  const cache = createDiscoveryCache();
+  const handler = createRequestHandler({
+    searchCache: cache,
+    searchMedia: async (intent) => ({
+      intent,
+      providerStatus: { torbox: 'known' },
+      results: [{
+        key: `ih:${HASH}`,
+        infoHash: HASH,
+        title: 'Movie.1080p.mkv',
+        filename: 'Movie.1080p.mkv',
+        resolution: '1080p',
+        providers: { torbox: { cached: true } },
+        sources: [],
+      }],
+    }),
+  });
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = '/api/search?type=movie&mediaId=tt1234567';
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.results.length, 1);
+  assert.equal(body.results[0].infoHash, HASH);
+  assert.equal(body.results[0].resolution, '1080p');
+});
+
+test('GET /api/search for series episode live discovery returns releases', async () => {
+  const cache = createDiscoveryCache();
+  const handler = createRequestHandler({
+    searchCache: cache,
+    searchMedia: async (intent) => ({
+      intent,
+      providerStatus: { torbox: 'known' },
+      results: [{
+        key: `ih:${HASH}`,
+        infoHash: HASH,
+        title: 'Show.S01E01.1080p.mkv',
+        filename: 'Show.S01E01.1080p.mkv',
+        resolution: '1080p',
+        providers: { torbox: { cached: true } },
+        sources: [],
+      }],
+    }),
+  });
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = '/api/search?type=series&mediaId=tt1234567:1:1';
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.results.length, 1);
+  assert.equal(body.results[0].infoHash, HASH);
+});
+
+test('GET /api/search without mediaId returns Cinemeta title search', async () => {
+  const cache = createDiscoveryCache();
+  const handler = createRequestHandler({
+    searchCache: cache,
+    searchCatalog: async () => [{ id: 'tt1234567', type: 'movie', name: 'Test Movie' }],
+  });
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = '/api/search?q=Test+Movie';
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.results.length, 1);
+  assert.equal(body.results[0].name, 'Test Movie');
+});
+
+test('GET /api/search with Torrentio + Comet coexistence', async () => {
+  const cache = createDiscoveryCache();
+  const handler = createRequestHandler({
+    searchCache: cache,
+    searchMedia: async (intent) => ({
+      intent,
+      providerStatus: { torbox: 'known' },
+      results: [
+        { key: `ih:${HASH}`, infoHash: HASH, title: 'Torrentio result', providers: { torbox: { cached: true } }, sources: [] },
+        { key: `ih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`, infoHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', title: 'Comet result', providers: {}, sources: [] },
+      ],
+    }),
+  });
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = '/api/search?type=movie&mediaId=tt1234567';
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.results.length, 2);
+  const hashes = body.results.map(r => r.infoHash).sort();
+  assert.deepEqual(hashes, [HASH, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'].sort());
+});
+
+test('GET /api/search with Torznab participation', async () => {
+  const cache = createDiscoveryCache();
+  const handler = createRequestHandler({
+    searchCache: cache,
+    searchMedia: async (intent) => ({
+      intent,
+      providerStatus: { torbox: 'known' },
+      results: [
+        { key: `ih:${HASH}`, infoHash: HASH, title: 'Torznab result', providers: { torbox: { cached: false } }, sources: [] },
+      ],
+    }),
+  });
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = '/api/search?type=series&mediaId=tt1234567:1:1';
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.results.length, 1);
+  assert.equal(body.results[0].providers.torbox.cached, false);
+});
+
+test('removed endpoints return 404', async () => {
+  const cache = createDiscoveryCache();
+  const handler = createRequestHandler({ searchCache: cache });
+
+  // /api/releases should no longer exist
+  const input1 = Readable.from([]);
+  input1.method = 'GET';
+  input1.url = '/api/releases?type=series&mediaId=tt1234567:1:1';
+  const response1 = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input1, res).catch(reject);
+  });
+  assert.equal(response1.status, 404);
+
+  // /api/search/releases should no longer exist
+  const input2 = Readable.from([]);
+  input2.method = 'GET';
+  input2.url = '/api/search/releases?q=Movie';
+  const response2 = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input2, res).catch(reject);
+  });
+  assert.equal(response2.status, 404);
   cache.close();
 });
 

@@ -135,6 +135,10 @@ export function createRequestHandler(dependencies = {}) {
       if (request.method === 'GET' && url.pathname === '/health') {
         return sendJson(response, 200, { ok: true });
       }
+      if (request.method === 'GET' && url.pathname === '/api/search/stats') {
+        return sendJson(response, 200, getSearchStats(searchCache));
+      }
+      // Internal DMM corpus search (ranked FTS5 pipeline)
       if (request.method === 'GET' && url.pathname === '/api/search/internal') {
         const startedAt = performance.now();
         const params = url.searchParams;
@@ -159,9 +163,6 @@ export function createRequestHandler(dependencies = {}) {
           stats: getSearchStats(searchCache),
         });
       }
-      if (request.method === 'GET' && url.pathname === '/api/search/stats') {
-        return sendJson(response, 200, getSearchStats(searchCache));
-      }
       // DMM ingestion endpoint (for triggering hashlist sync via API)
       if (request.method === 'POST' && url.pathname === '/api/ingest/dmm') {
         const body = await readBody(request).catch(() => ({}));
@@ -183,23 +184,31 @@ export function createRequestHandler(dependencies = {}) {
       }
       if (request.method === 'GET' && url.pathname === '/api/search') {
         const startedAt = performance.now();
-        const results = await catalogSearch(url.searchParams.get('q'));
+        const params = url.searchParams;
+        const mediaId = params.get('mediaId');
+        const type = params.get('type');
+
+        // Live discovery path: when mediaId and type are provided, resolve
+        // Cinemeta media identity and run live discovery (Stremio + Torznab).
+        if (mediaId && type) {
+          const intent = createRequestIntent({ type, mediaId });
+          const result = await releaseSearch(intent);
+          return sendJson(response, 200, {
+            intent: result.intent,
+            providerStatus: result.providerStatus,
+            timings: result.timings,
+            results: result.results.filter((release) => release.infoHash).map(publicRelease),
+          });
+        }
+
+        // Cinemeta title search (default): find titles by query string.
+        const results = await catalogSearch(params.get('q'));
         return sendJson(response, 200, { results, timings: { totalMs: Math.round(performance.now() - startedAt) } });
       }
       if (request.method === 'GET' && url.pathname === '/api/media') {
         const startedAt = performance.now();
         const media = await mediaLookup(url.searchParams.get('type'), url.searchParams.get('id'));
         return media ? sendJson(response, 200, { media, timings: { totalMs: Math.round(performance.now() - startedAt) } }) : sendJson(response, 404, { error: 'Media not found' });
-      }
-      if (request.method === 'GET' && url.pathname === '/api/releases') {
-        const intent = createRequestIntent({ type: url.searchParams.get('type'), mediaId: url.searchParams.get('mediaId') });
-        const result = await releaseSearch(intent);
-        return sendJson(response, 200, {
-          intent: result.intent,
-          providerStatus: result.providerStatus,
-          timings: result.timings,
-          results: result.results.filter((release) => release.infoHash).map(publicRelease),
-        });
       }
       if (request.method === 'POST' && url.pathname === '/api/requests') {
         const body = await readBody(request);

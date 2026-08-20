@@ -11,8 +11,8 @@ export function loadSourceRegistry() {
   // Stremio/Torrentio/TorBox
   if (process.env.TORBOX_API_KEY) {
     sources.push({
-      id: 'stremio.torbox',
-      kind: 'stremio',
+      id: 'torrentio.torbox',
+      kind: 'torrentio',
       enabled: true,
       provider: 'torbox',
       endpoint: buildTorrentioUrl('torbox', process.env.TORBOX_API_KEY),
@@ -30,8 +30,8 @@ export function loadSourceRegistry() {
   // Stremio/Torrentio/Real-Debrid
   if (process.env.REALDEBRID_API_KEY) {
     sources.push({
-      id: 'stremio.realdebrid',
-      kind: 'stremio',
+      id: 'torrentio.realdebrid',
+      kind: 'torrentio',
       enabled: true,
       provider: 'realdebrid',
       endpoint: buildTorrentioUrl('realdebrid', process.env.REALDEBRID_API_KEY),

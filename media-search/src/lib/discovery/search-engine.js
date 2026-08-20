@@ -402,6 +402,151 @@ export function searchReleases(cache, options = {}) {
 }
 
 /**
+ * Combined search: DMM corpus (ranked) + live discovery (Torrentio/Torznab).
+ *
+ * Searches the local DMM corpus first, optionally runs live discovery,
+ * merges results by infoHash, and ranks all candidates together.
+ *
+ * @param {Object} cache - Discovery cache instance
+ * @param {Object} options - Search options
+ * @param {string} options.query - User search query
+ * @param {number} [options.year] - Filter by year
+ * @param {number} [options.season] - Filter by season
+ * @param {number} [options.episode] - Filter by episode
+ * @param {string} [options.resolution] - Filter by resolution
+ * @param {string} [options.source] - Filter by source type
+ * @param {string} [options.codec] - Filter by codec
+ * @param {number} [options.hdr] - Filter by HDR
+ * @param {string} [options.audio] - Filter by audio format
+ * @param {number} [options.limit] - Max results (default 50)
+ * @param {number} [options.offset] - Pagination offset
+ * @param {boolean} [options.includeProviders] - Include provider observations
+ * @param {boolean} [options.includeMedia] - Include media associations
+ * @param {boolean} [options.includeLive] - Include live discovery results (Torrentio/Torznab)
+ * @param {Function} [options.liveDiscoveryFn] - Async function that returns live discovery results
+ * @param {string} [options.mode] - Output mode: 'raw' or 'ui' (default 'raw')
+ * @returns {{ results: Array, total: number, query: Object, stats: Object }}
+ */
+export async function combinedSearch(cache, options = {}) {
+  const {
+    limit = 50,
+    offset = 0,
+    includeLive = false,
+    liveDiscoveryFn = null,
+    mode = 'raw',
+    ...searchOptions
+  } = options;
+
+  // Always search DMM corpus
+  const corpusResult = searchReleases(cache, {
+    ...searchOptions,
+    limit: Math.min(limit * 2, 200),  // Get more from corpus for better merging
+    includeProviders: true,
+    includeMedia: true,
+  });
+
+  let allHits = [...corpusResult.results];
+
+  // Optionally run live discovery
+  if (includeLive && typeof liveDiscoveryFn === 'function') {
+    try {
+      const liveResults = await liveDiscoveryFn(options);
+      if (liveResults && Array.isArray(liveResults)) {
+        // Normalize live results to match corpus shape
+        const normalized = liveResults.map(r => ({
+          hash: r.infoHash,
+          fileIndex: r.fileIndex ?? null,
+          filename: r.filename || r.title,
+          parsed: {
+            title: r.title,
+            year: r.year,
+            season: r.season,
+            episode: r.episode,
+            resolution: r.resolution,
+            sourceType: r.source,
+            codec: r.codec,
+            hdr: r.hdr,
+            audio: r.audio,
+            releaseGroup: r.releaseGroup,
+            source: r.source,
+          },
+          confidence: r.confidence ?? 0.5,
+          score: 0,
+          components: {},
+          providers: r.providers || {},
+          media: r.media || [],
+          _source: 'live',
+        }));
+        allHits.push(...normalized);
+      }
+    } catch (error) {
+      // Live discovery failure should not break corpus results
+      console.error(`Live discovery failed: ${error.message}`);
+    }
+  }
+
+  // Deduplicate by infoHash (corpus takes precedence)
+  const seen = new Map();
+  for (const hit of allHits) {
+    const hash = String(hit.hash || '').toLowerCase();
+    if (!hash) continue;
+    if (!seen.has(hash)) {
+      seen.set(hash, hit);
+    }
+  }
+  const deduped = Array.from(seen.values());
+
+  // Apply pagination
+  const total = deduped.length;
+  const results = deduped.slice(offset, offset + limit);
+
+  // Map to UI-compatible shape if requested
+  const mappedResults = mode === 'ui' ? results.map(mapToUIShape) : results;
+
+  return {
+    results: mappedResults,
+    total,
+    query: corpusResult.query,
+    stats: getSearchStats(cache),
+  };
+}
+
+/**
+ * Map a ranked result to the UI-compatible release shape.
+ * Matches what prepareReleases() expects.
+ */
+function mapToUIShape(r) {
+  const hash = String(r.hash || '').toLowerCase();
+  const providers = Array.isArray(r.providers) ? r.providers.reduce((acc, o) => {
+    acc[o.provider] = { cached: o.cached, evidence: o.evidence };
+    return acc;
+  }, {}) : (r.providers || {});
+
+  return {
+    infoHash: hash,
+    fileIndex: r.fileIndex ?? null,
+    title: r.parsed?.title || r.filename,
+    filename: r.filename,
+    size: r.parsed?.size || null,
+    resolution: r.parsed?.resolution || null,
+    quality: r.parsed?.sourceType || null,
+    codec: r.parsed?.codec || null,
+    hdr: r.parsed?.hdr ? String(r.parsed.hdr) : null,
+    audio: r.parsed?.audio || null,
+    releaseGroup: r.parsed?.releaseGroup || null,
+    year: r.parsed?.year || null,
+    season: r.parsed?.season || null,
+    episode: r.parsed?.episode || null,
+    confidence: r.confidence ?? 0.5,
+    score: r.score ?? 0,
+    components: r.components || {},
+    providers,
+    media: r.media || [],
+    _source: r._source || 'corpus',
+  };
+}
+
+/**
  * Get search index statistics.
  *
  * @param {Object} cache - Discovery cache instance

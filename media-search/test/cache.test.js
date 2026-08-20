@@ -36,7 +36,7 @@ function makeCandidate(overrides = {}) {
     magnet: `magnet:?xt=urn:btih:${HASH}`,
     downloadUrl: null,
     metadata: { resolution: '1080p' },
-    sources: [{ id: 'stremio.torbox', kind: 'stremio' }],
+    sources: [{ id: 'torrentio.torbox', kind: 'torrentio' }],
     firstSeen: Date.now(),
     lastSeen: Date.now(),
     ...overrides,
