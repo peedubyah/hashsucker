@@ -3,7 +3,7 @@ services:
     build:
       context: ./media-search
     image: media-search:local
-    container_name: media-search
+    container_name: media-stack-search
     restart: unless-stopped
     environment:
       PORT: "3000"
@@ -24,7 +24,7 @@ services:
     build:
       context: ./torbox-importer
     image: torbox-importer:local
-    container_name: torbox-importer
+    container_name: media-stack-importer
     restart: unless-stopped
     user: "${PUID:-99}:${PGID:-100}"
     environment:
