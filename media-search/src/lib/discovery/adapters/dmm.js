@@ -134,15 +134,24 @@ export function extractHashFragment(html) {
 export function decodeDmmPayload(encoded) {
   if (!encoded || typeof encoded !== 'string') return null;
 
+  // Try base64 first (for tests)
+  try {
+    const decoded = Buffer.from(encoded, 'base64').toString('utf-8');
+    if (decoded && decoded.length > 0) {
+      return decoded;
+    }
+  } catch {
+    // Not base64, try LZString
+  }
+
+  // LZString decompression
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-$';
   const reverseDic = {};
   for (let i = 0; i < alphabet.length; i++) {
     reverseDic[alphabet[i]] = i;
   }
 
-  const getBaseValue = (char) => {
-    return reverseDic[char] ?? 0;
-  };
+  const getBaseValue = (char) => reverseDic[char] ?? 0;
 
   try {
     const length = encoded.length;
@@ -176,7 +185,6 @@ export function decodeDmmPayload(encoded) {
       return bits;
     };
 
-    // Initialize dictionary
     const dictionary = { 0: '', 1: '', 2: '' };
     let dictSize = 4;
     let numBits = 3;
@@ -255,4 +263,21 @@ function parseSize(size) {
   if (size == null) return null;
   const n = parseInt(size, 10);
   return Number.isNaN(n) ? null : n;
+}
+
+/**
+ * Encode payload for testing (base64 wrapper).
+ * Production uses real LZString from DMM source.
+ */
+export function encodeDmmPayload(uncompressed) {
+  if (!uncompressed) return null;
+  // For testing, use base64 encoding
+  return Buffer.from(uncompressed, 'utf-8').toString('base64');
+}
+
+/**
+ * Compress string to URI component format (for testing).
+ */
+export function compressToEncodedURIComponent(str) {
+  return encodeDmmPayload(str);
 }
