@@ -1,0 +1,48 @@
+services:
+  media-search:
+    build:
+      context: ./media-search
+    image: media-search:local
+    container_name: media-search
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      REQUESTS_ROOT: /requests
+      TORBOX_API_KEY: ${TORBOX_API_KEY:?Set TORBOX_API_KEY in .env}
+      STREMIO_ADDON_MANIFEST_URL: ${STREMIO_ADDON_MANIFEST_URL:?Set STREMIO_ADDON_MANIFEST_URL in .env}
+    ports:
+      - "${MEDIA_SEARCH_PORT:-3000}:3000"
+    volumes:
+      - ${REQUESTS_HOST_PATH:?Set REQUESTS_HOST_PATH in .env}:/requests
+    group_add:
+      - "${MEDIA_SEARCH_QUEUE_GID:-100}"
+    security_opt:
+      - no-new-privileges:true
+
+  torbox-importer:
+    build:
+      context: ./torbox-importer
+    image: torbox-importer:local
+    container_name: torbox-importer
+    restart: unless-stopped
+    user: "${PUID:-99}:${PGID:-100}"
+    environment:
+      TORBOX_API_KEY: ${TORBOX_API_KEY:?Set TORBOX_API_KEY in .env}
+      TORBOX_DB: /config/state/torbox-importer.db
+      POLL_INTERVAL: "${POLL_INTERVAL:-10}"
+      RADARR_URL: ${RADARR_URL:?Set RADARR_URL in .env}
+      RADARR_API_KEY: ${RADARR_API_KEY:?Set RADARR_API_KEY in .env}
+      RADARR_ROOT_FOLDER: "${RADARR_ROOT_FOLDER:-/data/Movies}"
+      RADARR_PROFILE_HD: "${RADARR_PROFILE_HD:-4}"
+      RADARR_PROFILE_4K_WEB: "${RADARR_PROFILE_4K_WEB:-7}"
+      RADARR_PROFILE_4K_BLU: "${RADARR_PROFILE_4K_BLU:-8}"
+      SONARR_URL: ${SONARR_URL:?Set SONARR_URL in .env}
+      SONARR_API_KEY: ${SONARR_API_KEY:?Set SONARR_API_KEY in .env}
+    volumes:
+      - ${TORBOX_IMPORTER_HOST_PATH:?Set TORBOX_IMPORTER_HOST_PATH in .env}:/config
+      - ${REQUESTS_HOST_PATH:?Set REQUESTS_HOST_PATH in .env}:/requests
+      - ${DOWNLOADS_HOST_PATH:?Set DOWNLOADS_HOST_PATH in .env}:/downloads
+    command: ["/app/scripts/worker.sh"]
+    security_opt:
+      - no-new-privileges:true
