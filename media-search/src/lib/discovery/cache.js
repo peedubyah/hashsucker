@@ -64,6 +64,34 @@ CREATE TABLE IF NOT EXISTS candidate_media (
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidate_media_media_id ON candidate_media(media_id);
+
+CREATE TABLE IF NOT EXISTS release_attributes (
+  info_hash TEXT NOT NULL,
+  file_index INTEGER,
+  file_index_key INTEGER NOT NULL DEFAULT -1,
+  source TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0.5,
+  title TEXT,
+  year INTEGER,
+  media_type TEXT,
+  season INTEGER,
+  episode INTEGER,
+  episode_range TEXT,
+  resolution TEXT,
+  source_type TEXT,
+  codec TEXT,
+  hdr INTEGER,
+  audio TEXT,
+  language TEXT,
+  release_group TEXT,
+  evidence TEXT,
+  parsed_at INTEGER NOT NULL,
+  PRIMARY KEY (info_hash, file_index_key, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_release_attributes_source ON release_attributes(source);
+CREATE INDEX IF NOT EXISTS idx_release_attributes_parsed_at ON release_attributes(parsed_at);
 `;
 
 const INSERT_CANDIDATE = `
@@ -158,6 +186,54 @@ JOIN candidates c ON c.info_hash = cm.info_hash AND c.file_index_key = cm.file_i
 WHERE cm.media_id = @media_id;
 `;
 
+const INSERT_RELEASE_ATTRIBUTES = `
+INSERT INTO release_attributes (
+  info_hash, file_index, file_index_key, source, filename, confidence,
+  title, year, media_type, season, episode, episode_range, resolution, source_type,
+  codec, hdr, audio, language, release_group, evidence, parsed_at
+) VALUES (
+  @info_hash, @file_index, @file_index_key, @source, @filename, @confidence,
+  @title, @year, @media_type, @season, @episode, @episode_range, @resolution, @source_type,
+  @codec, @hdr, @audio, @language, @release_group, @evidence, @parsed_at
+)
+ON CONFLICT(info_hash, file_index_key, source) DO UPDATE SET
+  filename = EXCLUDED.filename,
+  confidence = EXCLUDED.confidence,
+  title = EXCLUDED.title,
+  year = EXCLUDED.year,
+  media_type = EXCLUDED.media_type,
+  season = EXCLUDED.season,
+  episode = EXCLUDED.episode,
+  episode_range = EXCLUDED.episode_range,
+  resolution = EXCLUDED.resolution,
+  source_type = EXCLUDED.source_type,
+  codec = EXCLUDED.codec,
+  hdr = EXCLUDED.hdr,
+  audio = EXCLUDED.audio,
+  language = EXCLUDED.language,
+  release_group = EXCLUDED.release_group,
+  evidence = EXCLUDED.evidence,
+  parsed_at = EXCLUDED.parsed_at;
+`;
+
+const GET_RELEASE_ATTRIBUTES = `
+SELECT * FROM release_attributes
+WHERE info_hash = @info_hash AND file_index_key = @file_index_key
+ORDER BY confidence DESC;
+`;
+
+const GET_RELEASE_ATTRIBUTES_BY_SOURCE = `
+SELECT * FROM release_attributes
+WHERE info_hash = @info_hash AND file_index_key = @file_index_key AND source = @source;
+`;
+
+const GET_CANDIDATES_WITHOUT_ATTRIBUTES = `
+SELECT c.*
+FROM candidates c
+LEFT JOIN release_attributes ra ON c.info_hash = ra.info_hash AND c.file_index_key = ra.file_index_key
+WHERE ra.info_hash IS NULL;
+`;
+
 export function createDiscoveryCache({ dbPath = ':memory:', database = null } = {}) {
   const db = database || new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
@@ -173,6 +249,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const upsertMediaAssocStmt = db.prepare(UPSERT_MEDIA_ASSOCIATION);
   const getMediaAssocStmt = db.prepare(GET_MEDIA_ASSOCIATIONS);
   const getCandidatesByMediaStmt = db.prepare(GET_CANDIDATES_BY_MEDIA);
+  const insertReleaseAttributesStmt = db.prepare(INSERT_RELEASE_ATTRIBUTES);
+  const getReleaseAttributesStmt = db.prepare(GET_RELEASE_ATTRIBUTES);
+  const getReleaseAttributesBySourceStmt = db.prepare(GET_RELEASE_ATTRIBUTES_BY_SOURCE);
+  const getCandidatesWithoutAttributesStmt = db.prepare(GET_CANDIDATES_WITHOUT_ATTRIBUTES);
 
 
   function fileIndexKey(fileIndex) {
@@ -440,6 +520,102 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     return rows.map(rowToCandidate);
   }
 
+  /**
+   * Store release attributes for a candidate from a specific parser source.
+   * Uses UPSERT — if same (candidate, source) exists, overwrites if confidence is higher.
+   * This is the internal write path used by release-attributes.js.
+   *
+   * @param {Object} attrs - Normalized release attributes
+   */
+  function _insertReleaseAttributes(attrs) {
+    insertReleaseAttributesStmt.run({
+      info_hash: attrs.infoHash,
+      file_index: attrs.fileIndex ?? null,
+      file_index_key: fileIndexKey(attrs.fileIndex),
+      source: attrs.source,
+      filename: attrs.filename,
+      confidence: attrs.confidence,
+      title: attrs.title ?? null,
+      year: attrs.year ?? null,
+      media_type: attrs.mediaType ?? null,
+      season: attrs.season ?? null,
+      episode: attrs.episode ?? null,
+      episode_range: attrs.episodeRange ?? null,
+      resolution: attrs.resolution ?? null,
+      source_type: attrs.sourceType ?? null,
+      codec: attrs.codec ?? null,
+      hdr: attrs.hdr === true ? 1 : 0,
+      audio: attrs.audio ?? null,
+      language: attrs.language ?? null,
+      release_group: attrs.releaseGroup ?? null,
+      evidence: attrs.evidence != null ? JSON.stringify(attrs.evidence) : null,
+      parsed_at: attrs.parsedAt,
+    });
+  }
+
+  function rowToReleaseAttributes(row) {
+    if (!row) return null;
+    return {
+      infoHash: row.info_hash,
+      fileIndex: row.file_index,
+      source: row.source,
+      filename: row.filename,
+      confidence: row.confidence,
+      title: row.title,
+      year: row.year,
+      mediaType: row.media_type,
+      season: row.season,
+      episode: row.episode,
+      episodeRange: row.episode_range,
+      resolution: row.resolution,
+      sourceType: row.source_type,
+      codec: row.codec,
+      hdr: row.hdr === 1,
+      audio: row.audio,
+      language: row.language,
+      releaseGroup: row.release_group,
+      evidence: row.evidence ? JSON.parse(row.evidence) : null,
+      parsedAt: row.parsed_at,
+    };
+  }
+
+  /**
+   * Get release attributes for a candidate.
+   * If source is provided, returns attributes from that source only.
+   * If source is null, returns attributes from all sources (sorted by confidence desc).
+   *
+   * @param {string} infoHash - Candidate infoHash
+   * @param {number|null} fileIndex - Candidate fileIndex
+   * @param {string} [source] - Optional source filter
+   * @returns {Array<Object>} Release attributes
+   */
+  function getReleaseAttributes(infoHash, fileIndex = null, source = null) {
+    if (source != null) {
+      const row = getReleaseAttributesBySourceStmt.get({
+        info_hash: infoHash,
+        file_index_key: fileIndexKey(fileIndex),
+        source,
+      });
+      return row ? [rowToReleaseAttributes(row)] : [];
+    }
+    const rows = getReleaseAttributesStmt.all({
+      info_hash: infoHash,
+      file_index_key: fileIndexKey(fileIndex),
+    });
+    return rows.map(rowToReleaseAttributes);
+  }
+
+  /**
+   * Get candidates that have no release attributes.
+   * Useful for finding candidates that need filename parsing.
+   *
+   * @returns {Array<Object>} Candidates without release attributes
+   */
+  function getCandidatesWithoutReleaseAttributes() {
+    const rows = getCandidatesWithoutAttributesStmt.all();
+    return rows.map(rowToCandidate);
+  }
+
   let closed = false;
 
   function isClosed() {
@@ -459,6 +635,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     try { upsertMediaAssocStmt.finalize(); } catch {}
     try { getMediaAssocStmt.finalize(); } catch {}
     try { getCandidatesByMediaStmt.finalize(); } catch {}
+    try { insertReleaseAttributesStmt.finalize(); } catch {}
+    try { getReleaseAttributesStmt.finalize(); } catch {}
+    try { getReleaseAttributesBySourceStmt.finalize(); } catch {}
+    try { getCandidatesWithoutAttributesStmt.finalize(); } catch {}
     db.close();
   }
 
@@ -474,6 +654,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     ingestCandidate,
     isClosed,
     close,
+    // Release attributes (used by release-attributes.js)
+    _insertReleaseAttributes,
+    getReleaseAttributes,
+    getCandidatesWithoutReleaseAttributes,
     // Exposed for testing/inspection
     get db() { return db; },
   };

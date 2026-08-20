@@ -14,6 +14,11 @@ Read all of `CODEX.md` first. Its architectural contract is binding; this file i
 6. **Enrichment boundary** — `enrichCandidate()` creates media associations without mutating candidate identity
 7. **Enrichment worker** — `runEnrichmentWorker()` processes unenriched candidates with per-candidate failure isolation
 8. **Evidence tracking** — Media associations carry evidence arrays explaining WHY the association exists
+9. **Release attributes boundary** — `release_attributes` table for filename-derived metadata (title, year, season, episode, resolution, codec, HDR, audio, language, release group)
+   - Separate from candidates, candidate_media, and provider observations
+   - Multiple parser sources per candidate (primary key: `(info_hash, file_index_key, source)`)
+   - Stronger confidence wins conflicts per source
+   - Evidence tags preserved for transparency
 
 ### Current Invariants
 
@@ -31,6 +36,8 @@ Read all of `CODEX.md` first. Its architectural contract is binding; this file i
 3. **New provider observations** — Use `cache.recordProviderObservation()` — never store in candidates
 4. **New cache queries** — Use `cache.queryCachedCandidates()` with `searchKey`, `maxAgeMs`, `withObservations`
 5. **New media associations** — Use `cache.associateMedia()` or `enrichCandidate()`
+6. **New filename parsers** — Implement parser, call `storeReleaseAttributes()` with source name
+7. **Release attribute queries** — Use `getReleaseAttributesForCandidate()`, `getStrongestReleaseAttributes()`, `mergeReleaseAttributes()`
 
 ### Research Dependencies
 
@@ -42,8 +49,8 @@ Read all of `CODEX.md` first. Its architectural contract is binding; this file i
 
 **RIGHTMON implementation agent** (this track):
 - Production code — `media-search/src/lib/discovery/`
-- Tests — `media-search/test/cache.test.js` (150 tests, all passing)
-- Contracts — `ingestCandidates()`, `enrichCandidate()`, `associateMedia()`
+- Tests — `media-search/test/cache.test.js` (100 tests, all passing)
+- Contracts — `ingestCandidates()`, `enrichCandidate()`, `associateMedia()`, `storeReleaseAttributes()`
 
 ## Research Branch Status
 
@@ -83,6 +90,9 @@ Zurg architectural lessons:
 5. **Evidence tags are mandatory** — explain WHY for every association
 6. **Higher confidence wins on conflict** — equal confidence → latest wins
 7. **Unknown media identity is valid** — candidate with no associations is still retrievable
+8. **Release attributes separate from candidates/media** — evidence, not identity
+9. **Multiple parser sources per candidate** — primary key `(info_hash, file_index_key, source)`
+10. **Release attributes don't create media associations** — filename parse is evidence only
 
 ## Unresolved Questions
 
@@ -97,10 +107,16 @@ Zurg architectural lessons:
 
 **Implement filename parsing enrichment (Source 1):**
 - Parse filenames into structured tokens (title, year, season, episode, quality, source, codec, release group)
-- Classify media type (movie, series, unknown)
-- Create `candidate_media` associations with confidence + evidence
+- Store parsed attributes via `storeReleaseAttributes()` — parser source + confidence + evidence
+- Optional: Create `candidate_media` associations with confidence + evidence
 - Integrate with `runEnrichmentWorker()`
 - Target: 0.6-0.85 confidence for well-formed filenames
+
+### Parser Research Deliverables (WINDOWS branch)
+
+- **PARSER-CONTRACT.md** — parser interface contract
+- **Parser fixtures** — test cases for parser validation
+- **Recommendation: PTN + custom regex** — high accuracy, no heavy dependencies
 
 ## Verified Baseline
 

@@ -17,11 +17,18 @@ Ingestion (ingestCandidates — source-agnostic boundary)
     v
 Candidate cache (SQLite: candidates + provider_observations)
     |
-    v
-Enrichment worker (filename/title → media identity)
-    |
-    v
-Candidate_media (associations with confidence + evidence)
+    +------------------+------------------+
+    |                  |                  |
+    v                  v                  v
+Release attrs    Enrichment worker   Provider workers
+(filename parse) (filename/title     (cache status)
+    |               → media identity)
+    v                  |
+release_attributes   v
+                 candidate_media
+                 (associations +
+                  confidence +
+                  evidence)
     |
     v
 Search layer (user-facing API + UI)
@@ -101,7 +108,61 @@ Key APIs:
 - Confidence is always explicit (default 0.5 if not provided)
 - Evidence is optional but recommended (array of string tags)
 
-### 5. Enrichment Worker
+### 5. Release Attributes Boundary
+
+**Filename-derived attributes** separate from candidates and media associations.
+
+- `src/lib/discovery/release-attributes.js` — `storeReleaseAttributes()`, `getReleaseAttributesForCandidate()`, etc.
+
+**Table:** `release_attributes`
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `info_hash` | TEXT | FK to candidates |
+| `file_index_key` | INTEGER | FK to candidates |
+| `source` | TEXT | Parser source (e.g., 'ptn', 'guessit') |
+| `filename` | TEXT | Raw filename preserved |
+| `confidence` | REAL | Parser confidence 0.0–1.0 |
+| `title` | TEXT | Normalized title |
+| `year` | INTEGER | Release year |
+| `media_type` | TEXT | Type guess: movie, episode, unknown |
+| `season` | INTEGER | Season number |
+| `episode` | INTEGER | Episode number |
+| `episode_range` | TEXT | Episode range (e.g., "1-3") |
+| `resolution` | TEXT | Resolution (e.g., "1080p", "2160p") |
+| `source_type` | TEXT | Source (e.g., "WEB-DL", "BluRay") |
+| `codec` | TEXT | Video codec (e.g., "x264", "x265") |
+| `hdr` | INTEGER | HDR flag (0/1) |
+| `audio` | TEXT | Audio format (e.g., "AAC", "DTS") |
+| `language` | TEXT | Language (e.g., "en", "multi") |
+| `release_group` | TEXT | Release group name |
+| `evidence` | TEXT | JSON array of evidence tags |
+| `parsed_at` | INTEGER | Epoch ms |
+
+**Primary key:** `(info_hash, file_index_key, source)` — one row per candidate per parser source.
+
+**Contract:**
+- Release attributes are SEPARATE from candidates (different table)
+- Release attributes are SEPARATE from candidate_media (different purpose)
+- Release attributes are EVIDENCE, not identity — they don't imply media association
+- Release attributes do NOT create provider observations
+- Multiple parsers can contribute attributes
+- Stronger confidence wins conflicts (same source overwrite)
+- Attributes survive cache reload (persistent storage)
+- Source is preserved — no fuzzy merge
+
+**Key APIs:**
+- `storeReleaseAttributes()` — store attributes from a parser source
+- `storeReleaseAttributesBatch()` — batch store multiple sources
+- `getReleaseAttributesForCandidate()` — get all sources (sorted by confidence)
+- `getReleaseAttributesBySource()` — get specific parser source
+- `getStrongestReleaseAttributes()` — get highest confidence attributes
+- `mergeReleaseAttributes()` — merge multiple sources (highest confidence wins per field)
+- `hasReleaseAttributes()` — check if candidate has any attributes
+- `getCandidatesWithoutAttributes()` — find candidates needing parsing
+- `validateReleaseAttributes()` — validate attributes object
+
+### 7. Enrichment Worker
 
 **Orchestration layer** that processes unenriched candidates.
 
@@ -120,7 +181,7 @@ getUnenrichedCandidates() → worker → enrichCandidates()
 - Worker does NOT trigger importer behavior
 - Progress callbacks available for observability
 
-### 6. Search Layer
+### 8. Search Layer
 
 **User-facing API** for searching candidates and submitting requests.
 
@@ -142,6 +203,14 @@ getUnenrichedCandidates() → worker → enrichCandidates()
 - Source: which enrichment source created this association
 - Evidence: array of string tags explaining WHY this association exists
 - Timestamps: when the association was created/updated
+
+### Release Attributes
+- Filename-derived metadata: title, year, season, episode, resolution, codec, etc.
+- Parser source: which parser produced these attributes
+- Confidence: parser's confidence in the parse result
+- Evidence: tags explaining what patterns were detected
+- Multiple sources: one row per candidate per parser source
+- Does NOT imply media identity — evidence only
 
 ### Provider Observations
 - Provider-specific state: cached availability, evidence payloads

@@ -1836,3 +1836,571 @@ test('evidence with single string is normalized to array', () => {
 
   cache.close();
 });
+
+// =============================================================================
+// Release Attributes Boundary Tests
+// =============================================================================
+
+import {
+  storeReleaseAttributes,
+  storeReleaseAttributesBatch,
+  getReleaseAttributesForCandidate,
+  getReleaseAttributesBySource,
+  getStrongestReleaseAttributes,
+  hasReleaseAttributes,
+  getCandidatesWithoutAttributes,
+  mergeReleaseAttributes,
+  validateReleaseAttributes,
+} from '../src/lib/discovery/release-attributes.js';
+
+test('candidate can exist without release attributes', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'test.mkv' }));
+
+  const attributes = cache.getReleaseAttributes(HASH, null);
+  assert.equal(attributes.length, 0);
+
+  const hasAttrs = hasReleaseAttributes(cache, HASH, null);
+  assert.equal(hasAttrs, false);
+
+  cache.close();
+});
+
+test('release attributes can be stored for a candidate', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'Black.Mirror.S07E03.1080p.mkv' }));
+
+  const stored = storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Black.Mirror.S07E03.1080p.mkv',
+    source: 'ptn-parser',
+    confidence: 0.85,
+    parsed: {
+      title: 'Black Mirror',
+      season: 7,
+      episode: 3,
+      resolution: '1080p',
+      source: 'WEB-DL',
+      codec: 'x264',
+      audio: 'AAC',
+      releaseGroup: 'NTb',
+    },
+    evidence: ['title_extracted', 'season_episode_pattern', 'resolution_detected'],
+  });
+
+  assert.equal(stored, true);
+
+  const attributes = cache.getReleaseAttributes(HASH, null);
+  assert.equal(attributes.length, 1);
+  assert.equal(attributes[0].title, 'Black Mirror');
+  assert.equal(attributes[0].season, 7);
+  assert.equal(attributes[0].episode, 3);
+  assert.equal(attributes[0].resolution, '1080p');
+  assert.equal(attributes[0].sourceType, 'WEB-DL');
+  assert.equal(attributes[0].codec, 'x264');
+  assert.equal(attributes[0].audio, 'AAC');
+  assert.equal(attributes[0].releaseGroup, 'NTb');
+  assert.equal(attributes[0].source, 'ptn-parser');
+  assert.equal(attributes[0].confidence, 0.85);
+
+  cache.close();
+});
+
+test('release attributes can exist without media association', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'Movie.2024.2160p.mkv' }));
+
+  // Store release attributes
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Movie.2024.2160p.mkv',
+    source: 'ptn-parser',
+    confidence: 0.9,
+    parsed: {
+      title: 'Movie',
+      year: 2024,
+      resolution: '2160p',
+    },
+  });
+
+  // Has release attributes
+  assert.equal(hasReleaseAttributes(cache, HASH, null), true);
+
+  // But no media association
+  const associations = cache.getMediaAssociations(HASH, null);
+  assert.equal(associations.length, 0);
+
+  cache.close();
+});
+
+test('multiple parsers can contribute release attributes', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'Release.2024.1080p.mkv' }));
+
+  // First parser
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.2024.1080p.mkv',
+    source: 'ptn-parser',
+    confidence: 0.75,
+    parsed: {
+      title: 'Release',
+      year: 2024,
+      resolution: '1080p',
+    },
+  });
+
+  // Second parser
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.2024.1080p.mkv',
+    source: 'guessit-parser',
+    confidence: 0.85,
+    parsed: {
+      title: 'Release',
+      year: 2024,
+      resolution: '1080p',
+      codec: 'x265',
+      releaseGroup: 'GROUP',
+    },
+  });
+
+  // Both parsers' attributes stored
+  const attributes = cache.getReleaseAttributes(HASH, null);
+  assert.equal(attributes.length, 2);
+
+  // Get by source
+  const ptnAttrs = getReleaseAttributesBySource(cache, HASH, null, 'ptn-parser');
+  assert.ok(ptnAttrs);
+  assert.equal(ptnAttrs.title, 'Release');
+
+  const guessitAttrs = getReleaseAttributesBySource(cache, HASH, null, 'guessit-parser');
+  assert.ok(guessitAttrs);
+  assert.equal(guessitAttrs.codec, 'x265');
+
+  cache.close();
+});
+
+test('stronger confidence wins conflicts for same source', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'Release.mkv' }));
+
+  // First parse with lower confidence
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.mkv',
+    source: 'ptn-parser',
+    confidence: 0.6,
+    parsed: { title: 'Release', resolution: '720p' },
+  });
+
+  // Second parse with higher confidence (same source)
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.mkv',
+    source: 'ptn-parser',
+    confidence: 0.9,
+    parsed: { title: 'Release', resolution: '1080p' },
+  });
+
+  // Should have only one entry (same source), with the higher confidence value
+  const attributes = cache.getReleaseAttributes(HASH, null);
+  assert.equal(attributes.length, 1);
+  assert.equal(attributes[0].resolution, '1080p');
+  assert.equal(attributes[0].confidence, 0.9);
+
+  cache.close();
+});
+
+test('weaker confidence does not overwrite stronger for same source', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'Release.mkv' }));
+
+  // First parse with higher confidence
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.mkv',
+    source: 'ptn-parser',
+    confidence: 0.9,
+    parsed: { title: 'Release', resolution: '1080p' },
+  });
+
+  // Second parse with lower confidence (same source)
+  const stored = storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.mkv',
+    source: 'ptn-parser',
+    confidence: 0.5,
+    parsed: { title: 'Release', resolution: '720p' },
+  });
+
+  // Should not overwrite
+  assert.equal(stored, false);
+
+  const attributes = cache.getReleaseAttributes(HASH, null);
+  assert.equal(attributes.length, 1);
+  assert.equal(attributes[0].resolution, '1080p');
+  assert.equal(attributes[0].confidence, 0.9);
+
+  cache.close();
+});
+
+test('release attributes survive cache reload', () => {
+  const cache = createDiscoveryCache();
+
+  // Ingest candidate and store attributes
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'Movie.2024.mkv' }));
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Movie.2024.mkv',
+    source: 'ptn-parser',
+    confidence: 0.85,
+    parsed: { title: 'Movie', year: 2024, resolution: '1080p' },
+  });
+
+  // Get candidate and attributes
+  const candidate = cache.getCandidate(HASH, null);
+  const attributes = getReleaseAttributesForCandidate(cache, HASH, null);
+
+  assert.ok(candidate);
+  assert.equal(attributes.length, 1);
+  assert.equal(attributes[0].title, 'Movie');
+  assert.equal(attributes[0].year, 2024);
+
+  cache.close();
+
+  // Create new cache instance with same data (simulates reload)
+  const cache2 = createDiscoveryCache();
+  cache2.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'Movie.2024.mkv' }));
+  storeReleaseAttributes(cache2, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Movie.2024.mkv',
+    source: 'ptn-parser',
+    confidence: 0.85,
+    parsed: { title: 'Movie', year: 2024, resolution: '1080p' },
+  });
+
+  const attributes2 = getReleaseAttributesForCandidate(cache2, HASH, null);
+  assert.equal(attributes2.length, 1);
+  assert.equal(attributes2[0].title, 'Movie');
+  assert.equal(attributes2[0].year, 2024);
+  assert.equal(attributes2[0].resolution, '1080p');
+
+  cache2.close();
+});
+
+test('getStrongestReleaseAttributes returns highest confidence', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'Release.mkv' }));
+
+  // Lower confidence parser
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.mkv',
+    source: 'ptn-parser',
+    confidence: 0.7,
+    parsed: { title: 'Release', resolution: '720p' },
+  });
+
+  // Higher confidence parser
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.mkv',
+    source: 'guessit-parser',
+    confidence: 0.95,
+    parsed: { title: 'Release', resolution: '1080p', codec: 'x265' },
+  });
+
+  const strongest = getStrongestReleaseAttributes(cache, HASH, null);
+  assert.ok(strongest);
+  assert.equal(strongest.source, 'guessit-parser');
+  assert.equal(strongest.confidence, 0.95);
+  assert.equal(strongest.codec, 'x265');
+
+  cache.close();
+});
+
+test('getCandidatesWithoutAttributes returns candidates needing parsing', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'HasAttrs.mkv' }));
+  cache.upsertCandidate(makeCandidate({ infoHash: OTHER_HASH, filename: 'NoAttrs.mkv' }));
+
+  // Only first candidate has release attributes
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'HasAttrs.mkv',
+    source: 'ptn-parser',
+    confidence: 0.85,
+    parsed: { title: 'HasAttrs', resolution: '1080p' },
+  });
+
+  const withoutAttrs = getCandidatesWithoutAttributes(cache);
+  assert.equal(withoutAttrs.length, 1);
+  assert.equal(withoutAttrs[0].infoHash, OTHER_HASH);
+
+  cache.close();
+});
+
+test('storeReleaseAttributesBatch stores multiple sources', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'Release.mkv' }));
+
+  const stored = storeReleaseAttributesBatch(cache, [
+    {
+      infoHash: HASH,
+      fileIndex: null,
+      filename: 'Release.mkv',
+      source: 'ptn-parser',
+      confidence: 0.75,
+      parsed: { title: 'Release', resolution: '1080p' },
+    },
+    {
+      infoHash: HASH,
+      fileIndex: null,
+      filename: 'Release.mkv',
+      source: 'guessit-parser',
+      confidence: 0.85,
+      parsed: { title: 'Release', codec: 'x265' },
+    },
+    {
+      infoHash: HASH,
+      fileIndex: null,
+      filename: 'Release.mkv',
+      source: 'custom-parser',
+      confidence: 0.6,
+      parsed: { title: 'Release' },
+    },
+  ]);
+
+  assert.equal(stored, 3);
+
+  const attributes = cache.getReleaseAttributes(HASH, null);
+  assert.equal(attributes.length, 3);
+
+  cache.close();
+});
+
+test('mergeReleaseAttributes picks best from each source', () => {
+  const merged = mergeReleaseAttributes([
+    {
+      source: 'ptn-parser',
+      confidence: 0.75,
+      filename: 'Release.mkv',
+      title: 'Release',
+      resolution: '1080p',
+      codec: 'x264',
+      year: null,
+      mediaType: 'movie',
+      season: null,
+      episode: null,
+      episodeRange: null,
+      sourceType: null,
+      hdr: false,
+      audio: null,
+      language: null,
+      releaseGroup: null,
+    },
+    {
+      source: 'guessit-parser',
+      confidence: 0.9,
+      filename: 'Release.mkv',
+      title: 'Release',
+      resolution: '1080p',
+      codec: 'x265',
+      year: 2024,
+      mediaType: 'movie',
+      season: null,
+      episode: null,
+      episodeRange: null,
+      sourceType: 'WEB-DL',
+      hdr: true,
+      audio: 'AAC',
+      language: 'en',
+      releaseGroup: 'GROUP',
+    },
+  ]);
+
+  assert.ok(merged);
+  // Highest confidence source provides most fields
+  assert.equal(merged.title, 'Release');
+  assert.equal(merged.year, 2024);
+  assert.equal(merged.codec, 'x265');
+  assert.equal(merged.sourceType, 'WEB-DL');
+  assert.equal(merged.audio, 'AAC');
+  assert.equal(merged.hdr, true);
+  assert.equal(merged.mediaType, 'movie');
+  // Lower confidence source fills gaps
+  assert.equal(merged.resolution, '1080p');
+});
+
+test('mergeReleaseAttributes returns null for empty input', () => {
+  assert.equal(mergeReleaseAttributes([]), null);
+  assert.equal(mergeReleaseAttributes(null), null);
+});
+
+test('validateReleaseAttributes catches missing fields', () => {
+  // Missing infoHash
+  let result = validateReleaseAttributes({
+    filename: 'test.mkv',
+    source: 'parser',
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.includes('infoHash is required'));
+
+  // Missing filename
+  result = validateReleaseAttributes({
+    infoHash: HASH,
+    source: 'parser',
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.includes('filename is required'));
+
+  // Missing source
+  result = validateReleaseAttributes({
+    infoHash: HASH,
+    filename: 'test.mkv',
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.includes('source is required'));
+
+  // Valid attributes
+  result = validateReleaseAttributes({
+    infoHash: HASH,
+    filename: 'test.mkv',
+    source: 'parser',
+    confidence: 0.8,
+  });
+  assert.equal(result.valid, true);
+  assert.equal(result.errors.length, 0);
+});
+
+test('release attributes with fileIndex work correctly', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, fileIndex: 0 }));
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, fileIndex: 1 }));
+
+  // Store attributes for fileIndex 0
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: 0,
+    filename: 'Movie.mkv',
+    source: 'ptn-parser',
+    confidence: 0.85,
+    parsed: { title: 'Movie Part 1', resolution: '1080p' },
+  });
+
+  // Store attributes for fileIndex 1
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: 1,
+    filename: 'Movie.cd2.mkv',
+    source: 'ptn-parser',
+    confidence: 0.85,
+    parsed: { title: 'Movie Part 2', resolution: '1080p' },
+  });
+
+  // Each file has its own attributes
+  const attrsFile0 = cache.getReleaseAttributes(HASH, 0);
+  const attrsFile1 = cache.getReleaseAttributes(HASH, 1);
+
+  assert.equal(attrsFile0.length, 1);
+  assert.equal(attrsFile0[0].title, 'Movie Part 1');
+  assert.equal(attrsFile1.length, 1);
+  assert.equal(attrsFile1[0].title, 'Movie Part 2');
+
+  cache.close();
+});
+
+test('release attributes do not create provider observations', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'Release.mkv' }));
+
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.mkv',
+    source: 'ptn-parser',
+    confidence: 0.85,
+    parsed: { title: 'Release', resolution: '1080p' },
+  });
+
+  // No provider observations should exist
+  const observations = cache.getProviderObservations(HASH, null);
+  assert.equal(observations.length, 0);
+
+  cache.close();
+});
+
+test('release attributes preserve evidence', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'Release.mkv' }));
+
+  const evidence = ['title_extracted', 'year_pattern', 'resolution_detected'];
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.mkv',
+    source: 'ptn-parser',
+    confidence: 0.85,
+    parsed: { title: 'Release', year: 2024 },
+    evidence,
+  });
+
+  const attributes = cache.getReleaseAttributes(HASH, null);
+  assert.equal(attributes.length, 1);
+  assert.deepEqual(attributes[0].evidence, evidence);
+
+  cache.close();
+});
+
+test('getReleaseAttributesForCandidate sorts by confidence descending', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate(makeCandidate({ infoHash: HASH, filename: 'Release.mkv' }));
+
+  // Add in order: low, high, medium
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.mkv',
+    source: 'low-parser',
+    confidence: 0.5,
+    parsed: { title: 'Low' },
+  });
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.mkv',
+    source: 'high-parser',
+    confidence: 0.95,
+    parsed: { title: 'High' },
+  });
+  storeReleaseAttributes(cache, {
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Release.mkv',
+    source: 'mid-parser',
+    confidence: 0.75,
+    parsed: { title: 'Mid' },
+  });
+
+  const attributes = getReleaseAttributesForCandidate(cache, HASH, null);
+  assert.equal(attributes.length, 3);
+  assert.equal(attributes[0].source, 'high-parser');
+  assert.equal(attributes[1].source, 'mid-parser');
+  assert.equal(attributes[2].source, 'low-parser');
+
+  cache.close();
+});
