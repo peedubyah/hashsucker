@@ -8,5 +8,8 @@
     "dev": "node --watch --env-file-if-exists=.env.local src/server/index.js",
     "search": "node --env-file=.env.local src/scripts/search.js",
     "test": "node --test"
+  },
+  "allowScripts": {
+    "better-sqlite3@11.10.0": true
   }
 }
