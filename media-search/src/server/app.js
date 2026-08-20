@@ -8,7 +8,8 @@ import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { createHandoff } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
 import { searchMedia } from '../lib/search.js';
-import { searchReleases, getSearchStats } from '../lib/discovery/search-engine.js';
+import { searchReleases, combinedSearch, getSearchStats } from '../lib/discovery/search-engine.js';
+import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
 import { createDiscoveryCache } from '../lib/discovery/cache.js';
 import { runDMMIngestion } from '../lib/discovery/dmm-ingestion-runner.js';
 import { runAttributeWorker } from '../lib/discovery/attribute-worker.js';
@@ -123,6 +124,7 @@ export function createRequestHandler(dependencies = {}) {
   const catalogSearch = dependencies.searchCatalog || searchCatalog;
   const mediaLookup = dependencies.getMedia || getMedia;
   const releaseSearch = dependencies.searchMedia || searchMedia;
+  const combinedSearchFn = dependencies.combinedSearch || combinedSearch;
   // Internal search uses a persistent discovery cache.
   // dbPath can be injected via dependencies or DISCOVERY_DB env var.
   // Defaults to in-memory for testing (when no dbPath provided).
@@ -188,16 +190,33 @@ export function createRequestHandler(dependencies = {}) {
         const mediaId = params.get('mediaId');
         const type = params.get('type');
 
-        // Live discovery path: when mediaId and type are provided, resolve
-        // Cinemeta media identity and run live discovery (Stremio + Torznab).
+        // Unified release discovery path: DMM corpus + live discovery + ranking.
+        // Routes through combinedSearch() for a single ranked result set.
         if (mediaId && type) {
           const intent = createRequestIntent({ type, mediaId });
-          const result = await releaseSearch(intent);
+          const result = await combinedSearchFn(searchCache, {
+            query: params.get('q') || '',
+            year: params.get('year') ? parseInt(params.get('year'), 10) : undefined,
+            season: intent.season,
+            episode: intent.episodes[0],
+            resolution: params.get('resolution') || undefined,
+            source: params.get('source') || undefined,
+            codec: params.get('codec') || undefined,
+            hdr: params.get('hdr') === 'true' ? 1 : params.get('hdr') === 'false' ? 0 : undefined,
+            audio: params.get('audio') || undefined,
+            limit: params.get('limit') ? Math.min(parseInt(params.get('limit'), 10), 100) : 50,
+            offset: params.get('offset') ? parseInt(params.get('offset'), 10) : 0,
+            includeProviders: true,
+            includeLive: true,
+            mode: 'ui',
+            liveDiscoveryFn: async () => runLiveDiscovery(mediaId, { season: intent.season, episode: intent.episodes[0] }),
+          });
           return sendJson(response, 200, {
-            intent: result.intent,
-            providerStatus: result.providerStatus,
-            timings: result.timings,
-            results: result.results.filter((release) => release.infoHash).map(publicRelease),
+            intent,
+            results: result.results,
+            total: result.total,
+            timings: { ...result.timings, totalMs: Math.round(performance.now() - startedAt) },
+            stats: result.stats,
           });
         }
 

@@ -16,10 +16,34 @@ function createHarness() {
     },
     searchCatalog: async () => [{ id: 'tt2085059', type: 'series', name: 'Black Mirror' }],
     getMedia: async () => ({ id: 'tt2085059', type: 'series', name: 'Black Mirror', videos: [{ id: 'tt2085059:7:3', season: 7, episode: 3 }] }),
-    searchMedia: async (intent) => ({ intent, providerStatus: { torbox: 'known' }, results: [{
-      key: `ih:${HASH}`, infoHash: HASH, title: 'Season pack', raw: { secret: 'TORBOX_SECRET' },
-      providers: { torbox: { cached: true } }, sources: [],
-    }] }),
+    combinedSearch: async (cache, opts) => ({
+      results: [{
+        infoHash: HASH,
+        fileIndex: null,
+        title: 'Season pack',
+        filename: 'Season pack',
+        size: null,
+        resolution: '1080p',
+        quality: null,
+        codec: null,
+        hdr: null,
+        audio: null,
+        releaseGroup: null,
+        year: null,
+        season: 7,
+        episode: 3,
+        confidence: 0.85,
+        score: 0.75,
+        components: { relevance: 0.8, quality: 0.7 },
+        providers: { torbox: { cached: true } },
+        media: [],
+        _source: 'corpus',
+      }],
+      total: 1,
+      query: { match: '*', filters: {}, titleQuery: null },
+      timings: { totalMs: 5 },
+      stats: { indexed: 0, total: 0 },
+    }),
   });
   async function request(url, { method = 'GET', body } = {}) {
     const input = Readable.from(body ? [Buffer.from(body)] : []);
@@ -67,30 +91,33 @@ test('public release API strips all secret-bearing and internal fields', async (
     },
     searchCatalog: async () => [],
     getMedia: async () => null,
-    searchMedia: async (intent) => ({
-      intent,
-      providerStatus: { torbox: 'known' },
+    combinedSearch: async (cache, opts) => ({
       results: [{
-        key: `ih:${HASH}`,
         infoHash: HASH,
+        fileIndex: null,
         title: 'Test Release',
-        magnet: `magnet:?xt=urn:btih:${HASH}&dn=secret`,
-        downloadUrl: 'https://torznab.example.com/api?apikey=SECRET123&callback=foo',
-        behaviorHints: { videoSize: 5000 },
-        raw: { upstream: 'RAW_SECRET' },
-        torznab: { seeders: 5 },
-        sources: [{
-          id: 's1',
-          kind: 'torznab',
-          instance: 'i1',
-          indexer: 'idx',
-          role: 'discovery',
-          capability: 'dl',
-          provider: 'torbox',
-          downloadUrl: 'https://other.example.com/api?apikey=SECRET456',
-        }],
+        filename: 'Test Release',
+        size: 5000,
+        resolution: '1080p',
+        quality: null,
+        codec: null,
+        hdr: null,
+        audio: null,
+        releaseGroup: null,
+        year: null,
+        season: null,
+        episode: null,
+        confidence: 0.85,
+        score: 0.75,
+        components: { relevance: 0.8, quality: 0.7 },
         providers: { torbox: { cached: true } },
+        media: [],
+        _source: 'corpus',
       }],
+      total: 1,
+      query: { match: '*', filters: {}, titleQuery: null },
+      timings: { totalMs: 5 },
+      stats: { indexed: 0, total: 0 },
     }),
   });
 
@@ -118,12 +145,10 @@ test('public release API strips all secret-bearing and internal fields', async (
   assert.match(text, /"infoHash"/);
   assert.match(text, /"title"/);
   assert.match(text, /"cached":true/);
-  // Source objects are sanitized (no downloadUrl)
+  // combinedSearch response shape: no sources array, uses _source for provenance
   const body = JSON.parse(text);
-  const src = body.results[0].sources[0];
-  assert.equal(src.downloadUrl, undefined, 'source downloadUrl should be stripped');
-  assert.equal(src.id, 's1');
-  assert.equal(src.kind, 'torznab');
+  assert.equal(body.results[0].sources, undefined, 'sources array should not be present in combinedSearch output');
+  assert.equal(body.results[0]._source, 'corpus', 'provenance tracked via _source field');
 });
 
 test('request endpoint only accepts an explicit episode and preserves it for season packs', async () => {
@@ -304,18 +329,33 @@ test('GET /api/search for live discovery with mediaId returns releases', async (
   const cache = createDiscoveryCache();
   const handler = createRequestHandler({
     searchCache: cache,
-    searchMedia: async (intent) => ({
-      intent,
-      providerStatus: { torbox: 'known' },
+    combinedSearch: async (cache, opts) => ({
       results: [{
-        key: `ih:${HASH}`,
         infoHash: HASH,
+        fileIndex: null,
         title: 'Movie.1080p.mkv',
         filename: 'Movie.1080p.mkv',
+        size: null,
         resolution: '1080p',
+        quality: null,
+        codec: null,
+        hdr: null,
+        audio: null,
+        releaseGroup: null,
+        year: null,
+        season: null,
+        episode: null,
+        confidence: 0.85,
+        score: 0.75,
+        components: { relevance: 0.8, quality: 0.7 },
         providers: { torbox: { cached: true } },
-        sources: [],
+        media: [],
+        _source: 'corpus',
       }],
+      total: 1,
+      query: { match: '*', filters: {}, titleQuery: null },
+      timings: { totalMs: 5 },
+      stats: { indexed: 0, total: 0 },
     }),
   });
   const input = Readable.from([]);
@@ -341,18 +381,33 @@ test('GET /api/search for series episode live discovery returns releases', async
   const cache = createDiscoveryCache();
   const handler = createRequestHandler({
     searchCache: cache,
-    searchMedia: async (intent) => ({
-      intent,
-      providerStatus: { torbox: 'known' },
+    combinedSearch: async (cache, opts) => ({
       results: [{
-        key: `ih:${HASH}`,
         infoHash: HASH,
+        fileIndex: null,
         title: 'Show.S01E01.1080p.mkv',
         filename: 'Show.S01E01.1080p.mkv',
+        size: null,
         resolution: '1080p',
+        quality: null,
+        codec: null,
+        hdr: null,
+        audio: null,
+        releaseGroup: null,
+        year: null,
+        season: 1,
+        episode: 1,
+        confidence: 0.85,
+        score: 0.75,
+        components: { relevance: 0.8, quality: 0.7 },
         providers: { torbox: { cached: true } },
-        sources: [],
+        media: [],
+        _source: 'corpus',
       }],
+      total: 1,
+      query: { match: '*', filters: {}, titleQuery: null },
+      timings: { totalMs: 5 },
+      stats: { indexed: 0, total: 0 },
     }),
   });
   const input = Readable.from([]);
@@ -401,13 +456,15 @@ test('GET /api/search with Torrentio + Comet coexistence', async () => {
   const cache = createDiscoveryCache();
   const handler = createRequestHandler({
     searchCache: cache,
-    searchMedia: async (intent) => ({
-      intent,
-      providerStatus: { torbox: 'known' },
+    combinedSearch: async (cache, opts) => ({
       results: [
-        { key: `ih:${HASH}`, infoHash: HASH, title: 'Torrentio result', providers: { torbox: { cached: true } }, sources: [] },
-        { key: `ih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`, infoHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', title: 'Comet result', providers: {}, sources: [] },
+        { infoHash: HASH, fileIndex: null, title: 'Torrentio result', filename: 'Torrentio result', size: null, resolution: '1080p', quality: null, codec: null, hdr: null, audio: null, releaseGroup: null, year: null, season: null, episode: null, confidence: 0.85, score: 0.75, components: {}, providers: { torbox: { cached: true } }, media: [], _source: 'live' },
+        { infoHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', fileIndex: null, title: 'Comet result', filename: 'Comet result', size: null, resolution: '720p', quality: null, codec: null, hdr: null, audio: null, releaseGroup: null, year: null, season: null, episode: null, confidence: 0.8, score: 0.7, components: {}, providers: {}, media: [], _source: 'live' },
       ],
+      total: 2,
+      query: { match: '*', filters: {}, titleQuery: null },
+      timings: { totalMs: 5 },
+      stats: { indexed: 0, total: 0 },
     }),
   });
   const input = Readable.from([]);
@@ -433,12 +490,14 @@ test('GET /api/search with Torznab participation', async () => {
   const cache = createDiscoveryCache();
   const handler = createRequestHandler({
     searchCache: cache,
-    searchMedia: async (intent) => ({
-      intent,
-      providerStatus: { torbox: 'known' },
+    combinedSearch: async (cache, opts) => ({
       results: [
-        { key: `ih:${HASH}`, infoHash: HASH, title: 'Torznab result', providers: { torbox: { cached: false } }, sources: [] },
+        { infoHash: HASH, fileIndex: null, title: 'Torznab result', filename: 'Torznab result', size: null, resolution: '1080p', quality: null, codec: null, hdr: null, audio: null, releaseGroup: null, year: null, season: 1, episode: 1, confidence: 0.85, score: 0.75, components: {}, providers: { torbox: { cached: false } }, media: [], _source: 'live' },
       ],
+      total: 1,
+      query: { match: '*', filters: {}, titleQuery: null },
+      timings: { totalMs: 5 },
+      stats: { indexed: 0, total: 0 },
     }),
   });
   const input = Readable.from([]);
