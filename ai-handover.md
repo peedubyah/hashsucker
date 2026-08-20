@@ -45,6 +45,14 @@ Read all of `CODEX.md` first. Its architectural contract is binding; this file i
 6. **New filename parsers** — Implement parser, call `storeReleaseAttributes()` with source name
 7. **Release attribute queries** — Use `getReleaseAttributesForCandidate()`, `getStrongestReleaseAttributes()`, `mergeReleaseAttributes()`
 
+### Research Deliverables
+
+- **ZILEAN-ARCHITECTURE-COMPARISON.md** — Analysis of Zilean's search architecture vs HashSucker
+  - HashSucker has stronger foundation (cleaner identity model, evidence-based attributes)
+  - Missing piece: search layer (FTS5 full-text index + query API)
+  - Should NOT copy: monolithic ES, implicit media identity, single-node coupling
+  - Recommendation: SQLite FTS5 for MVP, migrate to ES only if required
+
 ### Research Dependencies
 
 **WINDOWS research agent** (parallel track, branch `research/ingestion-contract`):
