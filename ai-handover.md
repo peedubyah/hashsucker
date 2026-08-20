@@ -19,6 +19,12 @@ Read all of `CODEX.md` first. Its architectural contract is binding; this file i
    - Multiple parser sources per candidate (primary key: `(info_hash, file_index_key, source)`)
    - Stronger confidence wins conflicts per source
    - Evidence tags preserved for transparency
+10. **Filename parser adapter** — regex-based PTN-style parser (`parser-adapter.js`)
+    - Parses filenames into structured release attributes
+    - Parser failures do NOT break ingestion
+    - Low-confidence parses stored with confidence value
+    - Evidence tags preserved for transparency
+    - Does NOT create media associations or provider observations
 
 ### Current Invariants
 
@@ -49,8 +55,8 @@ Read all of `CODEX.md` first. Its architectural contract is binding; this file i
 
 **RIGHTMON implementation agent** (this track):
 - Production code — `media-search/src/lib/discovery/`
-- Tests — `media-search/test/cache.test.js` (100 tests, all passing)
-- Contracts — `ingestCandidates()`, `enrichCandidate()`, `associateMedia()`, `storeReleaseAttributes()`
+- Tests — `media-search/test/cache.test.js` (100 tests), `media-search/test/parser.test.js` (37 tests), all passing
+- Contracts — `ingestCandidates()`, `enrichCandidate()`, `associateMedia()`, `storeReleaseAttributes()`, `parseFilename()`
 
 ## Research Branch Status
 
@@ -84,6 +90,8 @@ Zurg architectural lessons:
 ## Known Decisions
 
 1. **Filename parsing is first enrichment source** — highest value, no external deps
+   - Custom regex-based parser (PTN has broken dependencies)
+   - Source identifier: `ptn-regex`
 2. **Confidence model: base + bonuses - penalties** — clamped to [0.0, 1.0]
 3. **Ambiguous results (within 0.15) → return all** — mark as ambiguous
 4. **Refuse when confidence < 0.5** — no forced associations
@@ -96,7 +104,7 @@ Zurg architectural lessons:
 
 ## Unresolved Questions
 
-1. **PTN vs GuessIt** — which parser library to use (or custom)?
+1. ~~**PTN vs GuessIt**~~ — **RESOLVED:** Custom regex parser (PTN has broken dependencies)
 2. **External API rate limits** — Cinemeta/TMDB throttling strategy
 3. **Ambiguous result handling** — store all or store none?
 4. **Zurg integration depth** — real-time scan or periodic sync?
@@ -105,22 +113,21 @@ Zurg architectural lessons:
 
 ## Next Recommended Milestone
 
-**Implement filename parsing enrichment (Source 1):**
-- Parse filenames into structured tokens (title, year, season, episode, quality, source, codec, release group)
-- Store parsed attributes via `storeReleaseAttributes()` — parser source + confidence + evidence
-- Optional: Create `candidate_media` associations with confidence + evidence
-- Integrate with `runEnrichmentWorker()`
+**Integrate parser with enrichment worker:**
+- Wire `parseFilename()` into `runEnrichmentWorker()` flow
+- Parse all unenriched candidates on startup/schedule
+- Store results via `storeReleaseAttributes()`
 - Target: 0.6-0.85 confidence for well-formed filenames
 
 ### Parser Research Deliverables (WINDOWS branch)
 
 - **PARSER-CONTRACT.md** — parser interface contract
 - **Parser fixtures** — test cases for parser validation
-- **Recommendation: PTN + custom regex** — high accuracy, no heavy dependencies
+- **Recommendation: PTN + custom regex** — implemented
 
 ## Verified Baseline
 
-VERIFIED locally: `cd media-search && npm test` passes 150 tests, 0 failures.
+VERIFIED locally: `cd media-search && npm test` passes 204 tests, 0 failures.
 
 Test coverage includes:
 - Candidate identity and merge semantics

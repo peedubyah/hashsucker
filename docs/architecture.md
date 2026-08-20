@@ -20,12 +20,12 @@ Candidate cache (SQLite: candidates + provider_observations)
     +------------------+------------------+
     |                  |                  |
     v                  v                  v
-Release attrs    Enrichment worker   Provider workers
-(filename parse) (filename/title     (cache status)
+Parser adapter   Enrichment worker   Provider workers
+(regex-based)    (filename/title     (cache status)
     |               → media identity)
     v                  |
 release_attributes   v
-                 candidate_media
+(evidence)       candidate_media
                  (associations +
                   confidence +
                   evidence)
@@ -161,6 +161,28 @@ Key APIs:
 - `hasReleaseAttributes()` — check if candidate has any attributes
 - `getCandidatesWithoutAttributes()` — find candidates needing parsing
 - `validateReleaseAttributes()` — validate attributes object
+
+### 6. Filename Parser Adapter
+
+**Regex-based filename parser** producing release attributes from release filenames.
+
+- `src/lib/discovery/parser-adapter.js` — `parseFilename()`, `createReleaseAttributes()`, `parseFilenames()`
+
+**Parser source:** `ptn-regex` (custom regex implementation based on PTN patterns)
+
+**Contract:**
+- Parser failures do NOT break ingestion (returns null for invalid input)
+- Low-confidence parses ARE stored (with low confidence value)
+- Ambiguous titles remain unresolved (no forced matches)
+- Evidence tags preserved (describes what patterns were detected)
+- Raw filename ALWAYS retained (original string preserved)
+- Does NOT resolve media identity
+- Does NOT create candidate_media rows
+- Does NOT create provider observations
+
+**Parsed fields:** title, year, media_type, season, episode, episode_range, resolution, source_type, codec, hdr, audio, language, release_group
+
+**Evidence tags:** title_extracted, year_detected, season_episode_detected, episode_range_detected, resolution_detected, source_detected, codec_detected, hdr_detected, audio_detected, language_detected, release_group_detected
 
 ### 7. Enrichment Worker
 
