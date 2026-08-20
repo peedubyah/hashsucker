@@ -17,21 +17,24 @@ Ingestion (ingestCandidates — source-agnostic boundary)
     v
 Candidate cache (SQLite: candidates + provider_observations)
     |
-    +------------------+------------------+
-    |                  |                  |
-    v                  v                  v
-Parser adapter   Enrichment worker   Provider workers
-(regex-based)    (filename/title     (cache status)
-    |               → media identity)
-    v                  |
-release_attributes   v
-(evidence)       candidate_media
-                 (associations +
-                  confidence +
-                  evidence)
+    +------------------+------------------+------------------+
+    |                  |                  |                  |
+    v                  v                  v                  v
+Attribute worker  Enrichment worker  Provider workers  (future)
+(filename parse   (filename/title    (cache status)
+ → release_attrs)  → media identity)
+    |                  |
+    v                  v
+release_attributes   candidate_media
+(evidence)           (associations +
+                      confidence +
+                      evidence)
     |
     v
-Search layer (user-facing API + UI)
+FTS5 index (release_search)
+    |
+    v
+Search layer (searchReleases — user-facing API)
 ```
 
 ## Layer Responsibilities
@@ -184,7 +187,50 @@ Key APIs:
 
 **Evidence tags:** title_extracted, year_detected, season_episode_detected, episode_range_detected, resolution_detected, source_detected, codec_detected, hdr_detected, audio_detected, language_detected, release_group_detected
 
-### 7. Enrichment Worker
+### 7. Release Attribute Worker
+
+**Orchestration layer** that processes candidates without release attributes.
+
+- `src/lib/discovery/attribute-worker.js` — `runAttributeWorker()`, `createAttributeWorker()`
+
+Pipeline:
+```
+getCandidatesWithoutAttributes() → worker → parseFilename() → storeReleaseAttributes()
+```
+
+**Contract:**
+- Does NOT mutate candidate identity (infoHash, fileIndex)
+- Does NOT create candidate_media associations
+- Does NOT create provider observations
+- Only creates release_attributes (parsed filename metadata)
+- Per-candidate failure isolation (one parse failure doesn't affect others)
+- Low-confidence parses ARE stored (with confidence value)
+- Evidence tags preserved
+- Raw filename always retained
+- Worker is source-agnostic — parser function is injected
+- Idempotent — re-running doesn't duplicate attributes
+
+### 8. DMM Ingestion Runner
+
+**Orchestrates fetching, parsing, and ingesting DMM hashlist data.**
+
+- `src/lib/discovery/dmm-ingestion-runner.js` — `DMMIngestionRunner`, `DMMHashListSource`
+
+Pipeline:
+```
+listFragments() → fetchFragment() → decompress → streamParse → transformDMMRecord → ingestCandidates
+                                                                      ↓ (post-ingestion)
+                                                              runAttributeWorker → release_attributes → FTS5 index
+```
+
+**Contract:**
+- Uses existing `ingestCandidates()` boundary for candidate writes
+- Automatically runs attribute parsing pass after ingestion (configurable)
+- Streaming JSON parser for memory efficiency
+- Batch ingestion with configurable size
+- Metrics: records processed, inserted, updated, failed, duplicates, duration
+
+### 10. Enrichment Worker
 
 **Orchestration layer** that processes unenriched candidates.
 
@@ -203,13 +249,33 @@ getUnenrichedCandidates() → worker → enrichCandidates()
 - Worker does NOT trigger importer behavior
 - Progress callbacks available for observability
 
-### 8. Search Layer
+### 11. Search Layer
 
-**User-facing API** for searching candidates and submitting requests.
+**FTS5-backed full-text search** over the parsed release corpus.
 
-- `src/lib/search.js` — `searchMedia()` integrates cache read-through + live discovery
-- `src/server/` — HTTP API routes
-- `src/ui/` — Browser application
+- `src/lib/discovery/search-engine.js` — `searchReleases()`, `getSearchStats()`, `rebuildSearchIndex()`
+- `src/lib/discovery/cache.js` — `release_search` FTS5 virtual table with auto-sync triggers
+
+Pipeline:
+```
+Query text + filters
+  → FTS5 full-text match
+  → Structured attribute filtering (year, season, resolution, etc.)
+  → Rank by composite score (relevance × confidence × quality × provider)
+  → Return ranked candidates with parsed attributes
+```
+
+**Scoring:**
+```
+score = relevance × 0.30 + confidence × 0.25 + quality × 0.25 + provider × 0.20
+```
+
+**Contract:**
+- Auto-extracts filters from query (year, season/episode, resolution, source)
+- Combines FTS5 text search with structured attribute filtering
+- Ranks by composite score (relevance, parser confidence, release quality, provider cache)
+- Supports pagination and provider observation inclusion
+- FTS5 index auto-maintained by triggers on release_attributes
 
 ## Data Ownership Boundaries
 

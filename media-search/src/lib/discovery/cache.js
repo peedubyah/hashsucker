@@ -92,6 +92,37 @@ CREATE TABLE IF NOT EXISTS release_attributes (
 
 CREATE INDEX IF NOT EXISTS idx_release_attributes_source ON release_attributes(source);
 CREATE INDEX IF NOT EXISTS idx_release_attributes_parsed_at ON release_attributes(parsed_at);
+
+-- FTS5 full-text search index over release_attributes
+-- Stores its own copy of searchable fields (simpler than external content)
+CREATE VIRTUAL TABLE IF NOT EXISTS release_search USING fts5(
+  title,
+  filename,
+  resolution,
+  source_type,
+  codec,
+  audio,
+  release_group,
+  language,
+  media_type,
+  tokenize='porter unicode61'
+);
+
+-- Triggers to keep FTS index in sync with release_attributes
+CREATE TRIGGER IF NOT EXISTS release_attributes_ai AFTER INSERT ON release_attributes BEGIN
+  INSERT INTO release_search(rowid, title, filename, resolution, source_type, codec, audio, release_group, language, media_type)
+  VALUES (new.rowid, new.title, new.filename, new.resolution, new.source_type, new.codec, new.audio, new.release_group, new.language, new.media_type);
+END;
+
+CREATE TRIGGER IF NOT EXISTS release_attributes_ad AFTER DELETE ON release_attributes BEGIN
+  DELETE FROM release_search WHERE rowid = old.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS release_attributes_au AFTER UPDATE ON release_attributes BEGIN
+  DELETE FROM release_search WHERE rowid = old.rowid;
+  INSERT INTO release_search(rowid, title, filename, resolution, source_type, codec, audio, release_group, language, media_type)
+  VALUES (new.rowid, new.title, new.filename, new.resolution, new.source_type, new.codec, new.audio, new.release_group, new.language, new.media_type);
+END;
 `;
 
 const INSERT_CANDIDATE = `

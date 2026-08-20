@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
 import test from 'node:test';
 
+import { createDiscoveryCache } from '../src/lib/discovery/cache.js';
 import { createRequestHandler } from '../src/server/app.js';
 
 const HASH = '0123456789abcdef0123456789abcdef01234567';
@@ -155,4 +156,198 @@ test('request endpoint accepts explicit movie scope through the same handoff pat
   assert.equal(submitted[0].intent.scope, 'movie');
   assert.equal(submitted[0].intent.season, null);
   assert.deepEqual(submitted[0].intent.episodes, []);
+});
+
+// =============================================================================
+// Internal Search API Tests
+// =============================================================================
+
+test('GET /api/search/internal returns results from DMM-ingested candidates', async () => {
+  const cache = createDiscoveryCache();
+  // Ingest a candidate with release attributes
+  cache.upsertCandidate({
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Breaking.Bad.S05E14.1080p.BluRay.x264-TEST.mkv',
+  });
+  cache._insertReleaseAttributes({
+    infoHash: HASH,
+    fileIndex: null,
+    filename: 'Breaking.Bad.S05E14.1080p.BluRay.x264-TEST.mkv',
+    source: 'ptn-regex',
+    confidence: 0.85,
+    title: 'Breaking Bad',
+    season: 5,
+    episode: 14,
+    resolution: '1080p',
+    sourceType: 'BluRay',
+    codec: 'x264',
+    hdr: 0,
+    audio: 'AAC',
+    releaseGroup: 'TEST',
+    evidence: JSON.stringify(['title_extracted', 'resolution_detected']),
+    parsedAt: Date.now(),
+  });
+
+  const handler = createRequestHandler({ searchCache: cache });
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = '/api/search/internal?q=Breaking+Bad+S05E14';
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.total, 1);
+  assert.equal(body.results.length, 1);
+  assert.equal(body.results[0].hash, HASH);
+  assert.equal(body.results[0].parsed.title, 'Breaking Bad');
+  assert.equal(body.results[0].parsed.resolution, '1080p');
+  cache.close();
+});
+
+test('GET /api/search/internal filters by codec', async () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate({ infoHash: HASH, fileIndex: null, filename: 'Movie.x264.mkv' });
+  cache._insertReleaseAttributes({
+    infoHash: HASH, fileIndex: null, filename: 'Movie.x264.mkv', source: 'ptn-regex',
+    confidence: 0.8, title: 'Movie', codec: 'x264', parsedAt: Date.now(),
+  });
+  cache.upsertCandidate({ infoHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', fileIndex: null, filename: 'Movie.x265.mkv' });
+  cache._insertReleaseAttributes({
+    infoHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', fileIndex: null, filename: 'Movie.x265.mkv', source: 'ptn-regex',
+    confidence: 0.8, title: 'Movie', codec: 'x265', parsedAt: Date.now(),
+  });
+
+  const handler = createRequestHandler({ searchCache: cache });
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = '/api/search/internal?q=Movie&codec=x265';
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.total, 1);
+  assert.equal(body.results[0].hash, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+  cache.close();
+});
+
+test('GET /api/search/internal includes media associations when requested', async () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate({ infoHash: HASH, fileIndex: null, filename: 'Movie.mkv' });
+  cache._insertReleaseAttributes({
+    infoHash: HASH, fileIndex: null, filename: 'Movie.mkv', source: 'ptn-regex',
+    confidence: 0.8, title: 'Movie', parsedAt: Date.now(),
+  });
+  cache.associateMedia(HASH, null, 'tt1234567', { source: 'manual', confidence: 0.9 });
+
+  const handler = createRequestHandler({ searchCache: cache });
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = '/api/search/internal?q=Movie&media=true';
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.results[0].media.length, 1);
+  assert.equal(body.results[0].media[0].mediaId, 'tt1234567');
+  cache.close();
+});
+
+test('GET /api/search/internal returns fileIndex in results', async () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate({ infoHash: HASH, fileIndex: null, filename: 'Movie.mkv' });
+  cache._insertReleaseAttributes({
+    infoHash: HASH, fileIndex: null, filename: 'Movie.mkv', source: 'ptn-regex',
+    confidence: 0.8, title: 'Movie', parsedAt: Date.now(),
+  });
+
+  const handler = createRequestHandler({ searchCache: cache });
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = '/api/search/internal?q=Movie';
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.results[0].fileIndex, null);
+  cache.close();
+});
+
+test('GET /api/search/stats returns index statistics', async () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate({ infoHash: HASH, fileIndex: null, filename: 'Movie.mkv' });
+  cache._insertReleaseAttributes({
+    infoHash: HASH, fileIndex: null, filename: 'Movie.mkv', source: 'ptn-regex',
+    confidence: 0.8, title: 'Movie', parsedAt: Date.now(),
+  });
+
+  const handler = createRequestHandler({ searchCache: cache });
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = '/api/search/stats';
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.indexed, 1);
+  assert.equal(body.total, 1);
+  cache.close();
+});
+
+test('POST /api/attributes/run triggers attribute parsing', async () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate({ infoHash: HASH, fileIndex: null, filename: 'Movie.1080p.mkv' });
+
+  const handler = createRequestHandler({ searchCache: cache });
+  const input = Readable.from([Buffer.from('{}')]);
+  input.method = 'POST';
+  input.url = '/api/attributes/run';
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.parsed, 1);
+  cache.close();
 });

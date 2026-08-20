@@ -17,9 +17,12 @@
  * - records processed, duplicates, failures, duration, estimated db growth
  */
 
-// LZString decompression (matches existing decoder)
-import { decodeDmmPayload as decompressFromEncodedURIComponent } from './adapters/dmm.js';
+// DMM source adapter (WINDOWS: canonical parser, well-tested with real DMM data)
+import { decodeDmmPayload as decompressFromEncodedURIComponent, parseDmmRecord } from './adapters/dmm.js';
 import { ingestCandidates } from './ingest.js';
+import { runAttributeWorker } from './attribute-worker.js';
+import { runEnrichmentWorker } from './worker.js';
+import { enrichWithCinemeta } from './enrichment-sources/cinemeta.js';
 
 /**
  * Abstract hashlist source interface.
@@ -171,29 +174,20 @@ export function* streamParseDMM(json) {
 }
 
 /**
- * Transform DMM record to HashSucker entry.
+ * Transform DMM record to HashSucker ingest entry.
+ * Delegates to the canonical DMM source adapter (parseDmmRecord) and adds
+ * timestamps for the runner's tracking.
  */
 export function transformDMMRecord(record) {
-  if (!record || !record.hash || !record.filename) {
-    return null;
-  }
+  // Delegate to the canonical DMM adapter (WINDOWS: tested with real DMM data)
+  const entry = parseDmmRecord(record);
+  if (!entry) return null;
 
-  // Validate hash format
-  const hash = record.hash.toLowerCase().trim();
-  if (!/^[a-f0-9]{40}$/.test(hash)) {
-    return null;
-  }
+  // Add timestamps for the runner's tracking
+  entry.firstSeen = Date.now();
+  entry.lastSeen = Date.now();
 
-  return {
-    infoHash: hash,
-    fileIndex: null,
-    title: record.filename,
-    filename: record.filename,
-    size: record.bytes != null ? parseInt(record.bytes, 10) : null,
-    sources: [{ id: 'dmm.hashlist', kind: 'ingestion' }],
-    firstSeen: Date.now(),
-    lastSeen: Date.now(),
-  };
+  return entry;
 }
 
 /**
@@ -283,6 +277,7 @@ export class IngestionMetrics {
       estimatedGrowthMB: Math.round(this.estimateDatabaseGrowthMB() * 100) / 100,
       errorCount: this.errors.length,
       errors: this.errors.slice(0, 10), // First 10 errors
+      attributeStats: this.attributeStats || null,
     };
   }
 }
@@ -299,12 +294,16 @@ export class DMMIngestionRunner {
     batchSize = 1000,
     maxFragments = null,
     onProgress = null,
+    enableAttributeParsing = true,
+    enableMediaEnrichment = false,  // Disabled by default (requires external API calls)
   } = {}) {
     this.source = source || new DMMHashListSource();
     this.cache = cache;
     this.batchSize = batchSize;
     this.maxFragments = maxFragments;
     this.onProgress = onProgress || null;
+    this.enableAttributeParsing = enableAttributeParsing;
+    this.enableMediaEnrichment = enableMediaEnrichment;
     this.metrics = new IngestionMetrics();
   }
 
@@ -328,6 +327,27 @@ export class DMMIngestionRunner {
       // 2. Process each fragment
       for (const fragment of toProcess) {
         await this.processFragment(fragment);
+      }
+
+      // 3. Attribute parsing pass (post-ingestion enrichment)
+      //    Parses filenames of newly-ingested candidates into release_attributes,
+      //    which auto-populates the FTS5 search index via triggers.
+      if (this.enableAttributeParsing) {
+        const attrStats = await runAttributeWorker(this.cache, {
+          parser: undefined, // uses default parseFilename
+          limit: undefined,  // all unparsed candidates
+        });
+        this.metrics.attributeStats = attrStats;
+      }
+
+      // 4. Media identity enrichment pass (optional, uses external API)
+      //    Resolves release_attributes → candidate_media associations via Cinemeta.
+      if (this.enableMediaEnrichment) {
+        const enrichStats = await runEnrichmentWorker(this.cache, {
+          enrich: enrichWithCinemeta,
+          limit: undefined,
+        });
+        this.metrics.enrichmentStats = enrichStats;
       }
     } finally {
       this.metrics.stop();

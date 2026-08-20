@@ -8,6 +8,10 @@ import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { createHandoff } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
 import { searchMedia } from '../lib/search.js';
+import { searchReleases, getSearchStats } from '../lib/discovery/search-engine.js';
+import { createDiscoveryCache } from '../lib/discovery/cache.js';
+import { runDMMIngestion } from '../lib/discovery/dmm-ingestion-runner.js';
+import { runAttributeWorker } from '../lib/discovery/attribute-worker.js';
 
 const UI_ROOT = fileURLToPath(new URL('../ui/', import.meta.url));
 const HASH_PATTERN = /^[a-f0-9]{40}$/i;
@@ -119,12 +123,63 @@ export function createRequestHandler(dependencies = {}) {
   const catalogSearch = dependencies.searchCatalog || searchCatalog;
   const mediaLookup = dependencies.getMedia || getMedia;
   const releaseSearch = dependencies.searchMedia || searchMedia;
+  // Internal search uses a persistent discovery cache.
+  // dbPath can be injected via dependencies or DISCOVERY_DB env var.
+  // Defaults to in-memory for testing (when no dbPath provided).
+  const dbPath = dependencies.dbPath || process.env.DISCOVERY_DB;
+  const searchCache = dependencies.searchCache || dependencies.discoveryCache || createDiscoveryCache(dbPath ? { dbPath } : {});
 
   return async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
     try {
       if (request.method === 'GET' && url.pathname === '/health') {
         return sendJson(response, 200, { ok: true });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/search/internal') {
+        const startedAt = performance.now();
+        const params = url.searchParams;
+        const result = searchReleases(searchCache, {
+          query: params.get('q') || '',
+          year: params.get('year') ? parseInt(params.get('year'), 10) : undefined,
+          season: params.get('season') ? parseInt(params.get('season'), 10) : undefined,
+          episode: params.get('episode') ? parseInt(params.get('episode'), 10) : undefined,
+          resolution: params.get('resolution') || undefined,
+          source: params.get('source') || undefined,
+          codec: params.get('codec') || undefined,
+          hdr: params.get('hdr') === 'true' ? 1 : params.get('hdr') === 'false' ? 0 : undefined,
+          audio: params.get('audio') || undefined,
+          limit: params.get('limit') ? Math.min(parseInt(params.get('limit'), 10), 100) : 50,
+          offset: params.get('offset') ? parseInt(params.get('offset'), 10) : 0,
+          includeProviders: params.get('providers') === 'true',
+          includeMedia: params.get('media') === 'true',
+        });
+        return sendJson(response, 200, {
+          ...result,
+          timings: { totalMs: Math.round(performance.now() - startedAt) },
+          stats: getSearchStats(searchCache),
+        });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/search/stats') {
+        return sendJson(response, 200, getSearchStats(searchCache));
+      }
+      // DMM ingestion endpoint (for triggering hashlist sync via API)
+      if (request.method === 'POST' && url.pathname === '/api/ingest/dmm') {
+        const body = await readBody(request).catch(() => ({}));
+        const maxFragments = body.maxFragments ? parseInt(body.maxFragments, 10) : 1;
+        const ingestResult = await runDMMIngestion({
+          cache: searchCache,
+          maxFragments,
+          batchSize: body.batchSize || 1000,
+        });
+        return sendJson(response, 200, ingestResult);
+      }
+      // Attribute parsing trigger (for reparsing or startup catch-up)
+      if (request.method === 'POST' && url.pathname === '/api/attributes/run') {
+        const body = await readBody(request).catch(() => ({}));
+        const stats = await runAttributeWorker(searchCache, {
+          limit: body.limit ? parseInt(body.limit, 10) : undefined,
+        });
+        return sendJson(response, 200, stats);
       }
       if (request.method === 'GET' && url.pathname === '/api/search') {
         const startedAt = performance.now();

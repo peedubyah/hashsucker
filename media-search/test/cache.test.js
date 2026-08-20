@@ -1313,8 +1313,8 @@ test('worker processes candidates without media associations', async () => {
     sources: [{ id: 'dmm.hashlist', kind: 'ingestion' }],
   });
 
-  // Mock enrichment function
-  const enrich = async (candidate) => {
+  // Mock enrichment function (signature: async (_cache, candidate) => enrichment|null)
+  const enrich = async (_cache, candidate) => {
     if (candidate.infoHash === HASH) {
       return {
         infoHash: HASH,
@@ -1372,7 +1372,7 @@ test('worker skips already enriched candidates', async () => {
     sources: [{ id: 'dmm.hashlist', kind: 'ingestion' }],
   });
 
-  const enrich = async (candidate) => {
+  const enrich = async (_cache, candidate) => {
     return {
       infoHash: candidate.infoHash,
       fileIndex: null,
@@ -1412,7 +1412,7 @@ test('worker handles enrichment failure without losing candidates', async () => 
     sources: [{ id: 'dmm.hashlist', kind: 'ingestion' }],
   });
 
-  const enrich = async (candidate) => {
+  const enrich = async (_cache, candidate) => {
     if (candidate.infoHash === HASH) {
       throw new Error('Parser crashed');
     }
@@ -1454,7 +1454,7 @@ test('worker preserves confidence/source/evidence metadata', async () => {
     sources: [{ id: 'dmm.hashlist', kind: 'ingestion' }],
   });
 
-  const enrich = async (candidate) => {
+  const enrich = async (_cache, candidate) => {
     return {
       infoHash: candidate.infoHash,
       fileIndex: null,
@@ -1486,7 +1486,7 @@ test('worker respects limit parameter', async () => {
     });
   }
 
-  const enrich = async (candidate) => ({
+  const enrich = async (_cache, candidate) => ({
     infoHash: candidate.infoHash,
     fileIndex: null,
     matches: [{ mediaId: 'tt1234567:1:1', confidence: 0.8 }],
@@ -1527,7 +1527,7 @@ test('createEnrichmentWorker returns reusable worker function', async () => {
     sources: [{ id: 'dmm.hashlist', kind: 'ingestion' }],
   });
 
-  const enrich = async (candidate) => ({
+  const enrich = async (_cache, candidate) => ({
     infoHash: candidate.infoHash,
     fileIndex: null,
     matches: [{ mediaId: 'tt2085059:7:3', confidence: 0.9 }],
@@ -1552,7 +1552,7 @@ test('enrichSingleCandidate processes one candidate', async () => {
     sources: [{ id: 'dmm.hashlist', kind: 'ingestion' }],
   });
 
-  const enrich = async (candidate) => ({
+  const enrich = async (_cache, candidate) => ({
     infoHash: candidate.infoHash,
     fileIndex: null,
     matches: [{ mediaId: 'tt2085059:7:3', confidence: 0.9 }],
@@ -1580,7 +1580,7 @@ test('worker does not create provider observations', async () => {
     sources: [{ id: 'dmm.hashlist', kind: 'ingestion' }],
   });
 
-  const enrich = async (candidate) => ({
+  const enrich = async (_cache, candidate) => ({
     infoHash: candidate.infoHash,
     fileIndex: null,
     matches: [{ mediaId: 'tt2085059:7:3', confidence: 0.9 }],
@@ -1607,7 +1607,7 @@ test('worker progress callback receives updates', async () => {
 
   const progressCalls = [];
 
-  const enrich = async (candidate) => ({
+  const enrich = async (_cache, candidate) => ({
     infoHash: candidate.infoHash,
     fileIndex: null,
     matches: [{ mediaId: 'tt2085059:7:3', confidence: 0.9 }],
@@ -1732,7 +1732,7 @@ test('worker preserves evidence through enrichment', async () => {
     sources: [{ id: 'dmm.hashlist', kind: 'ingestion' }],
   });
 
-  const enrich = async (candidate) => ({
+  const enrich = async (_cache, candidate) => ({
     infoHash: candidate.infoHash,
     fileIndex: null,
     matches: [{ mediaId: 'tt2085059:7:3', confidence: 0.94 }],

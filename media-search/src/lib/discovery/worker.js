@@ -62,7 +62,8 @@ export async function runEnrichmentWorker(cache, options = {}) {
     stats.processed++;
     try {
       // Call injected enrichment function
-      const enrichment = await enrich(candidate);
+      // Enrichment function signature: async (cache, candidate, options?) => enrichment|null
+      const enrichment = await enrich(cache, candidate);
 
       if (enrichment) {
         enrichments.push(enrichment);
@@ -126,7 +127,7 @@ export async function enrichSingleCandidate(cache, candidate, enrich) {
   }
 
   try {
-    const enrichment = await enrich(candidate);
+    const enrichment = await enrich(cache, candidate);
     if (enrichment) {
       const result = enrichCandidates(cache, [enrichment]);
       return { enrichment, ...result };

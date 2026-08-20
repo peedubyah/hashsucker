@@ -24,6 +24,8 @@ import {
 import { decodeDmmPayload as decompressFromEncodedURIComponent, encodeDmmPayload as compressToEncodedURIComponent } from '../src/lib/discovery/adapters/dmm.js';
 
 import { createDiscoveryCache } from '../src/lib/discovery/cache.js';
+import { searchReleases } from '../src/lib/discovery/search-engine.js';
+import { getCandidatesWithoutAttributes } from '../src/lib/discovery/release-attributes.js';
 
 const HASH = 'abcdef0123456789abcdef0123456789abcdef01';
 const OTHER_HASH = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -487,6 +489,132 @@ test('Pipeline handles mixed valid/invalid records', async () => {
   assert.equal(metrics.recordsProcessed, 4);
   assert.equal(metrics.recordsInserted, 2); // Only valid ones
   assert.equal(metrics.recordsFailed, 2); // Invalid hash + missing filename
+
+  cache.close();
+});
+
+// =============================================================================
+// Attribute Worker Integration Tests
+// =============================================================================
+
+test('DMMIngestionRunner runs attribute parsing pass after ingestion', async () => {
+  const cache = createDiscoveryCache();
+
+  const dmmData = JSON.stringify({
+    torrents: [
+      { hash: HASH, filename: 'Breaking.Bad.S05E14.1080p.BluRay.x264-TEST.mkv', bytes: 1500000000 },
+      { hash: OTHER_HASH, filename: 'Breaking.Bad.S05E14.720p.WEB-DL.x264-GROUP.mkv', bytes: 800000000 },
+    ],
+  });
+
+  const compressed = compressToEncodedURIComponent(dmmData);
+  const source = new MockHashListSource({
+    fragments: [
+      {
+        url: 'https://example.com/fragment1.html',
+        name: 'fragment1.html',
+        size: 1000,
+        html: '<html><body><script>var payload = decompressFromEncodedURIComponent(\'' + compressed + '\');</script></body></html>',
+      },
+    ],
+  });
+
+  const runner = new DMMIngestionRunner({
+    source,
+    cache,
+    batchSize: 10,
+    enableAttributeParsing: true,
+  });
+
+  const metrics = await runner.run();
+
+  // Verify ingestion metrics
+  assert.equal(metrics.recordsInserted, 2);
+
+  // Verify attribute parsing ran
+  assert.ok(metrics.attributeStats, 'attributeStats should be present');
+  assert.equal(metrics.attributeStats.parsed, 2);
+  assert.equal(metrics.attributeStats.failed, 0);
+
+  // Verify no candidates without attributes remain
+  assert.equal(getCandidatesWithoutAttributes(cache).length, 0);
+
+  // Verify search works
+  const searchResult = searchReleases(cache, { query: 'Breaking Bad S05E14' });
+  assert.equal(searchResult.total, 2);
+
+  cache.close();
+});
+
+test('DMMIngestionRunner can disable attribute parsing', async () => {
+  const cache = createDiscoveryCache();
+
+  const dmmData = JSON.stringify({
+    torrents: [
+      { hash: HASH, filename: 'Movie.2024.1080p.mkv', bytes: 2000000000 },
+    ],
+  });
+
+  const compressed = compressToEncodedURIComponent(dmmData);
+  const source = new MockHashListSource({
+    fragments: [
+      {
+        url: 'https://example.com/fragment1.html',
+        name: 'fragment1.html',
+        size: 1000,
+        html: '<html><body><script>decompressFromEncodedURIComponent(\'' + compressed + '\');</script></body></html>',
+      },
+    ],
+  });
+
+  const runner = new DMMIngestionRunner({
+    source,
+    cache,
+    enableAttributeParsing: false,
+  });
+
+  const metrics = await runner.run();
+
+  assert.equal(metrics.recordsInserted, 1);
+  assert.equal(metrics.attributeStats, null); // No attribute parsing
+
+  // Verify no attributes were created
+  assert.equal(getCandidatesWithoutAttributes(cache).length, 1);
+
+  cache.close();
+});
+
+test('DMMIngestionRunner metrics include attribute stats', async () => {
+  const cache = createDiscoveryCache();
+
+  const dmmData = JSON.stringify({
+    torrents: [
+      { hash: HASH, filename: 'Test.Movie.1080p.mkv', bytes: 1000000000 },
+    ],
+  });
+
+  const compressed = compressToEncodedURIComponent(dmmData);
+  const source = new MockHashListSource({
+    fragments: [
+      {
+        url: 'https://example.com/fragment1.html',
+        name: 'fragment1.html',
+        size: 1000,
+        html: '<html><body><script>decompressFromEncodedURIComponent(\'' + compressed + '\');</script></body></html>',
+      },
+    ],
+  });
+
+  const runner = new DMMIngestionRunner({ source, cache });
+  const metrics = await runner.run();
+
+  // Verify attribute stats structure
+  assert.ok(metrics.attributeStats);
+  assert.ok('total' in metrics.attributeStats);
+  assert.ok('processed' in metrics.attributeStats);
+  assert.ok('parsed' in metrics.attributeStats);
+  assert.ok('failed' in metrics.attributeStats);
+  assert.ok('errors' in metrics.attributeStats);
 
   cache.close();
 });

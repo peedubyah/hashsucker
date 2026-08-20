@@ -61,10 +61,12 @@ export function storeReleaseAttributes(cache, attributes) {
 
   const normalizedConfidence = normalizeConfidence(confidence);
 
-  // Check for existing attributes from same source
+  // Check for existing attributes from same source.
+  // Equal confidence → latest wins (update allowed).
+  // Only skip if existing is strictly stronger.
   const existing = cache.getReleaseAttributes(infoHash, fileIndex, source);
-  if (existing && existing.length > 0 && existing[0].confidence >= normalizedConfidence) {
-    // Existing attributes are stronger or equal — preserve them
+  if (existing && existing.length > 0 && existing[0].confidence > normalizedConfidence) {
+    // Existing attributes are strictly stronger — preserve them
     return false;
   }
 
