@@ -21,22 +21,48 @@ export async function searchMedia(intent, dependencies = {}) {
 
   try {
     torbox = await cacheCheck(hashes);
+
+    const failed = torbox.failed instanceof Set
+      ? torbox.failed
+      : new Set();
+
+    if (failed.size > 0) {
+      cacheStatus = failed.size >= new Set(hashes).size
+        ? 'unknown'
+        : 'partial';
+    }
   } catch (error) {
     cacheStatus = 'unknown';
-    torbox = { cached: new Set(), details: new Map() };
+    torbox = {
+      cached: new Set(),
+      details: new Map(),
+      failed: new Set(hashes),
+    };
     console.error(`TorBox cache enrichment unavailable: ${error.message}`);
   }
 
-  results = results.map((item) => ({
-    ...item,
-    providers: {
-      torbox: {
-        cached: cacheStatus === 'known'
-          ? Boolean(item.infoHash) && torbox.cached.has(item.infoHash.toLowerCase())
-          : null,
+  results = results.map((item) => {
+    const hash = item.infoHash
+      ? item.infoHash.toLowerCase()
+      : null;
+
+    const failed = torbox.failed instanceof Set
+      ? torbox.failed
+      : new Set();
+
+    const cached = !hash
+      ? (cacheStatus === 'unknown' ? null : false)
+      : failed.has(hash)
+        ? null
+        : torbox.cached.has(hash);
+
+    return {
+      ...item,
+      providers: {
+        torbox: { cached },
       },
-    },
-  }));
+    };
+  });
 
   // Stable sort: cached TorBox releases first while preserving
   // Stremio's existing ordering within each group.

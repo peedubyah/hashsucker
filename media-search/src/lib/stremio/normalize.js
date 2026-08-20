@@ -193,6 +193,46 @@ function extractInfoHashFromMagnetUrl(url) {
   return normalizeInfoHash(url);
 }
 
+/**
+ * Extract a torrent infohash from a Comet TorBox playback stream only when
+ * Comet exposes the same validated hash in both its bingeGroup and URL path.
+ */
+function extractCometTorBoxInfoHash(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const bingeGroup =
+    raw.behaviorHints &&
+    typeof raw.behaviorHints.bingeGroup === 'string'
+      ? raw.behaviorHints.bingeGroup.trim()
+      : '';
+
+  const bingeMatch = bingeGroup.match(
+    /^comet\|torbox\|([a-f0-9]{40})$/i
+  );
+
+  if (!bingeMatch || typeof raw.url !== 'string') return null;
+
+  let url;
+  try {
+    url = new URL(raw.url);
+  } catch {
+    return null;
+  }
+
+  if (!/^https?:$/.test(url.protocol)) return null;
+
+  const pathMatch = url.pathname.match(
+    /\/playback\/([a-f0-9]{40})(?:\/|$)/i
+  );
+
+  if (!pathMatch) return null;
+
+  const bingeHash = normalizeInfoHash(bingeMatch[1]);
+  const pathHash = normalizeInfoHash(pathMatch[1]);
+
+  return bingeHash && bingeHash === pathHash ? bingeHash : null;
+}
+
 function fingerprint(parts) {
   return parts.filter(Boolean).join('|');
 }
@@ -238,7 +278,10 @@ export function normalizeStream(raw, addonMeta = {}) {
   const fromFilename = parseMetadata(filename || '');
   const parsed = mergeParsedMetadata(fromLabels, fromFilename);
 
-  const infoHash = normalizeInfoHash(raw.infoHash) || extractInfoHashFromMagnetUrl(raw.url);
+  const infoHash =
+    normalizeInfoHash(raw.infoHash) ||
+    extractInfoHashFromMagnetUrl(raw.url) ||
+    extractCometTorBoxInfoHash(raw);
   const nzbUrl =
     typeof raw.nzbUrl === 'string' && /^https?:\/\//i.test(raw.nzbUrl.trim())
       ? raw.nzbUrl.trim()
