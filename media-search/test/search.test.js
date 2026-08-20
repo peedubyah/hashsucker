@@ -4,11 +4,19 @@ import test from 'node:test';
 import { createRequestIntent } from '../src/lib/requests/intent.js';
 import { searchMedia } from '../src/lib/search.js';
 import { checkTorBoxCached } from '../src/lib/providers/torbox.js';
+import { normalizeStream } from '../src/lib/stremio/normalize.js';
 
 const HASH = 'abcdef0123456789abcdef0123456789abcdef01';
 
 function makeHash(n) {
   return String(n).padStart(40, '0');
+}
+
+function release(infoHash, title) {
+  return normalizeStream(
+    { infoHash, name: title },
+    { addonId: 'torrentio.torbox', addonName: 'Torrentio (TorBox)', provider: 'torbox' }
+  );
 }
 
 function installFetchMock(handler) {
@@ -18,24 +26,32 @@ function installFetchMock(handler) {
 }
 
 test('TorBox cached state is enrichment and provider failures become unknown', async () => {
-  const intent = createRequestIntent({ type: 'series', mediaId: 'tt1:7:3' });
-  const result = await searchMedia(intent, {
-    searchStremio: async () => [{ infoHash: HASH, title: 'Season pack' }],
-    checkTorBoxCached: async () => ({ cached: new Set([HASH]), details: new Map() }),
-  });
-  assert.equal(result.results[0].providers.torbox.cached, true);
-  assert.equal(typeof result.timings.discoveryMs, 'number');
-  assert.equal(typeof result.timings.torboxMs, 'number');
-  assert.equal(typeof result.timings.totalMs, 'number');
-  assert.deepEqual(result.intent.episodes, [3]);
-  assert.equal('providers' in result.intent, false);
+  process.env.TORBOX_API_KEY = 'test-key';
 
-  const unknown = await searchMedia(intent, {
-    searchStremio: async () => [{ infoHash: HASH }],
-    checkTorBoxCached: async () => { throw new Error('offline'); },
-  });
-  assert.equal(unknown.results[0].providers.torbox.cached, null);
-  assert.equal(unknown.providerStatus.torbox, 'unknown');
+  try {
+    const intent = createRequestIntent({ type: 'series', mediaId: 'tt1:7:3' });
+    const result = await searchMedia(intent, {
+      searchStremio: async () => [release(HASH, 'Season pack')],
+      searchTorznab: async () => [],
+      checkTorBoxCached: async () => ({ cached: new Set([HASH]), details: new Map() }),
+    });
+    assert.equal(result.results[0].providers.torbox.cached, true);
+    assert.equal(typeof result.timings.discoveryMs, 'number');
+    assert.equal(typeof result.timings.torboxMs, 'number');
+    assert.equal(typeof result.timings.totalMs, 'number');
+    assert.deepEqual(result.intent.episodes, [3]);
+    assert.equal('providers' in result.intent, false);
+
+    const unknown = await searchMedia(intent, {
+      searchStremio: async () => [release(HASH, 'Season pack')],
+      searchTorznab: async () => [],
+      checkTorBoxCached: async () => { throw new Error('offline'); },
+    });
+    assert.equal(unknown.results[0].providers.torbox.cached, null);
+    assert.equal(unknown.providerStatus.torbox, 'unknown');
+  } finally {
+    delete process.env.TORBOX_API_KEY;
+  }
 });
 
 test('checkTorBoxCached sends explicit User-Agent header', async () => {
@@ -143,7 +159,7 @@ test('searchMedia produces providerStatus partial with mixed cache results', asy
     const intent = createRequestIntent({ type: 'series', mediaId: 'tt1:7:3' });
     const hashes = Array.from({ length: 11 }, (_, i) => makeHash(i + 1));
     const result = await searchMedia(intent, {
-      searchStremio: async () => hashes.map((infoHash) => ({ infoHash, title: 'x' })),
+      searchStremio: async () => hashes.map((infoHash) => release(infoHash, 'x')),
       checkTorBoxCached,
     });
 
@@ -177,7 +193,7 @@ test('global auth failure produces providerStatus unknown', async () => {
     process.env.TORBOX_API_KEY = 'bad-token';
     const intent = createRequestIntent({ type: 'series', mediaId: 'tt1:7:3' });
     const result = await searchMedia(intent, {
-      searchStremio: async () => [{ infoHash: HASH, title: 'x' }],
+      searchStremio: async () => [release(HASH, 'x')],
       checkTorBoxCached,
     });
 

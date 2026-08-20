@@ -317,6 +317,7 @@ export function normalizeStream(raw, addonMeta = {}) {
     addonLogo: addonMeta.addonLogo || null,
     addonSortOrder: addonMeta.sortOrder ?? 0,
     streamType: addonMeta.streamType || null,
+    role: addonMeta.role || 'discovery',
     title: title || description || 'Stream',
     description,
     quality: parsed.quality,
@@ -337,6 +338,8 @@ export function normalizeStream(raw, addonMeta = {}) {
       {
         addonId: addonMeta.addonId || null,
         addonName: addonMeta.addonName || null,
+        role: addonMeta.role || 'discovery',
+        provider: addonMeta.provider || null,
       },
     ],
   };
@@ -380,6 +383,8 @@ export function mergeStreams(existing, incoming) {
     }
     map.set(s.key, {
       ...keep,
+      role: keep.role || other.role,
+      provider: keep.provider || other.provider,
       title: keep.title || other.title,
       description: keep.description || other.description,
       quality: keep.quality || other.quality,

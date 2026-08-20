@@ -18,6 +18,13 @@ function sendJson(response, status, body) {
 }
 
 function publicRelease(release) {
+  // Structurally exclude secret-bearing fields:
+  // - magnet: may contain tracker info but not credentials
+  // - downloadUrl: MAY contain API keys in query string (Prowlarr/Torznab)
+  // - sources[].downloadUrl: same risk
+  // - behaviorHints: internal Stremio metadata
+  // - raw: raw upstream response
+  // - torznab: internal metadata
   return {
     key: release.key,
     title: release.title,
@@ -30,8 +37,21 @@ function publicRelease(release) {
     audio: release.audio,
     language: release.language,
     infoHash: release.infoHash,
-    sources: release.sources,
+    sources: release.sources?.map((s) => ({
+      id: s.id,
+      kind: s.kind,
+      instance: s.instance,
+      indexer: s.indexer,
+      role: s.role,
+      capability: s.capability,
+      provider: s.provider,
+    })) || [],
     providers: release.providers,
+    fileIndex: release.fileIndex,
+    seeders: release.seeders,
+    leechers: release.leechers,
+    publishDate: release.publishDate,
+    trackers: release.trackers,
   };
 }
 

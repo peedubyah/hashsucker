@@ -58,6 +58,73 @@ test('server serves UI and secret-free release API', async () => {
   assert.deepEqual(JSON.parse(status.text), { requestId, status: 'processing' });
 });
 
+test('public release API strips all secret-bearing and internal fields', async () => {
+  const handler = createRequestHandler({
+    importer: {
+      async submitRequest() { return { requestId: 'id', status: 'queued' }; },
+      async getRequestStatus() { return { requestId: 'id', status: 'processing' }; },
+    },
+    searchCatalog: async () => [],
+    getMedia: async () => null,
+    searchMedia: async (intent) => ({
+      intent,
+      providerStatus: { torbox: 'known' },
+      results: [{
+        key: `ih:${HASH}`,
+        infoHash: HASH,
+        title: 'Test Release',
+        magnet: `magnet:?xt=urn:btih:${HASH}&dn=secret`,
+        downloadUrl: 'https://torznab.example.com/api?apikey=SECRET123&callback=foo',
+        behaviorHints: { videoSize: 5000 },
+        raw: { upstream: 'RAW_SECRET' },
+        torznab: { seeders: 5 },
+        sources: [{
+          id: 's1',
+          kind: 'torznab',
+          instance: 'i1',
+          indexer: 'idx',
+          role: 'discovery',
+          capability: 'dl',
+          provider: 'torbox',
+          downloadUrl: 'https://other.example.com/api?apikey=SECRET456',
+        }],
+        providers: { torbox: { cached: true } },
+      }],
+    }),
+  });
+
+  const input = Readable.from([]);
+  input.method = 'GET'; input.url = '/api/releases?type=series&mediaId=tt2085059:7:3';
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8') }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const text = response.text;
+  // Internal/secret fields must never appear
+  assert.doesNotMatch(text, /magnet/, 'magnet should be excluded');
+  assert.doesNotMatch(text, /behaviorHints/, 'behaviorHints should be excluded');
+  assert.doesNotMatch(text, /RAW_SECRET|"raw"/, 'raw should be excluded');
+  assert.doesNotMatch(text, /"torznab":/, 'torznab internal metadata should be excluded');
+  assert.doesNotMatch(text, /SECRET123/, 'downloadUrl must be excluded');
+  assert.doesNotMatch(text, /SECRET456/, 'sources[].downloadUrl must be excluded');
+  // Public fields SHOULD appear
+  assert.match(text, /"infoHash"/);
+  assert.match(text, /"title"/);
+  assert.match(text, /"cached":true/);
+  // Source objects are sanitized (no downloadUrl)
+  const body = JSON.parse(text);
+  const src = body.results[0].sources[0];
+  assert.equal(src.downloadUrl, undefined, 'source downloadUrl should be stripped');
+  assert.equal(src.id, 's1');
+  assert.equal(src.kind, 'torznab');
+});
+
 test('request endpoint only accepts an explicit episode and preserves it for season packs', async () => {
   const { request, submitted } = createHarness();
   const valid = await request('/api/requests', {

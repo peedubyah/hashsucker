@@ -9,6 +9,13 @@ import {
 
 const DEFAULT_CONCURRENCY = 6;
 
+const TORRENTIO_BASE = 'https://torrentio.strem.fun';
+
+function buildTorrentioUrl(provider, apiKey) {
+  const encoded = encodeURIComponent(apiKey);
+  return `${TORRENTIO_BASE}/${provider}=${encoded}/manifest.json`;
+}
+
 async function runPool(tasks, limit) {
   const results = new Array(tasks.length);
   let nextIndex = 0;
@@ -31,25 +38,61 @@ async function runPool(tasks, limit) {
 }
 
 export async function loadDiscoveryAddons() {
-  if (process.env.STREMIO_ADDON_MANIFEST_URL) {
-    return [{
-      addon_id: 'configured.discovery',
-      name: 'Configured Discovery',
-      manifest_url: process.env.STREMIO_ADDON_MANIFEST_URL,
+  const addons = [];
+
+  // Torrentio/TorBox — generated from TORBOX_API_KEY
+  if (process.env.TORBOX_API_KEY) {
+    addons.push({
+      addon_id: 'torrentio.torbox',
+      name: 'Torrentio (TorBox)',
+      manifest_url: buildTorrentioUrl('torbox', process.env.TORBOX_API_KEY),
+      provider: 'torbox',
+      role: 'discovery',
       enabled: true,
       sort_order: 0,
-    }];
+    });
   }
+
+  // Torrentio/Real-Debrid — generated from REALDEBRID_API_KEY
+  if (process.env.REALDEBRID_API_KEY) {
+    addons.push({
+      addon_id: 'torrentio.realdebrid',
+      name: 'Torrentio (Real-Debrid)',
+      manifest_url: buildTorrentioUrl('realdebrid', process.env.REALDEBRID_API_KEY),
+      provider: 'realdebrid',
+      role: 'discovery',
+      enabled: true,
+      sort_order: 1,
+    });
+  }
+
+  // Comet manual manifest — optional, user-provided URL
+  if (process.env.COMET_MANIFEST_URL) {
+    addons.push({
+      addon_id: 'comet.manual',
+      name: 'Comet (manual)',
+      manifest_url: process.env.COMET_MANIFEST_URL,
+      provider: 'comet',
+      role: 'discovery',
+      enabled: true,
+      sort_order: 2,
+    });
+  }
+
+  if (addons.length > 0) {
+    return addons;
+  }
+
   const configUrl = new URL(
     '../../../config/addons.discovery.local.json',
     import.meta.url
   );
 
-  const addons = JSON.parse(
+  const localAddons = JSON.parse(
     await fs.readFile(configUrl, 'utf8')
   );
 
-  return addons.filter((addon) => Boolean(addon.enabled));
+  return localAddons.filter((addon) => Boolean(addon.enabled));
 }
 
 export async function searchStremio({
