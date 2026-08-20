@@ -41,14 +41,14 @@ export async function searchMedia(intent, dependencies = {}) {
     console.error(`TorBox cache enrichment unavailable: ${error.message}`);
   }
 
+  const failed = torbox.failed instanceof Set
+    ? torbox.failed
+    : new Set();
+
   results = results.map((item) => {
     const hash = item.infoHash
       ? item.infoHash.toLowerCase()
       : null;
-
-    const failed = torbox.failed instanceof Set
-      ? torbox.failed
-      : new Set();
 
     const cached = !hash
       ? (cacheStatus === 'unknown' ? null : false)
