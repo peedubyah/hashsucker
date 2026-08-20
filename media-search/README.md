@@ -16,6 +16,7 @@ Copy `.env.example` to `.env` and set:
 - `STREMIO_ADDON_MANIFEST_URL`: discovery-only Stremio addon manifest URL. Configure the addon to return torrent info hashes without embedding debrid credentials.
 - `MEDIA_SEARCH_PORT`: browser port on the Unraid host; defaults to `3000`.
 - `REQUESTS_HOST_PATH`: shared queue root on Unraid; defaults to `/mnt/database/appdata/media-request-queue`.
+- `DISCOVERY_CACHE_PATH`: SQLite discovery cache path; defaults to `/config/discovery-cache.db`.
 
 The browser never receives these values. The queue root must contain (or allow the container to create) `incoming`, `processing`, `done`, and `failed`. Both media-search and torbox-importer must mount the same host root at `/requests`.
 

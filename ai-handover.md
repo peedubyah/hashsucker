@@ -26,7 +26,7 @@ This is the product baseline. Do not regress it.
 - IMPLEMENTED BUT NOT LIVE-VERIFIED: debounced 325 ms search-as-you-type with minimum two characters, AbortController cancellation, latest-query sequence protection, and retained Search/Enter behavior.
 - IMPLEMENTED BUT NOT LIVE-VERIFIED: coarse status stays in the sticky pane, duplicate submit remains disabled, terminal state is visually distinct, request UUID is under details, and Request another episode returns to the picker.
 - IMPLEMENTED + LOCALLY VERIFIED: timing fields for title/media totals and release discovery/TorBox/total latency. No speculative server cache was added.
-- DESIGNED / DEFERRED: `docs/importer-progress-design.md` proposes importer-authored atomic `/requests/status/<requestId>.json` with coarse fallback. It is not implemented and does not parse logs/stdout or read SQLite.
+- DESIGNED / DEFERRED: `docs/archive/importer-progress-design.md` proposes importer-authored atomic `/requests/status/<requestId>.json` with coarse fallback. It is not implemented and does not parse logs/stdout or read SQLite.
 - FAILED LIVE VERIFICATION ON UNRAID: selection visuals can imply selection while the confirmation remains empty; the supposed sticky pane falls below the full list; filter controls appear detached/raw; result/cached/filtered counts are not obvious; and Resolution/Codec options remain empty despite normalized row metadata. These are active Priority-1 regressions.
 - PASSED LIVE IN THAT BUILD: cached-first order, dense release rows, normalized metadata readability, large-list rendering, real E04 discovery/TorBox enrichment, and exact Black Mirror S07E04 context.
 - IMPLEMENTED BUT NEEDS LIVE REDEPLOY VERIFICATION: one tested exact-hash selection predicate now drives row styling; selected rows have an explicit badge, neutral focus is visually separate, `[hidden]` is enforced, and selection persists through filtering/rerendering.
@@ -46,6 +46,21 @@ This is the product baseline. Do not regress it.
 
 Read-only TorBox account view, recent activity, rich progress implementation, and all destructive provider operations remain deferred.
 
+## Discovery cache architecture
+
+IMPLEMENTED + LOCALLY VERIFIED: SQLite-backed discovery cache using Node.js built-in `node:sqlite`.
+
+- `candidates` table keyed by `(info_hash, file_index)` — normalized torrent/media candidates
+- `provider_observations` table keyed by `(info_hash, file_index, provider)` — provider-specific cache state
+- Write-through integration in `search.js` — live discovery remains authoritative, cache is additive
+- Cache write failures are swallowed and logged; search responses unaffected
+- Identity: `(infoHash, fileIndex)` — no fuzzy merge, same semantics as existing `merger.js`
+- Provider state intentionally separated from candidates for independent refresh/extensibility
+- 11 new tests in `media-search/test/cache.test.js` prove identity, merge, observation refresh, and failure isolation
+- ADR: `docs/decisions/001-discovery-cache.md`
+
+Configuration: `DISCOVERY_CACHE_PATH` env var (default: `/config/discovery-cache.db`).
+
 ## Next work
 
 1. Redeploy and verify results-grid sticky placement, loading transition, Confirm/In progress/Complete/Failed lifecycle, and clean normalized rows with a real long-list request.
@@ -53,6 +68,9 @@ Read-only TorBox account view, recent activity, rich progress implementation, an
 3. Optimize only if those measurements identify a bottleneck; use short-lived bounded caches and record before/after values.
 4. Repeat Black Mirror S07E03 from a season pack through `/requests/done` to prove no stabilization regression.
 5. Coordinate the structured progress proposal with torbox-importer before implementing it.
+6. Implement read-through cache path (cache-first query with optional refresh)
+7. Build background discovery ingestion (DMM hashlist, scrapers)
+8. Implement ranking system (RTN integration)
 
 ## Verification state
 
@@ -60,7 +78,7 @@ Read-only TorBox account view, recent activity, rich progress implementation, an
 - VERIFIED locally for movie bridge (historical): `handoff/movie-importer-bridge/tests/movie-request-bridge.sh` passes 100%, proving `worker.sh` `NOT EXISTS` legacy query exclusion (preventing request-linked or failed-validation jobs from falling through to legacy processing while preserving unrequested legacy movie processing), fail-safe TorBox retention when multiple active requests share a hash/job, fail-closed immediate settlement to `/requests/failed/` on identity mismatch, non-terminal job protection, and terminal state synchronization. NOTE: `handoff/` is historical provenance; canonical importer source is `torbox-importer/`.
 - VERIFIED syntax: `bash -n` and `sh -n` pass for all scripts in `handoff/movie-importer-bridge/scripts/`.
 - VERIFIED live externally: Docker build/listener/browser/importer/Sonarr acceptance flow described above.
-- STAGED: `docs/torbox-importer-movie-bridge.patch` regenerated against verified Tower originals and ready for deliberate deployment.
+- STAGED: `docs/archive/torbox-importer-movie-bridge.patch` regenerated against verified Tower originals and ready for deliberate deployment.
 - Keep both this file and the `# Current Implementation Handoff` section of `CODEX.md` accurate after each substantial milestone.
 
 ## Repository state
@@ -81,7 +99,7 @@ Read `CODEX.md`, inspect the cited implementation, run tests, then continue from
 
 ## Pre-unification inventory
 
-Read `docs/inventory/2026-08-19-live-unification-inventory.md` for the initial read-only
+Read `docs/archive/2026-08-19-live-unification-inventory.md` for the initial read-only
 inventory of media-search and torbox-importer.
 
 Important: it contains known stale claims documented at the top of the file. Do not treat

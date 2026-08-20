@@ -104,7 +104,7 @@ Preferred production shape:
        v
     media-search container
        |
-       +-- serves compiled browser UI
+       +-- serves static UI
        +-- exposes /api/*
        +-- performs provider/discovery requests server-side
        +-- submits importer requests
@@ -119,22 +119,13 @@ Prefer a single production `media-search` container.
 
 A development server may be used locally, but production must NOT require:
 
-- a Vite development server
 - source files outside the image
 - `/home/patrick/...`
 - development-machine services
-- development proxying
 - globally installed Node packages
 - absolute development host paths
 
-Use a multi-stage Docker build if appropriate:
-
-    Node build stage
-      -> compile browser application
-
-    production Node stage
-      -> API server
-      -> serves compiled static UI
+The application is plain Node.js ESM with no build step. A single-stage Dockerfile is sufficient.
 
 The server should listen on a configurable port.
 
