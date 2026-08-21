@@ -28,6 +28,8 @@
  * - Source/provenance beyond the filename
  * - Seeders/leechers
  * - Magnet URI
+ *
+ * Uses the lz-string npm package for decompression.
  * - fileIndex (single-file torrents only)
  *
  * Media identity MUST be inferred post-ingestion from filename via enrichment.
@@ -118,135 +120,27 @@ export function parseDmmPayload(payload) {
  * @param {string} html - HTML string containing iframe with hash fragment
  * @returns {string|null} The hash fragment or null
  */
+import LZString from 'lz-string';
+
 export function extractHashFragment(html) {
   if (!html || typeof html !== 'string') return null;
-  const match = html.match(/src="https:\/\/debridmediamanager\.com\/hashlist#([^"]+)"/);
+  // Match both debridmediamanager.com and beta.debridmediamanager.com
+  const match = html.match(/src="https:\/\/(?:beta\.)?debridmediamanager\.com\/hashlist#([^"]+)"/);
   return match ? match[1] : null;
 }
 
 /**
  * Decode DMM hashlist payload from LZString-encoded string.
- * This is a Node.js implementation of lz-string's decompressFromEncodedURIComponent.
+ * Uses the lz-string npm package.
  *
  * @param {string} encoded - LZString-encoded URI component
  * @returns {string|null} Decompressed JSON string or null on failure
  */
 export function decodeDmmPayload(encoded) {
   if (!encoded || typeof encoded !== 'string') return null;
-
-  // Try base64 first (for tests)
   try {
-    const decoded = Buffer.from(encoded, 'base64').toString('utf-8');
-    if (decoded && decoded.length > 0) {
-      return decoded;
-    }
-  } catch {
-    // Not base64, try LZString
-  }
-
-  // LZString decompression
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-$';
-  const reverseDic = {};
-  for (let i = 0; i < alphabet.length; i++) {
-    reverseDic[alphabet[i]] = i;
-  }
-
-  const getBaseValue = (char) => reverseDic[char] ?? 0;
-
-  try {
-    const length = encoded.length;
-    const resetValue = 32;
-    let dataIndex = 0;
-
-    const getNextValue = (index) => {
-      if (index >= length) return 0;
-      return getBaseValue(encoded[index]);
-    };
-
-    let dataVal = getNextValue(0);
-    let dataPosition = resetValue;
-
-    const readBits = (bitCount) => {
-      let bits = 0;
-      let power = 1;
-      const maxPower = 1 << bitCount;
-
-      while (power !== maxPower) {
-        const resb = dataVal & dataPosition;
-        dataPosition >>= 1;
-        if (dataPosition === 0) {
-          dataPosition = resetValue;
-          dataIndex++;
-          dataVal = getNextValue(dataIndex);
-        }
-        if (resb > 0) bits |= power;
-        power <<= 1;
-      }
-      return bits;
-    };
-
-    const dictionary = { 0: '', 1: '', 2: '' };
-    let dictSize = 4;
-    let numBits = 3;
-    let enlargeIn = 4;
-
-    const nextCode = readBits(2);
-    let c;
-    if (nextCode === 0) {
-      c = String.fromCharCode(readBits(8));
-    } else if (nextCode === 1) {
-      c = String.fromCharCode(readBits(16));
-    } else if (nextCode === 2) {
-      return '';
-    } else {
-      return null;
-    }
-
-    dictionary[3] = c;
-    let w = c;
-    const result = [c];
-
-    while (true) {
-      if (dataIndex > length) return null;
-
-      let cCode = readBits(numBits);
-
-      if (cCode === 0) {
-        dictionary[dictSize] = String.fromCharCode(readBits(8));
-        dictSize++;
-        cCode = dictSize - 1;
-        enlargeIn--;
-      } else if (cCode === 1) {
-        dictionary[dictSize] = String.fromCharCode(readBits(16));
-        dictSize++;
-        cCode = dictSize - 1;
-        enlargeIn--;
-      } else if (cCode === 2) {
-        return result.join('');
-      }
-
-      if (enlargeIn === 0) {
-        enlargeIn = 1 << numBits;
-        numBits++;
-      }
-
-      let entry;
-      if (dictionary[cCode] !== undefined) {
-        entry = dictionary[cCode];
-      } else if (cCode === dictSize) {
-        entry = w + w[0];
-      } else {
-        return null;
-      }
-
-      result.push(entry);
-
-      dictionary[dictSize] = w + entry[0];
-      dictSize++;
-      enlargeIn--;
-
-      w = entry;
-    }
+    const decompressed = LZString.decompressFromEncodedURIComponent(encoded);
+    return decompressed;
   } catch {
     return null;
   }
@@ -266,18 +160,18 @@ function parseSize(size) {
 }
 
 /**
- * Encode payload for testing (base64 wrapper).
- * Production uses real LZString from DMM source.
+ * Encode payload for testing.
+ * Uses the same lz-string library as production decoding.
  */
 export function encodeDmmPayload(uncompressed) {
   if (!uncompressed) return null;
-  // For testing, use base64 encoding
-  return Buffer.from(uncompressed, 'utf-8').toString('base64');
+  return LZString.compressToEncodedURIComponent(uncompressed);
 }
 
 /**
  * Compress string to URI component format (for testing).
+ * Uses the same lz-string library as production decoding.
  */
 export function compressToEncodedURIComponent(str) {
-  return encodeDmmPayload(str);
+  return LZString.compressToEncodedURIComponent(str);
 }

@@ -11,5 +11,8 @@
   },
   "allowScripts": {
     "better-sqlite3@11.10.0": true
+  },
+  "dependencies": {
+    "lz-string": "^1.5.0"
   }
 }
