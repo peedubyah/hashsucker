@@ -1,7 +1,9 @@
 # HashSucker Backend API — Architecture State
 
+> **ARCHIVED SNAPSHOT:** Superseded by [`../../HANDOFF.md`](../../HANDOFF.md) and the [2026-08-21 audit](../audit/8-21-audit.md). Do not treat this file as current architecture or deployment authority.
+
 **Date:** 2026-08-20
-**Status:** MVP search API is functional and tested
+**Status:** Historical implementation snapshot
 
 ---
 

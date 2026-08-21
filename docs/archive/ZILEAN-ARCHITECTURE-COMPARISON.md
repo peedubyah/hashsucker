@@ -1,11 +1,13 @@
 # Zilean Architecture Comparison
 
+> **ARCHIVED RESEARCH:** This dated comparison is evidence only. Its HashSucker state matrix and identity assumptions are superseded by [`../architecture.md`](../architecture.md) and the [2026-08-21 audit](../audit/8-21-audit.md).
+
 **Date:** 2026-08-20
 **Purpose:** Understand minimum indexing/search layer needed for Zilean-like functionality in HashSucker.
 
 ## Overview
 
-Zilean was a full-text search engine for DMM hashlists. It indexed parsed release metadata and provided a REST API for searching. This document compares Zilean's architecture to HashSucker's current state.
+Zilean was a full-text search engine for DMM hashlists. It indexed parsed release metadata and provided a REST API for searching. This document compared Zilean's architecture to HashSucker's state at that date.
 
 ---
 

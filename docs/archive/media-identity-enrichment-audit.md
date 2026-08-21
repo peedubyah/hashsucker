@@ -1,17 +1,17 @@
 # Media Identity Enrichment — Gap Analysis
 
 **Date:** 2026-08-20
-**Status:** ⚠️ SUPERSEDED — See `docs/evaluation/ENRICHMENT-EVALUATION-2026-08-21.md`
+**Status:** SUPERSEDED — see the bounded [enrichment evaluation](../evaluation/ENRICHMENT-EVALUATION-2026-08-21.md) and current [known gaps](../known-gaps.md).
 
 ---
 
-> **This document is archived for historical context.** The gap analysis was completed before implementation. All listed gaps have been addressed:
+> **Archived historical context:** Later work did not establish that all identity/enrichment gaps were resolved. The 2026-08-21 audit found remaining validation, correction, and selected-media identity defects. The original completion claims below are retained as history only:
 > - Cinemeta enrichment source: ✅ Implemented in `src/lib/discovery/enrichment-sources/cinemeta.js`
 > - Filename → media identity resolver: ✅ Implemented
 > - Confidence scoring function: ✅ Implemented in `src/lib/discovery/enrichment-sources/confidence.js`
 > - Enrichment worker: ✅ Fully functional with failure isolation
 >
-> For current enrichment effectiveness metrics, see the [Enrichment Evaluation Report](evaluation/ENRICHMENT-EVALUATION-2026-08-21.md).
+> For the bounded historical metrics, see the [Enrichment Evaluation Report](../evaluation/ENRICHMENT-EVALUATION-2026-08-21.md).
 
 ---
 

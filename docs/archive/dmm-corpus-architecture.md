@@ -1,6 +1,8 @@
 # DMM Corpus Architecture
 
-This document describes the existing DMM corpus persistence layer and search foundation.
+> **ARCHIVED SNAPSHOT:** Superseded by [`../data-model.md`](../data-model.md) and the [2026-08-21 audit](../audit/8-21-audit.md). Reverify implementation details before reuse.
+
+This document described the DMM corpus persistence layer and search foundation at the time it was written.
 
 ## 1. Storage Design
 

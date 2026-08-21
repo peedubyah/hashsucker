@@ -1,64 +1,78 @@
 # media-search
 
-A single-container browser application for finding media releases and submitting explicit TV episode requests to the torbox-importer shared queue.
+Node.js API and current control-plane prototype for HashSucker.
 
-## Supported workflow
+## Current responsibilities
 
-The MVP supports title search, TV season/episode selection, normalized Stremio torrent releases, server-side TorBox cache indicators, explicit release selection, queue submission, and queued/processing/done/failed status polling. Movies can appear in search, but movie, season, series, and multi-episode requests are visibly disabled and rejected by the API.
+- Cinemeta title search and media lookup with an in-memory metadata cache.
+- SQLite/FTS5 release-corpus storage and retrieval.
+- Local release ranking.
+- Live Torrentio/Comet/Torznab discovery and normalization.
+- Atomic publication of explicit physical-acquisition requests to a shared filesystem queue.
+- Operator-triggered DMM ingestion and attribute parsing.
 
-An episode request remains an episode request even when the selected torrent is a whole-season pack. For example, selecting a 61 GB Season 7 release for S07E03 writes `scope: "episode"`, `season: 7`, and `episodes: [3]`. The importer selects the physical file.
+It does **not** serve the React application, directly place Real-Debrid content, expose WebDAV/rclone media, or maintain a canonical virtual library. See the root [`HANDOFF.md`](../HANDOFF.md) for current defects and target boundaries.
 
-## Configuration
+## Local development
 
-Copy `.env.example` to `.env` and set:
-
-- `TORBOX_API_KEY`: TorBox server-side API key.
-- `STREMIO_ADDON_MANIFEST_URL`: discovery-only Stremio addon manifest URL. Configure the addon to return torrent info hashes without embedding debrid credentials.
-- `MEDIA_SEARCH_PORT`: browser port on the Unraid host; defaults to `3000`.
-- `REQUESTS_HOST_PATH`: shared queue root on Unraid; defaults to `/mnt/database/appdata/media-request-queue`.
-- `DISCOVERY_CACHE_PATH`: SQLite discovery cache path; defaults to `/config/discovery-cache.db`.
-
-The browser never receives these values. The queue root must contain (or allow the container to create) `incoming`, `processing`, `done`, and `failed`. Both media-search and torbox-importer must mount the same host root at `/requests`.
-
-Choose a `MEDIA_SEARCH_PORT` that is not already used by another Unraid service. Port 3000 is valid but commonly occupied.
-
-## Local test and run
+Requires Node.js 24+.
 
 ```sh
+npm ci
 npm test
-TORBOX_API_KEY=... STREMIO_ADDON_MANIFEST_URL=... REQUESTS_ROOT=/tmp/media-requests npm start
+npm run dev
 ```
 
-Open `http://localhost:3000`. Healthcheck: `http://localhost:3000/health`.
+Useful scripts:
 
-## Docker and Unraid deployment
+- `npm start` — start the API.
+- `npm run dev` — watch mode using `.env.local` when present.
+- `npm run search` — legacy search CLI; this is not the active server release-discovery path.
+- `npm test` — backend test suite.
 
-Copy the repository to any persistent project directory on Unraid. Application source is copied into the image and is not read from a development-host mount.
+The API defaults to `http://localhost:3000`. `GET /health` verifies process health. `/` returns 404 because there is no static frontend route.
 
-```sh
-cp .env.example .env
-# Edit .env; set TORBOX_API_KEY and STREMIO_ADDON_MANIFEST_URL.
-docker compose build
-docker compose up -d
-docker compose ps
-curl --fail http://localhost:3000/health
-```
+For frontend development, run `npm run dev` separately in `../ui`; Vite proxies `/api` to port 3000.
 
-To copy from a workstation first:
+## Active configuration
 
-```sh
-DEPLOY_TARGET=root@unraid:/mnt/user/appdata/media-search-project ./deploy.sh
-```
+| Variable | Purpose |
+|---|---|
+| `PORT`, `HOST` | HTTP listen address |
+| `REQUESTS_ROOT` | Shared physical-request queue root; defaults to `/requests` |
+| `DISCOVERY_DB` | Discovery SQLite file; unset means in-memory |
+| `CINEMETA_BASE_URL` | Optional Cinemeta base URL |
+| `METADATA_CACHE_TTL_MS`, `METADATA_CACHE_MAX_ENTRIES` | Metadata cache limits |
+| `TORBOX_API_KEY` | Torrentio/TorBox live discovery; direct checks only on the legacy CLI path |
+| `REALDEBRID_API_KEY` | Torrentio/Real-Debrid live discovery only; not a direct provider adapter |
+| `COMET_MANIFEST_URL` | Optional Comet discovery source |
+| `TORZNAB_URLS` | JSON array of Torznab endpoint definitions |
 
-Then create `.env` and run Compose on Unraid. The container remains the image's unprivileged `node` user (UID/GID 1000). `compose.yaml` adds supplementary GID 100 so it can use the proven shared-spool ownership model: host owner/group `99:100`, directories group-writable and setgid (`2775`). Do not remove `group_add: ["100"]`; newly queued files should inherit ownership `1000:100`. No Docker socket, importer appdata, SQLite database, SSH service, source bind mount, or development server is required at runtime.
+`STREMIO_ADDON_MANIFEST_URL` is not read by current source. `DISCOVERY_CACHE_PATH` belongs to a legacy search path; the server uses `DISCOVERY_DB`.
 
-## API summary
+Never expose provider tokens to browser code.
 
-- `GET /api/search?q=...`
-- `GET /api/media?type=series&id=...`
-- `GET /api/releases?type=series&mediaId=...:season:episode`
-- `POST /api/requests` (single explicit TV episode only)
-- `GET /api/requests/:requestId`
-- `GET /health`
+## Deployment status
 
-Failures are fail-closed. TorBox cache-check failure is shown as “Cache unknown,” not “Not cached.”
+Root `compose.yaml` is the relevant repository topology. It currently:
+
+- deploys this API and `torbox-importer`;
+- mounts only `/requests` for this service;
+- does not set/persist `DISCOVERY_DB`;
+- does not deploy the React UI.
+
+`media-search/compose.yaml` is a stale standalone topology and should not be treated as production authority until reconciled.
+
+The current Dockerfile copies source but does not install `lz-string`; clean-image deployment is a known Stage 0 defect. Do not describe the image as production-ready.
+
+## Current release-search behavior
+
+`GET /api/search?type=...&mediaId=...` combines local corpus and live sources, but local retrieval is not selected-media scoped, live results receive score `0`, no final global rerank occurs, and merge identity is info hash only. Treat output as prototype recommendations.
+
+## DMM ingestion status
+
+`POST /api/ingest/dmm` reaches a runner that recognizes only a script-call wrapper. Sampled current fragments use iframe/hash, so the reachable path fails before decoding them. `src/lib/ingestion/dmm.js` is compatible with sampled current fragments but is only used by tests/manual code and is not a package script or server/deployment entrypoint.
+
+## API
+
+The current HTTP contract is documented once in [`src/api/API_CONTRACT.md`](src/api/API_CONTRACT.md). Mutation routes currently have no application authentication and must remain behind a trusted boundary until Stage 0 access controls are implemented.

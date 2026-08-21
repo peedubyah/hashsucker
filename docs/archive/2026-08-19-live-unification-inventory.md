@@ -1,5 +1,7 @@
 # Live Unification Inventory — 2026-08-19
 
+> **ARCHIVED INVENTORY:** Superseded by [`../../HANDOFF.md`](../../HANDOFF.md) and the [2026-08-21 audit](../audit/8-21-audit.md). Reverify all observations before reuse.
+
 ## Status
 
 Read-only pre-unification inventory and planning notes.

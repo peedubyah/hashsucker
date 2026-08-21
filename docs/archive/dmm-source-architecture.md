@@ -1,5 +1,7 @@
 # DMM Hashlist Source Architecture
 
+> **ARCHIVED SOURCE SNAPSHOT:** Wrapper and corpus-size claims are superseded by the [2026-08-21 audit](../audit/8-21-audit.md). Current sampled fragments used iframe/hash; reverify upstream format and licensing before relying on this file.
+
 ## Canonical Source
 
 **URL:** https://hashlists.debridmediamanager.com

@@ -1,5 +1,7 @@
 # DMM Ingestion Benchmark Report
 
+> **ARCHIVED SUPERSEDED EXPERIMENT:** Non-authoritative. Its decoder-blocker and capacity conclusions do not describe current code; see the [2026-08-21 audit](../audit/8-21-audit.md).
+
 **Date:** 2026-08-20
 **Benchmark ID:** 2026-08-20-live
 

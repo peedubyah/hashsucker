@@ -1,7 +1,9 @@
 # HashSucker MVP Pipeline Consolidation
 
+> **ARCHIVED MILESTONE:** Superseded by the [2026-08-21 audit](../audit/8-21-audit.md). Its end-to-end DMM claim does not match the current API-reachable wrapper path; test counts and frontend guidance are historical.
+
 **Date:** 2026-08-20
-**Status:** COMPLETE — DMM → searchable pipeline is proven end-to-end
+**Status:** Historical completion report
 
 ---
 

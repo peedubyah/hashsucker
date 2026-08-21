@@ -1,443 +1,220 @@
-# Frontend API Contract
+# media-search HTTP API contract
 
-This document describes the backend API contracts for the frontend application.
-All endpoints are served from the media-search application.
+**Code-verified:** 2026-08-21
 
-## Base URL
+**Runtime authority:** `src/server/app.js`
 
-Relative to the same origin (e.g., `/api/...`).
+This is the only detailed HTTP contract. It documents current behavior, including known defects; target fields such as `releaseKey` are not claimed as implemented.
 
----
+## General behavior
 
-## Endpoints
+- Default base URL: `http://localhost:3000`.
+- All responses are JSON with `cache-control: no-store`.
+- Most thrown input failures use `{ "error": "message" }` with status `400`; missing resources use `404`, and processing/upstream failures generally use `502`.
+- Exceptions: invalid title-query length currently returns `200` with an empty result envelope and omits the validation message; malformed JSON for the DMM and attribute mutation routes is swallowed and treated as `{}`.
+- There is no application authentication or authorization. Ingestion, mutation, and request routes must remain behind a trusted boundary.
+- The server does not serve the React UI or static files.
 
-### GET /api/search?q=QUERY
+## Metadata shape
 
-<<<<<<< HEAD
-Search for titles by query string (Cinemeta catalog).
-=======
-Search for titles by query string. Provider-agnostic: the backend owns
-which metadata providers are queried (Cinemeta today, TMDB in future).
-Results are cached in-memory for fast typeahead responses.
->>>>>>> github/frontend/vite
+Active normalized media fields:
 
-**Request:**
+```json
+{
+  "id": "tt2085059",
+  "type": "series",
+  "title": "Black Mirror",
+  "year": 2011,
+  "posterUrl": "https://example/poster.jpg",
+  "backdropUrl": null,
+  "overview": "Description"
+}
 ```
-GET /api/search?q=Black+Mirror
+
+For series detail, `videos` may be attached:
+
+```json
+{
+  "id": "tt2085059:7:3",
+  "season": 7,
+  "episode": 3,
+  "title": "Episode title",
+  "released": "2026-01-01T00:00:00.000Z",
+  "thumbnail": null
+}
 ```
 
-**Response (200):**
+The current UI TypeScript definitions still use older metadata names. This document follows active backend output.
+
+## `GET /health`
+
+Response `200`:
+
+```json
+{ "ok": true }
+```
+
+## `GET /api/search?q=QUERY`
+
+Title search through the unified metadata layer (Cinemeta currently). Query length is 2–120 characters.
+
+Response `200`:
+
 ```json
 {
   "results": [
     {
       "id": "tt2085059",
       "type": "series",
-<<<<<<< HEAD
-      "name": "Black Mirror",
-      "poster": "https://m.media-amazon.com/images/...",
-      "year": "2011-",
-      "description": null
-    }
-  ],
-=======
       "title": "Black Mirror",
       "year": 2011,
-      "posterUrl": "https://m.media-amazon.com/images/...",
+      "posterUrl": "https://example/poster.jpg",
       "backdropUrl": null,
-      "overview": "A dark anthology series exploring technology"
+      "overview": "Description"
     }
   ],
-  "requestId": "req-1",
+  "requestId": "request-sequence-id",
   "fromCache": false,
->>>>>>> github/frontend/vite
-  "timings": {
-    "totalMs": 106
-  }
+  "errors": [{ "provider": "provider-name", "error": "message" }],
+  "timings": { "totalMs": 12 }
 }
 ```
 
-**Fields:**
-<<<<<<< HEAD
-- `results[]` — Array of title results
-  - `id` — Media identifier (e.g., "tt2085059")
-  - `type` — "movie" or "series"
-  - `name` — Title name
-  - `poster` — Poster URL (nullable)
-  - `year` — Year or year range (nullable)
-  - `description` — Brief description (nullable)
-=======
-- `results[]` — Array of normalized media results (provider-agnostic)
-  - `id` — Media identifier (e.g., "tt2085059")
-  - `type` — "movie" or "series"
-  - `title` — Canonical title
-  - `year` — Release year (nullable)
-  - `posterUrl` — Poster image URL (nullable)
-  - `backdropUrl` — Backdrop/fanart URL (nullable)
-  - `overview` — Brief description (nullable)
-- `requestId` — Unique request ID for stale response detection
-- `fromCache` — Whether results came from the in-memory cache
-- `errors[]` — Provider errors (omitted if all providers succeeded)
-  - `provider` — Provider name
-  - `error` — Error message
->>>>>>> github/frontend/vite
-- `timings.totalMs` — Response time in milliseconds
+`errors` is omitted when all providers succeed. `requestId` is for stale-response handling; `fromCache` describes the in-memory metadata cache.
 
-**Errors:**
-- 400 — Invalid query (too short/long)
+## `GET /api/media?type=TYPE&id=ID`
 
-<<<<<<< HEAD
-=======
-**Notes:**
-- Query must be 2-120 characters
-- Frontend should debounce input; backend deduplicates concurrent identical requests
-- Slow upstream requests cannot overwrite newer results (requestId tracking)
+- `type`: `movie` or `series`.
+- `id`: provider media ID.
 
->>>>>>> github/frontend/vite
----
+Response `200`: `{ "media": <normalized-media>, "timings": { "totalMs": 12 } }`. Series media may include `videos`. Returns `404` when not found.
 
-### GET /api/search?type=TYPE&mediaId=ID
+## `GET /api/search?type=TYPE&mediaId=ID`
 
-Search for releases by media identity. This is the primary endpoint for
-finding downloadable releases. Results are ranked by composite score.
+Combined local-corpus and live release discovery.
 
-Merges DMM corpus results with live discovery (Torrentio/Torznab),
-deduplicates by infoHash (corpus takes precedence), and returns
-a single ranked result set.
+- `type`: `movie` or `series`.
+- Movie ID example: `tt1234567`.
+- Episode ID example: `tt1234567:2:4`.
+- Optional filters: `q`, `year`, `resolution`, `source`, `codec`, `hdr`, `audio`, `limit`, `offset`.
+- `limit` is capped at 100.
 
-**Request:**
-```
-GET /api/search?type=series&mediaId=tt0944947:7:3
-```
+Response envelope:
 
-**Response (200):**
 ```json
 {
   "intent": {
     "streamType": "series",
     "mediaType": "tv",
     "scope": "episode",
-    "mediaId": "tt0944947:7:3",
-    "baseMediaId": "tt0944947",
-    "season": 7,
-    "episodes": [3]
+    "mediaId": "tt1234567:2:4",
+    "baseMediaId": "tt1234567",
+    "season": 2,
+    "episodes": [4]
   },
-  "results": [
-    {
-      "infoHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "fileIndex": null,
-      "title": "Black Mirror",
-      "filename": "Black.Mirror.S07E03.2160p.WEB-DL.DV.HDR10.mkv",
-      "size": null,
-      "resolution": "2160p",
-      "quality": "WEB-DL",
-      "codec": null,
-      "hdr": "true",
-      "audio": null,
-      "releaseGroup": null,
-      "year": null,
-      "season": 7,
-      "episode": 3,
-      "confidence": 0.5,
-      "score": 0.82,
-      "components": {
-        "relevance": 1,
-        "quality": 0.805,
-        "releaseConfidence": 0.92,
-        "identityConfidence": 0.5,
-        "providerAvailability": 0.5,
-        "episodeMatch": 1
-      },
-      "providers": {
-        "torbox": { "cached": true, "evidence": ["usenet"] }
-      },
-      "media": [],
-      "_source": "corpus"
-    }
-  ],
-  "total": 638,
-  "timings": { "totalMs": 45 },
-  "stats": { "indexed": 3, "total": 3 }
+  "results": [],
+  "total": 0,
+  "timings": { "totalMs": 12 },
+  "stats": { "indexed": 0, "total": 0 }
 }
 ```
 
-**Fields:**
-- `intent` — Parsed media intent from the request
-  - `streamType` — "movie" or "series"
-  - `mediaType` — "movie" or "tv"
-  - `scope` — "movie", "series", or "episode"
-  - `mediaId` — Full media identifier
-  - `baseMediaId` — Base media ID (without season:episode)
-  - `season` — Season number (nullable)
-  - `episodes` — Episode numbers array
-- `results[]` — Ranked release candidates
-  - `infoHash` — 40-char hex infoHash
-  - `fileIndex` — File index (null for single-file torrents)
-  - `title` — Parsed title
-  - `filename` — Original release filename
-  - `size` — File size in bytes (nullable)
-  - `resolution` — "1080p", "2160p", "720p", etc. (nullable)
-  - `quality` — "WEB-DL", "BluRay", "HDTV", etc. (nullable)
-  - `codec` — "x264", "x265", etc. (nullable)
-  - `hdr` — "true" if HDR (nullable)
-  - `audio` — Audio format (nullable)
-  - `releaseGroup` — Release group name (nullable)
-  - `year` — Release year (nullable)
-  - `season` — Season number (nullable)
-  - `episode` — Episode number (nullable)
-  - `confidence` — Parse confidence (0.0-1.0)
-  - `score` — Composite ranking score (0.0-1.0)
-  - `components` — Score breakdown:
-    - `relevance` — Title relevance
-    - `quality` — Quality score
-    - `releaseConfidence` — Release parse confidence
-    - `identityConfidence` — Media identity confidence
-    - `providerAvailability` — Provider availability
-    - `episodeMatch` — Episode match score
-  - `providers` — Provider observations keyed by provider name
-    - `[provider].cached` — Boolean (null=unknown, true=cached, false=not cached)
-    - `[provider].evidence` — Array of evidence tags (nullable)
-  - `media` — Media associations array
-  - `_source` — "corpus" (DMM) or "live" (Torrentio/Torznab)
-- `total` — Total number of results
-- `timings.totalMs` — Response time
-- `stats.indexed` — Number of candidates in FTS5 index
-- `stats.total` — Total candidates in database
+Release result shape:
 
-**Errors:**
-- 400 — Invalid type or mediaId
-
----
-
-### GET /api/search/internal?q=QUERY
-
-Search the DMM corpus directly via FTS5 (no live discovery).
-
-**Request:**
-```
-GET /api/search/internal?q=Black+Mirror
-```
-
-**Response (200):**
 ```json
 {
-  "results": [
-    {
-      "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "fileIndex": null,
-      "filename": "Black.Mirror.S07E03.2160p.WEB-DL.mkv",
-      "parsed": {
-        "title": "Black Mirror",
-        "year": null,
-        "season": 7,
-        "episode": 3,
-        "resolution": "2160p",
-        "source": "WEB-DL",
-        "codec": null,
-        "hdr": false,
-        "audio": null,
-        "releaseGroup": null
-      },
-      "confidence": 0.92,
-      "score": 0.82,
-      "relevance": 1,
-      "quality": 0.805,
-      "releaseConfidence": 0.92,
-      "identityConfidence": 0.5,
-      "provider": 0.5,
-      "episodeMatch": 1,
-      "components": {
-        "relevance": 1,
-        "quality": 0.805,
-        "releaseConfidence": 0.92,
-        "identityConfidence": 0.5,
-        "providerAvailability": 0.5,
-        "episodeMatch": 1
-      },
-      "providers": [
-        {
-          "provider": "torbox",
-          "cached": true,
-          "evidence": ["usenet"],
-          "checkedAt": 1724123456789
-        }
-      ],
-      "media": [
-        {
-          "mediaId": "tt0944947",
-          "source": "manual",
-          "confidence": 0.9,
-          "evidence": ["imdb-match"],
-          "associatedAt": 1724123456789
-        }
-      ]
-    }
-  ],
-  "total": 638,
-  "query": {
-    "match": "\"black\"* AND \"mirror\"*",
-    "filters": {},
-    "titleQuery": "Black Mirror"
+  "infoHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "fileIndex": null,
+  "title": "Parsed title",
+  "filename": "Release.Name.mkv",
+  "size": null,
+  "resolution": "1080p",
+  "quality": "WEB-DL",
+  "codec": "x264",
+  "hdr": null,
+  "audio": null,
+  "releaseGroup": null,
+  "year": 2026,
+  "season": 2,
+  "episode": 4,
+  "confidence": 0.5,
+  "score": 0.8,
+  "components": {
+    "relevance": 1,
+    "quality": 0.8,
+    "releaseConfidence": 0.9,
+    "identityConfidence": 0.5,
+    "providerAvailability": 0.5,
+    "episodeMatch": 1
   },
-  "timings": { "totalMs": 45 },
-  "stats": { "indexed": 3, "total": 3 }
-}
-```
-
-**Differences from `/api/search?mediaId=...`:**
-- Result objects use `hash` (not `infoHash`)
-- Result objects use `parsed` nested object (not top-level fields)
-- Result objects include `relevance`, `quality`, etc. as top-level fields
-- Result objects use `provider` (not `providerAvailability`) for the component
-- `providers` is an array of observation objects (not a keyed object)
-- Includes `query` object with FTS5 match expression and parsed filters
-- Only DMM corpus results (no live discovery)
-
-**Errors:**
-- 400 — Invalid query
-
----
-
-### GET /api/search/stats
-
-Get search index statistics.
-
-**Request:**
-```
-GET /api/search/stats
-```
-
-**Response (200):**
-```json
-{
-  "indexed": 10181,
-  "total": 10181
-}
-```
-
----
-
-### GET /api/media?type=TYPE&id=ID
-
-<<<<<<< HEAD
-Get media details by type and ID.
-=======
-Get media details by type and ID. Provider-agnostic.
->>>>>>> github/frontend/vite
-
-**Request:**
-```
-GET /api/media?type=series&id=tt2085059
-```
-
-**Response (200):**
-```json
-{
-  "media": {
-    "id": "tt2085059",
-    "type": "series",
-<<<<<<< HEAD
-    "name": "Black Mirror",
-    "poster": "https://images.metahub.space/poster/small/tt2085059/img",
-    "year": "2011–",
-    "description": "Featuring stand-alone dramas...",
-=======
-    "title": "Black Mirror",
-    "year": 2011,
-    "posterUrl": "https://images.metahub.space/poster/small/tt2085059/img",
-    "backdropUrl": null,
-    "overview": "A dark anthology series...",
->>>>>>> github/frontend/vite
-    "videos": [
-      {
-        "id": "tt2085059:0:1",
-        "season": 0,
-        "episode": 1,
-        "title": "Episode 1",
-        "released": "2014-12-16T03:00:00.000Z",
-        "thumbnail": "https://episodes.metahub.space/tt2085059/0/1/w780.jpg"
-      }
-    ]
+  "providers": {
+    "torbox": { "cached": true, "evidence": [] }
   },
-  "timings": { "totalMs": 45 }
+  "media": [],
+  "_source": "corpus"
 }
 ```
 
-**Fields:**
-- `media.id` — Media identifier
-- `media.type` — "movie" or "series"
-<<<<<<< HEAD
-- `media.name` — Title name
-- `media.poster` — Poster URL (nullable)
-- `media.year` — Year or year range (nullable)
-- `media.description` — Brief description (nullable)
-=======
-- `media.title` — Canonical title
-- `media.year` — Release year (nullable)
-- `media.posterUrl` — Poster URL (nullable)
-- `media.backdropUrl` — Backdrop URL (nullable)
-- `media.overview` — Brief description (nullable)
->>>>>>> github/frontend/vite
-- `media.videos[]` — Episode list (series only)
-  - `id` — Video identifier (e.g., "tt2085059:7:3")
-  - `season` — Season number
-  - `episode` — Episode number
-  - `title` — Episode title
-  - `released` — Release date ISO string (nullable)
-  - `thumbnail` — Thumbnail URL (nullable)
+Known current semantics:
 
-**Errors:**
-- 404 — Media not found
+- Local retrieval is not constrained by `mediaId`.
+- Local candidates are ranked; live candidates receive `score: 0` and empty `components`.
+- There is no final global rerank.
+- Merge deduplication uses lowercase `infoHash`; corpus results win collisions and `fileIndex` is ignored.
+- `total` is the bounded merged count after deduplication, not an exhaustive corpus count.
+- Provider observations may be stale; age is not enforced.
+- For corpus results, public `confidence` currently falls back to `0.5` because the mapper reads a nonexistent nested confidence field; the actual parser confidence still contributes to `components.releaseConfidence`. Live confidence follows live normalization.
+- `releaseKey` is not implemented yet.
 
----
+The local score formula is:
 
-<<<<<<< HEAD
-=======
-### GET /api/search/cache/metrics
+$$
+S = 0.25R + 0.20Q + 0.20C_r + 0.15C_i + 0.10P + 0.10E
+$$
 
-Get metadata cache performance metrics.
+This score is not currently comparable to live result score.
 
-**Request:**
-```
-GET /api/search/cache/metrics
-```
+## `GET /api/search/internal`
 
-**Response (200):**
+Direct local SQLite/FTS search with no live discovery.
+
+Optional parameters: `q`, `year`, `season`, `episode`, `resolution`, `source`, `codec`, `hdr`, `audio`, `limit`, `offset`, `providers=true`, and `media=true`.
+
+The response contains `results`, `total`, parsed `query`, `timings`, and `stats`. Internal result shape differs from public UI release shape: it uses `hash`, nested `parsed` attributes, top-level score components, and provider/media arrays when requested. This endpoint is operator/internal surface and should not be copied into frontend domain types unless used.
+
+## `GET /api/search/stats`
+
+Response:
+
 ```json
-{
-  "hits": 150,
-  "misses": 50,
-  "evictions": 10,
-  "size": 45,
-  "maxEntries": 500,
-  "hitRatio": 0.75
-}
+{ "indexed": 100, "total": 100 }
 ```
 
-**Fields:**
-- `hits` — Total cache hits
-- `misses` — Total cache misses
-- `evictions` — Total entries evicted (TTL expiry or LRU)
-- `size` — Current number of cached entries
-- `maxEntries` — Maximum cache capacity
-- `hitRatio` — Hit ratio (0.0-1.0), null if no requests yet
+`indexed` counts FTS rows; `total` currently counts release-attribute rows.
 
----
+## `GET /api/search/cache/metrics`
 
->>>>>>> github/frontend/vite
-### POST /api/requests
+Returns metadata cache metrics when available, otherwise `{ "error": "Cache not available" }` with status `200`.
 
-Submit a media request for import.
+## `POST /api/requests`
 
-**Request:**
+Submits an explicit physical-acquisition request. Current API forces provider `torbox`.
+
+Accepted intents:
+
+- `type: "movie"` with a movie media ID;
+- `type: "series"` with exactly one episode media ID such as `tt1234567:2:4`.
+
+Request:
+
 ```json
 {
   "type": "series",
-  "mediaId": "tt0944947:7:3",
+  "mediaId": "tt1234567:2:4",
   "release": {
     "infoHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "title": "Test",
-    "filename": "Test.mkv",
+    "title": "Optional title",
+    "filename": "Optional filename.mkv",
     "size": 1000,
     "resolution": "1080p",
     "quality": "WEB-DL",
@@ -447,16 +224,10 @@ Submit a media request for import.
 }
 ```
 
-**Required fields:**
-- `type` — "movie" or "series"
-- `mediaId` — Media identifier (e.g., "tt0944947:7:3")
-- `release.infoHash` — 40-char hex infoHash
+Only `release.infoHash` is required within `release`; it must be 40 hexadecimal characters. Optional strings are trimmed/truncated and invalid size becomes null.
 
-**Optional fields:**
-- `release.title`, `release.filename`, `release.size`
-- `release.resolution`, `release.quality`, `release.codec`, `release.hdr`
+Response `202`:
 
-**Response (202):**
 ```json
 {
   "requestId": "12345678-1234-1234-1234-123456789abc",
@@ -464,188 +235,43 @@ Submit a media request for import.
 }
 ```
 
-**Errors:**
-- 400 — Invalid request (missing infoHash, invalid scope, etc.)
+Current handoff omits `fileIndex` and `releaseKey`. Do not infer that a UI-selected file index reaches the importer.
 
----
+## `GET /api/requests/:uuid`
 
-### GET /api/requests/REQUEST_ID
+Returns:
 
-Get request status.
-
-**Request:**
-```
-GET /api/requests/12345678-1234-1234-1234-123456789abc
-```
-
-**Response (200):**
 ```json
 {
   "requestId": "12345678-1234-1234-1234-123456789abc",
-  "status": "processing"
+  "status": "queued"
 }
 ```
 
-**Status values:** "queued", "processing", "done", "failed"
+Status is derived from queue directory and is one of `queued`, `processing`, `done`, or `failed`. Returns `404` if no file exists in those directories.
 
-**Errors:**
-- 404 — Request not found
+## `POST /api/ingest/dmm`
 
----
+Operator mutation route. Body fields:
 
-### POST /api/ingest/dmm
-
-Trigger DMM hashlist ingestion (admin/background operation).
-
-**Request:**
 ```json
-{
-  "maxFragments": 1,
-  "batchSize": 1000
-}
+{ "maxFragments": 1, "batchSize": 1000 }
 ```
 
-**Response (200):**
-```json
-{
-  "imported": 10181,
-  "inserted": 9531,
-  "updated": 650,
-  "failed": 0,
-  "attributesParsed": 10181,
-  "durationMs": 667
-}
-```
+The exact response is the `DMMIngestionRunner` result. Do not rely on the historical alternate-importer metrics shape.
 
----
+Known defect: the reachable runner recognizes only a `decompressFromEncodedURIComponent('...')` script call, while sampled current fragments use iframe/hash. It can therefore fail with `No payload found` before decoding valid current data.
 
-### POST /api/attributes/run
+## `POST /api/attributes/run`
 
-Trigger release attribute parsing for unparsed candidates.
+Operator mutation route. Optional body: `{ "limit": 100 }`. Returns attribute-worker statistics from active code.
 
-**Request:**
-```json
-{
-  "limit": 100
-}
-```
+## Not implemented
 
-**Response (200):**
-```json
-{
-  "parsed": 100,
-  "failed": 0
-}
-```
+- `/api/releases` — no route exists.
+- Authentication/authorization.
+- `releaseKey` in release DTOs or requests.
+- Provider-neutral placement or virtual-library endpoints.
+- WebDAV/mount/catalog/playback lifecycle endpoints.
 
----
-
-### GET /health
-
-Health check endpoint.
-
-**Response (200):**
-```json
-{
-  "ok": true
-}
-```
-
----
-
-## Usage Notes
-
-### Natural Language / Title Query Flow
-
-1. User enters query → `GET /api/search?q=QUERY`
-2. Display title results (`id`, `name`, `type`, `poster`, `year`)
-3. User selects a title → Store `mediaId` (e.g., "tt0944947")
-4. For series, user selects season/episode → Construct full `mediaId` (e.g., "tt0944947:7:3")
-5. `GET /api/search?type=series&mediaId=tt0944947:7:3` → Ranked release candidates
-6. Display results with quality badges, resolution, size, score
-7. User selects release → `POST /api/requests` with infoHash
-
-### Media Identity as Aid
-
-- Use `GET /api/media?type=series&id=tt2085059` to fetch:
-  - Season/episode list for series
-  - Poster and description for display
-  - Episode titles for better UX
-
-### Provider Observations
-
-The `providers` field on release results contains provider-specific state.
-
-**For `/api/search?mediaId=...` (ReleaseResult):**
-```json
-{
-  "providers": {
-    "torbox": { "cached": true, "evidence": ["usenet"] }
-  }
-}
-```
-- `providers[provider].cached` — Boolean (null=unknown, true=cached, false=not cached)
-- `providers[provider].evidence` — Array of evidence tags
-
-**For `/api/search/internal` (InternalReleaseResult):**
-```json
-{
-  "providers": [
-    {
-      "provider": "torbox",
-      "cached": true,
-      "evidence": ["usenet"],
-      "checkedAt": 1724123456789
-    }
-  ]
-}
-```
-- `providers` is an array of observation objects
-- Each includes `provider`, `cached`, `evidence`, and `checkedAt`
-
-### Ranking
-
-Results are pre-ranked by the backend. The `score` field (0.0-1.0) is a
-composite of relevance, quality, release confidence, identity confidence,
-provider availability, and episode match.
-
-**Formula:**
-```
-score = relevance × 0.25
-      + quality × 0.20
-      + releaseConfidence × 0.20
-      + identityConfidence × 0.15
-      + providerAvailability × 0.10
-      + episodeMatch × 0.10
-```
-
-Display results in score order (highest first).
-
-### Error Handling
-
-All endpoints return JSON with an `error` field on failure:
-```json
-{
-  "error": "Description of what went wrong"
-}
-```
-
-Common error patterns:
-- 400 — Client input validation (missing fields, invalid format)
-- 404 — Resource not found (media, request)
-- 502 — Backend processing error
-
-### Endpoint Selection Guide
-
-| Use Case | Endpoint |
-|----------|----------|
-| Search titles by name | `GET /api/search?q=QUERY` |
-| Find releases for a specific episode/movie (with live discovery) | `GET /api/search?type=TYPE&mediaId=ID` |
-| Search DMM corpus only (no live discovery) | `GET /api/search/internal?q=QUERY` |
-| Get media details (poster, episodes) | `GET /api/media?type=TYPE&id=ID` |
-| Submit import request | `POST /api/requests` |
-| Check request status | `GET /api/requests/REQUEST_ID` |
-| Get index statistics | `GET /api/search/stats` |
-| Trigger DMM ingestion | `POST /api/ingest/dmm` |
-| Trigger attribute parsing | `POST /api/attributes/run` |
-| Health check | `GET /health` |
+When implementation changes, update contract tests/shared types and this file together. Do not duplicate this full contract in `README.md`, `docs/pipeline.md`, or UI documentation.

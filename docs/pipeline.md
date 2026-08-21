@@ -1,267 +1,153 @@
-# Pipeline
+# Pipelines
 
-Actual current data flows in HashSucker.
+**Verified baseline:** 2026-08-21. “Current” describes active code. “Target” describes intended behavior not yet implemented.
 
----
+## Current title and media lookup
 
-## 1. Title Search / Metadata Lookup
-
-**Trigger:** User types in browser search box.
-
-```
-Browser → GET /api/search?q=Black+Mirror
-         ↓
-    media-search/src/server/app.js
-         ↓
-    src/lib/metadata/cinemeta.js → searchCatalog(query)
-         ↓
-    Cinemeta API (v3-cinemeta.strem.io)
-         ↓
-    Returns: [{ id, type, name, poster, year, description }]
+```text
+UI/client
+  → GET /api/search?q=...
+  → unified metadata search
+  → Cinemeta adapter
+  → in-memory TTL/LRU metadata cache
+  → normalized media fields
 ```
 
-**Notes:**
-- Provider-agnostic: backend owns which metadata providers are queried
-- Results cached in-memory for fast typeahead
-- Query must be 2-120 characters
-- Frontend should debounce input
+`GET /api/media?type=...&id=...` retrieves normalized details from Cinemeta. The active API uses `title`, `posterUrl`, `backdropUrl`, `overview`, and numeric `year`; current UI types still expect older names.
 
----
+## Current release discovery
 
-## 2. Release Search
-
-**Trigger:** User selects a media title and requests releases.
-
-```
-Browser → GET /api/search?type=series&mediaId=tt0944947:7:3
-         ↓
-    media-search/src/server/app.js
-         ↓
-    src/lib/discovery/search-engine.js → searchReleases()
-         ↓
-    ┌─────────────────────────────────────────────────────────┐
-    │ FTS5 MATCH on release_search                            │
-    │ + Structured filters (year, season, episode, resolution)│
-    │ + Composite ranking: relevance × quality × confidence   │
-    │ + Optional: provider observations, media associations   │
-    └─────────────────────────────────────────────────────────┘
-         ↓
-    Returns: Ranked release candidates with parsed attributes
+```mermaid
+flowchart TD
+    R["GET /api/search?type=...&mediaId=..."] --> I["Parse explicit intent"]
+    I --> L["Local corpus query\ntext/attributes only"]
+    I --> V["Live discovery\nselected media ID"]
+    L --> Q["SQL/FTS limit before ranking"]
+    Q --> S["Six-component local rank"]
+    V --> N["Normalize live candidates\nscore = 0"]
+    S --> M["Merge corpus first by lowercase infoHash"]
+    N --> M
+    M --> P["Offset/limit and response"]
 ```
 
-**Ranking formula:**
-```
-score = relevance × 0.30 + confidence × 0.25 + quality × 0.25 + provider × 0.20
-```
+Current consequences:
 
-**Notes:**
-- DMM corpus is the primary release source
-- Live discovery (Torrentio/Torznab) merged when `includeLive=true`
-- Deduplication by infoHash (corpus takes precedence)
+- Local retrieval is not filtered by selected `mediaId`; an empty query is a wildcard.
+- TV local filters require exact season/episode values and exclude many compatible packs/ranges.
+- Identity confidence may use an association for another media item.
+- Only a bounded local set is ranked.
+- Live candidates bypass local ranking and no global rerank occurs.
+- Hash-only merge discards distinct file candidates; corpus rows win collisions.
+- Provider observation age is ignored.
+- Result `total` is the bounded merged count, not a full-corpus total.
 
----
+The active local score is:
 
-## 3. DMM Ingestion
+$$
+S = 0.25R + 0.20Q + 0.20C_r + 0.15C_i + 0.10P + 0.10E
+$$
 
-**Trigger:** Manual via `POST /api/ingest/dmm` or scheduled (not yet implemented).
+This formula is explainable, but it is not currently a unified system score.
 
-```
+## Current DMM ingestion
+
+### API-reachable path
+
+```text
 POST /api/ingest/dmm
-         ↓
-    media-search/src/server/app.js
-         ↓
-    src/lib/discovery/dmm-ingestion-runner.js → DMMIngestionRunner.run()
-         ↓
-    ┌─────────────────────────────────────────────────────────┐
-    │ 1. listFragments() → GitHub API                         │
-    │ 2. fetchFragment(url) → raw.githubusercontent.com       │
-    │ 3. extractPayload(html) → LZString compressed string    │
-    │ 4. decodeDmmPayload(compressed) → JSON string           │
-    │ 5. streamParseDMM(json) → generator of records          │
-    │ 6. transformDMMRecord(record) → HashSucker entry        │
-    │ 7. ingestCandidates() → write to candidates table      │
-    └─────────────────────────────────────────────────────────┘
-         ↓
-    Post-ingestion: runAttributeWorker → release_attributes → FTS5 index
+  → DMMIngestionRunner in the synchronous API process
+  → fetch source listing/fragments
+  → extract only decompressFromEncodedURIComponent('...') wrapper
+  → decode, scan, upsert, then parse attributes
 ```
 
-**Notes:**
-- Streaming JSON parser for memory efficiency
-- Batch commits every 1000 records
-- Per-record failure isolation
-- Metrics: records processed, inserted, updated, failed, duplicates, duration
+Current sampled DMM fragments use an iframe/hash wrapper, so this path fails with `No payload found` before decoding. It has no persistent run state, source revision checkpoint, run lock, retries, or resumability.
 
----
+### Compatible but unwired path
 
-## 4. Release Parsing / FTS5 Indexing
+`media-search/src/lib/ingestion/dmm.js` can extract current iframe/hash fragments, decode them with `lz-string`, parse the complete decoded JSON array, upsert candidates, and parse attributes per record. Tests and manual audit validation exercise it, but no server route, package script, CLI, or container entrypoint calls it.
 
-**Trigger:** Post-ingestion (automatic) or manual via `POST /api/attributes/run`.
+Neither path is bounded-memory streaming, and neither provides a production corpus lifecycle.
 
-```
-POST /api/attributes/run
-         ↓
-    src/lib/discovery/attribute-worker.js → runAttributeWorker()
-         ↓
-    ┌─────────────────────────────────────────────────────────┐
-    │ getCandidatesWithoutAttributes()                        │
-    │      ↓                                                  │
-    │ parseFilename(filename) → structured attributes         │
-    │      ↓                                                  │
-    │ storeReleaseAttributes() → release_attributes table     │
-    │      ↓                                                  │
-    │ FTS5 triggers auto-update release_search                │
-    └─────────────────────────────────────────────────────────┘
+## Current physical fulfillment
+
+```mermaid
+flowchart TD
+    A["POST /api/requests"] --> B["Validate explicit movie or one episode"]
+    B --> C["Build TorBox handoff\ninfoHash only"]
+    C --> D["Atomic write + rename to incoming/"]
+    D --> E["Importer mv -n claim to processing/"]
+    E --> F["TorBox placement/job reconciliation"]
+    F --> G["Provider file selection and validation"]
+    G --> H["Resolve signed URL and aria2c to staging"]
+    H --> I["Verify bytes/size"]
+    I --> J["Radarr/Sonarr ManualImport"]
+    J --> K["Post-import validation"]
+    K --> L["Ownership-aware cleanup and done/failed settlement"]
 ```
 
-**Parser output fields:**
-title, year, media_type, season, episode, episode_range, resolution, source_type, codec, hdr, audio, language, release_group
+The filesystem spool is authoritative for physical-mode ownership. The importer independently validates scope, expected hash/provider ID, selected files, media identity, size, Arr import, and cleanup eligibility.
 
-**Evidence tags:**
-title_extracted, year_detected, season_episode_detected, episode_range_detected, resolution_detected, source_detected, codec_detected, hdr_detected, audio_detected, language_detected, release_group_detected
+Current defects:
 
-**Notes:**
-- Parser failures do NOT break ingestion
-- Low-confidence parses ARE stored (with confidence value)
-- Multiple parser sources per candidate (higher confidence wins)
+- `fileIndex`/`releaseKey` is not persisted across this boundary.
+- The worker repeatedly chooses the first `processing` file. A blocked/manual request can starve later work.
+- Physical acquisition is TorBox-only and downloads bytes locally before Arr import.
 
----
+## Target discovery and decision pipeline
 
-## 5. Enrichment
+1. Accept canonical selected media ID, media type, and explicit episode intent.
+2. Retrieve local candidates only through an exact association with that selected media.
+3. Apply episode-coverage compatibility; keep pack/range evidence explicit.
+4. Retrieve live candidates in parallel.
+5. Normalize all candidates to one evidence shape with exact `releaseKey`.
+6. Apply hard eligibility/rejection before preferences.
+7. Deduplicate exact `releaseKey`, never hash or release family.
+8. Compute provider-independent release desirability.
+9. Compute provider-specific cache priors from information available before probing.
+10. Allocate a bounded probe set using desirability, prior, uncertainty, cost, and explicit exploration.
+11. Record fresh authoritative provider results as `cached`, `uncached`, `unknown`, or `error` with scope and expiry.
+12. Stop probing when policy-defined sufficient desirable cached choices exist.
+13. Select placement policy using confirmed state, provider health/cost, existing ownership, and operator policy.
+14. Preserve deterministic comparisons and explanations.
 
-**Trigger:** Manual via enrichment worker (not yet scheduled).
+Hard eligibility includes selected-media association, explicit episode compatibility, acceptable candidate shape, and policy constraints. Quality, size, seeders, desirability, and predicted cache likelihood are preferences—not identity proof.
 
-```
-runEnrichmentWorker()
-         ↓
-    getUnenrichedCandidates() → candidates without candidate_media
-         ↓
-    ┌─────────────────────────────────────────────────────────┐
-    │ enrichWithCinemeta(cache, candidate)                    │
-    │      ↓                                                  │
-    │ getStrongestReleaseAttributes() → parsed title/year     │
-    │      ↓                                                  │
-    │ searchCatalog(parsedTitle) → Cinemeta results           │
-    │      ↓                                                  │
-    │ titleMatchQuality() + yearMatch() → confidence score   │
-    │      ↓                                                  │
-    │ If confidence ≥ 0.5 → create association               │
-    └─────────────────────────────────────────────────────────┘
-         ↓
-    enrichCandidate() → writes to candidate_media
-```
+## Target virtual fulfillment
 
-**Confidence scoring:**
-```
-base: 0.5
-+ title exact match: +0.2
-+ title starts with: +0.1
-+ title includes: +0.05
-+ year match: +0.1
-+ season+episode match: +0.15
-= clamped to [0.0, 1.0]
+```text
+intent
+  → exact candidate selected
+  → authoritative provider check
+  → placement reused/created
+  → provider ready
+  → provider-authoritative file inventory mapped
+  → WebDAV exposure observed
+  → hidden rclone mount target validated
+  → canonical binding atomically published
+  → catalog refresh/visibility observed
+  → optional playback/open probe
 ```
 
-**Notes:**
-- Enrichment is additive — never removes existing associations
-- Higher confidence wins on conflict (equal → latest wins)
-- Unknown matches remain unknown (no forced associations)
-- Cinemeta is the first implemented enrichment source
+Required separate milestones:
 
----
-
-## 6. Ranking
-
-**Trigger:** During release search (synchronous).
-
-```
-searchReleases() → rankHits()
-         ↓
-    ┌─────────────────────────────────────────────────────────┐
-    │ Pure function (no I/O, no API calls)                    │
-    │                                                         │
-    │ Inputs:                                                 │
-    │   - relevance: FTS5 BM25 score                          │
-    │   - quality: resolution + source tier                   │
-    │   - confidence: parser confidence                       │
-    │   - identity: media association confidence              │
-    │   - provider: cache status (0.5 = unknown/neutral)      │
-    │   - episodeMatch: season/episode match bonus            │
-    │                                                         │
-    │ Output:                                                 │
-    │   score = weighted sum (weights sum to 1.0)             │
-    └─────────────────────────────────────────────────────────┘
+```text
+requested → checked → placed → provider-ready → exposed
+          → exact-file-mapped → bound → cataloged → playable
 ```
 
-**Notes:**
-- Ranking is explainable via `explainScore()` and `compareRanks()`
-- Unknown provider = neutral (0.5), not penalty
-- Weights must sum to 1.0
+Reconciliation compares desired library state with provider resources, file inventories, WebDAV/mount state, canonical targets, and catalog visibility. It must tolerate eventual consistency: refresh/re-observe before re-place, rebind before duplicate placement, and never delete an unowned resource because a mount is stale.
 
----
+## Target physical fallback
 
-## 7. Request → Importer → Sonarr/Radarr Flow
+The existing queue/importer remains an explicit secondary policy. It receives exact candidate provenance, continues to map against provider-authoritative files, and retains Sonarr/Radarr final import authority. Virtual reconciliation must not be generalized from the importer’s staging/`aria2c`/`ManualImport` lifecycle.
 
-**Trigger:** User selects a release and submits request in browser.
+## Error semantics
 
-```
-Browser → POST /api/requests
-         ↓
-    media-search/src/lib/requests/
-         ↓
-    ┌─────────────────────────────────────────────────────────┐
-    │ Build request document:                                 │
-    │   - intent: mediaType, scope, mediaId, season, episodes │
-    │   - release: infoHash, title, filename, size, etc.      │
-    └─────────────────────────────────────────────────────────┘
-         ↓
-    Write to /requests/incoming/{requestId}.json
-         ↓
-    ┌─────────────────────────────────────────────────────────┐
-    │ torbox-importer/claim-request.sh                        │
-    │   - Atomic claim (mv incoming → processing)             │
-    └─────────────────────────────────────────────────────────┘
-         ↓
-    torbox-importer/scripts/worker.sh → process-request.sh
-         ↓
-    ┌─────────────────────────────────────────────────────────┐
-    │ 1. validate-request.sh → verify request integrity       │
-    │ 2. ensure-torbox-job.sh → create/reuse TorBox resource  │
-    │ 3. inspect-job.sh → examine torrent contents            │
-    │ 4. select-tv-files.sh → map intent to physical files    │
-    │ 5. process-movie.sh / process-tv.sh → download & import │
-    │ 6. settle-request.sh → move to done/failed              │
-    └─────────────────────────────────────────────────────────┘
-         ↓
-    ┌─────────────────────────────────────────────────────────┐
-    │ Sonarr/Radarr ManualImport                              │
-    │   - Select correct series/episode/movie                 │
-    │   - Import downloaded files                             │
-    │   - Verify successful import                            │
-    └─────────────────────────────────────────────────────────┘
-         ↓
-    Request moves to /requests/done or /requests/failed
-```
+- Live-source failure may return partial discovery results.
+- Provider auth failure opens an operator-visible fault; transient errors remain unknown/error.
+- Mount absence does not imply uncached or absent placement.
+- Arr rejection may describe media/quality policy, not provider state.
+- “Cached,” “placed,” “exposed,” “bound,” “cataloged,” and “playable” are never synonyms.
 
-**Notes:**
-- The shared filesystem queue is the authoritative transport (not HTTP)
-- Request identity is explicit — no inference from release title
-- Episode intent controls file selection — no guessing
-- Mixed requested/unrequested files must fail ambiguous
-
----
-
-## API Endpoints Summary
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/api/search` | Cinemeta catalog search (titles) |
-| GET | `/api/search?type=TYPE&mediaId=ID` | Release search (FTS5) |
-| GET | `/api/releases` | Release search (alias) |
-| POST | `/api/requests` | Submit request to importer |
-| GET | `/api/requests/:id` | Get request status |
-| POST | `/api/ingest/dmm` | Trigger DMM ingestion |
-| POST | `/api/attributes/run` | Trigger filename parsing |
-| GET | `/api/search/stats` | FTS5 index statistics |
-| GET | `/health` | Health check |
-
-**Full contract:** `media-search/src/api/API_CONTRACT.md`
+The current HTTP shapes are documented once in [`../media-search/src/api/API_CONTRACT.md`](../media-search/src/api/API_CONTRACT.md). This file documents flow, not a duplicate API contract.

@@ -1,122 +1,51 @@
-# Release Discovery UI
+# Release discovery UI
 
-A React/Vite frontend for media release discovery. Built as a release intelligence interface, not a streaming catalog.
+React/Vite prototype for title search and release comparison.
 
-## Architecture
+## Current status
 
-```
-src/
-├── App.tsx                  # Page routing (search ↔ releases)
-├── main.tsx                 # Entry point
-├── index.css                # Global dark theme, dense tables, badges
-├── components/
-│   ├── Badge.tsx            # Reusable badge (variants: default/success/warning/error/info/corpus/live)
-│   ├── DataTable.tsx        # Generic sortable table with column definitions
-│   ├── EmptyState.tsx       # Empty state placeholder
-│   ├── ErrorState.tsx       # Error state with retry button
-│   ├── FilterBar.tsx        # Inline filter controls (query, source, resolution, quality, cache)
-│   ├── LoadingState.tsx     # Spinner + message
-│   ├── MediaResults.tsx     # Title selection cards
-│   ├── ProviderStatus.tsx   # Provider cache badges
-│   ├── ReleaseDetails.tsx   # Full detail overlay
-│   ├── ReleaseRow.tsx       # Expandable release row with inline details
-│   └── SearchBar.tsx        # Query input
-├── hooks/
-│   ├── useReleaseFilters.ts # Sorting + filtering logic for releases
-│   └── useSearch.ts         # Title search + media selection
-├── pages/
-│   ├── ReleasesPage.tsx     # Release discovery screen (filter + sort + list)
-│   └── SearchPage.tsx       # Title search screen
-├── types/
-│   └── api.ts               # TypeScript interfaces derived from API_CONTRACT.md
-├── utils/
-│   └── format.ts            # Size, score, confidence formatting
-└── test/
-    ├── fixtures.ts          # Mock data for tests
-    └── setup.ts             # Testing Library setup
-```
+- Separate from `media-search`; root Compose does not build, serve, or deploy it.
+- Vite development proxies `/api` to `http://localhost:3000`.
+- Supports title search, media selection, release filtering/sorting, provider badges, and a release-details panel.
+- Has no season/episode picker.
+- “Request this release” opens details only; it does not submit `POST /api/requests` or poll request status.
+- Current TypeScript metadata fields (`name`, `poster`, `description`) diverge from active backend fields (`title`, `posterUrl`, `overview`). The UI may render missing title/artwork data until roadmap Stage 1.
+- React list identity uses `infoHash` only rather than exact `(infoHash,fileIndex)`.
 
-## API Usage
+Treat this as a prototype, not a deployed product UI.
 
-All API calls go through the existing `media-search/src/api/client.js` (imported via `@api/client`). No duplicate fetch logic.
+## Development
 
-| Endpoint | Hook | Component |
-|----------|------|-----------|
-| `GET /api/search?q=` | `useSearch.search()` | `SearchPage` |
-| `GET /api/search?type=&mediaId=` | `useSearch.selectMedia()` | `ReleasesPage` |
-| `GET /api/media?type=&id=` | `useSearch.selectMedia()` | `ReleasesPage` (header) |
+Run the backend first from `../media-search`, then:
 
-### API Fields Consumed
-
-**Title Search:**
-- `results[].id`, `type`, `name`, `poster`, `year`, `description`
-
-**Release Search:**
-- `intent` — media identity (used for display context)
-- `results[]` — full `ReleaseResult` objects:
-  - `infoHash`, `filename`, `size`, `resolution`, `quality`, `codec`, `hdr`, `audio`, `releaseGroup`
-  - `confidence`, `score` — composite ranking
-  - `components` — score breakdown (relevance, quality, releaseConfidence, identityConfidence, providerAvailability, episodeMatch)
-  - `providers` — cache status per provider
-  - `_source` — `"corpus"` (DMM) or `"live"` (Torrentio/Torznab)
-- `total`, `timings.totalMs`, `stats.indexed`, `stats.total`
-
-**Media Lookup:**
-- `media.id`, `type`, `name`, `poster`, `year`, `description`
-
-## Ranking Presentation
-
-Score, confidence, and score components are all treated as optional. The UI renders whatever is present:
-
-- **Score** — composite ranking (shown prominently)
-- **Confidence** — parse confidence
-- **Score bars** — visual breakdown of components (only shown if `components` is present)
-
-No weights are hard-coded in the frontend. The ranking model can evolve without UI changes.
-
-## Local Development
-
-```bash
-cd ui
-npm install
+```sh
+npm ci
+npm test
 npm run dev
 ```
 
-The dev server proxies `/api` requests to `http://localhost:3000` (the media-search backend).
+Other scripts:
 
-## Testing
+- `npm run build`
+- `npm run lint`
+- `npm run preview`
+- `npm run test:watch`
 
-```bash
-npm test          # Run all tests
-npm run test:watch
-```
+## Contract boundary
 
-Tests cover:
-- Filter state management (source, resolution, quality, cache, query)
-- Sorting logic (score, size, filename, direction toggle)
-- Component rendering (badges, release rows, filter controls)
-- Empty/error/loading states
+All HTTP calls go through `../media-search/src/api/client.js` via the `@api` alias. The current API is documented in [`../media-search/src/api/API_CONTRACT.md`](../media-search/src/api/API_CONTRACT.md).
 
-## Assumptions
+Until generated/shared types or contract tests exist, code is the final authority. Do not add another copied API narrative. When Stage 1 is implemented, update the backend contract, API client/JSDoc, TypeScript types, UI fixtures, and tests together.
 
-1. **Backend contract** — All shapes derived from `media-search/src/api/API_CONTRACT.md`. If the backend changes, update `types/api.ts` first.
-2. **Score/components optional** — Ranking data may be partial; UI degrades gracefully.
-3. **Provider observations** — Keyed by provider name; may be empty for corpus results.
-4. **Source distinction** — `corpus` = DMM (cached/indexed), `live` = real-time discovery.
-5. **No auth** — Authentication is out of scope for this iteration.
-6. **No request workflow** — The "Request this release" button is a placeholder for future import flow integration.
-7. **Release table is the core screen** — All UX decisions prioritize release comparison over browsing.
+## Product direction
 
-## Visual Direction
+The UI should eventually display separate lifecycle and evidence concepts:
 
-- Dark theme with high-contrast text
-- Dense information layout (not poster-card streaming UI)
-- Monospace filenames for quick scanning
-- Color-coded badges for providers, sources, quality attributes
-- Minimal animation — fast interaction priority
+- provider-independent release desirability;
+- provider-specific cache prior;
+- fresh confirmed provider state;
+- placement/exposure/file mapping;
+- canonical binding;
+- catalog/playback health.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Do not label `cached` or `placed` as `playable`, and do not hide exact file identity behind a hash-only row key.

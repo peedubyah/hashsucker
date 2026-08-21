@@ -1,7 +1,8 @@
 # HashSucker — Architecture Handoff
 
-> **First file for new architecture/refactor agents.**
-> Last verified: 2026-08-21.
+> **ARCHIVED SUPERSEDED HANDOFF:** Non-authoritative. Do not start here; use the single canonical [`../../HANDOFF.md`](../../HANDOFF.md).
+>
+> Historical text below originally said “First file for new architecture/refactor agents.” Last verified at that time: 2026-08-21.
 
 ---
 

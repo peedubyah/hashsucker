@@ -1,83 +1,66 @@
-# ADR 001: Discovery Cache
+# ADR 001: SQLite discovery cache with separate provider state
 
 ## Status
 
-Implemented (2026-08-20).
+Accepted; partially operational. Originally implemented 2026-08-20, current consequences verified 2026-08-21.
 
 ## Context
 
-Discovery is currently request-time: each search query triggers live calls to Stremio/Torznab providers and TorBox cache checks. This works but is not scalable for:
-
-- Background discovery (ingesting torrents independent of user queries)
-- Ranking/scoring (requires a corpus to rank)
-- Provider workers (multiple providers observing the same candidates)
-
-We need a persistent cache to store normalized discovery candidates.
+HashSucker needs a local corpus for background ingestion, release parsing, media associations, retrieval/ranking, and independent provider observations. Provider cache state changes over time and differs by provider; it must not be embedded into release identity.
 
 ## Decision
 
-Use SQLite via Node.js built-in `node:sqlite` with two tables:
+Use Node.js `node:sqlite` in WAL mode for single-host discovery state.
 
-1. **`candidates`** — normalized torrent/media candidates keyed by `(info_hash, file_index)`
-2. **`provider_observations`** — provider-specific state keyed by `(info_hash, file_index, provider)`
+- Exact candidate identity is `(info_hash, file_index_key)`; `-1` represents a null raw file index.
+- Store candidates, parsed release attributes, media associations, provider observations, and FTS data separately.
+- Key provider observations by exact candidate plus provider.
+- Keep SQLite as the default until a reproducible corpus benchmark demonstrates an operational reason to change.
 
-### Why SQLite
+## Rationale
 
-- **Node.js built-in** (`node:sqlite` in Node 24+): No native compilation, no external dependencies, works in Alpine Docker
-- **Single-file**: Database is a single file, easy to backup/mount
-- **WAL mode**: Concurrent reads with write performance
-- **Familiar**: SQL is well-understood; no new query language to learn
+- Single-file persistence fits the intended single-host deployment and is straightforward to mount, inspect, and back up.
+- Node 24 provides `node:sqlite` without a third-party native module.
+- WAL permits concurrent reads while a single writer updates the corpus.
+- Separating provider observations prevents one provider’s mutable state from corrupting candidate identity or leaking into another provider.
 
-### Why Node.js built-in `node:sqlite` over `better-sqlite3`
+## Current reality
 
-- **Alpine compatibility**: `better-sqlite3` requires native compilation (node-gyp), which fails in musl-based Alpine containers without build tools
-- **No install scripts**: `better-sqlite3` uses `prebuild-install` or `node-gyp rebuild`, both blocked by default in secure npm configurations
-- **Maintenance**: `node:sqlite` is maintained by the Node.js team; `better-sqlite3` is a third-party dependency
+The read path, FTS retrieval, ranking, and additional evidence tables are implemented. The deployment does **not** currently satisfy the persistence intent:
 
-### Why Candidate Identity is Separate from Provider State
+- The API uses an in-memory database when `DISCOVERY_DB` is unset.
+- Root Compose neither sets `DISCOVERY_DB` nor mounts a discovery volume.
+- Observation `checked_at` is stored, but active ranking does not enforce freshness or expiry.
+- Exact identity is preserved in SQLite but collapses to hash-only in combined merge and downstream request boundaries.
+- There is no schema-version/migration runner, busy timeout, explicit checkpoint lifecycle, run lock, or transaction API.
 
-**Problem**: Storing `cached: true` directly on a candidate couples identity to provider state.
-
-**Consequences of coupling**:
-- Multiple providers cannot observe the same candidate independently
-- Provider state refresh requires mutating the candidate
-- Adding a new provider requires schema migration
-- Provider observation failure corrupts the candidate
-
-**Solution**: Two-table design where `provider_observations` references candidates by `(info_hash, file_index)` but stores independent observation rows.
-
-**Benefits**:
-- Providers refresh observations without touching candidates
-- New providers are added by inserting observation rows
-- Observation failures don't corrupt candidate data
-- Each observation has its own TTL/expiration via `checked_at`
-
-### Why Write-Through Only (Initially)
-
-**Read-through** (cache-first) introduces staleness concerns: users may see outdated results. **Write-through** (cache-aside) keeps live discovery authoritative while building the cache substrate for future background ingestion.
-
-## Alternatives Considered
-
-| Alternative | Rejected Because |
-|-------------|------------------|
-| `better-sqlite3` | Native compilation issues in Alpine; blocked install scripts |
-| `node:sqlite` async API | Sync API is sufficient for write-through; simpler code |
-| JSON file store | No query capability; concurrent write issues |
-| Redis | External dependency; overkill for single-host deployment |
-| Single table with embedded provider state | Couples identity to provider state; not extensible |
+“SQLite discovery cache” therefore describes the chosen storage architecture, not proof that current deployment is durable or identity-safe end to end.
 
 ## Consequences
 
-- **Positive**: Background discovery, ranking, and provider workers can now be built on a persistent substrate
-- **Positive**: Cache is additive — live discovery behavior unchanged
-- **Negative**: Storage growth requires monitoring (mitigated by SQLite's efficiency and WAL checkpointing)
-- **Negative**: Cache read path not yet implemented (planned for future)
+### Positive
 
-## Future Extensibility
+- Candidate, evidence, media identity, and provider state remain distinct.
+- New providers do not require fields on candidate rows.
+- FTS and relational queries can support a large local corpus without a separate database service.
+- The model can grow toward placements/bindings/events while remaining single-host.
 
-This design supports:
-- Background scrapers writing to `candidates`
-- DMM hashlist ingestion feeding the same pipeline
-- RTN/ranking operating on the cached corpus
-- Provider workers refreshing `provider_observations` independently
-- Read-through query path when staleness requirements are defined
+### Required follow-up
+
+- Persist `DISCOVERY_DB` in deployment and test restart recovery.
+- Add schema versions/migrations and a bounded ingestion lifecycle.
+- Define provider observation state, scope, TTL, error category, current projection, and event history.
+- Propagate exact `releaseKey`/`fileIndex` through all external boundaries.
+- Benchmark measured whole-corpus ingestion/query/maintenance behavior before reconsidering storage.
+
+## Rejected alternatives
+
+| Alternative | Reason |
+|---|---|
+| Provider state embedded in candidates | Couples mutable, provider-specific observations to exact release identity |
+| JSON files | Weak query/index/concurrency behavior |
+| Redis | Adds an external service without durable relational evidence modeling |
+| `better-sqlite3` | Unnecessary native dependency for the Node 24 target |
+| Immediate Postgres/database migration | No measured workload demonstrates that SQLite is the limiting factor |
+
+See [`../data-model.md`](../data-model.md) for current and target state and [`../roadmap.md`](../roadmap.md) for remediation order.

@@ -1,5 +1,7 @@
 # Structured importer progress proposal
 
+> **ARCHIVED PROPOSAL:** Not implemented and not current status behavior. Current project direction is in [`../../HANDOFF.md`](../../HANDOFF.md); this file remains useful only as design evidence for physical-import progress ownership.
+
 Status richer than queued/processing/done/failed must be authored by torbox-importer. media-search must not infer it from logs, stdout, SQLite, torrent contents, or filesystem side effects.
 
 ## Recommended v1 extension

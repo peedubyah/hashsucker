@@ -1,6 +1,8 @@
 # Enrichment Architecture
 
-This document describes the media identity enrichment system that resolves DMM candidates to known media IDs (IMDb, TMDB).
+> **ARCHIVED SUPERSEDED DESIGN:** Non-authoritative. Current enrichment boundaries and defects are consolidated into [`../architecture.md`](../architecture.md), [`../data-model.md`](../data-model.md), and [`../known-gaps.md`](../known-gaps.md).
+
+This document described the media identity enrichment system as understood at the time.
 
 ## 1. Enrichment Boundary
 
@@ -123,7 +125,7 @@ CREATE TABLE candidate_media (
 
 ### 5.1 Parser Audit Results
 
-For comprehensive parser and enrichment metrics against 62 real DMM corpus samples, see the [Enrichment Evaluation Report](evaluation/ENRICHMENT-EVALUATION-2026-08-21.md).
+For the bounded historical parser and mock-catalog fixture metrics against 62 release filename samples, see the [Enrichment Evaluation Report](../evaluation/ENRICHMENT-EVALUATION-2026-08-21.md).
 
 **Key findings (2026-08-21):**
 - Parser success: 100% (62/62 samples)

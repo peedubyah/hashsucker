@@ -3,34 +3,46 @@
 **Date:** 2026-08-21T04:11:10.678Z
 **Total Samples:** 62
 
+> **Scope:** Bounded fixture experiment over 62 labeled release filenames embedded in `media-search/test/enrichment-evaluation.js`. “Parser success” means a parser result was produced. Enrichment used that script’s handcrafted mock Cinemeta catalog, not the live service, and counted any returned match without validating its media ID against an authoritative expected ID. Results are parser extraction/correctness and fixture-match coverage—not production identity-resolution accuracy. This does not validate DMM transport, whole-corpus ingestion, selected-media retrieval, ranking, or production behavior.
+
+## Reproduction and provenance
+
+Run from `media-search/` with the repository revision that produced this report:
+
+```sh
+node test/enrichment-evaluation.js
+```
+
+The script contains its fixtures and mock catalog inline and writes `test/ENRICHMENT-EVALUATION.md`; the dated file in `docs/evaluation/` was retained as the 2026-08-21 evidence snapshot. No pinned Git commit or DMM source-fragment provenance was recorded, so exact regeneration requires the contemporaneous repository revision and manual comparison. A future evaluation should emit the authoritative dated path and record generator commit, fixture provenance, expected media IDs, and deterministic assertions.
+
 ## Executive Summary
 
-| Metric | Value | Rate |
-|--------|-------|------|
-| Parser Success | 62/62 | 100.0% |
-| Enrichment Success | 55/62 | 88.7% |
+| Metric | Value | Coverage |
+|--------|-------|----------|
+| Parser produced a result | 62/62 | 100.0% |
+| Mock-catalog match returned | 55/62 | 88.7% |
 | Parser Avg Confidence | 0.964 | - |
-| Enrichment Avg Confidence | 0.744 | - |
+| Match Avg Confidence | 0.744 | - |
 
-## 1. Parser Success Metrics
+## 1. Parser field metrics
 
-| Field | Extracted | Correct | Rate |
-|-------|-----------|---------|------|
-| Title | 62/62 | 60/62 | 100.0% |
-| Year | 42/62 | 40/42 | 67.7% |
-| Season | 15/62 | - | 24.2% |
-| Episode | 15/62 | - | 24.2% |
-| Media Type | 62/62 | - | 100.0% |
+| Field | Extraction coverage | Correctness where labeled/extracted |
+|-------|---------------------|-------------------------------------|
+| Title | 62/62 (100.0%) | 60/62 (96.8%) |
+| Year | 42/62 (67.7%) | 40/42 (95.2%) |
+| Season | 15/62 (24.2%) | Not evaluated |
+| Episode | 15/62 (24.2%) | Not evaluated |
+| Media Type | 62/62 (100.0%) | Not evaluated |
 
-## 2. Identity Resolution
+## 2. Mock-catalog fixture match coverage
 
 | Metric | Value |
 |--------|-------|
-| Matched | 55 |
-| Unmatched | 7 |
-| Avg Confidence | 0.744 |
+| Match returned | 55 |
+| No match returned | 7 |
+| Avg match confidence | 0.744 |
 
-### By Source
+### By mock source label
 
 | Source | Count |
 |--------|-------|
@@ -98,7 +110,7 @@
 
 | Priority | Area | Issue | Impact | Recommendation |
 |----------|------|-------|--------|----------------|
-| HIGH | Parser Improvements | Year extraction failures | 32.3% of titled releases | Add year patterns for edge cases (year at start, year in parentheses) |
+| HIGH | Parser Improvements | Year absent from parser output | 20/62 samples (32.3%); 2 additional extracted years were incorrect | Add year patterns for edge cases (year at start, year in parentheses) |
 | HIGH | Alternate Title Support | Foreign language titles | 8 samples | Add TMDB/IMDb as enrichment source for better foreign title matching |
 | MEDIUM | Provider Additions | Ambiguous titles (multiple matches) | 11 samples | Add TMDB for disambiguation (year + title matching) |
 | LOW | Parser Improvements | Pack/collection detection | 5 samples | Add patterns for detecting collections, trilogies, sagas |

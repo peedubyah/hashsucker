@@ -1,9 +1,11 @@
 # UI Directory
 
-This directory is reserved for the future frontend application.
+> **ARCHIVED REDUNDANT PLACEHOLDER:** Non-authoritative. The actual frontend is documented in [`../../ui/README.md`](../../ui/README.md).
 
-The current backend runtime serves API endpoints from `src/server/` and does
-not include a bundled frontend. A separate branch will add the frontend
+This directory was reserved for a future frontend application.
+
+The backend runtime served API endpoints from `src/server/` and did
+not include a bundled frontend. A separate branch was expected to add the frontend
 into this directory.
 
 ## Backend API

@@ -1,220 +1,162 @@
-# Data Model
+# Data model
 
-Persistent storage uses SQLite (Node.js built-in `node:sqlite`) in WAL mode.
+**Verified baseline:** 2026-08-21. Implemented tables are described separately from target entities. Target entities do not exist yet.
 
-**Database path:** Configurable via `DISCOVERY_DB` env var or `dbPath` to `createDiscoveryCache()`. Defaults to in-memory.
+## Identity vocabulary
 
----
+### Exact release candidate
 
-## 1. candidates
+The current database key is `(info_hash, file_index_key)`, where `file_index_key = -1` represents a null raw file index.
 
-**Purpose:** Normalized torrent/file identity — what came from discovery sources.
+The target public/logging key is:
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `info_hash` | TEXT NOT NULL | 40-char hex infoHash |
-| `file_index` | INTEGER | Raw file index (null for single-file) |
-| `file_index_key` | INTEGER NOT NULL DEFAULT -1 | -1 when file_index is null (for PK) |
-| `search_key` | TEXT | Search grouping key |
-| `title` | TEXT | Display title |
-| `filename` | TEXT | Original release filename |
-| `size` | INTEGER | File size in bytes |
-| `seeders` | INTEGER | Peer count (null from DMM) |
-| `leechers` | INTEGER | Peer count (null from DMM) |
-| `publish_date` | TEXT | Publication date |
-| `magnet` | TEXT | Magnet URI |
-| `download_url` | TEXT | Direct download URL |
-| `metadata` | TEXT NOT NULL DEFAULT '{}' | JSON blob for extensibility |
-| `sources` | TEXT NOT NULL DEFAULT '[]' | JSON array of source references |
-| `first_seen` | INTEGER NOT NULL | Timestamp (ms) of first observation |
-| `last_seen` | INTEGER NOT NULL | Timestamp (ms) of last observation |
+$$
+\text{releaseKey} = \operatorname{lower}(\text{infoHash}) + ":" +
+\begin{cases}
+\text{"torrent"} & \text{if fileIndex is null} \\
+\text{fileIndex} & \text{otherwise}
+\end{cases}
+$$
 
-**Primary key:** `(info_hash, file_index_key)` — exact identity, no fuzzy merging.
+`fileIndex = null` means torrent-level or unknown-file evidence. It never means file zero. Hash grouping may be a presentation feature but must not deduplicate exact candidates.
 
-**Allowed writers:**
-- `upsertCandidate()` — called by `ingestCandidates()` and `ingestEntry()`
-- Direct cache API (rare)
+### Separate target identities
 
-**Invariants:**
-- Identity is physical `(infoHash, fileIndex)`, not media identity
-- `first_seen` preserved on update, `last_seen` always updated
-- Scalar fields: incoming non-null values fill existing nulls (don't overwrite)
-- `sources`: set-union by source key
-- `metadata`: shallow merge
+- **Media intent/item:** canonical movie or episode identity.
+- **Release candidate:** exact corpus/live evidence identified by `releaseKey`.
+- **Provider placement:** provider plus provider-owned resource ID and normalized hash.
+- **Provider file:** a file from the provider-authoritative inventory for a placement.
+- **Library item:** provider-independent logical media item/edition.
+- **Binding:** a versioned mapping from canonical path/item to one validated provider file.
 
-**Indexes:**
-- `idx_candidates_last_seen` — for age-based queries
-- `idx_candidates_search_key` — for search grouping
+Do not overload one identity with another.
 
----
+## Current discovery schema
 
-## 2. release_attributes
+The discovery database uses Node’s `node:sqlite` in WAL mode. `DISCOVERY_DB` selects a file; without it the server uses an in-memory database.
 
-**Purpose:** Parsed filename metadata — evidence about what the release contains.
+### `candidates`
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `info_hash` | TEXT NOT NULL | FK to candidates |
-| `file_index` | INTEGER | FK to candidates |
-| `file_index_key` | INTEGER NOT NULL DEFAULT -1 | FK to candidates |
-| `source` | TEXT NOT NULL | Parser source ('ptn-regex', etc.) |
-| `filename` | TEXT NOT NULL | Raw filename preserved |
-| `confidence` | REAL NOT NULL DEFAULT 0.5 | Parser confidence 0.0–1.0 |
-| `title` | TEXT | Guessed title |
-| `year` | INTEGER | Release year |
-| `media_type` | TEXT | 'movie', 'episode', 'unknown' |
-| `season` | INTEGER | Season number |
-| `episode` | INTEGER | Episode number |
-| `episode_range` | TEXT | Episode range (e.g., "1-3") |
-| `resolution` | TEXT | '1080p', '2160p', etc. |
-| `source_type` | TEXT | 'WEB-DL', 'BluRay', etc. |
-| `codec` | TEXT | 'x264', 'x265', etc. |
-| `hdr` | INTEGER | 0 or 1 |
-| `audio` | TEXT | 'AAC', 'DTS', etc. |
-| `language` | TEXT | Language code |
-| `release_group` | TEXT | Release group name |
-| `evidence` | TEXT | JSON array of evidence tags |
-| `parsed_at` | INTEGER NOT NULL | Timestamp (ms) |
+Exact normalized torrent/file observations.
 
-**Primary key:** `(info_hash, file_index_key, source)` — one row per candidate per parser source.
+- Primary key: `(info_hash, file_index_key)`.
+- Stores raw `file_index`, release/title/filename, size, swarm/date/link fields, metadata, source references, and first/last-seen timestamps.
+- Current ingest merge preserves `first_seen`, updates `last_seen`, overwrites existing scalar fields when a present incoming value is supplied, unions sources, and fills only missing metadata keys.
+- This is physical release evidence, not media identity or provider state.
 
-**Allowed writers:**
-- `storeReleaseAttributes()` — called by attribute worker
-- `storeReleaseAttributesBatch()` — batch store
+### `release_attributes`
 
-**Invariants:**
-- Evidence only — NOT media identity
-- Higher confidence wins on conflict (same source overwrite)
-- Equal confidence → latest wins (update allowed)
-- Lower confidence is skipped
-- Raw filename ALWAYS retained
-- Multiple parsers can contribute (different sources)
+Parser output and release evidence.
 
-**Indexes:**
-- `idx_release_attributes_source`
-- `idx_release_attributes_parsed_at`
+- Primary key: `(info_hash, file_index_key, source)`.
+- Stores raw filename, parser confidence, title/year/type/episode evidence, quality attributes, language/group, evidence tags, and parse time.
+- A later write for the same source unconditionally replaces the stored row, even when its confidence is lower; different parser sources may coexist.
+- Parsing evidence is not proof of a media association.
 
----
+### `candidate_media`
 
-## 3. candidate_media
+Candidate-to-media associations.
 
-**Purpose:** Media identity associations — links candidates to known media IDs.
+- Primary key: `(info_hash, file_index_key, media_id)`.
+- Stores source, confidence, evidence, and association time.
+- Associations are currently additive. Weak or incorrect associations have no implemented correction/retraction lifecycle.
+- Current search may use the strongest association rather than one matching the selected media.
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `info_hash` | TEXT NOT NULL | FK to candidates |
-| `file_index_key` | INTEGER NOT NULL DEFAULT -1 | FK to candidates |
-| `media_id` | TEXT NOT NULL | 'tt1234567' or 'tt1234567:1:1' |
-| `source` | TEXT NOT NULL DEFAULT 'search' | Source of association ('cinemeta', etc.) |
-| `confidence` | REAL NOT NULL DEFAULT 1.0 | Association confidence 0.0–1.0 |
-| `evidence` | TEXT | JSON array of evidence tags |
-| `associated_at` | INTEGER NOT NULL | Timestamp (ms) |
+### `provider_observations`
 
-**Primary key:** `(info_hash, file_index_key, media_id)` — one association per media ID per candidate.
+Latest provider-specific cache observation per exact candidate.
 
-**Allowed writers:**
-- `associateMedia()` — direct API
-- `upsertMediaAssociation()` — merge on conflict
-- `enrichCandidate()` — via enrichment worker
+- Primary key: `(info_hash, file_index_key, provider)`.
+- Stores nullable `cached`, evidence, and `checked_at`.
+- Provider state remains separate from candidates.
+- Only the latest value is retained; there is no event history, status/error taxonomy, observation scope, or enforced TTL.
+- Ranking currently ignores `checked_at`, so documentation must not claim that observations expire operationally.
 
-**Invariants:**
-- Additive only — never removes existing associations
-- Higher confidence wins on conflict (equal → latest wins)
-- Lower confidence is skipped
-- Source attribution preserved
-- Evidence tags mandatory
-- For series with season/episode: `media_id` format is `${id}:${season}:${episode}`
+### `release_search`
 
-**Indexes:**
-- `idx_candidate_media_media_id` — for reverse lookup
+FTS5 copy of searchable release attributes using the `porter unicode61` tokenizer. Insert/update/delete triggers synchronize it with `release_attributes`.
 
----
+FTS is retrieval evidence only. It is not proof of media identity, desirability, provider state, or fulfillment.
 
-## 4. provider_observations
+### Current relationships
 
-**Purpose:** Provider-specific cache state — separate from candidate identity.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `info_hash` | TEXT NOT NULL | FK to candidates |
-| `file_index` | INTEGER | FK to candidates |
-| `file_index_key` | INTEGER NOT NULL DEFAULT -1 | FK to candidates |
-| `provider` | TEXT NOT NULL | 'torbox', 'realdebrid', etc. |
-| `cached` | INTEGER | 0, 1, or null (unknown) |
-| `evidence` | TEXT | JSON array |
-| `checked_at` | INTEGER NOT NULL | Timestamp (ms) |
-
-**Primary key:** `(info_hash, file_index_key, provider)` — one observation per provider.
-
-**Allowed writers:**
-- `recordProviderObservation()` — only write path
-- Ingestion (if providerObservations supplied)
-
-**Invariants:**
-- Provider state NEVER stored in candidates
-- Independent refresh per provider
-- Observations expire independently via `checked_at`
-
-**Indexes:**
-- `idx_observations_checked_at` — for TTL queries
-
----
-
-## 5. release_search
-
-**Purpose:** FTS5 full-text search index over release_attributes.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `title` | — | Parsed release title |
-| `filename` | — | Raw filename |
-| `resolution` | — | 1080p, 720p, etc. |
-| `source_type` | — | BluRay, WEB-DL, etc. |
-| `codec` | — | x264, x265 |
-| `audio` | — | AAC, DTS, etc. |
-| `release_group` | — | Release group name |
-| `language` | — | Language code |
-| `media_type` | — | movie, episode, unknown |
-
-**Tokenizer:** `porter unicode61`
-
-**Sync:** Auto-maintained via triggers on `release_attributes`:
-- `release_attributes_ai` — AFTER INSERT
-- `release_attributes_ad` — AFTER DELETE
-- `release_attributes_au` — AFTER UPDATE
-
-**Allowed writers:** None directly — triggers maintain automatically.
-
-**Invidences:**
-- FTS5 is for retrieval only — not responsible for provider availability or quality
-- Stores its own copy of searchable fields (external content would be more complex)
-
----
-
-## Relationships
-
-```
-candidates (1) ──────────────── (0..*) release_attributes
-  │                                    │
-  │                                    └──→ release_search (FTS5, auto-sync)
-  │
-  ├────────────────────────────────── (0..*) candidate_media
-  │
-  └────────────────────────────────── (0..*) provider_observations
+```mermaid
+erDiagram
+    CANDIDATES ||--o{ RELEASE_ATTRIBUTES : has
+    CANDIDATES ||--o{ CANDIDATE_MEDIA : associated_with
+    CANDIDATES ||--o{ PROVIDER_OBSERVATIONS : observed_by
+    RELEASE_ATTRIBUTES ||--|| RELEASE_SEARCH : indexed_as
 ```
 
-- One candidate has zero or many release_attributes (different parser sources)
-- One candidate has zero or many candidate_media (different media associations)
-- One candidate has zero or many provider_observations (one per provider)
-- release_search is a denormalized index, not a separate entity
+## Current enforcement gaps
 
----
+- Exact database identity collapses to info hash during combined merge, React keys, request handoff, and importer request persistence.
+- Local retrieval does not require an association to the selected media ID.
+- Additive associations can make weak false positives sticky.
+- Episode associations can be constructed without validating actual episode existence.
+- Provider observations have no freshness/error lifecycle and no append-only history.
+- There are no schema versions, migration runner, ingestion run lock, checkpoint lifecycle, or transaction API.
+- Root Compose does not persist this database.
 
-## Key Design Decisions
+## Current physical-import state
 
-1. **Exact identity:** `(info_hash, file_index_key)` with no fuzzy merging
-2. **Separate tables:** Provider state and media identity are not part of candidate
-3. **Evidence vs identity:** Release attributes are evidence, not media identity
-4. **Additive enrichment:** Media associations only add, never remove
-5. **Multiple parsers:** Different parser sources can contribute to same candidate
-6. **FTS5 auto-sync:** Triggers maintain the search index automatically
+`torbox-importer` owns a separate SQLite database and filesystem spool. It persists request/job/provider/Arr state sufficient for crash recovery and guarded physical import, but request identity includes `info_hash` only—not `fileIndex` or `releaseKey`.
+
+The spool directories are:
+
+```text
+incoming/ → processing/ → done/
+                       ↘ failed/
+```
+
+Queue JSON plus importer SQLite are physical-mode implementation details. They must not become the model for virtual desired state.
+
+## Target control-plane entities
+
+These are recommendations, not implemented schema.
+
+### Corpus lifecycle
+
+- `ingest_runs`: run ID, source revision, start/end/status, counts, error.
+- `source_fragments`: source path, SHA/ETag, parser version, status, attempts, checkpoint.
+- Bounded transaction and WAL checkpoint metadata.
+
+### Release intelligence
+
+- Versioned parser outputs and correctable media associations.
+- Conservative release-family relationships with role, confidence, evidence, and version.
+- Provider-independent release desirability/explanation.
+- Provider-specific cache priors with feature/model version and decision context.
+
+Release desirability, cache prior, and confirmed provider state remain separate fields/concepts.
+
+### Provider observations and placements
+
+- Current provider-observation projection with state (`cached`, `uncached`, `unknown`, `error`), scope, checked/expires time, latency, and error category.
+- Append-only provider-observation events with request/batch/check reason.
+- Placements with provider resource ID, normalized hash, ownership/provenance, state, timestamps, and failure.
+- Provider-authoritative file inventories keyed within a placement, including path/name/size/selection and mapping evidence.
+- Mount/exposure observations separate from placement state.
+
+A placement or mount failure never rewrites an authoritative cache result to `uncached`.
+
+### Canonical library
+
+- `library_items`: stable provider-independent media/edition identity and desired state.
+- `library_paths`: deterministic user-facing path with uniqueness/collision policy.
+- `bindings`: item/path to exact candidate, placement, and provider file; version, status, reason, `validFrom`, optional `supersededAt`, reconciliation time, and failure category.
+- `library_events`: requested, checked, placed, exposed, mapped, bound, scanned, playable, degraded, rebound, removed, and failed events.
+
+A canonical path is a logical projection, not proof that bytes, mount, catalog entry, or playback are healthy.
+
+### Outcomes and evaluation
+
+- `fulfillment_outcomes`: request/library item, exact `releaseKey`, family/policy/model versions, provider, placement/binding versions, stages reached, typed terminal outcome, bytes/files, catalog/Arr result, and timestamps.
+- Incorrect media, wrong episode, mapping ambiguity, mount failure, Arr rejection, and provider cache results retain distinct labels.
+- Never store provider tokens, signed URLs, WebDAV credentials, or sensitive response bodies in telemetry.
+
+## Storage direction
+
+SQLite remains the default for a single-host control plane. Existing corpus-size estimates are contradictory and no whole-corpus reproducible benchmark exists. Do not migrate databases based on estimates alone. Gate any change on measured ingestion throughput, FTS/query latency, write amplification, WAL/backup behavior, contention, and restart recovery.
+
+See [`audit/8-21-audit.md`](audit/8-21-audit.md) for detailed evidence and [`roadmap.md`](roadmap.md) for staged implementation.

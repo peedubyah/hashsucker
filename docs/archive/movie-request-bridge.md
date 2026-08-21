@@ -1,10 +1,12 @@
 # Queue-driven movie request bridge
 
+> **ARCHIVED BRIDGE DESIGN:** Superseded by the current importer captured under `torbox-importer/`. This document and patch record pre-deployment provenance, not current deployment state or authority.
+
 ## Authority and scope
 
-The existing torbox-importer legacy movie path is live-proven through cached TorBox acquisition, confident movie classification, exact selected-file download, Radarr ManualImport, command and post-import verification, empty staging, provider cleanup, and job completion. The bridge does not replace or redesign `process-movie.sh`; it connects explicit `mediaType=movie`, `scope=movie` queue requests to that processor.
+The existing torbox-importer legacy movie path was live-proven through cached TorBox acquisition, confident movie classification, exact selected-file download, Radarr ManualImport, command and post-import verification, empty staging, provider cleanup, and job completion. The bridge did not replace or redesign `process-movie.sh`; it connected explicit `mediaType=movie`, `scope=movie` queue requests to that processor.
 
-The complete proposed importer diff is in `docs/torbox-importer-movie-bridge.patch`. It was prepared against fresh read-only copies from `/mnt/database/appdata/torbox-importer` on 2026-08-19. It has not been deployed to Tower.
+The complete proposed importer diff is in `torbox-importer-movie-bridge.patch`. It was prepared against fresh read-only copies from `/mnt/database/appdata/torbox-importer` on 2026-08-19. This archived design predates promotion of the current repository importer.
 
 ## Minimal importer changes
 
