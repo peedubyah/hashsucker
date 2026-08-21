@@ -13,7 +13,13 @@ Relative to the same origin (e.g., `/api/...`).
 
 ### GET /api/search?q=QUERY
 
+<<<<<<< HEAD
 Search for titles by query string (Cinemeta catalog).
+=======
+Search for titles by query string. Provider-agnostic: the backend owns
+which metadata providers are queried (Cinemeta today, TMDB in future).
+Results are cached in-memory for fast typeahead responses.
+>>>>>>> github/frontend/vite
 
 **Request:**
 ```
@@ -27,12 +33,24 @@ GET /api/search?q=Black+Mirror
     {
       "id": "tt2085059",
       "type": "series",
+<<<<<<< HEAD
       "name": "Black Mirror",
       "poster": "https://m.media-amazon.com/images/...",
       "year": "2011-",
       "description": null
     }
   ],
+=======
+      "title": "Black Mirror",
+      "year": 2011,
+      "posterUrl": "https://m.media-amazon.com/images/...",
+      "backdropUrl": null,
+      "overview": "A dark anthology series exploring technology"
+    }
+  ],
+  "requestId": "req-1",
+  "fromCache": false,
+>>>>>>> github/frontend/vite
   "timings": {
     "totalMs": 106
   }
@@ -40,6 +58,7 @@ GET /api/search?q=Black+Mirror
 ```
 
 **Fields:**
+<<<<<<< HEAD
 - `results[]` — Array of title results
   - `id` — Media identifier (e.g., "tt2085059")
   - `type` — "movie" or "series"
@@ -47,11 +66,34 @@ GET /api/search?q=Black+Mirror
   - `poster` — Poster URL (nullable)
   - `year` — Year or year range (nullable)
   - `description` — Brief description (nullable)
+=======
+- `results[]` — Array of normalized media results (provider-agnostic)
+  - `id` — Media identifier (e.g., "tt2085059")
+  - `type` — "movie" or "series"
+  - `title` — Canonical title
+  - `year` — Release year (nullable)
+  - `posterUrl` — Poster image URL (nullable)
+  - `backdropUrl` — Backdrop/fanart URL (nullable)
+  - `overview` — Brief description (nullable)
+- `requestId` — Unique request ID for stale response detection
+- `fromCache` — Whether results came from the in-memory cache
+- `errors[]` — Provider errors (omitted if all providers succeeded)
+  - `provider` — Provider name
+  - `error` — Error message
+>>>>>>> github/frontend/vite
 - `timings.totalMs` — Response time in milliseconds
 
 **Errors:**
 - 400 — Invalid query (too short/long)
 
+<<<<<<< HEAD
+=======
+**Notes:**
+- Query must be 2-120 characters
+- Frontend should debounce input; backend deduplicates concurrent identical requests
+- Slow upstream requests cannot overwrite newer results (requestId tracking)
+
+>>>>>>> github/frontend/vite
 ---
 
 ### GET /api/search?type=TYPE&mediaId=ID
@@ -277,7 +319,11 @@ GET /api/search/stats
 
 ### GET /api/media?type=TYPE&id=ID
 
+<<<<<<< HEAD
 Get media details by type and ID.
+=======
+Get media details by type and ID. Provider-agnostic.
+>>>>>>> github/frontend/vite
 
 **Request:**
 ```
@@ -290,10 +336,18 @@ GET /api/media?type=series&id=tt2085059
   "media": {
     "id": "tt2085059",
     "type": "series",
+<<<<<<< HEAD
     "name": "Black Mirror",
     "poster": "https://images.metahub.space/poster/small/tt2085059/img",
     "year": "2011–",
     "description": "Featuring stand-alone dramas...",
+=======
+    "title": "Black Mirror",
+    "year": 2011,
+    "posterUrl": "https://images.metahub.space/poster/small/tt2085059/img",
+    "backdropUrl": null,
+    "overview": "A dark anthology series...",
+>>>>>>> github/frontend/vite
     "videos": [
       {
         "id": "tt2085059:0:1",
@@ -312,10 +366,18 @@ GET /api/media?type=series&id=tt2085059
 **Fields:**
 - `media.id` — Media identifier
 - `media.type` — "movie" or "series"
+<<<<<<< HEAD
 - `media.name` — Title name
 - `media.poster` — Poster URL (nullable)
 - `media.year` — Year or year range (nullable)
 - `media.description` — Brief description (nullable)
+=======
+- `media.title` — Canonical title
+- `media.year` — Release year (nullable)
+- `media.posterUrl` — Poster URL (nullable)
+- `media.backdropUrl` — Backdrop URL (nullable)
+- `media.overview` — Brief description (nullable)
+>>>>>>> github/frontend/vite
 - `media.videos[]` — Episode list (series only)
   - `id` — Video identifier (e.g., "tt2085059:7:3")
   - `season` — Season number
@@ -329,6 +391,40 @@ GET /api/media?type=series&id=tt2085059
 
 ---
 
+<<<<<<< HEAD
+=======
+### GET /api/search/cache/metrics
+
+Get metadata cache performance metrics.
+
+**Request:**
+```
+GET /api/search/cache/metrics
+```
+
+**Response (200):**
+```json
+{
+  "hits": 150,
+  "misses": 50,
+  "evictions": 10,
+  "size": 45,
+  "maxEntries": 500,
+  "hitRatio": 0.75
+}
+```
+
+**Fields:**
+- `hits` — Total cache hits
+- `misses` — Total cache misses
+- `evictions` — Total entries evicted (TTL expiry or LRU)
+- `size` — Current number of cached entries
+- `maxEntries` — Maximum cache capacity
+- `hitRatio` — Hit ratio (0.0-1.0), null if no requests yet
+
+---
+
+>>>>>>> github/frontend/vite
 ### POST /api/requests
 
 Submit a media request for import.

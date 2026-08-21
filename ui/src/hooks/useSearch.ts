@@ -1,0 +1,55 @@
+import { useState, useCallback } from 'react';
+import { searchTitles, searchReleases, getMedia } from '@api/client';
+import type {
+  TitleSearchResult,
+  ReleaseSearchResult,
+  MediaLookupResult,
+  TitleResult,
+} from '@/types/api';
+
+export interface SearchState {
+  titles: TitleResult[] | null;
+  releases: ReleaseSearchResult | null;
+  media: MediaLookupResult | null;
+  loading: boolean;
+  error: string | null;
+}
+
+export function useSearch() {
+  const [state, setState] = useState<SearchState>({
+    titles: null,
+    releases: null,
+    media: null,
+    loading: false,
+    error: null,
+  });
+
+  const search = useCallback(async (query: string) => {
+    setState(s => ({ ...s, loading: true, error: null, releases: null, media: null }));
+    try {
+      const result: TitleSearchResult = await searchTitles(query);
+      setState(s => ({ ...s, titles: result.results, loading: false }));
+    } catch (e) {
+      setState(s => ({ ...s, loading: false, error: (e as Error).message }));
+    }
+  }, []);
+
+  const selectMedia = useCallback(async (type: string, id: string) => {
+    setState(s => ({ ...s, loading: true, error: null }));
+    try {
+      const [releases, media] = await Promise.all([
+        searchReleases(type, id),
+        getMedia(type, id),
+      ]);
+      setState(s => ({ ...s, releases, media, loading: false }));
+    } catch (e) {
+      setState(s => ({ ...s, loading: false, error: (e as Error).message }));
+    }
+  }, []);
+
+  const reset = useCallback(() => {
+    setState({ titles: null, releases: null, media: null, loading: false, error: null });
+  }, []);
+
+  return { ...state, search, selectMedia, reset };
+}

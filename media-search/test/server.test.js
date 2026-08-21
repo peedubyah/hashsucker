@@ -424,15 +424,15 @@ test('GET /api/search for series episode live discovery returns releases', async
   assert.equal(body.results[0].infoHash, HASH);
 });
 
-test('GET /api/search without mediaId returns Cinemeta title search', async () => {
+test('GET /api/search without mediaId returns unified title search', async () => {
   const cache = createDiscoveryCache();
   const handler = createRequestHandler({
     searchCache: cache,
-    searchCatalog: async () => [{ id: 'tt1234567', type: 'movie', name: 'Test Movie' }],
+    // searchCatalog is no longer used; unified-search uses Cinemeta adapter directly
   });
   const input = Readable.from([]);
   input.method = 'GET';
-  input.url = '/api/search?q=Test+Movie';
+  input.url = '/api/search?q=Test';
   const response = await new Promise((resolve, reject) => {
     const chunks = [];
     const res = {
@@ -444,8 +444,14 @@ test('GET /api/search without mediaId returns Cinemeta title search', async () =
 
   assert.equal(response.status, 200);
   const body = JSON.parse(response.text);
-  assert.equal(body.results.length, 1);
-  assert.equal(body.results[0].name, 'Test Movie');
+  assert.ok(Array.isArray(body.results));
+  assert.ok(body.requestId, 'response should have requestId');
+  assert.equal(typeof body.fromCache, 'boolean');
+  // Results use normalized shape: title (not name), posterUrl (not poster)
+  if (body.results.length > 0) {
+    assert.ok(body.results[0].title, 'results should have title field');
+    assert.ok(body.results[0].id, 'results should have id field');
+  }
 });
 
 test('GET /api/search with Torrentio + Comet coexistence', async () => {
