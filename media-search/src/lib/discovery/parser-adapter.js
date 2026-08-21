@@ -345,8 +345,8 @@ function extractTitle(cleaned, parsed) {
   title = title.replace(/[Ss]\d{1,2}[Ee]\d{1,2}(?:[-~][Ee]?\d{1,2})?/g, '');
   title = title.replace(/Season\s*\d{1,2}(?:\s*Episode\s*\d{1,2})?/gi, '');
   title = title.replace(/Episode\s*\d{1,2}/gi, '');
-  // Remove audio channel counts (e.g., "AAC2.0", "AC35.1")
-  title = title.replace(/(?:aac|ac3|dts|mp3|flac|pcm)\d(?:\.\d)?/gi, '');
+  // Remove audio channel counts (e.g., "AAC2.0", "AC35.1", "DDP5.1")
+  title = title.replace(/(?:aac|ac3|dts|mp3|flac|pcm|ddp?)\d(?:\.\d)?/gi, '');
 
   // Remove year (but preserve for parsed.year)
   title = title.replace(/(?:^|[^a-zA-Z0-9])(19[3-9]\d|20[0-3]\d)(?:[^a-zA-Z0-9]|$)/g, ' ');
@@ -361,22 +361,31 @@ function extractTitle(cleaned, parsed) {
   title = title.replace(/(x264|x265|h\.?264|h\.?265|hevc|avc|divx|xvid|mpeg-?2|vc-?1)/gi, '');
 
   // Remove audio (with optional channel count and dash handling)
-  title = title.replace(/(aac(?:\d\.\d)?|ac-?3(?:\d\.\d)?|dts[-\s]?hd(?:\d\.\d)?|dts(?:\d\.\d)?|truehd|atmos|mp3|flac|ogg|wma|pcm)/gi, '');
+  // DDP = Dolby Digital Plus, DD = Dolby Digital
+  title = title.replace(/(aac(?:\d\.\d)?|ac-?3(?:\d\.\d)?|ddp(?:\d\.\d)?|dd(?:\d\.\d)?|dts[-\s]?hd(?:\d\.\d)?|dts(?:\d\.\d)?|truehd|atmos|mp3|flac|ogg|wma|pcm)/gi, '');
 
   // Remove HDR
   title = title.replace(/(hdr(?:10)?|dv|dolby.?vision|hlg)/gi, '');
 
-  // Remove release group patterns at end
-  title = title.replace(/[-\s][a-zA-Z0-9]+$/, '');
+  // Remove streaming service tags (common in release filenames)
+  title = title.replace(/\b(nf|amzn|dsnp|hmax|atvp|hulu|disney|netflix|hbo|apple|paramount)\b/gi, '');
 
   // Remove edition
   title = title.replace(/(extended|directors.?cut|unrated|theatrical|remastered|ultimate|collectors)/gi, '');
 
   // Clean up dots, dashes, underscores
-  title = title.replace(/[._]/g, ' ');
+  title = title.replace(/[._-]/g, ' ');
 
   // Remove extra whitespace
   title = title.replace(/\s+/g, ' ').trim();
+
+  // Remove the already-extracted release group from the title
+  // The release group was extracted earlier by extractReleaseGroup()
+  if (parsed.releaseGroup) {
+    const rg = parsed.releaseGroup;
+    // Remove release group from end of title (with optional dash/space separator)
+    title = title.replace(new RegExp(`\\s*[-\\s]?\\s*${rg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i'), '').trim();
+  }
 
   return title || null;
 }
