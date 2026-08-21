@@ -2,6 +2,7 @@ import http from 'node:http';
 
 import { QueueImporterClient } from '../lib/importer/queue-client.js';
 import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
+import { searchTitles, getMediaById, getCacheMetrics } from '../lib/metadata/unified-search.js';
 import { createHandoff } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
 import { searchReleases, combinedSearch, getSearchStats } from '../lib/discovery/search-engine.js';
@@ -160,14 +161,23 @@ export function createRequestHandler(dependencies = {}) {
           });
         }
 
-        // Cinemeta title search (default): find titles by query string.
-        const results = await catalogSearch(params.get('q'));
-        return sendJson(response, 200, { results, timings: { totalMs: Math.round(performance.now() - startedAt) } });
+        // Unified title search: provider-agnostic, cache-backed.
+        const searchResult = await searchTitles(params.get('q'));
+        return sendJson(response, 200, {
+          results: searchResult.results,
+          requestId: searchResult.requestId,
+          fromCache: searchResult.fromCache,
+          errors: searchResult.errors,
+          timings: { totalMs: Math.round(performance.now() - startedAt) },
+        });
       }
       if (request.method === 'GET' && url.pathname === '/api/media') {
         const startedAt = performance.now();
-        const media = await mediaLookup(url.searchParams.get('type'), url.searchParams.get('id'));
+        const media = await getMediaById(url.searchParams.get('type'), url.searchParams.get('id'));
         return media ? sendJson(response, 200, { media, timings: { totalMs: Math.round(performance.now() - startedAt) } }) : sendJson(response, 404, { error: 'Media not found' });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/search/cache/metrics') {
+        return sendJson(response, 200, getCacheMetrics() || { error: 'Cache not available' });
       }
       if (request.method === 'POST' && url.pathname === '/api/requests') {
         const body = await readBody(request);
