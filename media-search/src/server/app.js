@@ -1,63 +1,20 @@
-import fs from 'node:fs/promises';
 import http from 'node:http';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { QueueImporterClient } from '../lib/importer/queue-client.js';
 import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { createHandoff } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
-import { searchMedia } from '../lib/search.js';
 import { searchReleases, combinedSearch, getSearchStats } from '../lib/discovery/search-engine.js';
 import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
 import { createDiscoveryCache } from '../lib/discovery/cache.js';
 import { runDMMIngestion } from '../lib/discovery/dmm-ingestion-runner.js';
 import { runAttributeWorker } from '../lib/discovery/attribute-worker.js';
 
-const UI_ROOT = fileURLToPath(new URL('../ui/', import.meta.url));
 const HASH_PATTERN = /^[a-f0-9]{40}$/i;
 
 function sendJson(response, status, body) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   response.end(JSON.stringify(body));
-}
-
-function publicRelease(release) {
-  // Structurally exclude secret-bearing fields:
-  // - magnet: may contain tracker info but not credentials
-  // - downloadUrl: MAY contain API keys in query string (Prowlarr/Torznab)
-  // - sources[].downloadUrl: same risk
-  // - behaviorHints: internal Stremio metadata
-  // - raw: raw upstream response
-  // - torznab: internal metadata
-  return {
-    key: release.key,
-    title: release.title,
-    filename: release.filename,
-    size: release.size,
-    resolution: release.resolution,
-    quality: release.quality,
-    codec: release.codec,
-    hdr: release.hdr,
-    audio: release.audio,
-    language: release.language,
-    infoHash: release.infoHash,
-    sources: release.sources?.map((s) => ({
-      id: s.id,
-      kind: s.kind,
-      instance: s.instance,
-      indexer: s.indexer,
-      role: s.role,
-      capability: s.capability,
-      provider: s.provider,
-    })) || [],
-    providers: release.providers,
-    fileIndex: release.fileIndex,
-    seeders: release.seeders,
-    leechers: release.leechers,
-    publishDate: release.publishDate,
-    trackers: release.trackers,
-  };
 }
 
 async function readBody(request) {
@@ -99,22 +56,6 @@ function validateSupportedRequest(body) {
   return { intent, release };
 }
 
-async function serveStatic(pathname, response) {
-  const relative = pathname === '/' ? 'index.html' : pathname.slice(1);
-  if (!['index.html', 'app.js', 'release-model.js', 'styles.css'].includes(relative)) return false;
-  const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
-  const body = await fs.readFile(path.join(UI_ROOT, relative));
-  response.writeHead(200, {
-    'content-type': types[path.extname(relative)],
-    // Assets use stable filenames (no content hashes), so every navigation must
-    // revalidate them to avoid mixing HTML/JS/CSS from different deployments.
-    'cache-control': 'no-cache',
-    'content-security-policy': "default-src 'self'; img-src 'self' https: data:; style-src 'self'; script-src 'self'; connect-src 'self'",
-  });
-  response.end(body);
-  return true;
-}
-
 export function createApp(dependencies = {}) {
   return http.createServer(createRequestHandler(dependencies));
 }
@@ -123,7 +64,6 @@ export function createRequestHandler(dependencies = {}) {
   const importer = dependencies.importer || new QueueImporterClient();
   const catalogSearch = dependencies.searchCatalog || searchCatalog;
   const mediaLookup = dependencies.getMedia || getMedia;
-  const releaseSearch = dependencies.searchMedia || searchMedia;
   const combinedSearchFn = dependencies.combinedSearch || combinedSearch;
   // Internal search uses a persistent discovery cache.
   // dbPath can be injected via dependencies or DISCOVERY_DB env var.
@@ -240,7 +180,6 @@ export function createRequestHandler(dependencies = {}) {
         const status = await importer.getRequestStatus(statusMatch[1]);
         return status ? sendJson(response, 200, status) : sendJson(response, 404, { error: 'Request not found' });
       }
-      if (request.method === 'GET' && await serveStatic(url.pathname, response)) return;
       sendJson(response, 404, { error: 'Not found' });
     } catch (error) {
       const isInput = /invalid|required|supported|valid JSON|too large|2–120|infoHash/i.test(error.message);

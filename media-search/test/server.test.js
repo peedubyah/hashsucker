@@ -60,24 +60,20 @@ function createHarness() {
   return { request, submitted };
 }
 
-test('server serves UI and secret-free release API', async () => {
+test('server serves API and returns 404 for frontend routes', async () => {
   const { request } = createHarness();
-  const ui = await request('/');
-  assert.match(ui.text, /Media Search/);
-  assert.match(ui.text, /styles\.css\?v=20260819-movie1/);
-  assert.match(ui.text, /app\.js\?v=20260819-movie1/);
-  assert.match((await request('/app.js')).text, /release-model\.js\?v=20260819-movie1/);
-  assert.match(ui.text, /id="drilldown"/);
-  assert.match(ui.text, /id="intent-bar"/);
-  assert.equal(ui.headers['cache-control'], 'no-cache');
-  const uiModule = await request('/release-model.js');
-  assert.match(uiModule.text, /prepareReleases/);
-  assert.equal(uiModule.headers['cache-control'], 'no-cache');
+  
+  // API endpoints work
   const response = await request('/api/search?type=series&mediaId=tt2085059:7:3');
   assert.equal(response.status, 200);
   const text = response.text;
   assert.match(text, /"cached":true/);
   assert.doesNotMatch(text, /TORBOX_SECRET|"raw"/);
+  
+  // Frontend routes return 404 (frontend removed)
+  const ui = await request('/');
+  assert.equal(ui.status, 404);
+  
   const requestId = '12345678-1234-1234-1234-123456789abc';
   const status = await request(`/api/requests/${requestId}`);
   assert.deepEqual(JSON.parse(status.text), { requestId, status: 'processing' });
