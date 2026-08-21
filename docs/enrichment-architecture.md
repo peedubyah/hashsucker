@@ -119,35 +119,26 @@ CREATE TABLE candidate_media (
 - **Equal confidence → latest wins** — Timestamp breaks ties
 - **Lower confidence is skipped** — Preserves stronger associations
 
-## 5. Parser Audit Results
+## 5. Enrichment Effectiveness
 
-### 5.1 Field Extraction Rates (20 real DMM samples)
+### 5.1 Parser Audit Results
 
-| Field | Rate |
-|-------|------|
-| title | 100% |
-| resolution | 100% |
-| source | 100% |
-| codec | 85% |
-| releaseGroup | 75% |
-| year | 60% |
-| season | 40% |
-| episode | 40% |
-| hdr | 20% |
-| audio | 15% |
+For comprehensive parser and enrichment metrics against 62 real DMM corpus samples, see the [Enrichment Evaluation Report](evaluation/ENRICHMENT-EVALUATION-2026-08-21.md).
 
-### 5.2 Parser Improvements Made
+**Key findings (2026-08-21):**
+- Parser success: 100% (62/62 samples)
+- Title extraction: 100% (62/62)
+- Enrichment success: 88.7% (55/62 samples)
+- Enrichment avg confidence: 0.744
 
-1. **DDP audio support** — Added Dolby Digital Plus (DDP5.1, DDP7.1) patterns
-2. **Streaming service tags** — Strip NF, AMZN, DSNP, HMAX, etc. from titles
-3. **Release group stripping** — Use extracted release group to clean title
-4. **Title cleaning** — Better handling of edition tags, audio channel counts
+### 5.2 Highest-Value Improvements
 
-### 5.3 Remaining Limitations
+Based on the evaluation, the highest-value improvements are:
 
-- **Audio extraction** — Only 15% (DDP/Atmos patterns need work)
-- **HDR detection** — Only 20% (HDR10+ pattern missing)
-- **Complex titles** — Some titles still include release group fragments
+1. **Parser: Year extraction** — 32.3% of titled releases have year extraction failures (edge cases like year-at-start)
+2. **Alternate title support** — Foreign language titles need TMDB/IMDb enrichment source
+3. **Provider additions** — TMDB needed for disambiguation of ambiguous titles (multiple matches)
+4. **Parser: Pack detection** — Collections, trilogies, sagas not currently detected
 
 ## 6. Identity Resolution Potential
 

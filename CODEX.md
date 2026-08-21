@@ -370,13 +370,100 @@ Never commit real credentials.
 
 ---
 
+## Safety invariants (NON-NEGOTIABLE)
+
+### Provider deletion
+
+Never delete TorBox/provider-side media unless ALL relevant conditions are proven.
+
+For request-created resources:
+
+1. The provider object is proven to belong to the request.
+2. Provider ID and expected hash/identity match.
+3. Downstream import is verified, OR an explicit already-present condition has been safely verified.
+4. No other active request depends on the provider resource.
+
+For pre-existing provider resources:
+
+- Retain them by default.
+- Do not auto-delete them merely because an import completed.
+
+Ambiguous ownership MUST fail closed.
+
+### Import identity
+
+Never weaken identity validation just to make an import succeed.
+
+Movies:
+
+- Explicit request identity must match the Radarr-classified movie identity.
+- IMDb/TMDB mapping must be proven where required.
+
+TV:
+
+- Explicit season/episode intent controls file selection.
+- No explicit episode request => do not guess.
+- Mixed requested/unrequested physical files must fail ambiguous unless explicitly supported.
+
+### Failure behavior
+
+Unexpected processor errors must become terminal failures where appropriate.
+
+Do not leave request-associated jobs in hot retry loops.
+
+Failure must preserve:
+
+- Provider resource when cleanup is not proven safe.
+- Downloaded/staged media where useful for diagnosis/resume.
+- Useful `last_error` information.
+
+### Secrets
+
+Never print, log, commit, echo, screenshot, or expose:
+
+- API keys
+- OAuth tokens
+- cookies
+- provider credentials
+- Arr API keys
+- encryption keys
+
+Use `.env`, secret storage, or documented runtime configuration.
+
+Never commit live credentials.
+
+---
+
+## Production environment
+
+The current live deployment is on Unraid.
+
+Treat Tower as production.
+
+Do not casually mutate production to make local tests pass.
+
+Preferred workflow:
+
+1. Inspect existing implementation.
+2. Reproduce or test locally where possible.
+3. Make the smallest correct change.
+4. Run syntax/static/tests.
+5. Show the diff.
+6. Back up live files.
+7. Deploy atomically.
+8. Verify live behavior.
+9. Backport any emergency live fix into the repository immediately.
+
+Live fixes MUST NOT remain Tower-only.
+
+---
+
 ## Suggested application organization
 
 The current repository layout already reflects this separation:
 
     (repo root)
-    ├── AGENTS.md          # repo-wide operator guidance
-    ├── CODEX.md           # this file, repo-wide implementation contract
+    ├── CODEX.md           # this file, repo-wide implementation contract + safety invariants
     ├── ai-handover.md     # repo-wide operational record
     ├── media-search/      # user-facing search + request service
     │   ├── src/

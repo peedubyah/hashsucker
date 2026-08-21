@@ -100,6 +100,8 @@ Key APIs:
 **Filename/title → media identity** resolution.
 
 - `src/lib/discovery/enrichment.js` — `enrichCandidate()`, `enrichCandidates()`, `getUnenrichedCandidates()`
+- `src/lib/discovery/enrichment-sources/cinemeta.js` — `enrichWithCinemeta()` (implemented)
+- `src/lib/discovery/enrichment-sources/confidence.js` — `computeConfidence()`, `titleMatchQuality()`, `yearMatch()`, `seasonEpisodeMatch()`
 
 **Contract:**
 - Input: candidate identity + available metadata (filename, title)
@@ -110,6 +112,50 @@ Key APIs:
 - Unknown matches remain unknown (no forced associations)
 - Confidence is always explicit (default 0.5 if not provided)
 - Evidence is optional but recommended (array of string tags)
+
+### 4.1 Implemented Enrichment Sources
+
+#### Cinemeta (implemented)
+
+- **File:** `src/lib/discovery/enrichment-sources/cinemeta.js`
+- **Capabilities:** Searches Cinemeta catalog by parsed title/year, produces `candidate_media` associations
+- **Pros:** No API key required, fast responses, good movie/TV coverage
+- **Cons:** Uses Cinemeta IDs (not TMDB/IMDb directly), limited season/episode matching in catalog search
+
+#### Future Sources
+
+| Source | Status | Notes |
+|--------|--------|-------|
+| TMDB | Planned | Requires API key, comprehensive |
+| TVDB | Planned | Requires API key, TV-focused |
+| IMDb | Planned | No official API, scraping only |
+| Custom | Planned | Manual associations, user corrections |
+
+### 4.2 Confidence Model
+
+```
+base: 0.5
++ title exact match: +0.2
++ title starts with: +0.1
++ title includes: +0.05
++ year match: +0.1
++ season+episode match: +0.15
+= clamped to [0.0, 1.0]
+```
+
+Refuse association when:
+- No title extracted
+- Title < 3 characters
+- Confidence < 0.5
+
+### 4.3 Enrichment Effectiveness
+
+For measured parser and enrichment success rates against 62 real DMM corpus samples, see the [Enrichment Evaluation Report](evaluation/ENRICHMENT-EVALUATION-2026-08-21.md).
+
+**Key findings (2026-08-21):**
+- Parser success: 100% (62/62 samples)
+- Enrichment success: 88.7% (55/62 samples)
+- Highest-value improvements: year extraction edge cases, foreign title support, TMDB disambiguation
 
 ### 5. Release Attributes Boundary
 
@@ -123,7 +169,7 @@ Key APIs:
 |--------|------|-------|
 | `info_hash` | TEXT | FK to candidates |
 | `file_index_key` | INTEGER | FK to candidates |
-| `source` | TEXT | Parser source (e.g., 'ptn', 'guessit') |
+| `source` | TEXT | Parser source (e.g., 'ptn-regex') |
 | `filename` | TEXT | Raw filename preserved |
 | `confidence` | REAL | Parser confidence 0.0–1.0 |
 | `title` | TEXT | Normalized title |
@@ -171,7 +217,7 @@ Key APIs:
 
 - `src/lib/discovery/parser-adapter.js` — `parseFilename()`, `createReleaseAttributes()`, `parseFilenames()`
 
-**Parser source:** `ptn-regex` (custom regex implementation based on PTN patterns)
+**Parser source:** `ptn-regex` (custom regex implementation, PTN has broken dependencies)
 
 **Contract:**
 - Parser failures do NOT break ingestion (returns null for invalid input)
@@ -230,7 +276,7 @@ listFragments() → fetchFragment() → decompress → streamParse → transform
 - Batch ingestion with configurable size
 - Metrics: records processed, inserted, updated, failed, duplicates, duration
 
-### 10. Enrichment Worker
+### 9. Enrichment Worker
 
 **Orchestration layer** that processes unenriched candidates.
 
