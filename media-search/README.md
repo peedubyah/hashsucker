@@ -11,7 +11,7 @@ Node.js API and current control-plane prototype for HashSucker.
 - Atomic publication of explicit physical-acquisition requests to a shared filesystem queue.
 - Operator-triggered DMM ingestion and attribute parsing.
 
-It does **not** serve the React application, directly place Real-Debrid content, expose WebDAV/rclone media, or maintain a canonical virtual library. See the root [`HANDOFF.md`](../HANDOFF.md) for current defects and target boundaries.
+Its production image also serves the built React application on the same origin. It does **not** directly place Real-Debrid content, expose WebDAV/rclone media, or maintain a canonical virtual library. See the root [`HANDOFF.md`](../HANDOFF.md) for current defects and target boundaries.
 
 ## Local development
 
@@ -30,7 +30,7 @@ Useful scripts:
 - `npm run search` — legacy search CLI; this is not the active server release-discovery path.
 - `npm test` — backend test suite.
 
-The API defaults to `http://localhost:3000`. `GET /health` verifies process health. `/` returns 404 because there is no static frontend route.
+The API defaults to `http://localhost:3000`. `GET /health` verifies process health. Direct `npm start` serves static files only when `STATIC_ROOT` is set; the production image sets it to the built UI at `/app/public`.
 
 For frontend development, run `npm run dev` separately in `../ui`; Vite proxies `/api` to port 3000.
 
@@ -54,16 +54,15 @@ Never expose provider tokens to browser code.
 
 ## Deployment status
 
-Root `compose.yaml` is the relevant repository topology. It currently:
+Root `compose.yaml` is the relevant repository topology. It:
 
-- deploys this API and `torbox-importer`;
-- mounts only `/requests` for this service;
-- does not set/persist `DISCOVERY_DB`;
-- does not deploy the React UI.
+- builds the React UI and backend from their lockfiles into one production image;
+- installs only backend runtime dependencies in the final image and runs as `node`;
+- serves the UI and API on one origin;
+- persists `DISCOVERY_DB=/data/discovery-cache.db` on the `discovery-data` volume;
+- publishes to `127.0.0.1` by default because mutation routes are unauthenticated.
 
-`media-search/compose.yaml` is a stale standalone topology and should not be treated as production authority until reconciled.
-
-The current Dockerfile copies source but does not install `lz-string`; clean-image deployment is a known Stage 0 defect. Do not describe the image as production-ready.
+`media-search/compose.yaml` is a stale standalone topology and should not be treated as production authority until reconciled. Local credential-bearing addon files are ignored and are not copied into production images.
 
 ## Current release-search behavior
 
@@ -75,4 +74,4 @@ The current Dockerfile copies source but does not install `lz-string`; clean-ima
 
 ## API
 
-The current HTTP contract is documented once in [`src/api/API_CONTRACT.md`](src/api/API_CONTRACT.md). Mutation routes currently have no application authentication and must remain behind a trusted boundary until Stage 0 access controls are implemented.
+The current HTTP contract is documented once in [`src/api/API_CONTRACT.md`](src/api/API_CONTRACT.md). Mutation routes currently have no application authentication. Root Compose enforces a loopback-only default; retain that setting or place an authenticated trusted reverse proxy in front.

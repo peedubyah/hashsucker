@@ -1,21 +1,23 @@
 services:
   media-search:
     build:
-      context: ./media-search
+      context: .
+      dockerfile: media-search/Dockerfile
     image: media-search:local
-    container_name: media-stack-search
     restart: unless-stopped
     environment:
       PORT: "3000"
       HOST: "0.0.0.0"
       REQUESTS_ROOT: /requests
+      DISCOVERY_DB: /data/discovery-cache.db
       TORBOX_API_KEY: ${TORBOX_API_KEY:?Set TORBOX_API_KEY in .env}
       REALDEBRID_API_KEY: ${REALDEBRID_API_KEY:-}
       COMET_MANIFEST_URL: ${COMET_MANIFEST_URL:-}
       TORZNAB_URLS: ${TORZNAB_URLS:-}
     ports:
-      - "${MEDIA_SEARCH_PORT:-3000}:3000"
+      - "${MEDIA_SEARCH_BIND_ADDRESS:-127.0.0.1}:${MEDIA_SEARCH_PORT:-3000}:3000"
     volumes:
+      - discovery-data:/data
       - ${REQUESTS_HOST_PATH:?Set REQUESTS_HOST_PATH in .env}:/requests
     group_add:
       - "${MEDIA_SEARCH_QUEUE_GID:-100}"
@@ -26,11 +28,11 @@ services:
     build:
       context: ./torbox-importer
     image: torbox-importer:local
-    container_name: media-stack-importer
     restart: unless-stopped
     user: "${PUID:-99}:${PGID:-100}"
     environment:
       TORBOX_API_KEY: ${TORBOX_API_KEY:?Set TORBOX_API_KEY in .env}
+      TORBOX_API_URL: ${TORBOX_API_URL:-https://api.torbox.app/v1/api}
       TORBOX_DB: /config/state/torbox-importer.db
       POLL_INTERVAL: "${POLL_INTERVAL:-10}"
       RADARR_URL: ${RADARR_URL:?Set RADARR_URL in .env}
@@ -45,6 +47,8 @@ services:
       - ${TORBOX_IMPORTER_HOST_PATH:?Set TORBOX_IMPORTER_HOST_PATH in .env}:/config
       - ${REQUESTS_HOST_PATH:?Set REQUESTS_HOST_PATH in .env}:/requests
       - ${DOWNLOADS_HOST_PATH:?Set DOWNLOADS_HOST_PATH in .env}:/downloads
-    command: ["/app/scripts/worker.sh"]
     security_opt:
       - no-new-privileges:true
+
+volumes:
+  discovery-data:

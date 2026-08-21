@@ -35,11 +35,13 @@ A legacy no-request movie cleanup path can return `delete-legacy`; this policy r
 
 ## Runtime
 
-Root Compose runs:
+The image and root Compose both use this normal container lifecycle:
 
 ```text
 /app/scripts/worker.sh
 ```
+
+The worker initializes its SQLite database, resumes/claims requests, scans TorBox, dispatches jobs, and polls continuously. `TORBOX_API_URL` may override the API base for isolated testing; production uses the TorBox default.
 
 Important paths:
 

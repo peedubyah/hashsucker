@@ -10,14 +10,14 @@ HashSucker is evolving from a discovery-plus-local-import prototype into a contr
 
 ```mermaid
 flowchart LR
-    UI["React/Vite UI\nseparate and undeployed"]
-    API["media-search Node API\nno application auth"]
+    UI["React/Vite UI\nbuilt into media-search image"]
+    API["media-search Node API\nloopback default, no application auth"]
     META["Cinemeta metadata"]
     LOCAL["SQLite FTS retrieval\nnot selected-media scoped"]
     SCORE["Local six-part rank"]
     LIVE["Torrentio / Comet / Torznab"]
     MERGE["Hash-only merge\nlive score = 0"]
-    DB[("Discovery SQLite\nroot Compose defaults to memory")]
+    DB[("Discovery SQLite\npersistent Compose volume")]
     DMM["DMM fragments"]
     INGEST["HTTP ingestion\nwrapper mismatch"]
     QUEUE["Filesystem queue"]
@@ -25,7 +25,7 @@ flowchart LR
     TORBOX["TorBox"]
     ARR["Sonarr / Radarr"]
 
-    UI -. dev API calls .-> API
+    UI --> API
     API --> META
     API --> LOCAL --> SCORE --> MERGE
     LOCAL --> DB
@@ -37,10 +37,10 @@ flowchart LR
 
 ### Current components
 
-- **`media-search`** owns metadata lookup, discovery storage, local retrieval/ranking, live-source normalization, request publication, and operator-triggered ingestion/attribute work.
-- **Discovery SQLite** separates exact candidates, parsed release evidence, media associations, provider observations, and FTS data. Root deployment does not currently persist it.
-- **`ui`** is a standalone React/Vite prototype. It is neither built into `media-search` nor deployed separately by Compose.
-- **`torbox-importer`** owns physical TorBox acquisition, staging, provider/hash reconciliation, file selection, Arr validation/import, settlement, and conservative cleanup.
+- **`media-search`** owns metadata lookup, discovery storage, local retrieval/ranking, live-source normalization, request publication, operator-triggered ingestion/attribute work, and same-origin static UI serving in production.
+- **Discovery SQLite** separates exact candidates, parsed release evidence, media associations, provider observations, and FTS data. Root deployment persists it at `/data/discovery-cache.db` on the `discovery-data` volume.
+- **`ui`** is a React/Vite prototype built into the production `media-search` image; Vite remains separate for local development.
+- **`torbox-importer`** starts its worker by default and owns physical TorBox acquisition, staging, provider/hash reconciliation, file selection, Arr validation/import, settlement, and conservative cleanup.
 - **Filesystem queue** is the authority for physical-acquisition ownership and terminal movement.
 
 ### Current strengths

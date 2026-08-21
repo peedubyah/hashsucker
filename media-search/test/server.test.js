@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { Readable } from 'node:stream';
 import test from 'node:test';
 
@@ -60,23 +63,64 @@ function createHarness() {
   return { request, submitted };
 }
 
-test('server serves API and returns 404 for frontend routes', async () => {
+test('server serves API and returns 404 when no frontend build is configured', async () => {
   const { request } = createHarness();
-  
-  // API endpoints work
+
   const response = await request('/api/search?type=series&mediaId=tt2085059:7:3');
   assert.equal(response.status, 200);
   const text = response.text;
   assert.match(text, /"cached":true/);
   assert.doesNotMatch(text, /TORBOX_SECRET|"raw"/);
-  
-  // Frontend routes return 404 (frontend removed)
+
   const ui = await request('/');
   assert.equal(ui.status, 404);
-  
+
   const requestId = '12345678-1234-1234-1234-123456789abc';
   const status = await request(`/api/requests/${requestId}`);
   assert.deepEqual(JSON.parse(status.text), { requestId, status: 'processing' });
+});
+
+test('server serves the built frontend and preserves API 404s', async (t) => {
+  const staticRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hashsucker-ui-'));
+  t.after(() => fs.rm(staticRoot, { recursive: true, force: true }));
+  await fs.mkdir(path.join(staticRoot, 'assets'));
+  await fs.writeFile(path.join(staticRoot, 'index.html'), '<!doctype html><title>HashSucker</title>');
+  await fs.writeFile(path.join(staticRoot, 'assets', 'app.js'), 'console.log("HashSucker")');
+
+  const searchCache = createDiscoveryCache();
+  t.after(() => searchCache.close());
+  const handler = createRequestHandler({ searchCache, staticRoot });
+
+  async function request(url) {
+    const input = Readable.from([]);
+    input.method = 'GET';
+    input.url = url;
+    return new Promise((resolve, reject) => {
+      const chunks = [];
+      const response = {
+        writeHead(status, headers) { this.status = status; this.headers = headers; },
+        end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8'), headers: this.headers }); },
+      };
+      handler(input, response).catch(reject);
+    });
+  }
+
+  const index = await request('/');
+  assert.equal(index.status, 200);
+  assert.match(index.headers['content-type'], /^text\/html/);
+  assert.match(index.text, /HashSucker/);
+
+  const route = await request('/releases/tt1234567');
+  assert.equal(route.status, 200);
+  assert.match(route.text, /HashSucker/);
+
+  const asset = await request('/assets/app.js');
+  assert.equal(asset.status, 200);
+  assert.match(asset.headers['content-type'], /^text\/javascript/);
+
+  const missingApi = await request('/api/not-found');
+  assert.equal(missingApi.status, 404);
+  assert.deepEqual(JSON.parse(missingApi.text), { error: 'Not found' });
 });
 
 test('public release API strips all secret-bearing and internal fields', async () => {

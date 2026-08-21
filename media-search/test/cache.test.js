@@ -11,6 +11,9 @@
  */
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import { createDiscoveryCache, withCacheFailureIsolation } from '../src/lib/discovery/cache.js';
@@ -22,6 +25,24 @@ import { runEnrichmentWorker, createEnrichmentWorker, enrichSingleCandidate } fr
 const HASH = 'abcdef0123456789abcdef0123456789abcdef01';
 const OTHER_HASH = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const THIRD_HASH = 'cccccccccccccccccccccccccccccccccccccccc';
+
+test('file-backed discovery state survives close and reopen', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hashsucker-discovery-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const dbPath = path.join(directory, 'discovery-cache.db');
+
+  const first = createDiscoveryCache({ dbPath });
+  first.upsertCandidate({
+    infoHash: HASH,
+    fileIndex: 7,
+    filename: 'Stage.Zero.Persistence.Probe.mkv',
+  });
+  first.close();
+
+  const reopened = createDiscoveryCache({ dbPath });
+  assert.equal(reopened.getCandidate(HASH, 7)?.filename, 'Stage.Zero.Persistence.Probe.mkv');
+  reopened.close();
+});
 
 function makeCandidate(overrides = {}) {
   return {

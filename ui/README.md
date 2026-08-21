@@ -4,7 +4,7 @@ React/Vite prototype for title search and release comparison.
 
 ## Current status
 
-- Separate from `media-search`; root Compose does not build, serve, or deploy it.
+- Source remains a separate package, but the production `media-search` image builds and serves it on the same origin as `/api`.
 - Vite development proxies `/api` to `http://localhost:3000`.
 - Supports title search, media selection, release filtering/sorting, provider badges, and a release-details panel.
 - Has no season/episode picker.

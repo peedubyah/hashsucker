@@ -20,9 +20,9 @@ Worker branches/worktrees must not routinely regenerate or commit shared project
 
 - Root Compose defines `media-search` and `torbox-importer` only.
 - `media-search` is an unauthenticated Node HTTP API. It performs Cinemeta title/media lookup, local SQLite/FTS5 retrieval, live Torrentio/Comet/Torznab discovery, local ranking, request publication, and operator-triggered ingestion/attribute work.
-- Discovery SQLite models candidates, parsed release attributes, media associations, provider observations, and an FTS5 index. It defaults to memory unless `DISCOVERY_DB` is set.
-- A separate `ui/` React/Vite prototype supports title search and release comparison. It is not built, served, or deployed by root Compose, and its metadata DTOs currently diverge from the API.
-- `torbox-importer` claims JSON requests from a shared filesystem queue, resolves TorBox placement to an expiring download URL, downloads into local staging, and submits `ManualImport` to Sonarr or Radarr.
+- Discovery SQLite models candidates, parsed release attributes, media associations, provider observations, and an FTS5 index. Root Compose sets `DISCOVERY_DB=/data/discovery-cache.db` on the persistent `discovery-data` volume; direct local execution still defaults to memory when unset.
+- The `ui/` React/Vite prototype is built into the production `media-search` image and served by that process on the same origin. Its metadata DTOs still diverge from the API.
+- `torbox-importer` starts `/app/scripts/worker.sh`, claims JSON requests from the shared filesystem queue, resolves TorBox placement to an expiring download URL, downloads into local staging, and submits `ManualImport` to Sonarr or Radarr.
 - Physical import accepts an explicit movie or exactly one TV episode. The importer independently maps and validates provider files; browser-selected file evidence is not authoritative.
 - Direct TorBox cache-check code exists with useful batching/failure semantics, but it belongs to a legacy CLI path and is not connected to the active combined server search.
 - Real-Debrid appears only as a Torrentio discovery configuration. There is no direct Real-Debrid provider adapter or placement integration.
@@ -32,14 +32,14 @@ Worker branches/worktrees must not routinely regenerate or commit shared project
 - Real-Debrid placement, Zurg deployment, TorBox WebDAV validation, rclone provider mounts, mount inventory, provider-file inventory, canonical virtual-library projection, reconciliation, provider failover, and playback/catalog health.
 - A provider-neutral capability contract or provider-independent canonical binding model.
 - Learned cache priors, release-family reputation, or unbiased provider-outcome training telemetry.
-- Production UI deployment or an executable shared API contract.
+- An executable shared API contract or request-capable production UI workflow.
 
 ### Known deployment truth
 
-- Root Compose does not set `DISCOVERY_DB` or mount discovery storage; corpus and observations are lost on restart.
-- Root Compose does not deploy the React UI; the backend has no static route.
-- `media-search/Dockerfile` copies source but does not run `npm ci`/`npm install`, so clean images lack `lz-string`.
-- Mutation routes are not authenticated. Credential-bearing addon configuration has been committed and must be treated as exposed pending rotation and history cleanup.
+- The production `media-search` image uses both lockfiles, installs only runtime backend dependencies in the final image, runs as `node`, builds the React UI, and serves UI/API on one origin.
+- Root Compose persists `DISCOVERY_DB=/data/discovery-cache.db` on the `discovery-data` named volume and starts the importer worker explicitly.
+- Root Compose publishes UI/API to `127.0.0.1` by default. Mutation routes remain unauthenticated, so any non-loopback publication requires an authenticated trusted reverse proxy or equivalent network boundary.
+- The committed credential-bearing `media-search/config/addons.local.json` was removed from current tracking and local variants are ignored. Its embedded TorBox credential remains exposed in Git history and requires owner rotation; history was not rewritten.
 
 ## Product north star
 
@@ -99,9 +99,8 @@ Critical defects, in priority order:
 1. Local corpus retrieval is not selected-media scoped; empty local queries can return unrelated rows.
 2. Local and live candidates are not globally ranked; live candidates receive score `0`.
 3. Hash-only merging drops file-aware identity. UI keys, request handoff, and importer persistence also omit exact `releaseKey` propagation.
-4. Deployment is incomplete: ephemeral discovery DB, no UI, and a clean backend image without installed dependencies.
-5. Mutation endpoints lack authentication; committed credential-like configuration requires rotation/removal.
-6. The API-reachable DMM runner accepts an obsolete script-call wrapper while current sampled fragments use iframe/hash. The compatible importer is test-only/unwired and parses each decoded JSON array in memory.
+4. Mutation endpoints lack application authentication; loopback publication is the default trusted-network boundary, and the historically exposed TorBox credential requires owner rotation.
+5. The API-reachable DMM runner accepts an obsolete script-call wrapper while current sampled fragments use iframe/hash. The compatible importer is test-only/unwired and parses each decoded JSON array in memory.
 7. Provider-observation age is ignored; there is no active provider hydration in combined server search.
 8. API documentation and UI types disagree with active normalized metadata fields.
 9. The importer always resumes the first `processing` item; one blocked/manual request can starve later work.
@@ -111,13 +110,13 @@ See [`docs/known-gaps.md`](docs/known-gaps.md) for the maintained register.
 
 ## Current roadmap stage
 
-The project is at **Stage 0: security and deployability**. Stages are ordered in [`docs/roadmap.md`](docs/roadmap.md); do not skip directly to learned cache models or broad provider abstractions.
+Stage 0 deployability is implemented: clean images build, the UI/API share one origin, importer startup is explicit, discovery state persists across service recreation, and the unauthenticated surface defaults to loopback. The exposed historical TorBox credential still requires owner rotation.
 
-Resume implementation with:
+Resume implementation with Stage 1 only after rotation/trusted-boundary operations are acknowledged:
 
-1. Rotate/remove committed secrets and define route access controls.
-2. Make clean deployment truthful: install dependencies, choose a UI deployment model, persist `DISCOVERY_DB`, and test restart persistence.
-3. Then establish one executable API contract and propagate `releaseKey`/`fileIndex` through API, UI, queue, and importer state.
+1. Establish one executable API contract.
+2. Propagate `releaseKey`/`fileIndex` through API, UI, queue, and importer state.
+3. Continue through the ordered stages in [`docs/roadmap.md`](docs/roadmap.md); do not skip directly to learned cache models or broad provider abstractions.
 4. Scope local retrieval by selected media identity and globally rank normalized local/live candidates.
 5. Only after those foundations, add provider capability/observation contracts and a shadow canonical-library reconciler.
 

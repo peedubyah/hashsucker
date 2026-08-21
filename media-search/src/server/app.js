@@ -1,4 +1,6 @@
+import fs from 'node:fs/promises';
 import http from 'node:http';
+import path from 'node:path';
 
 import { QueueImporterClient } from '../lib/importer/queue-client.js';
 import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
@@ -12,10 +14,50 @@ import { runDMMIngestion } from '../lib/discovery/dmm-ingestion-runner.js';
 import { runAttributeWorker } from '../lib/discovery/attribute-worker.js';
 
 const HASH_PATTERN = /^[a-f0-9]{40}$/i;
+const CONTENT_TYPES = new Map([
+  ['.css', 'text/css; charset=utf-8'],
+  ['.html', 'text/html; charset=utf-8'],
+  ['.ico', 'image/x-icon'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.png', 'image/png'],
+  ['.svg', 'image/svg+xml'],
+  ['.webp', 'image/webp'],
+]);
 
 function sendJson(response, status, body) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   response.end(JSON.stringify(body));
+}
+
+async function sendStatic(response, pathname, staticRoot) {
+  const relativePath = pathname === '/' ? 'index.html' : pathname.slice(1);
+  const requestedPath = path.resolve(staticRoot, relativePath);
+  const relative = path.relative(staticRoot, requestedPath);
+
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
+
+  let filePath = requestedPath;
+  try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) return false;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    if (path.extname(pathname)) return false;
+    filePath = path.join(staticRoot, 'index.html');
+  }
+
+  try {
+    const body = await fs.readFile(filePath);
+    const contentType = CONTENT_TYPES.get(path.extname(filePath).toLowerCase()) || 'application/octet-stream';
+    const cacheControl = path.basename(filePath) === 'index.html' ? 'no-cache' : 'public, max-age=31536000, immutable';
+    response.writeHead(200, { 'content-type': contentType, 'cache-control': cacheControl });
+    response.end(body);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 async function readBody(request) {
@@ -71,6 +113,7 @@ export function createRequestHandler(dependencies = {}) {
   // Defaults to in-memory for testing (when no dbPath provided).
   const dbPath = dependencies.dbPath || process.env.DISCOVERY_DB;
   const searchCache = dependencies.searchCache || dependencies.discoveryCache || createDiscoveryCache(dbPath ? { dbPath } : {});
+  const staticRoot = dependencies.staticRoot === undefined ? process.env.STATIC_ROOT : dependencies.staticRoot;
 
   return async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
@@ -189,6 +232,10 @@ export function createRequestHandler(dependencies = {}) {
       if (statusMatch) {
         const status = await importer.getRequestStatus(statusMatch[1]);
         return status ? sendJson(response, 200, status) : sendJson(response, 404, { error: 'Request not found' });
+      }
+      if (request.method === 'GET' && staticRoot && !url.pathname.startsWith('/api/')) {
+        const served = await sendStatic(response, url.pathname, staticRoot);
+        if (served) return;
       }
       sendJson(response, 404, { error: 'Not found' });
     } catch (error) {

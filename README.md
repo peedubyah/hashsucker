@@ -13,8 +13,8 @@ The repository currently provides a prototype discovery API and a comparatively 
 - `media-search/` searches Cinemeta metadata, a local SQLite/FTS5 release corpus, Torrentio/Comet, and Torznab sources.
 - The local corpus stores exact `(infoHash, fileIndex)` candidates, parsed release attributes, media associations, and provider observations.
 - `torbox-importer/` consumes an atomic filesystem queue, acquires through TorBox, and invokes Sonarr/Radarr `ManualImport` for an explicit movie or one TV episode.
-- `ui/` is a separate React/Vite release-comparison prototype.
-- Backend and frontend tests pass, but several correctness and deployment defects remain.
+- `ui/` is a React/Vite release-comparison prototype built into and served by the production `media-search` image.
+- Backend, frontend, importer, clean-image, startup, and restart-persistence validation pass, but several correctness defects remain.
 
 Important limitations:
 
@@ -23,9 +23,8 @@ Important limitations:
 - Exact file identity collapses to hash-only during result merge, UI row identity, request handoff, and importer persistence.
 - Provider-observation age is ignored by ranking.
 - The reachable DMM ingestion endpoint does not recognize the current iframe/hash source wrapper; a compatible importer exists but is not wired to runtime.
-- Root Compose does not deploy the UI or persist the discovery database.
-- The backend image does not install its runtime dependency in a clean build.
-- Mutation endpoints have no application authentication.
+- Mutation endpoints have no application authentication. Root Compose binds to loopback by default; use an authenticated trusted reverse proxy before publishing beyond localhost.
+- A TorBox credential formerly committed in local addon configuration remains exposed in Git history and requires owner rotation.
 
 Treat current discovery recommendations as prototype output. The local importer safeguards are stronger, but that path is the secondary fulfillment mode rather than the target primary product.
 
@@ -56,10 +55,10 @@ Release desirability, a provider-specific cache prior, fresh confirmed provider 
 |---|---|
 | `media-search/` | Node control-plane prototype: metadata, corpus, discovery, ranking, request publication |
 | `torbox-importer/` | Shell/SQLite executor for secondary TorBox download plus Arr import |
-| `ui/` | Separate React/Vite prototype; not deployed by root Compose |
+| `ui/` | React/Vite prototype built into the production `media-search` image |
 | `docs/` | Current architecture, model, pipeline, roadmap, risks, decisions, and evidence |
 | `handoff/` | Historical importer bridge artifacts, not current runtime authority |
-| `compose.yaml` | Current two-service backend/importer topology; incomplete for target deployment |
+| `compose.yaml` | Current two-service topology with same-origin UI/API and persistent discovery storage |
 
 ## Development
 
@@ -85,7 +84,9 @@ npm run dev
 
 Vite proxies `/api` to the backend at `http://localhost:3000`. The backend itself serves API routes only; `/` is not a browser application.
 
-For the current container topology, copy `.env.example` to `.env` and review `compose.yaml`. Do not treat `docker compose up` as production-ready until roadmap Stage 0 is complete: clean-image dependencies, UI deployment, persistent `DISCOVERY_DB`, authentication/network controls, and secret rotation must be resolved.
+For the current container topology, copy `.env.example` to `.env`, create the three required host directories with ownership compatible with the configured IDs, and run `docker compose up -d --build`. Open `http://127.0.0.1:3000` by default. Discovery state is stored in the Compose-managed `discovery-data` volume; importer state remains under `TORBOX_IMPORTER_HOST_PATH`.
+
+The UI/API is intentionally loopback-only because mutation routes have no application authentication. Put an authenticated trusted reverse proxy in front before changing `MEDIA_SEARCH_BIND_ADDRESS`. Rotate the historically exposed TorBox credential before provider use.
 
 ## Read next
 

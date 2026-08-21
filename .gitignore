@@ -1,6 +1,7 @@
 node_modules/
 data/
 .env
-.env.local
-media-search/config/addons.local.json
-media-search/config/addons.discovery.local.json
+.env.*
+!**/.env.example
+*.local.*
+media-search/test/ENRICHMENT-EVALUATION.md

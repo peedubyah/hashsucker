@@ -3,18 +3,20 @@
 **Source:** [`audit/8-21-audit.md`](audit/8-21-audit.md), verified 2026-08-21.
 **Current stage:** Stage 0 — security and deployability.
 
-This roadmap is staged to be reversible. Target behavior below is not implemented unless explicitly stated elsewhere.
+Stage 0 deployability is implemented; owner credential rotation remains operationally required before Stage 1. This roadmap is staged to be reversible. Target behavior below is not implemented unless explicitly stated elsewhere.
 
 ## Stage 0 — Security and deployability
 
-- Rotate/remove committed credentials.
-- Authenticate mutation routes or document/enforce a trusted network boundary.
-- Install production dependencies in the backend image and include required runtime configuration.
-- Choose one UI topology: built into `media-search` or a separate deployed service.
-- Persist `DISCOVERY_DB` on a mounted volume.
-- Add clean-image startup and restart-persistence coverage.
+Implemented in the repository:
 
-**Exit:** A clean deployment serves the intended UI/API topology and retains discovery state across restart.
+- Removed committed local addon credentials from current tracking and ignored secret-bearing local variants. The historically exposed TorBox credential still requires owner rotation; Git history was not rewritten.
+- Enforced a trusted-network default by publishing the unauthenticated UI/API to loopback. Non-loopback deployment requires an authenticated reverse proxy or equivalent boundary.
+- Installed locked production dependencies and built the UI into the non-root `media-search` image.
+- Persisted `DISCOVERY_DB=/data/discovery-cache.db` on the `discovery-data` volume.
+- Made the importer worker the image's explicit default lifecycle.
+- Added and executed clean-image startup, UI reachability, importer lifecycle, and restart-persistence coverage.
+
+**Exit:** Met locally. A clean root deployment serves the UI/API topology and retains discovery state across service recreation.
 
 ## Stage 1 — Executable API contract
 

@@ -1,6 +1,5 @@
 
-
-FROM alpine:latest
+FROM alpine:3.22
 
 RUN apk add --no-cache \
     bash \
@@ -9,12 +8,12 @@ RUN apk add --no-cache \
     aria2 \
     sqlite \
     ca-certificates \
-    nano \
-    coreutils
+    coreutils \
+    findutils
 
 COPY scripts/ /app/scripts/
 COPY claim-request.sh validate-request.sh /app/
 
 WORKDIR /config
 
-CMD ["sleep", "infinity"]
+CMD ["/app/scripts/worker.sh"]
