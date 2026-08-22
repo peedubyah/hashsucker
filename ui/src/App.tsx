@@ -3,7 +3,10 @@ import { SearchPage } from '@/pages/SearchPage';
 import { ReleasesPage } from '@/pages/ReleasesPage';
 
 export default function App() {
-  const { titles, releases, media, loading, error, search, selectMedia, reset } = useSearch();
+  const {
+    titles, releases, media, controlPlaneItems, controlPlaneError,
+    loading, error, search, selectMedia, reset,
+  } = useSearch();
 
   const hasReleases = releases && !loading;
 
@@ -21,6 +24,8 @@ export default function App() {
         <ReleasesPage
           releases={releases}
           media={media}
+          controlPlaneItems={controlPlaneItems}
+          controlPlaneError={controlPlaneError}
           loading={loading}
           error={error}
           onBack={reset}

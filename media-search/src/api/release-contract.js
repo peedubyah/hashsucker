@@ -17,6 +17,7 @@ const PUBLIC_RELEASE_FIELDS = [
   'score',
   'components',
   'providers',
+  'providerObservations',
   'media',
   '_source',
   '_sources',
@@ -95,9 +96,9 @@ export function toPublicReleaseDto(release) {
   const value = requireReleaseObject(release);
   const identity = validateReleaseIdentity(value);
 
-  // Required fields (excluding optional provenance)
+  // Required fields (excluding optional provenance/evidence added after v1)
   const requiredFields = PUBLIC_RELEASE_FIELDS.filter(
-    f => f !== '_sources' && f !== '_selectedMediaId'
+    f => f !== '_sources' && f !== '_selectedMediaId' && f !== 'providerObservations'
   );
   for (const field of requiredFields) {
     if (!Object.hasOwn(value, field)) {
@@ -105,16 +106,18 @@ export function toPublicReleaseDto(release) {
     }
   }
 
-  // Provenance fields are optional with sensible defaults
-  const sources = Array.isArray(value._sources) ? value._sources : [];
-  const selectedMediaId = value._selectedMediaId ?? null;
+    // Provenance/evidence fields are optional with sensible defaults
+    const sources = Array.isArray(value._sources) ? value._sources : [];
+    const selectedMediaId = value._selectedMediaId ?? null;
+    const providerObservations = Array.isArray(value.providerObservations)
+      ? value.providerObservations
+      : [];
 
   return Object.fromEntries([
     ...Object.entries(identity),
     ...PUBLIC_RELEASE_FIELDS.map((field) => {
       if (field === '_sources') return [field, sources];
-      if (field === '_selectedMediaId') return [field, selectedMediaId];
-      return [field, value[field]];
+      if (field === '_selectedMediaId') return [field, selectedMediaId];        if (field === 'providerObservations') return [field, providerObservations];      return [field, value[field]];
     }),
   ]);
 }

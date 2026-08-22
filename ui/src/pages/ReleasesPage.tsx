@@ -1,24 +1,31 @@
 import { useState } from 'react';
 import { submitRequest } from '@api/client';
-import type { ReleaseSearchResult, MediaResult, ReleaseResult, RequestSubmissionResult } from '@/types/api';
+import type {
+  ReleaseSearchResult, MediaResult, ReleaseResult, RequestSubmissionResult, ControlPlaneItemList,
+} from '@/types/api';
 import { FilterBar } from '@/components/FilterBar';
 import { ReleaseRow } from '@/components/ReleaseRow';
 import { ReleaseDetails } from '@/components/ReleaseDetails';
 import { LoadingState } from '@/components/LoadingState';
 import { ErrorState } from '@/components/ErrorState';
 import { EmptyState } from '@/components/EmptyState';
+import { LifecycleStatus } from '@/components/LifecycleStatus';
 import { useReleaseFilters } from '@/hooks/useReleaseFilters';
 import type { SortKey } from '@/hooks/useReleaseFilters';
 
 interface Props {
   releases: ReleaseSearchResult | null;
   media: { media: MediaResult } | null;
+  controlPlaneItems?: ControlPlaneItemList | null;
+  controlPlaneError?: string | null;
   loading: boolean;
   error: string | null;
   onBack: () => void;
 }
 
-export function ReleasesPage({ releases, media, loading, error, onBack }: Props) {
+export function ReleasesPage({
+  releases, media, controlPlaneItems = null, controlPlaneError = null, loading, error, onBack,
+}: Props) {
   const [selectedRelease, setSelectedRelease] = useState<ReleaseResult | null>(null);
   const [requestResult, setRequestResult] = useState<RequestSubmissionResult | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
@@ -85,6 +92,7 @@ export function ReleasesPage({ releases, media, loading, error, onBack }: Props)
 
       {releases && !loading && (
         <>
+          <LifecycleStatus items={controlPlaneItems?.items ?? []} error={controlPlaneError} />
           <FilterBar
             filters={filters}
             onChange={setFilters}

@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import type { ReleaseResult } from '@/types/api';
 import type { FilterState } from '@/components/filter.types';
 import { initialFilters } from '@/components/filter.types';
+import { hasConfirmedCached, hasConfirmedUncached } from '@/utils/providerEvidence';
 
 export type SortKey = 'score' | 'size' | 'resolution' | 'confidence' | 'filename';
 export type SortDirection = 'asc' | 'desc';
@@ -47,12 +48,9 @@ export function useReleaseFilters(releases: ReleaseResult[]) {
     }
 
     if (filters.cached !== 'all') {
-      result = result.filter(r => {
-        const hasProvider = Object.keys(r.providers).length > 0;
-        if (!hasProvider) return false;
-        const anyCached = Object.values(r.providers).some(p => p.cached === true);
-        return filters.cached === 'cached' ? anyCached : !anyCached;
-      });
+      result = result.filter(r => filters.cached === 'cached'
+        ? hasConfirmedCached(r)
+        : hasConfirmedUncached(r));
     }
 
     return result;

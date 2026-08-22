@@ -35,7 +35,8 @@ import { createReleaseIdentity, createReleaseKey } from '../../api/release-contr
  * @property {Object} releaseAttributes - Parsed release attributes
  * @property {number} parserConfidence - Parser confidence (0.0-1.0)
  * @property {Array<Object>} mediaAssociations - Media associations (may be empty)
- * @property {Array<Object>} providerObservations - Provider observations (may be empty)
+ * @property {Array<Object>} providerObservations - Fresh authoritative rank evidence only
+ * @property {Array<Object>} providerEvidence - Complete current typed provider evidence
  * @property {Array<Object>} sources - Provenance sources for evidence
  *   Each source: { origin, evidence, confidence, evidenceType }
  */
@@ -68,7 +69,9 @@ export function toCanonicalLocal(row) {
     releaseAttributes: normalizeReleaseAttributes(row.parsed || row.releaseAttributes || {}),
     parserConfidence: row.confidence ?? row.components?.releaseConfidence ?? 0.5,
     mediaAssociations: normalizeMediaAssociations(row.media),
-    providerObservations: normalizeProviderObservations(row.providers),
+    providerObservations: normalizeProviderObservations(row.providerObservations ?? row.providers)
+      .filter(isRankEligibleProviderObservation),
+    providerEvidence: normalizeProviderObservations(row.providerEvidence ?? row.providers),
     sources: [
       {
         origin: 'corpus',
@@ -184,6 +187,7 @@ export function toCanonicalLive(raw, options = {}) {
     // Association requires explicit enrichment/persistence.
     mediaAssociations: [],
     providerObservations,
+    providerEvidence: providerObservations,
     sources,
     // Selected-media intent provenance: preserved to show live discovery
     // was already scoped by the selected media. This is NOT persisted identity
@@ -259,12 +263,13 @@ export function mergeExactDuplicates(existing, incoming) {
   }
   const mergedMediaAssociations = Array.from(mediaById.values());
 
-  // Merge provider observations: set-union by provider
-  const obsByProvider = new Map();
-  for (const obs of [...existing.providerObservations, ...incoming.providerObservations]) {
-    obsByProvider.set(obs.provider, obs);
-  }
-  const mergedProviderObservations = Array.from(obsByProvider.values());
+  // Merge provider evidence only for the same semantic observation identity.
+  // Newest evidence wins; provider/account/scope/subject/kind never collapse.
+  const mergedProviderEvidence = mergeProviderEvidence([
+    ...(existing.providerEvidence ?? existing.providerObservations),
+    ...(incoming.providerEvidence ?? incoming.providerObservations),
+  ]);
+  const mergedProviderObservations = mergedProviderEvidence.filter(isRankEligibleProviderObservation);
 
   // Merge sources: set-union by evidenceType+origin
   const sourceKey = (s) => `${s.origin}::${s.evidenceType}`;
@@ -307,6 +312,7 @@ export function mergeExactDuplicates(existing, incoming) {
     parserConfidence: Math.max(existingConf, incomingConf),
     mediaAssociations: mergedMediaAssociations,
     providerObservations: mergedProviderObservations,
+    providerEvidence: mergedProviderEvidence,
     sources: mergedSources,
     selectedMediaId: mergedSelectedMediaId,
   };
@@ -384,21 +390,59 @@ function normalizeMediaAssociations(media) {
  */
 function normalizeProviderObservations(providers) {
   if (!providers) return [];
-  if (Array.isArray(providers)) {
-    return providers.map((p) => ({
-      provider: p.provider ?? 'unknown',
-      cached: p.cached ?? null,
-      evidence: p.evidence ?? null,
-      checkedAt: p.checkedAt ?? null,
-    }));
+  const entries = Array.isArray(providers)
+    ? providers.map((observation) => [observation?.provider ?? 'unknown', observation])
+    : Object.entries(providers);
+  return entries.map(([name, raw]) => {
+    const observation = raw ?? {};
+    const cached = observation.cached ?? null;
+    return {
+      provider: name,
+      accountScope: observation.accountScope ?? 'default',
+      scope: observation.scope ?? 'candidate',
+      subjectType: observation.subjectType ?? 'candidate',
+      subjectKey: observation.subjectKey ?? null,
+      kind: observation.kind ?? 'inferred',
+      state: observation.state ?? (cached === true ? 'cached' : cached === false ? 'uncached' : 'unknown'),
+      cached,
+      observedAt: observation.observedAt ?? observation.checkedAt ?? null,
+      checkedAt: observation.observedAt ?? observation.checkedAt ?? null,
+      expiresAt: observation.expiresAt ?? null,
+      freshness: observation.freshness ?? 'unbounded',
+      fresh: observation.fresh ?? null,
+      ageMs: observation.ageMs ?? null,
+      expiresInMs: observation.expiresInMs ?? null,
+      source: observation.source ?? 'legacy-provider-evidence',
+      evidence: observation.evidence ?? null,
+      errorCategory: observation.errorCategory ?? null,
+      retryable: observation.retryable ?? null,
+      retryAfterMs: observation.retryAfterMs ?? null,
+    };
+  });
+}
+
+function mergeProviderEvidence(observations) {
+  const byIdentity = new Map();
+  for (const observation of normalizeProviderObservations(observations)) {
+    const key = [
+      observation.provider, observation.accountScope, observation.scope,
+      observation.subjectType, observation.subjectKey ?? '', observation.kind,
+    ].join('\0');
+    const existing = byIdentity.get(key);
+    if (!existing || (observation.observedAt ?? -1) > (existing.observedAt ?? -1)) {
+      byIdentity.set(key, observation);
+    }
   }
-  // Object form: { providerName: { cached, evidence } }
-  return Object.entries(providers).map(([name, obs]) => ({
-    provider: name,
-    cached: obs?.cached ?? null,
-    evidence: obs?.evidence ?? null,
-    checkedAt: obs?.checkedAt ?? null,
-  }));
+  return [...byIdentity.values()].sort((a, b) =>
+    `${a.provider}\0${a.accountScope}\0${a.scope}\0${a.subjectKey ?? ''}\0${a.kind}`
+      .localeCompare(`${b.provider}\0${b.accountScope}\0${b.scope}\0${b.subjectKey ?? ''}\0${b.kind}`),
+  );
+}
+
+function isRankEligibleProviderObservation(observation) {
+  return observation.kind === 'authoritative'
+    && observation.freshness === 'fresh'
+    && observation.fresh === true;
 }
 
 /**
@@ -420,6 +464,7 @@ export function toRankingInput(candidate) {
     parserConfidence: candidate.parserConfidence,
     mediaAssociations: candidate.mediaAssociations,
     providerObservations: candidate.providerObservations,
+    providerEvidence: candidate.providerEvidence ?? candidate.providerObservations,
     sources: candidate.sources || [],
     selectedMediaId: candidate.selectedMediaId || null,
   };

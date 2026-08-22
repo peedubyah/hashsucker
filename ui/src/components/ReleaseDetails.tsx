@@ -92,7 +92,7 @@ export function ReleaseDetails({ release, onClose, onSubmit, requesting, request
           </div>
           <div className="detail-section">
             <h4>Providers</h4>
-            <ProviderStatus providers={release.providers} />
+            <ProviderStatus providers={release.providers} observations={release.providerObservations} />
           </div>
           <div className="detail-section">
             <h4>Exact identity</h4>

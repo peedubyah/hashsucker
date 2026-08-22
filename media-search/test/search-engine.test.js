@@ -345,10 +345,12 @@ test('provider observations add ranking bonus', () => {
   });
 
   // Add provider observation for second candidate
+  const observedAt = Date.now();
   cache.recordProviderObservation(OTHER_HASH, null, 'torbox', {
     cached: true,
     evidence: { hit: true },
-    checkedAt: Date.now(),
+    checkedAt: observedAt,
+    expiresAt: observedAt + 60_000,
   });
 
   const result = searchReleases(cache, { query: 'movie' });
@@ -382,9 +384,13 @@ test('stale authoritative cache and fresh predictions do not add ranking bonus',
     observedAt: Date.now(), ttlMs: 60_000, source: 'prior-v1',
   });
 
-  const result = searchReleases(cache, { query: 'movie' });
-  assert.equal(result.results.find((item) => item.hash === HASH).provider, 0.5);
-  assert.equal(result.results.find((item) => item.hash === OTHER_HASH).provider, 0.5);
+  const result = searchReleases(cache, { query: 'movie', includeProviders: true });
+  const staleResult = result.results.find((item) => item.hash === HASH);
+  const predictedResult = result.results.find((item) => item.hash === OTHER_HASH);
+  assert.equal(staleResult.provider, 0.5);
+  assert.equal(predictedResult.provider, 0.5);
+  assert.equal(staleResult.providers[0].freshness, 'stale');
+  assert.equal(predictedResult.providers[0].kind, 'predicted');
   cache.close();
 });
 

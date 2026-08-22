@@ -101,7 +101,7 @@ export function ReleaseRow({ release, rank, onSelect }: Props) {
           <span className="release-score">{formatScore(release.score)}</span>
         </div>
         <div className="release-providers-mini">
-          <ProviderStatus providers={release.providers} />
+          <ProviderStatus providers={release.providers} observations={release.providerObservations} />
         </div>
         <button
           type="button"
@@ -194,8 +194,8 @@ export function ReleaseRow({ release, rank, onSelect }: Props) {
           </div>
           <RankingDetails release={release} />
           <div className="detail-providers">
-            <span className="detail-label">Providers</span>
-            <ProviderStatus providers={release.providers} />
+            <span className="detail-label">Provider evidence</span>
+            <ProviderStatus providers={release.providers} observations={release.providerObservations} />
           </div>
           {onSelect && (
             <button type="button" className="request-button" onClick={handleSelect}>

@@ -39,7 +39,7 @@ describe('ReleaseRow', () => {
     fireEvent.click(main);
     expect(screen.getByText('Score')).toBeTruthy();
     expect(screen.getByText('Confidence')).toBeTruthy();
-    expect(screen.getByText('Providers')).toBeTruthy();
+    expect(screen.getByText('Provider evidence')).toBeTruthy();
   });
 
   it('expands a live result with empty score components without crashing', () => {

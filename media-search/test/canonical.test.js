@@ -47,7 +47,12 @@ test('toCanonicalLocal: preserves exact identity', () => {
     confidence: 0.9,
     components: { relevance: 0.85, releaseConfidence: 0.9 },
     media: [{ mediaId: 'tt123', confidence: 0.95 }],
-    providers: [{ provider: 'torbox', cached: true, evidence: ['api-response'] }],
+    providers: [{
+      provider: 'torbox', accountScope: 'primary', scope: 'candidate',
+      subjectType: 'release', subjectKey: `${HASH_A}:0`, kind: 'authoritative',
+      state: 'cached', cached: true, observedAt: 10_000, expiresAt: 20_000,
+      freshness: 'fresh', fresh: true, evidence: ['api-response'],
+    }],
   };
 
   const canonical = toCanonicalLocal(row);
@@ -268,7 +273,10 @@ test('mergeExactDuplicates: preserves evidence from both sources', () => {
     releaseAttributes: { title: 'Movie', year: 2024, resolution: '1080p', sourceType: 'BluRay' },
     parserConfidence: 0.95,
     mediaAssociations: [{ mediaId: 'tt123', confidence: 0.9 }],
-    providerObservations: [{ provider: 'torbox', cached: true }],
+    providerObservations: [{
+      provider: 'torbox', kind: 'authoritative', state: 'cached', cached: true,
+      observedAt: 10_000, expiresAt: 20_000, freshness: 'fresh', fresh: true,
+    }],
     sources: [{ origin: 'corpus', evidenceType: 'fts5-ranked', confidence: 0.95 }],
   };
 
@@ -301,14 +309,43 @@ test('mergeExactDuplicates: preserves evidence from both sources', () => {
   assert.equal(merged.mediaAssociations.length, 1);
   assert.equal(merged.mediaAssociations[0].mediaId, 'tt123');
 
-  // Provider observations preserved
+  // Rank-eligible observations and full display evidence are both preserved.
   assert.equal(merged.providerObservations.length, 1);
+  assert.equal(merged.providerEvidence.length, 1);
 
   // Higher confidence wins for attributes
   assert.equal(merged.parserConfidence, 0.95);
 
   // Higher relevance wins
   assert.equal(merged.relevance, 0.9);
+});
+
+test('mergeExactDuplicates: preserves evidence scopes and keeps newest exact evidence', () => {
+  const base = {
+    hash: HASH_A, fileIndex: 0, releaseKey: `${HASH_A}:0`, filename: 'Movie.mkv',
+    relevance: 0.5, releaseAttributes: {}, parserConfidence: 0.5,
+    mediaAssociations: [], providerObservations: [], sources: [],
+  };
+  const oldAuthoritative = {
+    provider: 'torbox', accountScope: 'primary', scope: 'candidate',
+    subjectType: 'candidate', subjectKey: `${HASH_A}:0`, kind: 'authoritative',
+    state: 'uncached', cached: false, observedAt: 100, expiresAt: 1_000,
+    freshness: 'fresh', fresh: true,
+  };
+  const newAuthoritative = { ...oldAuthoritative, state: 'cached', cached: true, observedAt: 200 };
+  const prediction = {
+    ...newAuthoritative, accountScope: 'secondary', kind: 'predicted', observedAt: 300,
+  };
+
+  const merged = mergeExactDuplicates(
+    { ...base, providerEvidence: [oldAuthoritative, prediction] },
+    { ...base, providerEvidence: [newAuthoritative] },
+  );
+
+  assert.equal(merged.providerEvidence.length, 2);
+  assert.equal(merged.providerEvidence.find((item) => item.kind === 'authoritative').cached, true);
+  assert.equal(merged.providerObservations.length, 1);
+  assert.equal(merged.providerObservations[0].kind, 'authoritative');
 });
 
 test('mergeExactDuplicates: does not overwrite high-confidence with weak', () => {
@@ -568,6 +605,10 @@ test('toRankingInput: maps canonical to ranking shape', () => {
     parserConfidence: 0.9,
     mediaAssociations: [{ mediaId: 'tt123', confidence: 0.95 }],
     providerObservations: [{ provider: 'torbox', cached: true }],
+    providerEvidence: [
+      { provider: 'torbox', kind: 'authoritative', cached: true },
+      { provider: 'torbox', kind: 'predicted', cached: false },
+    ],
     sources: [{ origin: 'corpus', evidenceType: 'fts5-ranked', confidence: 0.9 }],
     selectedMediaId: null,
   };
@@ -581,6 +622,7 @@ test('toRankingInput: maps canonical to ranking shape', () => {
   assert.equal(ranking.parserConfidence, 0.9);
   assert.equal(ranking.mediaAssociations.length, 1);
   assert.equal(ranking.providerObservations.length, 1);
+  assert.equal(ranking.providerEvidence.length, 2);
   // Sources and selectedMediaId ARE preserved through ranking boundary
   assert.ok(Array.isArray(ranking.sources), 'sources must be preserved');
   assert.equal(ranking.sources.length, 1);

@@ -51,6 +51,10 @@ export const mockReleases: ReleaseResult[] = [
     providers: {
       torbox: { cached: true, evidence: ['usenet'] },
     },
+    providerObservations: [{
+      provider: 'torbox', kind: 'authoritative', state: 'cached', cached: true,
+      freshness: 'fresh', fresh: true, evidence: ['usenet'],
+    }],
     media: [],
     _source: 'corpus',
   },
@@ -83,6 +87,10 @@ export const mockReleases: ReleaseResult[] = [
     providers: {
       torbox: { cached: false, evidence: null },
     },
+    providerObservations: [{
+      provider: 'torbox', kind: 'authoritative', state: 'uncached', cached: false,
+      freshness: 'fresh', fresh: true, evidence: null,
+    }],
     media: [],
     _source: 'live',
   },
@@ -113,6 +121,7 @@ export const mockReleases: ReleaseResult[] = [
       episodeMatch: 1,
     },
     providers: {},
+    providerObservations: [],
     media: [],
     _source: 'corpus',
   },

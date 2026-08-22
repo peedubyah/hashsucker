@@ -35,6 +35,35 @@ export async function searchReleases(type, mediaId) {
   return response.json();
 }
 
+/** Get read-only control-plane item summaries for one exact media ID. */
+export async function getControlPlaneItems(mediaId, { limit = 100 } = {}) {
+  const params = new URLSearchParams({ mediaId, limit: String(limit) });
+  const response = await fetch(`${BASE}/api/control-plane/items?${params}`);
+  if (!response.ok) throw new Error(`Control-plane item lookup failed: ${response.status}`);
+  return response.json();
+}
+
+/** Get one control-plane item's read-only detail, optionally scoped to a release. */
+export async function getControlPlaneItem(itemId, release = null) {
+  const params = new URLSearchParams();
+  if (release) {
+    const identity = validateReleaseIdentity(release);
+    params.set('infoHash', identity.infoHash);
+    params.set('fileIndex', identity.fileIndex == null ? 'torrent' : String(identity.fileIndex));
+  }
+  const query = params.size > 0 ? `?${params}` : '';
+  const response = await fetch(`${BASE}/api/control-plane/items/${encodeURIComponent(itemId)}${query}`);
+  if (!response.ok) throw new Error(`Control-plane item detail failed: ${response.status}`);
+  return response.json();
+}
+
+/** Get detailed read-only control-plane configuration and mount health. */
+export async function getControlPlaneHealth() {
+  const response = await fetch(`${BASE}/api/control-plane/health`);
+  if (!response.ok) throw new Error(`Control-plane health check failed: ${response.status}`);
+  return response.json();
+}
+
 /**
  * Get media details by type and ID (Cinemeta).
  * @param {string} type - 'movie' or 'series'

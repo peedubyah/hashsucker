@@ -445,7 +445,7 @@ export function searchReleases(cache, options = {}) {
       providerObservations: cache.getProviderObservations(row.info_hash, fileIndexForKey, {
         includeStale: false,
         kinds: ['authoritative'],
-      }),
+      }).filter((observation) => observation.freshness === 'fresh' && observation.fresh === true),
       providerEvidence: cache.getProviderObservations(row.info_hash, fileIndexForKey),
     };
   });
@@ -701,9 +701,9 @@ function mapToUIShape(r) {
   const identity = createReleaseIdentity(r.hash, r.fileIndex);
   const attrs = r.releaseAttributes || r.parsed || {};
 
-  // Normalize providers: ranked results carry providerObservations array;
-  // public DTO expects { providerName: { cached, evidence } }
-  const observations = r.providerObservations || r.providers || [];
+  // Ranking evidence and visible provider evidence are intentionally separate.
+  // The legacy providers map remains during the public-contract transition.
+  const observations = r.providerEvidence || r.providerObservations || r.providers || [];
   const providers = Array.isArray(observations)
     ? observations.reduce((acc, o) => {
         acc[o.provider] = {
@@ -748,6 +748,7 @@ function mapToUIShape(r) {
     score: r.score ?? 0,
     components: r.components || {},
     providers,
+    providerObservations: Array.isArray(observations) ? observations : [],
     media: r.mediaAssociations || r.media || [],
     _source: source,
     // Preserve provenance through to the UI/public shape

@@ -112,6 +112,7 @@ test('server serves API and returns 404 when no frontend build is configured', a
     score: 0.75,
     components: { relevance: 0.8, quality: 0.7 },
     providers: { torbox: { cached: true } },
+    providerObservations: [],
     media: [],
     _source: 'corpus',
     _sources: [],
