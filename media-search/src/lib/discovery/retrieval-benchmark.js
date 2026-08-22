@@ -29,11 +29,12 @@
  *   - Each cohort query must have a deterministic generated fixture with
  *     non-empty oracle, or be reported as N/A
  *
- * BM25 adversarial case:
- *   FTS5's BM25 ranks documents with MORE matching tokens higher.
- *   The adversarial case is: winner has SHORT filename (BM25-penalized),
- *   noise has LONG filenames (BM25-favored). A small retrieval window
- *   misses the winner because it sits at a lower Stage-1 position.
+ * BM25 behavior note:
+ *   FTS5's BM25 produces effectively identical scores for same-title documents.
+ *   Winner Stage-1 position is effectively rowid order, not filename-length order.
+ *   A synthetic adversarial case (winner at lower Stage-1 position) cannot be
+ *   reliably produced with filename-length manipulation alone.
+ *   Production retrieval boundary must be measured against real corpus data.
  */
 
 import { performance } from 'node:perf_hooks';
@@ -150,10 +151,11 @@ const QUERY_COHORT = [
  * IMPORTANT: No cap on matchedCount. The caller specifies the exact
  * number of title-matched rows per query.
  *
- * BM25 adversarial design:
- *   - Winners have SHORT filenames (BM25-penalized, rank LOWER in Stage-1)
- *   - Noise has LONG filenames (BM25-favored, rank HIGHER in Stage-1)
- *   This creates a case where a small retrieval window misses the winner.
+ * Design note:
+ *   Winners are placed at the END of the insertion order (higher rowid).
+ *   This simulates a candidate that might be missed by a small retrieval window
+ *   when the window truncates before reaching later-inserted rows.
+ *   BM25 filename-length effects are NOT the adversarial mechanism.
  */
 function populateSyntheticCorpus(cache, totalRows, seed, config = {}) {
   const rng = mulberry32(hashString(seed));
@@ -198,12 +200,12 @@ function populateSyntheticCorpus(cache, totalRows, seed, config = {}) {
     const baseTitle = queryDef.title;
     const baseYear = queryDef.year;
 
-    // Insert title-matched noise with LONG filenames (BM25-favored)
-    // These rank HIGHER in Stage-1 due to more tokens
+    // Insert title-matched noise
+    // NOTE: FTS5 BM25 produces identical scores for same-title documents
     for (let i = 0; i < matchedPerQuery - winnerCount; i++) {
       const resIdx = Math.floor(rng() * resolutions.length);
       const srcIdx = Math.floor(rng() * sources.length);
-      // LONG filename: more metadata tokens → BM25-favored → HIGHER rank
+
       const longFilename = `${baseTitle.replace(/\s+/g, '.')}.${baseYear}.${resolutions[resIdx]}.${sources[srcIdx]}.x264.DTS-HD.MA.5.1-FGT-Group${i}.mkv`;
       const attrs = makeSyntheticRow(currentOffset + i, {
         title: baseTitle,
@@ -217,10 +219,10 @@ function populateSyntheticCorpus(cache, totalRows, seed, config = {}) {
       inserted++;
     }
 
-    // Insert winners with SHORT filenames (BM25-penalized)
-    // These rank LOWER in Stage-1 due to fewer tokens
+    // Insert winners at the END of insertion order (higher rowid)
+    // In FTS5, same-title docs have identical BM25 scores → rowid order
     for (let i = 0; i < winnerCount; i++) {
-      // SHORT filename: fewer tokens → BM25-penalized → LOWER rank
+
       const shortFilename = `${baseTitle.replace(/\s+/g, '.')}.${baseYear}.2160p.mkv`;
       const attrs = makeSyntheticRow(currentOffset + matchedPerQuery - winnerCount + i, {
         title: baseTitle,

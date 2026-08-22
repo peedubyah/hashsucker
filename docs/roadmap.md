@@ -1,7 +1,7 @@
 # Roadmap
 
 **Source:** [`audit/8-21-audit.md`](audit/8-21-audit.md), verified 2026-08-21.
-**Current stage:** Stage 4 — Provider capability and fresh observations.
+**Current stage:** Stage 3 — Canonical normalization and global ranking (empirical retrieval-policy selection remaining).
 
 Stage 0 deployability and the first Stage 1 exact-release-identity slice are implemented; owner credential rotation remains operationally required. This roadmap is staged to be reversible. Target behavior below is not implemented unless explicitly stated elsewhere.
 
@@ -54,9 +54,24 @@ Closed correctness slice:
 - Return hard rejection reasons and score explanations.
 - Make bounded retrieval behavior explicit and measured.
 
-**Exit:** Source order does not determine final order; live and corpus versions of an exact candidate merge without losing evidence. Bounded retrieval is explicit: fixed retrieval window (default 2000 rows, env `RETRIEVAL_WINDOW`) is independent of public `limit`/`offset`. Measurement at 100k-1M scale shows 100% top-1 recall for realistic adversarial cases at p95 < 25ms.
+**Implemented:**
+- Source order does not determine final order; live and corpus versions of an exact candidate merge without losing evidence.
+- Retrieval pagination separation is implemented: fixed retrieval window (default 2000 rows, env `RETRIEVAL_WINDOW`) is independent of public `limit`/`offset`.
+- Canonical normalization, global ranking, explanation/rejection behavior are all implemented and tested.
 
-**Exit:** Met.
+**NOT yet met — empirical retrieval-policy selection:**
+- The fixed window 2000 is **provisional**, not validated against a real corpus.
+- The corrected benchmark found that FTS5 BM25 produces effectively identical scores for same-title documents, so winner Stage-1 position is rowid order, not filename-length order.
+- A synthetic adversarial case cannot prove the retrieval boundary for production queries.
+
+**Deferred measurement criterion (with real DMM corpus):**
+1. Measure real query match cardinality distribution.
+2. Measure exhaustive Stage-3 winner position in production Stage-1 order.
+3. Measure cost of exhaustive ranking versus bounded windows.
+4. Answer FIRST whether a retrieval cap is needed at all.
+5. Only if a cap is needed, choose it from the real recall/latency curve.
+
+Do not assume 2000.
 
 ## Stage 4 — Provider capability and fresh observations
 

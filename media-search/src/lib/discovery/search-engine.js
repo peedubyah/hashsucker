@@ -22,10 +22,13 @@
  *     - A stronger candidate cannot be silently hidden by a small LIMIT.
  *     - Pagination occurs only AFTER global desirability ranking.
  *
- *   Default retrieval window: 2000 rows.
- *   Measured at 100k-1M row scales: 100% top-1 recall for realistic
- *   adversarial cases (high-quality release with longer filename ranks
- *   lower in BM25 than a low-quality release). p95 latency < 25ms.
+ *   Default retrieval window: 2000 rows (PROVISIONAL).
+ *
+ *   Empirical status:
+ *     - FTS5 BM25 produces effectively identical scores for same-title documents.
+ *     - Winner Stage-1 position is effectively rowid order, not filename-length order.
+ *     - The provisional 2000 window has NOT been validated against real corpus data.
+ *     - Production retrieval boundary must be measured against real DMM queries.
  *
  *   Override via RETRIEVAL_WINDOW env or options.retrievalWindow.
  */
@@ -502,7 +505,8 @@ export function searchReleases(cache, options = {}) {
  *   ensures stronger eligible candidates cannot be silently hidden.
  *
  *   Measurement (100k-1M scale, realistic adversarial): 2000 rows gives
- *   100% top-1 recall at p95 < 25ms. Window 200-1000 gives 85.7% recall.
+ *   See retrieval window contract above — window size is provisional pending
+ *   real-corpus measurement.
  *
  * Other invariants:
  * - Source origin does NOT directly determine desirability score.
@@ -548,11 +552,13 @@ export async function combinedSearch(cache, options = {}) {
   } = options;
 
   // Stage 1 retrieval window: FIXED, independent of public page size.
-  // Measurement shows 2000 rows yields 100% top-1 recall for realistic
-  // adversarial cases (high-quality releases with longer filenames that
-  // BM25 ranks lower than short low-quality filenames) at p95 < 25ms
-  // across 100k-1M row scales. Public `limit` only controls post-rank
-  // pagination size — it never determines which candidates can win.
+  //
+  // The 2000 default is PROVISIONAL. Empirical measurement against the real
+  // DMM corpus is required to validate or replace it. See roadmap Stage 3
+  // deferred measurement criterion.
+  //
+  // Public `limit` only controls post-rank pagination size — it never
+  // determines which candidates can win.
   const effectiveRetrievalWindow = retrievalWindow
     || parseInt(process.env.RETRIEVAL_WINDOW, 10)
     || 2000;
