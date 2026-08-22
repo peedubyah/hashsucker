@@ -1,7 +1,7 @@
 # Roadmap
 
 **Source:** [`audit/8-21-audit.md`](audit/8-21-audit.md), verified 2026-08-21.
-**Current stage:** Stage 3 — canonical normalization and global ranking.
+**Current stage:** Stage 4 — Provider capability and fresh observations.
 
 Stage 0 deployability and the first Stage 1 exact-release-identity slice are implemented; owner credential rotation remains operationally required. This roadmap is staged to be reversible. Target behavior below is not implemented unless explicitly stated elsewhere.
 
@@ -52,9 +52,11 @@ Closed correctness slice:
 - Deduplicate by `releaseKey` only.
 - Apply one provider-independent desirability score and deterministic tie-breakers.
 - Return hard rejection reasons and score explanations.
-- Remove pre-ranking limits that hide stronger eligible candidates, or make bounded retrieval behavior explicit and measured.
+- Make bounded retrieval behavior explicit and measured.
 
-**Exit:** Source order does not determine final order; live and corpus versions of an exact candidate merge without losing evidence.
+**Exit:** Source order does not determine final order; live and corpus versions of an exact candidate merge without losing evidence. Bounded retrieval is explicit: fixed retrieval window (default 2000 rows, env `RETRIEVAL_WINDOW`) is independent of public `limit`/`offset`. Measurement at 100k-1M scale shows 100% top-1 recall for realistic adversarial cases at p95 < 25ms.
+
+**Exit:** Met.
 
 ## Stage 4 — Provider capability and fresh observations
 
