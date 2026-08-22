@@ -150,7 +150,7 @@ export function createRequestHandler(dependencies = {}) {
       }
       // DMM ingestion endpoint (for triggering hashlist sync via API)
       if (request.method === 'POST' && url.pathname === '/api/ingest/dmm') {
-        const body = await readBody(request).catch(() => ({}));
+        const body = await readBody(request);
         const maxFragments = body.maxFragments ? parseInt(body.maxFragments, 10) : 1;
         const ingestResult = await runDMMIngestion({
           cache: searchCache,
@@ -161,7 +161,7 @@ export function createRequestHandler(dependencies = {}) {
       }
       // Attribute parsing trigger (for reparsing or startup catch-up)
       if (request.method === 'POST' && url.pathname === '/api/attributes/run') {
-        const body = await readBody(request).catch(() => ({}));
+        const body = await readBody(request);
         const stats = await runAttributeWorker(searchCache, {
           limit: body.limit ? parseInt(body.limit, 10) : undefined,
         });

@@ -11,7 +11,7 @@ This is the only detailed HTTP contract. Public release identity is enforced by 
 - Default base URL: `http://localhost:3000`.
 - All responses are JSON with `cache-control: no-store`.
 - Most thrown input failures use `{ "error": "message" }` with status `400`; missing resources use `404`, and processing/upstream failures generally use `502`.
-- Exceptions: invalid title-query length currently returns `200` with an empty result envelope and omits the validation message; malformed JSON for the DMM and attribute mutation routes is swallowed and treated as `{}`.
+- Exceptions: invalid title-query length currently returns `200` with an empty result envelope and omits the validation message. Request bodies are capped at 64KB; malformed JSON and oversized bodies return `400`.
 - There is no application authentication or authorization. Ingestion, mutation, and request routes must remain behind a trusted boundary.
 - In production, the server serves the built React UI from `STATIC_ROOT` on the same origin; local API-only execution may leave that setting unset.
 

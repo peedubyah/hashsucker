@@ -269,6 +269,66 @@ test('request endpoint accepts explicit movie scope through the same handoff pat
   );
 });
 
+test('POST mutation routes reject malformed JSON with 400', async () => {
+  const { request } = createHarness();
+  for (const path of ['/api/ingest/dmm', '/api/attributes/run', '/api/requests']) {
+    const response = await request(path, { method: 'POST', body: '{not valid json' });
+    assert.equal(response.status, 400, `${path} malformed JSON: expected 400, got ${response.status}: ${response.text}`);
+    const body = JSON.parse(response.text);
+    assert.match(body.error, /valid JSON/);
+  }
+});
+
+test('POST mutation routes reject oversized request bodies with 400', async () => {
+  const { request } = createHarness();
+  const oversized = 'x'.repeat(64 * 1024 + 1);
+  for (const path of ['/api/ingest/dmm', '/api/attributes/run', '/api/requests']) {
+    const response = await request(path, { method: 'POST', body: oversized });
+    assert.equal(response.status, 400, `${path} oversized body: expected 400, got ${response.status}: ${response.text}`);
+    const body = JSON.parse(response.text);
+    assert.match(body.error, /too large/);
+  }
+});
+
+test('POST /api/requests required-field validation returns 400 with stable detail', async () => {
+  const { request } = createHarness();
+  const response = await request('/api/requests', {
+    method: 'POST',
+    body: JSON.stringify({ mediaId: 'tt2085059:7:3', release: {} }),
+  });
+  assert.equal(response.status, 400);
+  const body = JSON.parse(response.text);
+  assert.match(body.error, /fileIndex is required|release is required|infoHash/);
+});
+
+test('POST mutation routes accept valid requests unchanged', async () => {
+  const { request } = createHarness();
+  const dmm = await request('/api/ingest/dmm', { method: 'POST', body: '{}' });
+  assert.equal(dmm.status, 200, dmm.text);
+
+  const attr = await request('/api/attributes/run', { method: 'POST', body: '{}' });
+  assert.equal(attr.status, 200, attr.text);
+
+  const req = await request('/api/requests', {
+    method: 'POST',
+    body: JSON.stringify({
+      mediaId: 'tt2085059:7:3',
+      release: { infoHash: HASH, fileIndex: 0, releaseKey: `${HASH}:0` },
+    }),
+  });
+  assert.equal(req.status, 202, req.text);
+});
+
+test('public responses do not expose secrets or internal fields', async () => {
+  const { request } = createHarness();
+  const response = await request('/api/search?type=series&mediaId=tt2085059:7:3');
+  assert.equal(response.status, 200);
+  const text = response.text;
+  assert.doesNotMatch(text, /magnet/);
+  assert.doesNotMatch(text, /behaviorHints/);
+  assert.doesNotMatch(text, /raw|secret|downloadUrl|torznab/i);
+});
+
 // =============================================================================
 // Internal Search API Tests
 // =============================================================================
