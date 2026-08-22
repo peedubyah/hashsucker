@@ -1,7 +1,10 @@
-import type { ReleaseResult, RequestSubmissionResult } from '@/types/api';
+import type {
+  ControlPlaneItemDetail, ReleaseResult, RequestSubmissionResult,
+} from '@/types/api';
 import { formatSize, formatScore, formatConfidence } from '@/utils/format';
 import { Badge } from './Badge';
 import { ProviderStatus } from './ProviderStatus';
+import { LifecycleStatus } from './LifecycleStatus';
 
 interface Props {
   release: ReleaseResult;
@@ -10,9 +13,15 @@ interface Props {
   requesting: boolean;
   requestResult: RequestSubmissionResult | null;
   requestError: string | null;
+  controlPlaneDetail?: ControlPlaneItemDetail | null;
+  controlPlaneLoading?: boolean;
+  controlPlaneError?: string | null;
 }
 
-export function ReleaseDetails({ release, onClose, onSubmit, requesting, requestResult, requestError }: Props) {
+export function ReleaseDetails({
+  release, onClose, onSubmit, requesting, requestResult, requestError,
+  controlPlaneDetail = null, controlPlaneLoading = false, controlPlaneError = null,
+}: Props) {
   return (
     <div className="release-details-overlay" onClick={onClose}>
       <div className="release-details-panel" onClick={e => e.stopPropagation()}>
@@ -101,6 +110,19 @@ export function ReleaseDetails({ release, onClose, onSubmit, requesting, request
               <span className="detail-value mono">{release.releaseKey}</span>
             </div>
           </div>
+          {controlPlaneLoading && <div className="detail-section">Loading exact lifecycle…</div>}
+          {controlPlaneError && <div className="detail-section" role="alert">{controlPlaneError}</div>}
+          {controlPlaneDetail && (
+            <div className="detail-section">
+              <LifecycleStatus items={[controlPlaneDetail]} />
+              <div className="detail-grid">
+                <div className="detail-item"><span className="detail-label">Shadow action</span><span className="detail-value">{controlPlaneDetail.shadowPlan?.actions[0]?.action ?? 'none'}</span></div>
+                <div className="detail-item"><span className="detail-label">Placements</span><span className="detail-value">{controlPlaneDetail.resources?.placements.length ?? 0}</span></div>
+                <div className="detail-item"><span className="detail-label">Provider files</span><span className="detail-value">{controlPlaneDetail.resources?.files.length ?? 0}</span></div>
+                <div className="detail-item"><span className="detail-label">Exposures</span><span className="detail-value">{controlPlaneDetail.resources?.exposures.length ?? 0}</span></div>
+              </div>
+            </div>
+          )}
           {requestResult ? (
             <div role="status">Request {requestResult.status}: {requestResult.requestId}</div>
           ) : (

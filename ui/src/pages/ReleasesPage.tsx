@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { submitRequest } from '@api/client';
+import { getControlPlaneItem, submitRequest } from '@api/client';
 import type {
-  ReleaseSearchResult, MediaResult, ReleaseResult, RequestSubmissionResult, ControlPlaneItemList,
+  ControlPlaneItemDetail, ReleaseSearchResult, MediaResult, ReleaseResult,
+  RequestSubmissionResult, ControlPlaneItemList,
 } from '@/types/api';
 import { FilterBar } from '@/components/FilterBar';
 import { ReleaseRow } from '@/components/ReleaseRow';
@@ -30,6 +31,9 @@ export function ReleasesPage({
   const [requestResult, setRequestResult] = useState<RequestSubmissionResult | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const [requesting, setRequesting] = useState(false);
+  const [controlPlaneDetail, setControlPlaneDetail] = useState<ControlPlaneItemDetail | null>(null);
+  const [controlPlaneDetailError, setControlPlaneDetailError] = useState<string | null>(null);
+  const [controlPlaneDetailLoading, setControlPlaneDetailLoading] = useState(false);
 
   const {
     filters,
@@ -45,6 +49,18 @@ export function ReleasesPage({
     setSelectedRelease(release);
     setRequestResult(null);
     setRequestError(null);
+    setControlPlaneDetail(null);
+    setControlPlaneDetailError(null);
+    const items = controlPlaneItems?.items ?? [];
+    if (items.length === 1) {
+      setControlPlaneDetailLoading(true);
+      getControlPlaneItem(items[0].item.id, release)
+        .then((detail: ControlPlaneItemDetail) => setControlPlaneDetail(detail))
+        .catch((failure: Error) => setControlPlaneDetailError(failure.message))
+        .finally(() => setControlPlaneDetailLoading(false));
+    } else if (items.length > 1) {
+      setControlPlaneDetailError('Multiple library items match this media; select an item before release-scoped reconciliation.');
+    }
   };
 
   const handleSubmitRequest = async () => {
@@ -138,6 +154,9 @@ export function ReleasesPage({
           requesting={requesting}
           requestResult={requestResult}
           requestError={requestError}
+          controlPlaneDetail={controlPlaneDetail}
+          controlPlaneLoading={controlPlaneDetailLoading}
+          controlPlaneError={controlPlaneDetailError}
         />
       )}
     </div>
