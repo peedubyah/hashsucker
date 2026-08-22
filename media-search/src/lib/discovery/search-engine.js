@@ -18,6 +18,12 @@
 import { createReleaseIdentity, createReleaseKey } from '../../api/release-contract.js';
 import { rankHits } from './ranking.js';
 import { isEpisodeCovered } from './episode-coverage.js';
+import {
+  toCanonicalLocal,
+  toCanonicalLive,
+  deduplicateByReleaseKey,
+  toRankingInput,
+} from './canonical.js';
 
 /**
  * Build FTS5 MATCH expression from user query.
@@ -460,11 +466,28 @@ export function searchReleases(cache, options = {}) {
 }
 
 /**
- * Combined search: DMM corpus (ranked) + live discovery (Torrentio/Torznab).
+ * Combined search: DMM corpus + live discovery (Torrentio/Torznab).
  *
- * Searches the local DMM corpus first, optionally runs live discovery,
- * merges only candidates with the same exact releaseKey, and retains the
- * existing corpus-first ordering without introducing a new ranking stage.
+ * Canonical normalization and global ranking pipeline:
+ *
+ *   Local corpus (ranked by FTS5)
+ *     → toCanonicalLocal()  → canonical evidence
+ *   Live discovery
+ *     → toCanonicalLive()   → canonical evidence
+ *     → deduplicateByReleaseKey()  → exact merge
+ *     → rankHits()          → one global deterministic rank
+ *     → pagination
+ *     → mapToUIShape()
+ *
+ * Invariants:
+ * - Source origin does NOT directly determine desirability score.
+ * - Local/live copies of the SAME releaseKey merge evidence; neither source
+ *   blindly replaces the other.
+ * - Provider hints from Torrentio/Comet remain evidence only, not authoritative.
+ * - Stage 2 hard eligibility remains intact for LOCAL corpus candidates.
+ * - Live candidates do NOT require persisted candidate_media.
+ * - Pagination happens AFTER global rank.
+ * - Deterministic tie-breakers ensure identical input yields identical order.
  *
  * @param {Object} cache - Discovery cache instance
  * @param {Object} options - Search options
@@ -484,6 +507,7 @@ export function searchReleases(cache, options = {}) {
  * @param {boolean} [options.includeLive] - Include live discovery results (Torrentio/Torznab)
  * @param {Function} [options.liveDiscoveryFn] - Async function that returns live discovery results
  * @param {string} [options.mode] - Output mode: 'raw' or 'ui' (default 'raw')
+ * @param {string} [options.mediaId] - Selected media ID for eligibility scoping
  * @returns {{ results: Array, total: number, query: Object, stats: Object }}
  */
 export async function combinedSearch(cache, options = {}) {
@@ -496,68 +520,72 @@ export async function combinedSearch(cache, options = {}) {
     ...searchOptions
   } = options;
 
-  // Always search DMM corpus
+  // Always search DMM corpus (returns locally-ranked results)
   const corpusResult = searchReleases(cache, {
     ...searchOptions,
-    limit: Math.min(limit * 2, 200),  // Get more from corpus for better merging
+    // Bounded retrieval: get more from corpus for global ranking.
+    // Limitation is explicit: pre-ranking limit can still hide stronger
+    // eligible candidates that fall outside this window.
+    limit: Math.min(limit * 2, 200),
     includeProviders: true,
     includeMedia: true,
   });
 
-  let allHits = [...corpusResult.results];
+  // Convert local results to canonical evidence shape
+  const canonicalLocal = corpusResult.results.map(toCanonicalLocal);
 
-  // Optionally run live discovery
+  // Optionally run live discovery and normalize to canonical shape
+  let canonicalLive = [];
   if (includeLive && typeof liveDiscoveryFn === 'function') {
     try {
       const liveResults = await liveDiscoveryFn(options);
       if (liveResults && Array.isArray(liveResults)) {
-        // Normalize live results to match corpus shape
-        const normalized = liveResults.map(r => ({
-          hash: r.infoHash,
-          fileIndex: r.fileIndex,
-          releaseKey: createReleaseKey(r.infoHash, r.fileIndex),
-          filename: r.filename || r.title,
-          parsed: {
-            title: r.title,
-            year: r.year,
-            season: r.season,
-            episode: r.episode,
-            resolution: r.resolution,
-            sourceType: r.source,
-            codec: r.codec,
-            hdr: r.hdr,
-            audio: r.audio,
-            releaseGroup: r.releaseGroup,
-            source: r.source,
-          },
-          confidence: r.confidence ?? 0.5,
-          score: 0,
-          components: {},
-          providers: r.providers || {},
-          media: r.media || [],
-          _source: 'live',
-        }));
-        allHits.push(...normalized);
+        canonicalLive = liveResults.map(toCanonicalLive);
       }
     } catch (error) {
-      // Live discovery failure should not break corpus results
+      // Live discovery failure must not break corpus results
       console.error(`Live discovery failed: ${error.message}`);
     }
   }
 
-  // Deduplicate exact physical candidates only (corpus takes precedence).
-  const seen = new Map();
-  for (const hit of allHits) {
-    const releaseKey = createReleaseKey(hit.hash, hit.fileIndex);
-    if (!seen.has(releaseKey)) {
-      seen.set(releaseKey, { ...hit, releaseKey });
-    }
-  }
-  const deduped = Array.from(seen.values());
+  // Merge into single candidate pool (local + live)
+  const allCandidates = [...canonicalLocal, ...canonicalLive];
 
-  // Apply pagination
-  const total = deduped.length;
-  const results = deduped.slice(offset, offset + limit);
+  // Deduplicate exact releaseKeys BEFORE ranking.
+  // For exact duplicates: merge evidence; neither source blindly replaces.
+  const deduped = deduplicateByReleaseKey(allCandidates);
+
+  // Build query intent for ranking
+  const parsed = _parseQuery(searchOptions.query || '');
+  const queryIntent = {};
+  if (parsed.filters.season != null) queryIntent.season = parsed.filters.season;
+  if (parsed.filters.episode != null) queryIntent.episode = parsed.filters.episode;
+
+  // Apply Stage 2 episode-coverage eligibility gate for LOCAL candidates.
+  // Live candidates are never eligible for media-scoped episode queries
+  // because they lack candidate_media associations.
+  const mediaId = searchOptions.mediaId || null;
+  let eligibleCandidates = deduped;
+  if (queryIntent.season != null && queryIntent.episode != null) {
+    eligibleCandidates = deduped.filter(candidate => {
+      // Local corpus: apply episode-coverage hard gate
+      if (candidate.sources.some(s => s.origin === 'corpus')) {
+        return isEpisodeCovered(candidate.releaseAttributes, queryIntent.season, queryIntent.episode);
+      }
+      // Live: only eligible if mediaId is NOT set (i.e., text search path)
+      // When mediaId is set, live candidates without candidate_media are ineligible
+      return mediaId == null;
+    });
+  }
+
+  // ONE global deterministic rank across all eligible candidates.
+  // Source origin does NOT determine desirability — evidence does.
+  const rankingInputs = eligibleCandidates.map(toRankingInput);
+  const ranked = rankHits(rankingInputs, queryIntent, mediaId);
+
+  // Pagination AFTER global rank. Source ordering cannot leak through.
+  const total = ranked.length;
+  const results = ranked.slice(offset, offset + limit);
 
   // Map to UI-compatible shape if requested
   const mappedResults = mode === 'ui' ? results.map(mapToUIShape) : results;
@@ -572,35 +600,51 @@ export async function combinedSearch(cache, options = {}) {
 
 /**
  * Map a ranked result to the UI-compatible release shape.
- * Matches what prepareReleases() expects.
+ * Matches what prepareReleases() expects and the public DTO contract.
+ *
+ * Works with both canonical-local and canonical-live ranked results.
  */
 function mapToUIShape(r) {
   const identity = createReleaseIdentity(r.hash, r.fileIndex);
-  const providers = Array.isArray(r.providers) ? r.providers.reduce((acc, o) => {
-    acc[o.provider] = { cached: o.cached, evidence: o.evidence };
-    return acc;
-  }, {}) : (r.providers || {});
+  const attrs = r.releaseAttributes || r.parsed || {};
+
+  // Normalize providers: ranked results carry providerObservations array;
+  // public DTO expects { providerName: { cached, evidence } }
+  const observations = r.providerObservations || r.providers || [];
+  const providers = Array.isArray(observations)
+    ? observations.reduce((acc, o) => {
+        acc[o.provider] = { cached: o.cached, evidence: o.evidence };
+        return acc;
+      }, {})
+    : observations;
+
+  // Determine source origin for the UI
+  let source = r._source;
+  if (!source) {
+    // Infer from available fields
+    source = r.releaseAttributes?.title ? 'corpus' : 'live';
+  }
 
   return {
     ...identity,
-    title: r.parsed?.title || r.filename,
+    title: attrs.title || r.filename,
     filename: r.filename,
-    size: r.parsed?.size || null,
-    resolution: r.parsed?.resolution || null,
-    quality: r.parsed?.sourceType || null,
-    codec: r.parsed?.codec || null,
-    hdr: r.parsed?.hdr ? String(r.parsed.hdr) : null,
-    audio: r.parsed?.audio || null,
-    releaseGroup: r.parsed?.releaseGroup || null,
-    year: r.parsed?.year || null,
-    season: r.parsed?.season || null,
-    episode: r.parsed?.episode || null,
-    confidence: r.confidence ?? 0.5,
+    size: attrs.size || null,
+    resolution: attrs.resolution || null,
+    quality: attrs.sourceType || null,
+    codec: attrs.codec || null,
+    hdr: attrs.hdr ? String(attrs.hdr) : null,
+    audio: attrs.audio || null,
+    releaseGroup: attrs.releaseGroup || null,
+    year: attrs.year || null,
+    season: attrs.season || null,
+    episode: attrs.episode || null,
+    confidence: r.components?.releaseConfidence ?? r.confidence ?? 0.5,
     score: r.score ?? 0,
     components: r.components || {},
     providers,
-    media: r.media || [],
-    _source: r._source || 'corpus',
+    media: r.mediaAssociations || r.media || [],
+    _source: source,
   };
 }
 

@@ -23,12 +23,13 @@ flowchart TD
     I --> L["Local corpus query\nFTS/text retrieval"]
     I --> V["Live discovery\nselected media ID"]
     L --> E["Selected-media eligibility\ncandidate_media join"]
-    E --> Q["Bounded candidate set"]
-    Q --> S["Six-component local rank\nidentity scoped to mediaId"]
-    V --> N["Normalize live candidates\nscore = 0"]
-    S --> M["Merge corpus first by exact releaseKey"]
-    N --> M
-    M --> P["Offset/limit and response"]
+    E --> C1["Canonical local evidence\ntoCanonicalLocal()"]
+    V --> C2["Canonical live evidence\ntoCanonicalLive()"]
+    C1 --> D["Exact releaseKey merge\ndeduplicateByReleaseKey()"]
+    C2 --> D
+    D --> G["ONE global deterministic rank\nrankHits()"]
+    G --> P["Pagination"]
+    P --> O["Public/UI DTO"]
 ```
 
 Current consequences:
@@ -36,20 +37,22 @@ Current consequences:
 - Local retrieval is filtered by selected `mediaId` via `candidate_media` join; an empty query returns only candidates explicitly associated with the selected media.
 - Identity confidence is scoped to the selected-media association; associations to other media never contribute.
 - TV local filters require exact season/episode values and exclude many compatible packs/ranges.
-- Only a bounded local set is ranked.
-- Live candidates bypass local ranking and no global rerank occurs.
+- Only a bounded local set is ranked (explicit limitation: `limit * 2` corpus window).
+- Live candidates are normalized to the same canonical evidence shape and enter the global rank.
 - Live candidates are exempt from corpus association requirements (no persisted `candidate_media` row needed).
-- Exact-key merge preserves same-hash file candidates; corpus rows win only exact `releaseKey` collisions.
-- Provider observation age is ignored.
-- Result `total` is the bounded merged count, not a full-corpus total.
+- Exact-key merge preserves all useful provenance; higher-confidence evidence wins per-field.
+- Source origin does NOT determine desirability score — evidence does.
+- Provider cache hints from Torrentio/Comet remain evidence only, not authoritative observations.
+- Deterministic tie-breakers ensure identical input yields identical ordering.
+- Result `total` is the post-merge count, not a full-corpus total.
 
-The active local score is:
+The active unified score is:
 
 $$
 S = 0.25R + 0.20Q + 0.20C_r + 0.15C_i + 0.10P + 0.10E
 $$
 
-This formula is explainable, but it is not currently a unified system score.
+This formula is now a unified system score applied to ALL eligible candidates (local + live) through one ranking path.
 
 ## Current DMM ingestion
 

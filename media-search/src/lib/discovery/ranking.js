@@ -277,6 +277,15 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
 /**
  * Rank multiple search hits.
  *
+ * Uses deterministic tie-breakers so repeated identical input yields identical
+ * order. Tie-breaking precedence:
+ * 1. Higher composite score wins
+ * 2. Higher releaseConfidence wins (parser evidence strength)
+ * 3. Higher quality wins (resolution/source evidence)
+ * 4. Higher relevance wins (title match strength)
+ * 5. Lower hash string wins (deterministic, content-derived)
+ * 6. Lower fileIndex wins (null sorts after 0)
+ *
  * @param {Array<Object>} hits - Search hits
  * @param {Object} [queryIntent] - Query intent
  * @param {string} [mediaId] - Selected media ID for identity confidence scoping
@@ -284,7 +293,28 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
  */
 export function rankHits(hits, queryIntent = {}, mediaId = null) {
   const ranked = hits.map(hit => rankHit(hit, queryIntent, mediaId));
-  ranked.sort((a, b) => b.score - a.score);
+  ranked.sort((a, b) => {
+    // Primary: composite score (higher wins)
+    if (b.score !== a.score) return b.score - a.score;
+    // Tie-break 1: releaseConfidence (higher wins)
+    const aConf = a.components?.releaseConfidence ?? 0;
+    const bConf = b.components?.releaseConfidence ?? 0;
+    if (bConf !== aConf) return bConf - aConf;
+    // Tie-break 2: quality (higher wins)
+    const aQual = a.components?.quality ?? 0;
+    const bQual = b.components?.quality ?? 0;
+    if (bQual !== aQual) return bQual - aQual;
+    // Tie-break 3: relevance (higher wins)
+    const aRel = a.components?.relevance ?? 0;
+    const bRel = b.components?.relevance ?? 0;
+    if (bRel !== aRel) return bRel - aRel;
+    // Tie-break 4: hash (lexicographic, lower wins — deterministic)
+    if (a.hash !== b.hash) return a.hash < b.hash ? -1 : 1;
+    // Tie-break 5: fileIndex (lower wins, null sorts after 0)
+    const aIdx = a.fileIndex ?? Number.MAX_SAFE_INTEGER;
+    const bIdx = b.fileIndex ?? Number.MAX_SAFE_INTEGER;
+    return aIdx - bIdx;
+  });
   return ranked;
 }
 
