@@ -61,7 +61,7 @@ Closed correctness slice:
 
 **NOT yet met — empirical retrieval-policy selection:**
 - The fixed window 2000 is **provisional**, not validated against a real corpus.
-- The corrected benchmark found that FTS5 BM25 produces effectively identical scores for same-title documents, so winner Stage-1 position is rowid order, not filename-length order.
+- The corrected synthetic fixture showed same-title documents receiving effectively identical BM25 scores, leaving rowid/insertion order as the effective ordering for that fixture. Therefore that synthetic setup cannot establish the production retrieval boundary.
 - A synthetic adversarial case cannot prove the retrieval boundary for production queries.
 
 **Deferred measurement criterion (with real DMM corpus):**

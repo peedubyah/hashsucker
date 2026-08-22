@@ -29,12 +29,12 @@
  *   - Each cohort query must have a deterministic generated fixture with
  *     non-empty oracle, or be reported as N/A
  *
- * BM25 behavior note:
- *   FTS5's BM25 produces effectively identical scores for same-title documents.
- *   Winner Stage-1 position is effectively rowid order, not filename-length order.
- *   A synthetic adversarial case (winner at lower Stage-1 position) cannot be
- *   reliably produced with filename-length manipulation alone.
- *   Production retrieval boundary must be measured against real corpus data.
+ * BM25 behavior note (corrected synthetic observation):
+ *   In the corrected synthetic fixture, same-title documents produced
+ *   effectively identical BM25 scores, leaving rowid/insertion order as
+ *   the effective ordering for that fixture. Therefore that synthetic setup
+ *   cannot establish the production retrieval boundary. Real DMM documents
+ *   may produce different BM25 scores due to varying title tokens and metadata.
  */
 
 import { performance } from 'node:perf_hooks';

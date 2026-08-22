@@ -25,10 +25,14 @@
  *   Default retrieval window: 2000 rows (PROVISIONAL).
  *
  *   Empirical status:
- *     - FTS5 BM25 produces effectively identical scores for same-title documents.
- *     - Winner Stage-1 position is effectively rowid order, not filename-length order.
+ *     - The corrected synthetic fixture showed same-title documents receiving
+ *       effectively identical BM25 scores, leaving rowid/insertion order as
+ *       the effective ordering for that fixture. Therefore that synthetic setup
+ *       cannot establish the production retrieval boundary.
+ *     - Real DMM documents (with varying title tokens and metadata) may produce
+ *       different BM25 scores. Only real-corpus measurement can determine
+ *       whether a retrieval cap is needed and what size it should be.
  *     - The provisional 2000 window has NOT been validated against real corpus data.
- *     - Production retrieval boundary must be measured against real DMM queries.
  *
  *   Override via RETRIEVAL_WINDOW env or options.retrievalWindow.
  */
