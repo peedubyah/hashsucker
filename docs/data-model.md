@@ -62,15 +62,14 @@ Candidate-to-media associations.
 - Associations are currently additive. Weak or incorrect associations have no implemented correction/retraction lifecycle.
 - Current search may use the strongest association rather than one matching the selected media.
 
-### `provider_observations`
+### Provider observation tables
 
-Latest provider-specific cache observation per exact candidate.
-
-- Primary key: `(info_hash, file_index_key, provider)`.
-- Stores nullable `cached`, evidence, and `checked_at`.
-- Provider state remains separate from candidates.
-- Only the latest value is retained; there is no event history, status/error taxonomy, observation scope, or enforced TTL.
-- Ranking currently ignores `checked_at`, so documentation must not claim that observations expire operationally.
+- Legacy `provider_observations` remains readable for one-time compatible migration.
+- `provider_observation_events` is append-only history keyed by an event ID. It stores provider/account scope, observation scope, subject, exact candidate identity when applicable, authoritative/inferred/predicted kind, state, observed/expiry timestamps, evidence/source, typed error, retry/backoff, latency, and correlation metadata.
+- `provider_observation_current` projects the newest observation per provider/account/scope/subject/kind. A late older event is retained in history but cannot replace newer current truth.
+- Freshness is evaluated explicitly from `expires_at`; no expiry means unbounded/unknown freshness rather than silently fresh.
+- Cache states are `cached`, `uncached`, `unknown`, or `error`. Unknown/error never become uncached. Only fresh authoritative observations may affect the existing provider ranking component.
+- Provider state remains separate from candidates. Exact candidate observations retain `(info_hash, file_index_key)`; torrent-scoped cache observations do not claim provider file identity.
 
 ### `release_search`
 

@@ -4,11 +4,11 @@
 
 This is the machine-maintained companion to [`HANDOFF.md`](../HANDOFF.md). It reports only reproducible repository facts and explicit unknowns. It does not prove live runtime, provider, deployment, or test health.
 
-- Generated at (UTC): `2026-08-22T18:00:59.641Z`
+- Generated at (UTC): `2026-08-22T19:24:59.471Z`
 - Generator: [`scripts/update-project-state.mjs`](../scripts/update-project-state.mjs)
 - Repository root: `.` (the Git top-level containing this file)
-- State input fingerprint: `sha256:67ffd9640d93ffa60409675d1e4ced489acfe72097657eef7d71a9edca74fe5b`
-- Fingerprinted repository paths: `196`
+- State input fingerprint: `sha256:6b7c8238b3664132f993342644af98166e100e2e94de03464fa2e0afabaced1f`
+- Fingerprinted repository paths: `201`
 
 ## Authority and ownership
 
@@ -55,10 +55,10 @@ Worker branches/worktrees do not routinely regenerate or commit this file. The c
 
 | Scope | Source | Derived fact |
 |---|---|---|
-| Active discovery database | [`media-search/src/lib/discovery/cache.js`](../media-search/src/lib/discovery/cache.js) | tables: `candidate_media`, `candidates`, `provider_observations`, `release_attributes`, `release_search` |
+| Active discovery database | [`media-search/src/lib/discovery/cache.js`](../media-search/src/lib/discovery/cache.js) | tables: `candidate_media`, `candidates`, `provider_observation_current`, `provider_observation_events`, `provider_observations`, `release_attributes`, `release_search`, `schema_migrations` |
 | Media metadata storage module | [`media-search/src/lib/discovery/media-metadata.js`](../media-search/src/lib/discovery/media-metadata.js) | tables: `media_metadata`; not imported by the active server metadata path |
 | Physical importer database | [`torbox-importer/scripts/db-init.sh`](../torbox-importer/scripts/db-init.sh) | tables: `events`, `files`, `jobs`, `requests` |
-| Database schema version | active schema sources | **not recorded; no migration table or schema/user version marker detected** |
+| Database schema version | active schema sources | **version marker detected** |
 | Request handoff protocol | producer and validator | version `1` |
 
 ## DMM ingestion static status
@@ -91,7 +91,7 @@ No DMM source, corpus, remote API, or database workload is contacted by this upd
 | Direct Real-Debrid provider adapter | not detected | discovery key is not a direct adapter | not recorded |
 | Zurg / rclone / provider WebDAV / Plex | not detected in root Compose | none detected | not recorded |
 
-- Direct provider adapter modules found: `torbox.js`.
+- Direct provider adapter modules found: `capabilities.js`, `errors.js`, `observations.js`, `torbox.js`.
 - Runtime configuration values are never read or emitted by this updater.
 
 ## Canonical document locations

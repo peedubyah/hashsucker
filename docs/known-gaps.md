@@ -17,9 +17,9 @@
 
 `POST /api/ingest/dmm` only recognizes a script-call wrapper, while sampled current fragments use iframe/hash. The compatible importer is unwired. Neither path has run checkpoints, locks, resumability, source revision state, bounded transactions, or bounded-memory decoding. Existing corpus/database size claims are unverified and contradictory.
 
-### Stale/absent provider observations
+### Incomplete provider observation integration
 
-The active combined server path does not hydrate direct provider checks. Stored observations are latest-value only and ranking ignores their age. There is no scope, TTL enforcement, error category, or event history.
+The provider-neutral contract, typed errors, explicit scope/authority/freshness model, append-only history/current projection, and TorBox cache capability now exist. Only fresh authoritative observations can affect the legacy ranking component. The active combined server path does not yet use the capability adapter, Real-Debrid has no direct adapter, public DTOs are not fully migrated, and runtime TTL/rate-limit policy still requires provider validation.
 
 ### Weak identity/enrichment correction
 
