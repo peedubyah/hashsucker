@@ -409,12 +409,13 @@ if [ "$goto_cleanup" -eq 0 ]; then
 fi
 
 # CLEANUP
-# Legacy jobs preserve their proven cleanup behavior. Explicit requests delete
-# only request-created provider material; pre-existing sources are retained.
+# Account inventory is not ownership. Delete only exact resources positively
+# owned by a processing physical request; retain pre-existing and unlinked
+# resources because they may serve virtual fulfillment or another client.
 CLEANUP_POLICY="$("$SCRIPTS_DIR/movie-cleanup-policy.sh" "$JOB_ID")"
 EVENT_MESSAGE="Radarr import verified; TorBox source retained"
 
-if [ "$CLEANUP_POLICY" != "retain-preexisting" ]; then
+if [ "$CLEANUP_POLICY" = "delete-request-owned" ]; then
 LIST="$(
     curl -fsS \
       -H "Authorization: Bearer $TORBOX_API_KEY" \

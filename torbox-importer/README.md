@@ -39,7 +39,7 @@ Legacy version-1 payloads that omit both fields remain accepted and are stored a
 
 The worker repeatedly resumes the first file in `processing` and handles at most one explicit request per loop. A permanently blocked/manual-selection request can starve later requests. Preserve crash recovery while adding attempts, typed errors, `nextAttemptAt`, backoff, fair eligible selection, terminal blocked/dead-letter state, and operator requeue.
 
-A legacy no-request movie cleanup path can return `delete-legacy`; this policy requires explicit review. Default to retention when request ownership is not proven.
+Unlinked account resources are retained because account inventory is not proof of physical-request ownership and may include virtual resources. Legacy unattended processing of such resources is disabled by default; `ALLOW_UNLINKED_LEGACY_IMPORTS=1` is an explicit compatibility opt-in. Even when opted in, cleanup retains unlinked resources. Provider deletion requires one exact active physical request with `provider_created=1`.
 
 ## Runtime
 

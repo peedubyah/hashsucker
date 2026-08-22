@@ -45,7 +45,9 @@ OWNED_COUNT="$(
 )"
 
 if [[ "$REQUEST_COUNT" -eq 0 ]]; then
-    printf '%s\n' 'delete-legacy'
+    # Account inventory is observation, not ownership. Unlinked resources may
+    # belong to virtual fulfillment or another client and must be retained.
+    printf '%s\n' 'retain-unlinked'
 elif [[ "$REQUEST_COUNT" -gt 1 ]]; then
     # Multiple active requests reference this job or hash; retain fail-safe to prevent breaking concurrent/pending requests
     printf '%s\n' 'retain-preexisting'

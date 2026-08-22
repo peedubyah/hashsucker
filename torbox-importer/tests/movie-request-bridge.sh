@@ -61,7 +61,8 @@ INSERT INTO requests (request_id,state,media_type,scope,provider,provider_create
 INSERT INTO requests (request_id,state,media_type,scope,provider,provider_created,torbox_id,info_hash) VALUES ('owned-b','processing','movie','movie','torbox',0,23,'hash23');
 SQL
 
-[[ "$(TORBOX_DB="$DB" "$ROOT/scripts/movie-cleanup-policy.sh" 20)" == delete-legacy ]]
+# Unlinked account resources may belong to virtual fulfillment or another client.
+[[ "$(TORBOX_DB="$DB" "$ROOT/scripts/movie-cleanup-policy.sh" 20)" == retain-unlinked ]]
 [[ "$(TORBOX_DB="$DB" "$ROOT/scripts/movie-cleanup-policy.sh" 21)" == delete-request-owned ]]
 [[ "$(TORBOX_DB="$DB" "$ROOT/scripts/movie-cleanup-policy.sh" 22)" == retain-preexisting ]]
 # While request B is still processing, request A completion must NOT delete the provider resource:
@@ -168,10 +169,10 @@ chmod +x "$MOCKS/curl"
 [[ "$(PATH="$MOCKS:$PATH" TORBOX_DB="$DB2" RADARR_API_KEY=test RADARR_URL=http://radarr \
   "$ROOT/scripts/validate-movie-request-match.sh" imdb-movie 30)" == 'MATCHED: tt0123456 -> tmdb:123' ]]
 
-# Regression test for legacy worker movie selection NOT EXISTS guard:
-# - Truly unlinked inspected movie (job 40) MUST be selected;
-# - Active request-linked movie (job 41) MUST be excluded;
-# - Failed request-linked movie (job 42) MUST be excluded.
+# Regression test for the opt-in legacy worker movie selection guard:
+# - Default worker configuration MUST disable unlinked account-resource processing;
+# - Explicit legacy opt-in may select truly unlinked inspected movie job 40;
+# - Active and failed request-linked movies MUST remain excluded.
 sqlite3 "$DB2" <<'SQL'
 INSERT INTO jobs (torbox_id, info_hash, state, media_type, arr_target, first_seen)
   VALUES (40, 'hash40', 'inspected', 'movie', 'radarr', CURRENT_TIMESTAMP);
@@ -208,9 +209,11 @@ WORKER_SQL="
     LIMIT 1;
 "
 
+grep -Fq 'ALLOW_UNLINKED_LEGACY_IMPORTS:-0' "$ROOT/scripts/worker.sh"
+grep -Fq 'MOVIE_JOB=""' "$ROOT/scripts/worker.sh"
 [[ "$(sqlite3 "$DB2" "$WORKER_SQL")" == "40" ]]
 
-# When unlinked job 40 is removed or completed, legacy worker query returns nothing (jobs 41 & 42 remain excluded):
+# When explicitly opted-in job 40 is removed or completed, selection returns nothing (jobs 41 & 42 remain excluded):
 sqlite3 "$DB2" "UPDATE jobs SET state='done' WHERE torbox_id=40;"
 [[ -z "$(sqlite3 "$DB2" "$WORKER_SQL")" ]]
 

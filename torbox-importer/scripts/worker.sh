@@ -82,35 +82,40 @@ while :; do
     done
 
     #
-    # Process exactly one legacy movie job at a time.
+    # Process exactly one explicitly opted-in legacy movie job at a time.
     #
     # Explicit request-driven movie and TV jobs are handled above by process-request.sh.
-    # Exclude any movie job that is associated with a queue request (by torbox_id or info_hash).
+    # Account inventory alone is not physical-import authority: unlinked jobs may
+    # be virtual provider resources. Legacy unattended processing is disabled by
+    # default and requires ALLOW_UNLINKED_LEGACY_IMPORTS=1.
     #
-    MOVIE_JOB="$(
-        sqlite3 "$DB" "
-            SELECT j.torbox_id
-            FROM jobs j
-            WHERE j.media_type='movie'
-              AND j.arr_target='radarr'
-              AND j.state IN (
-                  'inspected',
-                  'downloading',
-                  'downloaded',
-                  'evaluating',
-                  'importing',
-                  'cleaning'
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM requests r
-                  WHERE r.torbox_id=j.torbox_id
-                     OR (r.info_hash IS NOT NULL AND lower(r.info_hash)=lower(j.info_hash))
-              )
-            ORDER BY j.first_seen
-            LIMIT 1;
-        "
-    )"
+    MOVIE_JOB=""
+    if [ "${ALLOW_UNLINKED_LEGACY_IMPORTS:-0}" = "1" ]; then
+        MOVIE_JOB="$(
+            sqlite3 "$DB" "
+                SELECT j.torbox_id
+                FROM jobs j
+                WHERE j.media_type='movie'
+                  AND j.arr_target='radarr'
+                  AND j.state IN (
+                      'inspected',
+                      'downloading',
+                      'downloaded',
+                      'evaluating',
+                      'importing',
+                      'cleaning'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM requests r
+                      WHERE r.torbox_id=j.torbox_id
+                         OR (r.info_hash IS NOT NULL AND lower(r.info_hash)=lower(j.info_hash))
+                  )
+                ORDER BY j.first_seen
+                LIMIT 1;
+            "
+        )"
+    fi
 
     if [ -n "$MOVIE_JOB" ]; then
         log "processing movie job $MOVIE_JOB"
