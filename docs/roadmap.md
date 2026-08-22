@@ -1,7 +1,7 @@
 # Roadmap
 
 **Source:** [`audit/8-21-audit.md`](audit/8-21-audit.md), verified 2026-08-21.
-**Current stage:** Stage 2 — exact identity and identity-safe retrieval.
+**Current stage:** Stage 3 — canonical normalization and global ranking.
 
 Stage 0 deployability and the first Stage 1 exact-release-identity slice are implemented; owner credential rotation remains operationally required. This roadmap is staged to be reversible. Target behavior below is not implemented unless explicitly stated elsewhere.
 
@@ -44,7 +44,7 @@ Closed correctness slice:
 - Apply hard rejection before preference scoring.
 - Audit merge/upsert semantics and add cross-title, multi-file, null-index, and multi-association fixtures.
 
-**Exit:** Unrelated corpus rows cannot enter a selected-media result; exact candidates survive all boundaries.
+**Exit:** Met. `test/media-scoped-retrieval.test.js` enforces exact identity (infoHash, fileIndex), releaseKey format, selected-media INNER JOIN eligibility, identity confidence scoping, hard rejection before preference scoring, and live discovery exemption from persisted candidate_media eligibility.
 
 ## Stage 3 — Canonical normalization and global ranking
 

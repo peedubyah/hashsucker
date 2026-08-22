@@ -45,8 +45,18 @@
  */
 
 /**
+ * Strict integer pattern for episode bounds.
+ * Rejects decimals, hex prefixes, trailing/leading garbage (e.g. "1x", "1.5").
+ */
+const STRICT_INT = /^\d+$/;
+
+/**
  * Safely parse an episode_range string "start-end" into [start, end].
  * Returns null if the range is malformed, non-numeric, or reversed.
+ *
+ * Parsing is STRICT: each bound must be a pure integer string.
+ * Malformed values like "1x", "5x", "1.5", "1--5" are rejected
+ * (they would be partially accepted by naive parseInt()).
  *
  * @param {string} rangeStr - Episode range string (e.g., "1-5")
  * @returns {{ start: number, end: number } | null}
@@ -57,13 +67,17 @@ export function parseEpisodeRange(rangeStr) {
   const parts = trimmed.split('-');
   if (parts.length !== 2) return null;
 
-  const start = parseInt(parts[0].trim(), 10);
-  const end = parseInt(parts[1].trim(), 10);
+  const lo = parts[0].trim();
+  const hi = parts[1].trim();
+  // Empty bounds or non-pure-integer strings are malformed
+  if (!STRICT_INT.test(lo) || !STRICT_INT.test(hi)) return null;
 
-  // Reject non-numeric, NaN, or reversed ranges
-  if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+  const start = Number(lo);
+  const end = Number(hi);
+
+  // Reject zero/negative or reversed ranges
   if (start <= 0 || end <= 0) return null;
-  if (start > end) return null;  // Reversed range is malformed
+  if (start > end) return null;
 
   return { start, end };
 }

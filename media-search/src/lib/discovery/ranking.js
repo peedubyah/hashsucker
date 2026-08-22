@@ -9,7 +9,11 @@
  * - Perform I/O
  *
  * Inputs are plain values; outputs are plain values.
- *
+ */
+
+import { parseEpisodeRange } from './episode-coverage.js';
+
+/**
  * Ranking Contract:
  *   score = relevance × 0.25
  *         + quality × 0.20
@@ -186,15 +190,9 @@ export function episodeMatchScore(releaseAttrs = {}, queryIntent = {}) {
 
   // Episode range containing requested episode
   if (episodeRange != null) {
-    const parts = episodeRange.split('-');
-    if (parts.length === 2) {
-      const start = parseInt(parts[0].trim(), 10);
-      const end = parseInt(parts[1].trim(), 10);
-      if (Number.isInteger(start) && Number.isInteger(end) &&
-          start > 0 && end >= start &&
-          queryIntent.episode >= start && queryIntent.episode <= end) {
-        return 0.8;
-      }
+    const range = parseEpisodeRange(episodeRange);
+    if (range && queryIntent.episode >= range.start && queryIntent.episode <= range.end) {
+      return 0.8;
     }
     // Malformed or non-covering range — defensive low score
     return 0.0;

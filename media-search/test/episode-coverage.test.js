@@ -132,6 +132,115 @@ test('parseEpisodeRange: zero start "0-5" returns null', () => {
 });
 
 // =============================================================================
+// parseEpisodeRange strict-rejection fixtures (Stage 2 invariant:
+// "Malformed ranges must not accidentally become eligible")
+// =============================================================================
+test('parseEpisodeRange: trailing garbage "1x-5" returns null', () => {
+  assert.equal(parseEpisodeRange('1x-5'), null);
+});
+
+test('parseEpisodeRange: trailing garbage "1-5x" returns null', () => {
+  assert.equal(parseEpisodeRange('1-5x'), null);
+});
+
+test('parseEpisodeRange: decimal "1.5-5" returns null', () => {
+  assert.equal(parseEpisodeRange('1.5-5'), null);
+});
+
+test('parseEpisodeRange: double-dash "1--5" returns null', () => {
+  assert.equal(parseEpisodeRange('1--5'), null);
+});
+
+test('parseEpisodeRange: empty left bound "-5" returns null', () => {
+  assert.equal(parseEpisodeRange('-5'), null);
+});
+
+test('parseEpisodeRange: empty right bound "1-" returns null', () => {
+  assert.equal(parseEpisodeRange('1-'), null);
+});
+
+test('parseEpisodeRange: negative "-3-5" returns null', () => {
+  assert.equal(parseEpisodeRange('-3-5'), null);
+});
+
+test('parseEpisodeRange: negative "1--5" returns null', () => {
+  assert.equal(parseEpisodeRange('1--5'), null);
+});
+
+test('parseEpisodeRange: negative end "1--3" returns null', () => {
+  assert.equal(parseEpisodeRange('1--3'), null);
+});
+
+test('parseEpisodeRange: hex-looking "0x1-0x5" returns null', () => {
+  assert.equal(parseEpisodeRange('0x1-0x5'), null);
+});
+
+test('parseEpisodeRange: leading-zero bounds "01-05" parse (start 1, end 5)', () => {
+  const r = parseEpisodeRange('01-05');
+  assert.deepEqual(r, { start: 1, end: 5 });
+});
+
+test('parseEpisodeRange: coversEpisode rejects "1x-5" range as malformed', () => {
+  const result = coversEpisode({ season: 1, episodeRange: '1x-5' }, 1, 1);
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, 'malformed-range');
+});
+
+test('parseEpisodeRange: coversEpisode rejects "1.5-5" range as malformed', () => {
+  const result = coversEpisode({ season: 1, episodeRange: '1.5-5' }, 1, 1);
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, 'malformed-range');
+});
+
+test('parseEpisodeRange: coversEpisode rejects "1--5" range as malformed', () => {
+  const result = coversEpisode({ season: 1, episodeRange: '1--5' }, 1, 1);
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, 'malformed-range');
+});
+
+test('parseEpisodeRange: coversEpisode still accepts valid "1-5"', () => {
+  const result = coversEpisode({ season: 1, episodeRange: '1-5' }, 1, 3);
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, 'in-range');
+});
+
+test('parseEpisodeRange: coversEpisode still accepts boundary start', () => {
+  const result = coversEpisode({ season: 1, episodeRange: '1-5' }, 1, 1);
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, 'in-range');
+});
+
+test('parseEpisodeRange: coversEpisode still accepts boundary end', () => {
+  const result = coversEpisode({ season: 1, episodeRange: '1-5' }, 1, 5);
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, 'in-range');
+});
+
+test('parseEpisodeRange: episodeMatchScore rejects "1x-5" (defensive)', () => {
+  const score = episodeMatchScore(
+    { season: 1, episodeRange: '1x-5' },
+    { season: 1, episode: 3 },
+  );
+  assert.equal(score, 0.0);
+});
+
+test('parseEpisodeRange: episodeMatchScore rejects "1--5" (defensive)', () => {
+  const score = episodeMatchScore(
+    { season: 1, episodeRange: '1--5' },
+    { season: 1, episode: 3 },
+  );
+  assert.equal(score, 0.0);
+});
+
+test('parseEpisodeRange: episodeMatchScore still accepts valid "1-5"', () => {
+  const score = episodeMatchScore(
+    { season: 1, episodeRange: '1-5' },
+    { season: 1, episode: 3 },
+  );
+  assert.equal(score, 0.8);
+});
+
+// =============================================================================
 // coversEpisode unit tests — SINGLE EPISODE
 // =============================================================================
 test('coversEpisode: exact single episode S01E03 vs S01E03 => eligible', () => {
