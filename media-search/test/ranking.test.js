@@ -20,6 +20,11 @@ import {
   providerAvailabilityScore,
   episodeMatchScore,
   getWeights,
+  compareHits,
+  compareHitsDetailed,
+  explainOrder,
+  compareRanked,
+  explainRank,
 } from '../src/lib/discovery/ranking.js';
 
 const HASH1 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -438,4 +443,164 @@ test('rankHit: does not mutate input', () => {
   assert.deepEqual(hit.releaseAttributes, original.releaseAttributes);
   assert.deepEqual(hit.mediaAssociations, original.mediaAssociations);
   assert.deepEqual(hit.providerObservations, original.providerObservations);
+});
+
+// =============================================================================
+// compareHitsDetailed — single source of truth
+// =============================================================================
+
+test('compareHitsDetailed: decisiveFactor at each precedence level', () => {
+  const baseOpts = { fileIndex: null, mediaAssociations: [], providerObservations: [], sources: [] };
+
+  // Score difference wins (via rankHit results)
+  const aScore = rankHit({ hash: HASH1, ...baseOpts, filename: 'A.mkv', relevance: 0.9, releaseAttributes: { resolution: '2160p' }, parserConfidence: 0.9 }, {});
+  const bScore = rankHit({ hash: HASH2, ...baseOpts, filename: 'B.mkv', relevance: 0.1, releaseAttributes: { resolution: '360p' }, parserConfidence: 0.1 }, {});
+  let d = compareHitsDetailed(aScore, bScore);
+  assert.equal(d.winner, 'a');
+  assert.equal(d.decisiveFactor, 'score');
+  assert.equal(d.order, -1);
+
+  // Equal score → releaseConfidence decisive (artificial to isolate)
+  const aConf = { score: 0.5, components: { relevance: 0.0, quality: 0.0, releaseConfidence: 0.9 }, hash: HASH1, fileIndex: null };
+  const bConf = { score: 0.5, components: { relevance: 0.0, quality: 0.0, releaseConfidence: 0.1 }, hash: HASH2, fileIndex: null };
+  d = compareHitsDetailed(aConf, bConf);
+  assert.equal(d.winner, 'a');
+  assert.equal(d.decisiveFactor, 'releaseConfidence');
+  assert.equal(d.order, -1);
+});
+
+test('compareHitsDetailed: quality tie-break', () => {
+  const baseOpts = { fileIndex: null, mediaAssociations: [], providerObservations: [], sources: [] };
+  // Equal relevance and releaseConfidence, different quality
+  const a = rankHit({ ...baseOpts, hash: HASH1, filename: 'A.mkv', relevance: 0.5, releaseAttributes: { resolution: '2160p', sourceType: 'BluRay' }, parserConfidence: 0.5 }, {});
+  const b = rankHit({ ...baseOpts, hash: HASH2, filename: 'B.mkv', relevance: 0.5, releaseAttributes: { resolution: '360p', sourceType: 'DVD' }, parserConfidence: 0.5 }, {});
+  const d = compareHitsDetailed(a, b);
+  // Scores will differ because quality differs; but if score ties, quality should decide
+  // Let's check the direct contract: if score ties, quality is decisive
+  // We'll construct an artificial pair to test quality specifically
+  const artA = { score: 0.5, components: { relevance: 0.5, quality: 0.9, releaseConfidence: 0.5 }, hash: HASH1, fileIndex: null };
+  const artB = { score: 0.5, components: { relevance: 0.5, quality: 0.1, releaseConfidence: 0.5 }, hash: HASH2, fileIndex: null };
+  const dd = compareHitsDetailed(artA, artB);
+  assert.equal(dd.decisiveFactor, 'quality');
+  assert.equal(dd.winner, 'a');
+  assert.equal(dd.order, -1);
+});
+
+test('compareHitsDetailed: relevance tie-break', () => {
+  const artA = { score: 0.5, components: { relevance: 0.9, quality: 0.5, releaseConfidence: 0.5 }, hash: HASH1, fileIndex: null };
+  const artB = { score: 0.5, components: { relevance: 0.1, quality: 0.5, releaseConfidence: 0.5 }, hash: HASH2, fileIndex: null };
+  const d = compareHitsDetailed(artA, artB);
+  assert.equal(d.decisiveFactor, 'relevance');
+  assert.equal(d.winner, 'a');
+  assert.equal(d.order, -1);
+});
+
+test('compareHitsDetailed: hash tie-break (lexicographic)', () => {
+  const artA = { score: 0.5, components: { relevance: 0.5, quality: 0.5, releaseConfidence: 0.5 }, hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', fileIndex: null };
+  const artB = { score: 0.5, components: { relevance: 0.5, quality: 0.5, releaseConfidence: 0.5 }, hash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', fileIndex: null };
+  const d = compareHitsDetailed(artA, artB);
+  assert.equal(d.decisiveFactor, 'hash');
+  assert.equal(d.winner, 'a');
+  assert.equal(d.order, -1);
+});
+
+test('compareHitsDetailed: fileIndex tie-break — null sorts after 0', () => {
+  const common = { score: 0.5, components: { relevance: 0.5, quality: 0.5, releaseConfidence: 0.5 }, hash: HASH1 };
+  const withZero = { ...common, fileIndex: 0 };
+  const withNull = { ...common, fileIndex: null };
+  // Lower fileIndex (0) wins
+  const d = compareHitsDetailed(withZero, withNull);
+  assert.equal(d.decisiveFactor, 'fileIndex');
+  assert.equal(d.winner, 'a');
+  assert.equal(d.order, -1);
+  // Reverse: null vs 0 → 0 wins (b wins)
+  const d2 = compareHitsDetailed(withNull, withZero);
+  assert.equal(d2.decisiveFactor, 'fileIndex');
+  assert.equal(d2.winner, 'b');
+  assert.equal(d2.order, 1);
+});
+
+test('compareHitsDetailed: exact equality returns order 0', () => {
+  const art = { score: 0.5, components: { relevance: 0.5, quality: 0.5, releaseConfidence: 0.5 }, hash: HASH1, fileIndex: 0 };
+  const d = compareHitsDetailed(art, { ...art });
+  assert.equal(d.order, 0);
+  assert.equal(d.winner, 'tie');
+  assert.equal(d.decisiveFactor, null);
+});
+
+test('compareHits: thin wrapper returns .order', () => {
+  const artA = { score: 0.8, components: { relevance: 0.5, quality: 0.5, releaseConfidence: 0.5 }, hash: HASH1, fileIndex: null };
+  const artB = { score: 0.2, components: { relevance: 0.5, quality: 0.5, releaseConfidence: 0.5 }, hash: HASH2, fileIndex: null };
+  assert.equal(compareHits(artA, artB), compareHitsDetailed(artA, artB).order);
+});
+
+test('explainOrder: derives from compareHitsDetailed', () => {
+  const artA = { score: 0.5, components: { relevance: 0.5, quality: 0.5, releaseConfidence: 0.5 }, hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', fileIndex: null };
+  const artB = { score: 0.5, components: { relevance: 0.5, quality: 0.5, releaseConfidence: 0.5 }, hash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', fileIndex: null };
+  const detailed = compareHitsDetailed(artA, artB);
+  const order = explainOrder(artA, artB);
+  assert.equal(order.decisiveFactor, detailed.decisiveFactor);
+  assert.equal(order.winner, detailed.winner);
+  assert.equal(order.reason, detailed.reason);
+});
+
+test('rankHits ordering matches compareHitsDetailed per precedence level', () => {
+  const baseOpts = { fileIndex: null, mediaAssociations: [], providerObservations: [], sources: [] };
+  const hits = [
+    { ...baseOpts, hash: HASH3, filename: 'low.mkv', relevance: 0.1, releaseAttributes: { resolution: '360p' }, parserConfidence: 0.1 },
+    { ...baseOpts, hash: HASH1, filename: 'high.mkv', relevance: 0.9, releaseAttributes: { resolution: '2160p' }, parserConfidence: 0.9 },
+    { ...baseOpts, hash: HASH2, filename: 'mid.mkv', relevance: 0.5, releaseAttributes: { resolution: '1080p' }, parserConfidence: 0.5 },
+  ];
+  const ranked = rankHits(hits, {});
+  // Verify each adjacent pair is ordered per the detailed contract
+  for (let i = 0; i < ranked.length - 1; i++) {
+    const d = compareHitsDetailed(ranked[i], ranked[i + 1]);
+    assert.equal(d.winner, 'a', `rankHits[${i}] must beat rankHits[${i+1}] per detailed comparator`);
+    assert.equal(d.order, -1, `rankHits[${i}] must sort before rankHits[${i+1}]`);
+  }
+});
+
+// =============================================================================
+// compareRanked contract — ranked results only
+// =============================================================================
+
+test('compareRanked: accepts ranked results (not explainRank output)', () => {
+  const baseOpts = { fileIndex: null, mediaAssociations: [], providerObservations: [], sources: [] };
+  const a = rankHit({ ...baseOpts, hash: HASH1, filename: 'A.mkv', relevance: 0.9, releaseAttributes: { resolution: '2160p' }, parserConfidence: 0.9 }, {});
+  const b = rankHit({ ...baseOpts, hash: HASH2, filename: 'B.mkv', relevance: 0.1, releaseAttributes: { resolution: '360p' }, parserConfidence: 0.1 }, {});
+  const cmp = compareRanked(a, b);
+  assert.equal(cmp.winner, 'a');
+  assert.equal(cmp.decisiveFactor, 'score');
+});
+
+test('compareRanked: preserves final hash/fileIndex tie-break identity', () => {
+  // The critical contract test: compareRanked must NOT silently lose final
+  // tie-break identity when all components tie. It must see hash + fileIndex.
+  const common = { score: 0.5, components: { relevance: 0.5, quality: 0.5, releaseConfidence: 0.5 } };
+  const a = { ...common, hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', fileIndex: 0 };
+  const b = { ...common, hash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', fileIndex: 0 };
+  const cmp = compareRanked(a, b);
+  assert.equal(cmp.winner, 'a', 'hash tie-break must be decisive');
+  assert.equal(cmp.decisiveFactor, 'hash');
+});
+
+test('compareRanked: returns null for null inputs', () => {
+  assert.equal(compareRanked(null, {}), null);
+  assert.equal(compareRanked({}, null), null);
+});
+
+test('compareRanked: explainRank output is not contractually valid (drops hash/fileIndex)', () => {
+  // Proves why compareRanked requires ranked results: explainRank drops hash/fileIndex
+  const baseOpts = { fileIndex: null, mediaAssociations: [], providerObservations: [], sources: [] };
+  const a = rankHit({ ...baseOpts, hash: HASH1, filename: 'A.mkv', relevance: 0.9, releaseAttributes: { resolution: '2160p' }, parserConfidence: 0.9 }, {});
+  const b = rankHit({ ...baseOpts, hash: HASH2, filename: 'B.mkv', relevance: 0.9, releaseAttributes: { resolution: '2160p' }, parserConfidence: 0.9 }, {});
+  // If we passed explainRank output, the hashes would be undefined and the
+  // comparator would tie instead of breaking on hash.
+  const expA = explainRank(a);
+  const expB = explainRank(b);
+  // confirm that hash is dropped by explainRank
+  assert.equal(expA.hash, undefined, 'explainRank must drop hash');
+  // If you called compareRanked(expA, expB) you'd get a false tie
+  // because hash/fileIndex are missing. That's the documented reason
+  // compareRanked requires ranked results.
 });

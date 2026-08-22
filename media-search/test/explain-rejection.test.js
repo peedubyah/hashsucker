@@ -129,10 +129,9 @@ test('explainRank: stronger candidate explains why it outranks weaker', () => {
     sources: [],
   }, {});
 
-  const strongExp = explainRank(strong);
-  const weakExp = explainRank(weak);
-
-  const comparison = compareRanked(strongExp, weakExp);
+  // compareRanked() accepts RANKED RESULTS ONLY (not explainRank() output,
+  // which drops hash/fileIndex and cannot reproduce final tie-breaks).
+  const comparison = compareRanked(strong, weak);
 
   assert.equal(comparison.winner, 'a', 'Stronger candidate should win');
   assert.ok(comparison.scoreDiff > 0, 'Score diff should be positive');

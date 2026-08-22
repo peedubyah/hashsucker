@@ -299,12 +299,17 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
 }
 
 /**
- * Compare two ranked results using the FULL ordering contract.
+ * DETAILED comparator — the SINGLE source of truth for ranking order.
  *
- * This is the SINGLE source of truth for ranking order. Both rankHits() and
- * compareRanked() use this function so they cannot drift.
+ * Every other ordering function derives from this one:
+ *   - compareHits()        → returns compareHitsDetailed().order
+ *   - rankHits()           → sorts using compareHits()
+ *   - explainOrder()       → derives directly from compareHitsDetailed()
+ *   - compareRanked()      → derives directly from explainOrder()
  *
- * Ordering precedence:
+ * There must be NO second handwritten precedence chain.
+ *
+ * Ordering precedence (first difference is decisive):
  * 1. Higher composite score wins
  * 2. Higher releaseConfidence wins (parser evidence strength)
  * 3. Higher quality wins (resolution/source evidence)
@@ -314,121 +319,100 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
  *
  * @param {Object} a - First ranked result
  * @param {Object} b - Second ranked result
- * @returns {number} -1 if a before b, 1 if b before a, 0 if equal
+ * @returns {{order: -1|0|1, decisiveFactor: string|null, aValue: *, bValue: *, winner: 'a'|'b'|'tie', reason: string}}
  */
-export function compareHits(a, b) {
+export function compareHitsDetailed(a, b) {
   // Primary: composite score (higher wins)
   const aScore = a.score ?? 0;
   const bScore = b.score ?? 0;
-  if (aScore !== bScore) return bScore - aScore > 0 ? 1 : -1;
+  if (aScore !== bScore) {
+    const aWins = aScore > bScore;
+    return {
+      order: aWins ? -1 : 1,
+      decisiveFactor: 'score',
+      aValue: aScore,
+      bValue: bScore,
+      winner: aWins ? 'a' : 'b',
+      reason: `${aWins ? 'A' : 'B'} has higher composite score (${aScore} vs ${bScore})`,
+    };
+  }
 
   // Tie-break 1: releaseConfidence (higher wins)
   const aConf = a.components?.releaseConfidence ?? 0;
   const bConf = b.components?.releaseConfidence ?? 0;
-  if (aConf !== bConf) return bConf - aConf > 0 ? 1 : -1;
+  if (aConf !== bConf) {
+    const aWins = aConf > bConf;
+    return {
+      order: aWins ? -1 : 1,
+      decisiveFactor: 'releaseConfidence',
+      aValue: aConf,
+      bValue: bConf,
+      winner: aWins ? 'a' : 'b',
+      reason: `${aWins ? 'A' : 'B'} wins tie-break on release confidence (${aConf} vs ${bConf})`,
+    };
+  }
 
   // Tie-break 2: quality (higher wins)
   const aQual = a.components?.quality ?? 0;
   const bQual = b.components?.quality ?? 0;
-  if (aQual !== bQual) return bQual - aQual > 0 ? 1 : -1;
+  if (aQual !== bQual) {
+    const aWins = aQual > bQual;
+    return {
+      order: aWins ? -1 : 1,
+      decisiveFactor: 'quality',
+      aValue: aQual,
+      bValue: bQual,
+      winner: aWins ? 'a' : 'b',
+      reason: `${aWins ? 'A' : 'B'} wins tie-break on quality (${aQual} vs ${bQual})`,
+    };
+  }
 
   // Tie-break 3: relevance (higher wins)
   const aRel = a.components?.relevance ?? 0;
   const bRel = b.components?.relevance ?? 0;
-  if (aRel !== bRel) return bRel - aRel > 0 ? 1 : -1;
+  if (aRel !== bRel) {
+    const aWins = aRel > bRel;
+    return {
+      order: aWins ? -1 : 1,
+      decisiveFactor: 'relevance',
+      aValue: aRel,
+      bValue: bRel,
+      winner: aWins ? 'a' : 'b',
+      reason: `${aWins ? 'A' : 'B'} wins tie-break on relevance (${aRel} vs ${bRel})`,
+    };
+  }
 
   // Tie-break 4: hash (lexicographic, lower wins — deterministic)
-  if (a.hash !== b.hash) return a.hash < b.hash ? -1 : 1;
+  if (a.hash !== b.hash) {
+    const aWins = a.hash < b.hash;
+    return {
+      order: aWins ? -1 : 1,
+      decisiveFactor: 'hash',
+      aValue: a.hash,
+      bValue: b.hash,
+      winner: aWins ? 'a' : 'b',
+      reason: `${aWins ? 'A' : 'B'} wins tie-break on hash (lexicographic)`,
+    };
+  }
 
   // Tie-break 5: fileIndex (lower wins, null sorts after 0)
   const aIdx = a.fileIndex ?? Number.MAX_SAFE_INTEGER;
   const bIdx = b.fileIndex ?? Number.MAX_SAFE_INTEGER;
-  if (aIdx !== bIdx) return aIdx - bIdx;
-
-  return 0;
-}
-
-/**
- * Explain why one result outranks another using the SAME ordering contract
- * as rankHits(). Returns the FIRST difference found (the decisive factor).
- *
- * @param {Object} a - First ranked result
- * @param {Object} b - Second ranked result
- * @returns {Object} Explanation of ordering
- */
-export function explainOrder(a, b) {
-  const aScore = a.score ?? 0;
-  const bScore = b.score ?? 0;
-  if (aScore !== bScore) {
-    return {
-      decisiveFactor: 'score',
-      aValue: aScore,
-      bValue: bScore,
-      winner: aScore > bScore ? 'a' : 'b',
-      reason: `${aScore > bScore ? 'A' : 'B'} has higher composite score (${aScore} vs ${bScore})`,
-    };
-  }
-
-  const aConf = a.components?.releaseConfidence ?? 0;
-  const bConf = b.components?.releaseConfidence ?? 0;
-  if (aConf !== bConf) {
-    return {
-      decisiveFactor: 'releaseConfidence',
-      aValue: aConf,
-      bValue: bConf,
-      winner: aConf > bConf ? 'a' : 'b',
-      reason: `${aConf > bConf ? 'A' : 'B'} wins tie-break on release confidence (${aConf} vs ${bConf})`,
-    };
-  }
-
-  const aQual = a.components?.quality ?? 0;
-  const bQual = b.components?.quality ?? 0;
-  if (aQual !== bQual) {
-    return {
-      decisiveFactor: 'quality',
-      aValue: aQual,
-      bValue: bQual,
-      winner: aQual > bQual ? 'a' : 'b',
-      reason: `${aQual > bQual ? 'A' : 'B'} wins tie-break on quality (${aQual} vs ${bQual})`,
-    };
-  }
-
-  const aRel = a.components?.relevance ?? 0;
-  const bRel = b.components?.relevance ?? 0;
-  if (aRel !== bRel) {
-    return {
-      decisiveFactor: 'relevance',
-      aValue: aRel,
-      bValue: bRel,
-      winner: aRel > bRel ? 'a' : 'b',
-      reason: `${aRel > bRel ? 'A' : 'B'} wins tie-break on relevance (${aRel} vs ${bRel})`,
-    };
-  }
-
-  if (a.hash !== b.hash) {
-    const winner = a.hash < b.hash ? 'a' : 'b';
-    return {
-      decisiveFactor: 'hash',
-      aValue: a.hash,
-      bValue: b.hash,
-      winner,
-      reason: `${winner === 'a' ? 'A' : 'B'} wins tie-break on hash (lexicographic)`,
-    };
-  }
-
-  const aIdx = a.fileIndex ?? Number.MAX_SAFE_INTEGER;
-  const bIdx = b.fileIndex ?? Number.MAX_SAFE_INTEGER;
   if (aIdx !== bIdx) {
+    const aWins = aIdx < bIdx;
     return {
+      order: aWins ? -1 : 1,
       decisiveFactor: 'fileIndex',
       aValue: a.fileIndex,
       bValue: b.fileIndex,
-      winner: aIdx < bIdx ? 'a' : 'b',
-      reason: `${aIdx < bIdx ? 'A' : 'B'} wins tie-break on file index (${a.fileIndex} vs ${b.fileIndex})`,
+      winner: aWins ? 'a' : 'b',
+      reason: `${aWins ? 'A' : 'B'} wins tie-break on file index (${a.fileIndex} vs ${b.fileIndex})`,
     };
   }
 
+  // Exact equality: all tie-breakers exhausted
   return {
+    order: 0,
     decisiveFactor: null,
     aValue: null,
     bValue: null,
@@ -438,16 +422,43 @@ export function explainOrder(a, b) {
 }
 
 /**
+ * Compare two ranked results. Returns compareHitsDetailed().order.
+ *
+ * @param {Object} a - First ranked result
+ * @param {Object} b - Second ranked result
+ * @returns {number} -1 if a before b, 1 if b before a, 0 if equal
+ */
+export function compareHits(a, b) {
+  return compareHitsDetailed(a, b).order;
+}
+
+/**
+ * Explain why one result outranks another.
+ *
+ * Derives directly from compareHitsDetailed() — there is no second
+ * handwritten precedence chain.
+ *
+ * @param {Object} a - First ranked result
+ * @param {Object} b - Second ranked result
+ * @returns {{decisiveFactor: string|null, aValue: *, bValue: *, winner: 'a'|'b'|'tie', reason: string}}
+ */
+export function explainOrder(a, b) {
+  const d = compareHitsDetailed(a, b);
+  return {
+    decisiveFactor: d.decisiveFactor,
+    aValue: d.aValue,
+    bValue: d.bValue,
+    winner: d.winner,
+    reason: d.reason,
+  };
+}
+
+/**
  * Rank multiple search hits.
  *
  * Uses deterministic tie-breakers so repeated identical input yields identical
- * order. Tie-breaking precedence:
- * 1. Higher composite score wins
- * 2. Higher releaseConfidence wins (parser evidence strength)
- * 3. Higher quality wins (resolution/source evidence)
- * 4. Higher relevance wins (title match strength)
- * 5. Lower hash string wins (deterministic, content-derived)
- * 6. Lower fileIndex wins (null sorts after 0)
+ * order. Ordering is derived from compareHits() → compareHitsDetailed(),
+ * the single source of truth.
  *
  * @param {Array<Object>} hits - Search hits
  * @param {Object} [queryIntent] - Query intent
@@ -463,11 +474,18 @@ export function rankHits(hits, queryIntent = {}, mediaId = null) {
 /**
  * Compare two ranked results to explain why one outranks the other.
  *
- * Uses the SAME ordering contract as rankHits() via compareHits() and
- * explainOrder(). Guaranteed to never drift from actual ranking behavior.
+ * Accepts RANKED RESULTS ONLY (output of rankHit/rankHits). Does NOT accept
+ * explainRank() output, because explainRank() drops hash/fileIndex and
+ * therefore cannot reproduce the final hash/fileIndex tie-breaks.
  *
- * @param {Object} a - First ranked result (or its explanation)
- * @param {Object} b - Second ranked result (or its explanation)
+ * Callers that need per-result explanations should call explainRank()
+ * separately on each ranked result.
+ *
+ * Ordering is derived directly from explainOrder() → compareHitsDetailed(),
+ * the single source of truth. Guaranteed to never drift from rankHits().
+ *
+ * @param {Object} a - First ranked result (rankHit/rankHits output)
+ * @param {Object} b - Second ranked result (rankHit/rankHits output)
  * @returns {Object} Comparison result
  */
 export function compareRanked(a, b) {
