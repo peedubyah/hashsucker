@@ -1,9 +1,9 @@
 # Roadmap
 
 **Source:** [`audit/8-21-audit.md`](audit/8-21-audit.md), verified 2026-08-21.
-**Current stage:** Stage 0 — security and deployability.
+**Current stage:** Stage 1 — executable API contract.
 
-Stage 0 deployability is implemented; owner credential rotation remains operationally required before Stage 1. This roadmap is staged to be reversible. Target behavior below is not implemented unless explicitly stated elsewhere.
+Stage 0 deployability and the first Stage 1 exact-release-identity slice are implemented; owner credential rotation remains operationally required. This roadmap is staged to be reversible. Target behavior below is not implemented unless explicitly stated elsewhere.
 
 ## Stage 0 — Security and deployability
 
@@ -20,11 +20,18 @@ Implemented in the repository:
 
 ## Stage 1 — Executable API contract
 
-- Convert the current code-verified Markdown contract into executable schemas or contract tests.
-- Synchronize UI/JSDoc types with the selected active normalized metadata fields.
-- Correct known runtime contract defects, including swallowed validation details and corpus confidence mapping.
-- Introduce exact `releaseKey` and propagate `fileIndex` through API, UI keys, request JSON, importer DB, status, and logs.
-- Continue documenting only implemented routes and lifecycle states.
+Implemented first correctness slice:
+
+- A dependency-free executable contract validates canonical `releaseKey`, lowercase `infoHash`, and required nullable/non-negative-integer `fileIndex` at public boundaries.
+- UI/JSDoc metadata DTOs use the active normalized field names.
+- Exact identity propagates through search results, UI keys/selection, request JSON, queue status, importer DB, status, and logs.
+- Protocol version remains `1`: legacy payloads omitting both exact fields map to torrent-level identity; new payloads require both fields and consistency.
+- Backend contract tests, frontend tests/typecheck/build, and importer protocol tests cover null, zero, and different-file identities.
+
+Remaining Stage 1 work:
+
+- Correct any remaining runtime contract defects, including swallowed validation details not covered by the exact-identity slice.
+- Continue documenting only implemented routes and lifecycle states and keep executable/client/frontend contracts synchronized.
 
 **Exit:** Backend contract tests and frontend type/build checks fail on DTO drift; two files from one hash remain distinguishable end to end.
 

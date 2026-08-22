@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 
+import { validateReleaseIdentity } from '../../api/release-contract.js';
+
 export function createHandoff({
   intent,
   release,
@@ -9,9 +11,7 @@ export function createHandoff({
     throw new Error('intent is required');
   }
 
-  if (!release?.infoHash) {
-    throw new Error('selected release must have an infoHash');
-  }
+  const identity = validateReleaseIdentity(release);
 
   if (!['torbox', 'realdebrid', 'auto'].includes(provider)) {
     throw new Error(`Invalid provider: ${provider}`);
@@ -38,7 +38,7 @@ export function createHandoff({
     },
 
     release: {
-      infoHash: release.infoHash.toLowerCase(),
+      ...identity,
       title: release.title || null,
       filename: release.filename || null,
       size: release.size ?? null,

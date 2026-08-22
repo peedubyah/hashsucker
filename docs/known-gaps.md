@@ -8,10 +8,8 @@
 |---|---|---|
 | Local retrieval is not selected-media scoped | Cross-title/series recommendations can appear eligible | Require exact selected-media association before local eligibility |
 | Local and live results are not globally ranked | Source origin determines order; live score is `0` | Normalize both pools and run one final deterministic rank |
-| Exact file identity collapses to hash-only | Multi-file candidates overwrite/suppress each other and lose request provenance | Propagate `releaseKey`/`fileIndex` through merge, DTO, UI, queue, and importer state |
 | Historically exposed TorBox credential requires rotation | Removing current tracked configuration does not revoke a credential present in Git history | Owner must rotate the TorBox credential; history was deliberately not rewritten |
 | Mutation routes lack application authentication | Untrusted callers can ingest, mutate, or submit resource-consuming work if deployment is published beyond its default loopback boundary | Keep loopback-only publication or add an authenticated trusted reverse proxy before non-loopback exposure |
-| API contract and UI types diverge | Metadata fields render missing/incorrectly; request UI is not wired | Maintain one code-adjacent executable contract/shared types |
 
 ## High current defects
 

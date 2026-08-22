@@ -1,3 +1,4 @@
+import { createReleaseIdentity } from '../../api/release-contract.js';
 import { normalizeInfoHash } from '../stremio/normalize.js';
 
 const TORZNAB_CAPS = '/api?t=capabilities';
@@ -60,9 +61,10 @@ export function normalizeTorznabItem(item, indexerMeta = {}) {
   const seeders = parseNumber(item.seeders);
   const leechers = parseNumber(item.leechers);
   const publishDate = parseTorznabDate(item.pubDate);
+  const identity = createReleaseIdentity(infoHash, null);
 
   return {
-    key: `ih:${infoHash}`,
+    key: identity.releaseKey,
     addonId: indexerMeta.addonId || null,
     addonName: indexerMeta.name || null,
     addonSortOrder: indexerMeta.sortOrder ?? 0,
@@ -79,7 +81,7 @@ export function normalizeTorznabItem(item, indexerMeta = {}) {
     size: size || null,
     cached: false,
     filename: title,
-    infoHash,
+    ...identity,
     nzbUrl: null,
     url: downloadUrl,
     behaviorHints: {},

@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import type { ReleaseSearchResult, MediaResult, ReleaseResult } from '@/types/api';
+import { submitRequest } from '@api/client';
+import type { ReleaseSearchResult, MediaResult, ReleaseResult, RequestSubmissionResult } from '@/types/api';
 import { FilterBar } from '@/components/FilterBar';
 import { ReleaseRow } from '@/components/ReleaseRow';
 import { ReleaseDetails } from '@/components/ReleaseDetails';
@@ -19,6 +20,9 @@ interface Props {
 
 export function ReleasesPage({ releases, media, loading, error, onBack }: Props) {
   const [selectedRelease, setSelectedRelease] = useState<ReleaseResult | null>(null);
+  const [requestResult, setRequestResult] = useState<RequestSubmissionResult | null>(null);
+  const [requestError, setRequestError] = useState<string | null>(null);
+  const [requesting, setRequesting] = useState(false);
 
   const {
     filters,
@@ -32,6 +36,26 @@ export function ReleasesPage({ releases, media, loading, error, onBack }: Props)
 
   const handleSelectRelease = (release: ReleaseResult) => {
     setSelectedRelease(release);
+    setRequestResult(null);
+    setRequestError(null);
+  };
+
+  const handleSubmitRequest = async () => {
+    if (!selectedRelease || !releases) return;
+    setRequesting(true);
+    setRequestError(null);
+    try {
+      const result: RequestSubmissionResult = await submitRequest({
+        type: releases.intent.streamType,
+        mediaId: releases.intent.mediaId,
+        release: selectedRelease,
+      });
+      setRequestResult(result);
+    } catch (requestFailure) {
+      setRequestError((requestFailure as Error).message);
+    } finally {
+      setRequesting(false);
+    }
   };
 
   return (
@@ -42,7 +66,7 @@ export function ReleasesPage({ releases, media, loading, error, onBack }: Props)
         </button>
         {media && (
           <div className="media-title">
-            <h1>{media.media.name}</h1>
+            <h1>{media.media.title}</h1>
             <span className="media-subtitle">
               {media.media.type} {media.media.year && `· ${media.media.year}`}
             </span>
@@ -87,7 +111,7 @@ export function ReleasesPage({ releases, media, loading, error, onBack }: Props)
             <div className="release-list">
               {sorted.map((r, i) => (
                 <ReleaseRow
-                  key={r.infoHash}
+                  key={r.releaseKey}
                   release={r}
                   rank={i + 1}
                   onSelect={handleSelectRelease}
@@ -102,6 +126,10 @@ export function ReleasesPage({ releases, media, loading, error, onBack }: Props)
         <ReleaseDetails
           release={selectedRelease}
           onClose={() => setSelectedRelease(null)}
+          onSubmit={handleSubmitRequest}
+          requesting={requesting}
+          requestResult={requestResult}
+          requestError={requestError}
         />
       )}
     </div>

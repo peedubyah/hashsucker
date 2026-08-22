@@ -24,8 +24,16 @@ This is not the target provider-neutral virtual-library materializer. Do not gen
 - Ambiguity fails closed.
 - Pre-existing/unowned provider resources are normally retained; cleanup must remain ownership-aware.
 - Staging cleanup avoids recursive deletion.
+- Protocol-v1 requests persist canonical lowercase `info_hash`, nullable `file_index`, and `release_key`; historical protocol-v1 files without both exact fields remain compatible as torrent-level identity.
+- Browser/corpus `fileIndex` is request provenance only. TorBox inventory remains authoritative for provider `file_id`, path, size, and selection.
 
-Do not weaken these safeguards to compensate for discovery defects. Current request persistence still lacks `fileIndex`/`releaseKey`; that is roadmap Stage 1 work.
+Do not weaken these safeguards to compensate for discovery defects.
+
+## Protocol-v1 identity compatibility
+
+New queue payloads must include both `release.fileIndex` and `release.releaseKey`, with `fileIndex` exactly `null` or a non-negative JavaScript-safe integer and the key matching `lower(infoHash):torrent` or `lower(infoHash):<decimal index>`. Partial, malformed, inconsistent, or unsafe-integer identity fails validation.
+
+Legacy version-1 payloads that omit both fields remain accepted and are stored as `file_index = NULL` with `release_key = lower(infoHash) + ':torrent'`. Startup performs an idempotent additive migration for existing unversioned SQLite databases and canonically recomputes historical keys from `info_hash` and `file_index`.
 
 ## Known liveness risk
 

@@ -1,3 +1,4 @@
+import { createReleaseIdentity } from '../api/release-contract.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
 import { searchMedia } from '../lib/search.js';
 import { createHandoff } from '../lib/requests/handoff.js';
@@ -62,7 +63,10 @@ const selected = results.find(
 if (selected) {
   const handoff = createHandoff({
     intent,
-    release: selected,
+    release: {
+      ...selected,
+      ...createReleaseIdentity(selected.infoHash, selected.fileIndex),
+    },
     provider: 'torbox',
   });
 

@@ -7,7 +7,10 @@
 
 /**
  * @typedef {Object} TitleSearchResult
- * @property {Array<TitleResult>} results - Title results from Cinemeta
+ * @property {Array<TitleResult>} results - Normalized title results
+ * @property {string} requestId - Search request identifier
+ * @property {boolean} fromCache - Whether the metadata cache supplied the result
+ * @property {Array<{provider: string, error: string}>} [errors] - Provider failures when partial results are returned
  * @property {Timings} timings
  */
 
@@ -39,12 +42,14 @@
  * @typedef {Object} RequestSubmissionResult
  * @property {string} requestId - UUID of the submitted request
  * @property {string} status - Always "queued" on success
+ * @property {ReleaseIdentity} release - Exact selected physical candidate identity
  */
 
 /**
  * @typedef {Object} RequestStatusResult
  * @property {string} requestId - UUID of the request
  * @property {string} status - One of "queued", "processing", "done", "failed"
+ * @property {ReleaseIdentity} release - Exact selected physical candidate identity
  */
 
 /**
@@ -74,16 +79,25 @@
  * @typedef {Object} TitleResult
  * @property {string} id - Media identifier (e.g., "tt2085059")
  * @property {string} type - 'movie' or 'series'
- * @property {string} name - Title name
- * @property {string|null} poster - Poster URL
- * @property {string|null} year - Year or year range
- * @property {string|null} description - Brief description
+ * @property {string} title - Normalized title
+ * @property {number|null} year - Release year
+ * @property {string|null} posterUrl - Poster URL
+ * @property {string|null} backdropUrl - Backdrop URL
+ * @property {string|null} overview - Brief description
+ */
+
+/**
+ * @typedef {Object} ReleaseIdentity
+ * @property {string} infoHash - Lowercase 40-character hexadecimal infoHash
+ * @property {number|null} fileIndex - Browser/corpus file evidence; null means torrent-level or unknown-file evidence
+ * @property {string} releaseKey - Canonical lower(infoHash):fileIndex-or-torrent identity
  */
 
 /**
  * @typedef {Object} ReleaseResult
- * @property {string} infoHash - 40-char hex infoHash
- * @property {number|null} fileIndex - File index (null for single-file)
+ * @property {string} infoHash - Lowercase 40-character hexadecimal infoHash
+ * @property {number|null} fileIndex - Browser/corpus file evidence; null is distinct from file index zero
+ * @property {string} releaseKey - Canonical exact release identity
  * @property {string} title - Parsed title
  * @property {string} filename - Original release filename
  * @property {number|null} size - File size in bytes
@@ -107,7 +121,8 @@
 /**
  * @typedef {Object} InternalReleaseResult
  * @property {string} hash - 40-char hex infoHash
- * @property {number|null} fileIndex - File index (null for single-file)
+ * @property {number|null} fileIndex - File index (null for torrent-level or unknown-file evidence)
+ * @property {string} releaseKey - Canonical exact release identity
  * @property {string} filename - Original release filename
  * @property {ReleaseAttributes} parsed - Parsed release attributes
  * @property {number} confidence - Parse confidence (0.0-1.0)
@@ -139,12 +154,12 @@
 
 /**
  * @typedef {Object} ScoreComponents
- * @property {number} relevance - Title relevance
- * @property {number} quality - Quality score
- * @property {number} releaseConfidence - Release parse confidence
- * @property {number} identityConfidence - Media identity confidence
- * @property {number} providerAvailability - Provider availability
- * @property {number} episodeMatch - Episode match score
+ * @property {number} [relevance] - Title relevance
+ * @property {number} [quality] - Quality score
+ * @property {number} [releaseConfidence] - Release parse confidence
+ * @property {number} [identityConfidence] - Media identity confidence
+ * @property {number} [providerAvailability] - Provider availability
+ * @property {number} [episodeMatch] - Episode match score
  */
 
 /**

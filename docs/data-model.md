@@ -8,7 +8,7 @@
 
 The current database key is `(info_hash, file_index_key)`, where `file_index_key = -1` represents a null raw file index.
 
-The target public/logging key is:
+The current public/logging key is:
 
 $$
 \text{releaseKey} = \operatorname{lower}(\text{infoHash}) + ":" +
@@ -90,17 +90,15 @@ erDiagram
 
 ## Current enforcement gaps
 
-- Exact database identity collapses to info hash during combined merge, React keys, request handoff, and importer request persistence.
 - Local retrieval does not require an association to the selected media ID.
 - Additive associations can make weak false positives sticky.
 - Episode associations can be constructed without validating actual episode existence.
 - Provider observations have no freshness/error lifecycle and no append-only history.
-- There are no schema versions, migration runner, ingestion run lock, checkpoint lifecycle, or transaction API.
-- Root Compose does not persist this database.
+- There are no schema versions, migration runner, ingestion run lock, checkpoint lifecycle, or transaction API. The importer has only a narrow idempotent additive migration for exact request identity.
 
 ## Current physical-import state
 
-`torbox-importer` owns a separate SQLite database and filesystem spool. It persists request/job/provider/Arr state sufficient for crash recovery and guarded physical import, but request identity includes `info_hash` only—not `fileIndex` or `releaseKey`.
+`torbox-importer` owns a separate SQLite database and filesystem spool. It persists request/job/provider/Arr state sufficient for crash recovery and guarded physical import. Request rows carry lowercase `info_hash`, nullable `file_index`, and canonical `release_key`; provider files remain independently keyed by `(torbox_id, file_id)`.
 
 The spool directories are:
 

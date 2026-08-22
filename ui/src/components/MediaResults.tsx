@@ -21,16 +21,16 @@ export function MediaResults({ titles, onSelect }: Props) {
               className="media-select"
               onClick={() => onSelect(t.type, t.id)}
             >
-              {t.poster && (
-                <img src={t.poster} alt="" className="media-poster" loading="lazy" />
+              {t.posterUrl && (
+                <img src={t.posterUrl} alt="" className="media-poster" loading="lazy" />
               )}
               <div className="media-info">
-                <span className="media-name">{t.name}</span>
+                <span className="media-name">{t.title}</span>
                 <span className="media-meta">
                   {t.type} {t.year && `· ${t.year}`}
                 </span>
-                {t.description && (
-                  <span className="media-desc">{t.description}</span>
+                {t.overview && (
+                  <span className="media-desc">{t.overview}</span>
                 )}
               </div>
             </button>

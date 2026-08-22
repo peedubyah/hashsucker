@@ -23,7 +23,14 @@ function ScoreBar({ value, label }: { value: number; label: string }) {
 }
 
 function RankingDetails({ release }: { release: ReleaseResult }) {
-  const hasComponents = release.components != null;
+  const componentRows = [
+    ['relevance', release.components.relevance],
+    ['quality', release.components.quality],
+    ['release', release.components.releaseConfidence],
+    ['identity', release.components.identityConfidence],
+    ['provider', release.components.providerAvailability],
+  ] as const;
+  const hasComponents = componentRows.some(([, value]) => Number.isFinite(value));
   const hasScore = release.score != null;
   const hasConfidence = release.confidence != null;
 
@@ -47,13 +54,11 @@ function RankingDetails({ release }: { release: ReleaseResult }) {
       )}
       {hasComponents && (
         <div className="ranking-components">
-          <ScoreBar value={release.components.relevance} label="relevance" />
-          <ScoreBar value={release.components.quality} label="quality" />
-          <ScoreBar value={release.components.releaseConfidence} label="release" />
-          <ScoreBar value={release.components.identityConfidence} label="identity" />
-          <ScoreBar value={release.components.providerAvailability} label="provider" />
-          {release.components.episodeMatch != null && release.components.episodeMatch !== 1 && (
-            <ScoreBar value={release.components.episodeMatch} label="episode" />
+          {componentRows.map(([label, value]) => Number.isFinite(value) && (
+            <ScoreBar key={label} value={value as number} label={label} />
+          ))}
+          {Number.isFinite(release.components.episodeMatch) && release.components.episodeMatch !== 1 && (
+            <ScoreBar value={release.components.episodeMatch as number} label="episode" />
           )}
         </div>
       )}

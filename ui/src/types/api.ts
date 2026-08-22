@@ -3,16 +3,20 @@
 
 export interface TitleSearchResult {
   results: TitleResult[];
+  requestId: string;
+  fromCache: boolean;
+  errors?: Array<{ provider: string; error: string }>;
   timings: Timings;
 }
 
 export interface TitleResult {
   id: string;
   type: 'movie' | 'series';
-  name: string;
-  poster: string | null;
-  year: string | null;
-  description: string | null;
+  title: string;
+  year: number | null;
+  posterUrl: string | null;
+  backdropUrl: string | null;
+  overview: string | null;
 }
 
 export interface ReleaseSearchResult {
@@ -33,9 +37,13 @@ export interface SearchIntent {
   episodes: number[];
 }
 
-export interface ReleaseResult {
+export interface ReleaseIdentity {
   infoHash: string;
   fileIndex: number | null;
+  releaseKey: string;
+}
+
+export interface ReleaseResult extends ReleaseIdentity {
   title: string;
   filename: string;
   size: number | null;
@@ -57,12 +65,12 @@ export interface ReleaseResult {
 }
 
 export interface ScoreComponents {
-  relevance: number;
-  quality: number;
-  releaseConfidence: number;
-  identityConfidence: number;
-  providerAvailability: number;
-  episodeMatch: number;
+  relevance?: number;
+  quality?: number;
+  releaseConfidence?: number;
+  identityConfidence?: number;
+  providerAvailability?: number;
+  episodeMatch?: number;
 }
 
 export interface ProviderObservation {
@@ -92,14 +100,20 @@ export interface MediaLookupResult {
   timings: Timings;
 }
 
-export interface MediaResult {
-  id: string;
-  type: 'movie' | 'series';
-  name: string;
-  poster: string | null;
-  year: string | null;
-  description: string | null;
-  videos: VideoResult[];
+export interface MediaResult extends TitleResult {
+  videos?: VideoResult[];
+}
+
+export interface RequestSubmissionResult {
+  requestId: string;
+  status: 'queued';
+  release: ReleaseIdentity;
+}
+
+export interface RequestStatusResult {
+  requestId: string;
+  status: 'queued' | 'processing' | 'done' | 'failed';
+  release: ReleaseIdentity;
 }
 
 export interface VideoResult {

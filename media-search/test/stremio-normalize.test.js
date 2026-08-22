@@ -19,7 +19,9 @@ test('extracts Comet TorBox infoHash when bingeGroup and playback URL agree', ()
 
   assert.ok(stream);
   assert.equal(stream.infoHash, HASH);
-  assert.equal(stream.key, `ih:${HASH}`);
+  assert.equal(stream.fileIndex, null);
+  assert.equal(stream.releaseKey, `${HASH}:torrent`);
+  assert.equal(stream.key, `${HASH}:torrent`);
   assert.equal(stream.url, null);
 });
 

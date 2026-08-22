@@ -4,11 +4,11 @@
 
 This is the machine-maintained companion to [`HANDOFF.md`](../HANDOFF.md). It reports only reproducible repository facts and explicit unknowns. It does not prove live runtime, provider, deployment, or test health.
 
-- Generated at (UTC): `2026-08-21T23:52:12.376Z`
+- Generated at (UTC): `2026-08-22T02:09:16.700Z`
 - Generator: [`scripts/update-project-state.mjs`](../scripts/update-project-state.mjs)
 - Repository root: `.` (the Git top-level containing this file)
-- State input fingerprint: `sha256:c20a737ddb287b261b51e317941920e995a28b21c49b83b62fda7730bf9865a9`
-- Fingerprinted repository paths: `181`
+- State input fingerprint: `sha256:d1db54ba581824754ffb76d6f18738dbfc319e9fd13d80d2d76e2e7e401f98c0`
+- Fingerprinted repository paths: `186`
 
 ## Authority and ownership
 
@@ -34,7 +34,7 @@ Worker branches/worktrees do not routinely regenerate or commit this file. The c
 ## Roadmap state
 
 - Authority: [`docs/audit/8-21-audit.md`](../docs/audit/8-21-audit.md), verified `2026-08-21` by [`docs/roadmap.md`](roadmap.md).
-- Current stage: **Stage 0 — security and deployability**.
+- Current stage: **Stage 1 — executable API contract**.
 - Stage status: **not recorded**.
 - Defined stages: `0` through `12` (`13` headings).
 - Recently completed stages/milestones: **not recorded**.

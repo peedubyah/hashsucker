@@ -20,7 +20,7 @@ Important limitations:
 
 - Local corpus retrieval is not constrained by the selected media ID.
 - Local and live candidates are not globally ranked.
-- Exact file identity collapses to hash-only during result merge, UI row identity, request handoff, and importer persistence.
+- Exact `(infoHash,fileIndex)` identity now survives result merge, public DTOs, UI row/selection, request handoff/status, and importer persistence/logging; provider inventory remains authoritative for provider file IDs.
 - Provider-observation age is ignored by ranking.
 - The reachable DMM ingestion endpoint does not recognize the current iframe/hash source wrapper; a compatible importer exists but is not wired to runtime.
 - Mutation endpoints have no application authentication. Root Compose binds to loopback by default; use an authenticated trusted reverse proxy before publishing beyond localhost.

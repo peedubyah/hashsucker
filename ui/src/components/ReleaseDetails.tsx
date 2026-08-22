@@ -1,4 +1,4 @@
-import type { ReleaseResult } from '@/types/api';
+import type { ReleaseResult, RequestSubmissionResult } from '@/types/api';
 import { formatSize, formatScore, formatConfidence } from '@/utils/format';
 import { Badge } from './Badge';
 import { ProviderStatus } from './ProviderStatus';
@@ -6,9 +6,13 @@ import { ProviderStatus } from './ProviderStatus';
 interface Props {
   release: ReleaseResult;
   onClose: () => void;
+  onSubmit: () => void;
+  requesting: boolean;
+  requestResult: RequestSubmissionResult | null;
+  requestError: string | null;
 }
 
-export function ReleaseDetails({ release, onClose }: Props) {
+export function ReleaseDetails({ release, onClose, onSubmit, requesting, requestResult, requestError }: Props) {
   return (
     <div className="release-details-overlay" onClick={onClose}>
       <div className="release-details-panel" onClick={e => e.stopPropagation()}>
@@ -90,6 +94,21 @@ export function ReleaseDetails({ release, onClose }: Props) {
             <h4>Providers</h4>
             <ProviderStatus providers={release.providers} />
           </div>
+          <div className="detail-section">
+            <h4>Exact identity</h4>
+            <div className="detail-item">
+              <span className="detail-label">Release key</span>
+              <span className="detail-value mono">{release.releaseKey}</span>
+            </div>
+          </div>
+          {requestResult ? (
+            <div role="status">Request {requestResult.status}: {requestResult.requestId}</div>
+          ) : (
+            <button type="button" className="request-button" onClick={onSubmit} disabled={requesting}>
+              {requesting ? 'Submitting request…' : 'Submit request'}
+            </button>
+          )}
+          {requestError && <div role="alert">{requestError}</div>}
         </div>
       </div>
     </div>

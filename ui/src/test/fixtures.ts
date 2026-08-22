@@ -4,18 +4,20 @@ export const mockTitles: TitleResult[] = [
   {
     id: 'tt2085059',
     type: 'series',
-    name: 'Black Mirror',
-    poster: 'https://example.com/poster.jpg',
-    year: '2011-',
-    description: 'Stand-alone dramas exploring twisted high-tech futures.',
+    title: 'Black Mirror',
+    posterUrl: 'https://example.com/poster.jpg',
+    backdropUrl: null,
+    year: 2011,
+    overview: 'Stand-alone dramas exploring twisted high-tech futures.',
   },
   {
     id: 'tt0944947',
     type: 'series',
-    name: 'Game of Thrones',
-    poster: null,
-    year: '2011-2019',
-    description: null,
+    title: 'Game of Thrones',
+    posterUrl: null,
+    backdropUrl: null,
+    year: 2011,
+    overview: null,
   },
 ];
 
@@ -23,6 +25,7 @@ export const mockReleases: ReleaseResult[] = [
   {
     infoHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     fileIndex: null,
+    releaseKey: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:torrent',
     title: 'Black Mirror',
     filename: 'Black.Mirror.S07E03.2160p.WEB-DL.DV.HDR10.mkv',
     size: 8589934592,
@@ -54,6 +57,7 @@ export const mockReleases: ReleaseResult[] = [
   {
     infoHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
     fileIndex: null,
+    releaseKey: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:torrent',
     title: 'Black Mirror',
     filename: 'Black.Mirror.S07E03.1080p.WEB-DL.mkv',
     size: 4294967296,
@@ -85,6 +89,7 @@ export const mockReleases: ReleaseResult[] = [
   {
     infoHash: 'cccccccccccccccccccccccccccccccccccccccc',
     fileIndex: null,
+    releaseKey: 'cccccccccccccccccccccccccccccccccccccccc:torrent',
     title: 'Black Mirror',
     filename: 'Black.Mirror.S07E03.720p.HDTV.mkv',
     size: 1073741824,

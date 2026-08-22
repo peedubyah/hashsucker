@@ -66,7 +66,7 @@ Root `compose.yaml` is the relevant repository topology. It:
 
 ## Current release-search behavior
 
-`GET /api/search?type=...&mediaId=...` combines local corpus and live sources, but local retrieval is not selected-media scoped, live results receive score `0`, no final global rerank occurs, and merge identity is info hash only. Treat output as prototype recommendations.
+`GET /api/search?type=...&mediaId=...` combines local corpus and live sources, but local retrieval is not selected-media scoped, live results receive score `0`, and no final global rerank occurs. Merge identity is canonical `releaseKey`, so same-hash file indexes and torrent-level evidence remain distinct. Treat output as prototype recommendations.
 
 ## DMM ingestion status
 

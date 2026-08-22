@@ -8,6 +8,7 @@
  * the legacy live discovery adapters.
  */
 
+import { createReleaseIdentity } from '../../api/release-contract.js';
 import { searchStremio } from '../stremio/search.js';
 import { searchTorznab } from '../torznab/torznab.js';
 
@@ -45,8 +46,7 @@ export async function runLiveDiscovery(mediaId, options = {}) {
   return allReleases
     .filter(r => r.infoHash)
     .map(r => ({
-      infoHash: r.infoHash.toLowerCase(),
-      fileIndex: r.fileIndex ?? null,
+      ...createReleaseIdentity(r.infoHash, r.fileIndex),
       filename: r.filename || r.title,
       title: r.title || r.filename,
       year: r.year,

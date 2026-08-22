@@ -1,10 +1,10 @@
 # media-search HTTP API contract
 
-**Code-verified:** 2026-08-21
+**Code-verified:** 2026-08-22
 
 **Runtime authority:** `src/server/app.js`
 
-This is the only detailed HTTP contract. It documents current behavior, including known defects; target fields such as `releaseKey` are not claimed as implemented.
+This is the only detailed HTTP contract. Public release identity is enforced by the executable contract in `release-contract.js`; contract tests, frontend types/build checks, and importer protocol tests guard this documented behavior.
 
 ## General behavior
 
@@ -13,7 +13,7 @@ This is the only detailed HTTP contract. It documents current behavior, includin
 - Most thrown input failures use `{ "error": "message" }` with status `400`; missing resources use `404`, and processing/upstream failures generally use `502`.
 - Exceptions: invalid title-query length currently returns `200` with an empty result envelope and omits the validation message; malformed JSON for the DMM and attribute mutation routes is swallowed and treated as `{}`.
 - There is no application authentication or authorization. Ingestion, mutation, and request routes must remain behind a trusted boundary.
-- The server does not serve the React UI or static files.
+- In production, the server serves the built React UI from `STATIC_ROOT` on the same origin; local API-only execution may leave that setting unset.
 
 ## Metadata shape
 
@@ -44,7 +44,7 @@ For series detail, `videos` may be attached:
 }
 ```
 
-The current UI TypeScript definitions still use older metadata names. This document follows active backend output.
+The UI TypeScript definitions use these active normalized metadata names.
 
 ## `GET /health`
 
@@ -125,6 +125,7 @@ Release result shape:
 {
   "infoHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "fileIndex": null,
+  "releaseKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:torrent",
   "title": "Parsed title",
   "filename": "Release.Name.mkv",
   "size": null,
@@ -155,16 +156,21 @@ Release result shape:
 }
 ```
 
-Known current semantics:
+Exact identity semantics:
+
+- `infoHash` is a 40-character hexadecimal string and is normalized to lowercase.
+- `fileIndex` is exactly `null` or a non-negative JavaScript-safe integer. `null` is torrent-level/unknown-file evidence and never means file zero.
+- `releaseKey` is canonical and derived as `lower(infoHash) + ":" + ("torrent" when fileIndex is null, otherwise decimal fileIndex)`.
+- Merge deduplication uses `releaseKey`; corpus results win only when the exact key collides. Same-hash file indexes and the null index remain separate results.
+
+Other current semantics:
 
 - Local retrieval is not constrained by `mediaId`.
 - Local candidates are ranked; live candidates receive `score: 0` and empty `components`.
 - There is no final global rerank.
-- Merge deduplication uses lowercase `infoHash`; corpus results win collisions and `fileIndex` is ignored.
-- `total` is the bounded merged count after deduplication, not an exhaustive corpus count.
+- `total` is the bounded merged count after exact-key deduplication, not an exhaustive corpus count.
 - Provider observations may be stale; age is not enforced.
-- For corpus results, public `confidence` currently falls back to `0.5` because the mapper reads a nonexistent nested confidence field; the actual parser confidence still contributes to `components.releaseConfidence`. Live confidence follows live normalization.
-- `releaseKey` is not implemented yet.
+- Corpus confidence is projected from the ranked candidate's parser confidence; live confidence follows live normalization.
 
 The local score formula is:
 
@@ -213,6 +219,8 @@ Request:
   "mediaId": "tt1234567:2:4",
   "release": {
     "infoHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "fileIndex": 0,
+    "releaseKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
     "title": "Optional title",
     "filename": "Optional filename.mkv",
     "size": 1000,
@@ -224,18 +232,23 @@ Request:
 }
 ```
 
-Only `release.infoHash` is required within `release`; it must be 40 hexadecimal characters. Optional strings are trimmed/truncated and invalid size becomes null.
+`release.infoHash`, `release.fileIndex`, and `release.releaseKey` are required. The identity must satisfy the exact semantics above; a missing field, invalid index, or inconsistent key returns `400`. Optional strings are trimmed/truncated and invalid size becomes null.
 
 Response `202`:
 
 ```json
 {
   "requestId": "12345678-1234-1234-1234-123456789abc",
-  "status": "queued"
+  "status": "queued",
+  "release": {
+    "infoHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "fileIndex": 0,
+    "releaseKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0"
+  }
 }
 ```
 
-Current handoff omits `fileIndex` and `releaseKey`. Do not infer that a UI-selected file index reaches the importer.
+The selected exact identity is serialized into protocol-v1 queue JSON and returned by queue status. Browser/corpus `fileIndex` is provenance; it is never interpreted as a provider `file_id`.
 
 ## `GET /api/requests/:uuid`
 
@@ -244,11 +257,16 @@ Returns:
 ```json
 {
   "requestId": "12345678-1234-1234-1234-123456789abc",
-  "status": "queued"
+  "status": "queued",
+  "release": {
+    "infoHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "fileIndex": 0,
+    "releaseKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0"
+  }
 }
 ```
 
-Status is derived from queue directory and is one of `queued`, `processing`, `done`, or `failed`. Returns `404` if no file exists in those directories.
+Status is derived from queue directory and is one of `queued`, `processing`, `done`, or `failed`. Legacy protocol-v1 queue files that omitted both exact fields are reported as `fileIndex: null` and `releaseKey: lower(infoHash) + ":torrent"`; partial exact fields are invalid. Returns `404` if no file exists in those directories.
 
 ## `POST /api/ingest/dmm`
 
@@ -270,7 +288,6 @@ Operator mutation route. Optional body: `{ "limit": 100 }`. Returns attribute-wo
 
 - `/api/releases` — no route exists.
 - Authentication/authorization.
-- `releaseKey` in release DTOs or requests.
 - Provider-neutral placement or virtual-library endpoints.
 - WebDAV/mount/catalog/playback lifecycle endpoints.
 

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+import { readHandoffReleaseIdentity } from '../../api/release-contract.js';
 import { queueHandoff } from '../requests/queue.js';
 import { ImporterClient } from './client.js';
 
@@ -28,12 +29,20 @@ export class QueueImporterClient extends ImporterClient {
       fs.mkdir(path.join(this.root, directory), { recursive: true })
     ));
     await queueHandoff(handoff, { requestDir: path.join(this.root, 'incoming') });
-    return { requestId: handoff.requestId, status: 'queued' };
+    return {
+      requestId: handoff.requestId,
+      status: 'queued',
+      release: readHandoffReleaseIdentity(handoff.release),
+    };
   }
 
   async getRequestStatus(requestId) {
     const found = await this.getRequest(requestId);
-    return found ? { requestId, status: found.status } : null;
+    return found ? {
+      requestId,
+      status: found.status,
+      release: readHandoffReleaseIdentity(found.request.release),
+    } : null;
   }
 
   async getRequest(requestId) {

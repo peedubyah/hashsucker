@@ -35,12 +35,15 @@ INFO_HASH="$(
     jq -r '.release.infoHash' "$FILE" |
     tr '[:upper:]' '[:lower:]'
 )"
+FILE_INDEX_JSON="$(jq -r 'if (.release | has("fileIndex")) then (.release.fileIndex | tostring) else "null" end' "$FILE")"
+RELEASE_KEY="$(jq -r 'if (.release | has("releaseKey")) then .release.releaseKey else ((.release.infoHash | ascii_downcase) + ":torrent") end' "$FILE")"
 
 RELEASE_TITLE="$(jq -r '.release.title // ""' "$FILE")"
 RELEASE_FILENAME="$(jq -r '.release.filename // ""' "$FILE")"
 RELEASE_SIZE="$(jq -r '.release.size // empty' "$FILE")"
 
 [[ -n "$SEASON" ]] && SEASON_SQL="$SEASON" || SEASON_SQL="NULL"
+[[ "$FILE_INDEX_JSON" != "null" ]] && FILE_INDEX_SQL="$FILE_INDEX_JSON" || FILE_INDEX_SQL="NULL"
 [[ -n "$RELEASE_SIZE" ]] && SIZE_SQL="$RELEASE_SIZE" || SIZE_SQL="NULL"
 
 sqlite3 "$DB" "
@@ -55,6 +58,8 @@ INSERT INTO requests (
     season,
     episodes_json,
     info_hash,
+    file_index,
+    release_key,
     release_title,
     release_filename,
     release_size,
@@ -73,6 +78,8 @@ VALUES (
     $SEASON_SQL,
     $(sqlq "$EPISODES_JSON"),
     $(sqlq "$INFO_HASH"),
+    $FILE_INDEX_SQL,
+    $(sqlq "$RELEASE_KEY"),
     $(sqlq "$RELEASE_TITLE"),
     $(sqlq "$RELEASE_FILENAME"),
     $SIZE_SQL,
@@ -93,7 +100,9 @@ WHERE requests.created_at       = excluded.created_at
   AND COALESCE(requests.season, -1)
       = COALESCE(excluded.season, -1)
   AND requests.episodes_json    = excluded.episodes_json
-  AND lower(requests.info_hash) = lower(excluded.info_hash);
+  AND lower(requests.info_hash) = lower(excluded.info_hash)
+  AND requests.file_index IS excluded.file_index
+  AND requests.release_key      = excluded.release_key;
 "
 
 STORED="$(
@@ -107,14 +116,16 @@ STORED="$(
             COALESCE(base_media_id, ''),
             COALESCE(season, -1),
             episodes_json,
-            lower(info_hash)
+            lower(info_hash),
+            COALESCE(file_index, -1),
+            release_key
         FROM requests
         WHERE request_id=$(sqlq "$REQUEST_ID");
     "
 )"
 
 EXPECTED="$(
-    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s' \
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s' \
         "$CREATED_AT" \
         "$PROVIDER" \
         "$MEDIA_TYPE" \
@@ -123,7 +134,9 @@ EXPECTED="$(
         "$BASE_MEDIA_ID" \
         "${SEASON:--1}" \
         "$EPISODES_JSON" \
-        "$INFO_HASH"
+        "$INFO_HASH" \
+        "${FILE_INDEX_JSON/null/-1}" \
+        "$RELEASE_KEY"
 )"
 
 if [[ "$STORED" != "$EXPECTED" ]]; then
@@ -131,4 +144,4 @@ if [[ "$STORED" != "$EXPECTED" ]]; then
     exit 1
 fi
 
-printf 'INGESTED: %s\n' "$REQUEST_ID"
+printf 'INGESTED: %s releaseKey=%s\n' "$REQUEST_ID" "$RELEASE_KEY"

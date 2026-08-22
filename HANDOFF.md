@@ -21,9 +21,9 @@ Worker branches/worktrees must not routinely regenerate or commit shared project
 - Root Compose defines `media-search` and `torbox-importer` only.
 - `media-search` is an unauthenticated Node HTTP API. It performs Cinemeta title/media lookup, local SQLite/FTS5 retrieval, live Torrentio/Comet/Torznab discovery, local ranking, request publication, and operator-triggered ingestion/attribute work.
 - Discovery SQLite models candidates, parsed release attributes, media associations, provider observations, and an FTS5 index. Root Compose sets `DISCOVERY_DB=/data/discovery-cache.db` on the persistent `discovery-data` volume; direct local execution still defaults to memory when unset.
-- The `ui/` React/Vite prototype is built into the production `media-search` image and served by that process on the same origin. Its metadata DTOs still diverge from the API.
+- The `ui/` React/Vite prototype is built into the production `media-search` image and served by that process on the same origin. Its normalized metadata DTOs match the API, and exact release selection submits through the request endpoint.
 - `torbox-importer` starts `/app/scripts/worker.sh`, claims JSON requests from the shared filesystem queue, resolves TorBox placement to an expiring download URL, downloads into local staging, and submits `ManualImport` to Sonarr or Radarr.
-- Physical import accepts an explicit movie or exactly one TV episode. The importer independently maps and validates provider files; browser-selected file evidence is not authoritative.
+- Physical import accepts an explicit movie or exactly one TV episode. Exact `(infoHash,fileIndex)` provenance reaches importer SQLite/status/logs, while the importer independently maps and validates provider files; browser-selected file evidence is not authoritative.
 - Direct TorBox cache-check code exists with useful batching/failure semantics, but it belongs to a legacy CLI path and is not connected to the active combined server search.
 - Real-Debrid appears only as a Torrentio discovery configuration. There is no direct Real-Debrid provider adapter or placement integration.
 
@@ -32,7 +32,7 @@ Worker branches/worktrees must not routinely regenerate or commit shared project
 - Real-Debrid placement, Zurg deployment, TorBox WebDAV validation, rclone provider mounts, mount inventory, provider-file inventory, canonical virtual-library projection, reconciliation, provider failover, and playback/catalog health.
 - A provider-neutral capability contract or provider-independent canonical binding model.
 - Learned cache priors, release-family reputation, or unbiased provider-outcome training telemetry.
-- An executable shared API contract or request-capable production UI workflow.
+- Request-status polling and richer user/operator progress beyond the immediate queued result.
 
 ### Known deployment truth
 
@@ -98,26 +98,24 @@ Critical defects, in priority order:
 
 1. Local corpus retrieval is not selected-media scoped; empty local queries can return unrelated rows.
 2. Local and live candidates are not globally ranked; live candidates receive score `0`.
-3. Hash-only merging drops file-aware identity. UI keys, request handoff, and importer persistence also omit exact `releaseKey` propagation.
-4. Mutation endpoints lack application authentication; loopback publication is the default trusted-network boundary, and the historically exposed TorBox credential requires owner rotation.
-5. The API-reachable DMM runner accepts an obsolete script-call wrapper while current sampled fragments use iframe/hash. The compatible importer is test-only/unwired and parses each decoded JSON array in memory.
-7. Provider-observation age is ignored; there is no active provider hydration in combined server search.
-8. API documentation and UI types disagree with active normalized metadata fields.
-9. The importer always resumes the first `processing` item; one blocked/manual request can starve later work.
-10. There is no end-to-end virtual-library lifecycle, so cached, placed, exposed, bound, cataloged, and playable cannot yet be reported separately.
+3. Mutation endpoints lack application authentication; loopback publication is the default trusted-network boundary, and the historically exposed TorBox credential requires owner rotation.
+4. The API-reachable DMM runner accepts an obsolete script-call wrapper while current sampled fragments use iframe/hash. The compatible importer is test-only/unwired and parses each decoded JSON array in memory.
+5. Provider-observation age is ignored; there is no active provider hydration in combined server search.
+6. The importer always resumes the first `processing` item; one blocked/manual request can starve later work.
+7. There is no end-to-end virtual-library lifecycle, so cached, placed, exposed, bound, cataloged, and playable cannot yet be reported separately.
 
 See [`docs/known-gaps.md`](docs/known-gaps.md) for the maintained register.
 
 ## Current roadmap stage
 
-Stage 0 deployability is implemented: clean images build, the UI/API share one origin, importer startup is explicit, discovery state persists across service recreation, and the unauthenticated surface defaults to loopback. The exposed historical TorBox credential still requires owner rotation.
+Stage 0 deployability is implemented. The first Stage 1 correctness slice is also implemented: an executable release contract enforces exact identity through search DTOs, UI selection, request queue/status, and importer persistence/logging, with additive protocol-v1 compatibility. The exposed historical TorBox credential still requires owner rotation.
 
-Resume implementation with Stage 1 only after rotation/trusted-boundary operations are acknowledged:
+Continue only the remaining ordered Stage 1 contract work before Stage 2:
 
-1. Establish one executable API contract.
-2. Propagate `releaseKey`/`fileIndex` through API, UI, queue, and importer state.
-3. Continue through the ordered stages in [`docs/roadmap.md`](docs/roadmap.md); do not skip directly to learned cache models or broad provider abstractions.
-4. Scope local retrieval by selected media identity and globally rank normalized local/live candidates.
+1. Keep executable contract tests, API/JSDoc/TypeScript DTOs, UI fixtures, and importer protocol tests synchronized.
+2. Correct any remaining public validation/detail inconsistencies without broadening retrieval or ranking scope.
+3. Then continue through the ordered stages in [`docs/roadmap.md`](docs/roadmap.md); do not skip directly to learned cache models or broad provider abstractions.
+4. Stage 2 scopes local retrieval by selected media identity; Stage 3 globally ranks normalized local/live candidates.
 5. Only after those foundations, add provider capability/observation contracts and a shadow canonical-library reconciler.
 
 Do not create LongCat implementation contracts during this documentation pass. The next planning pass may define durable implementation contracts after Stage 0/1 scope is confirmed.

@@ -16,7 +16,7 @@ flowchart LR
     LOCAL["SQLite FTS retrieval\nnot selected-media scoped"]
     SCORE["Local six-part rank"]
     LIVE["Torrentio / Comet / Torznab"]
-    MERGE["Hash-only merge\nlive score = 0"]
+    MERGE["Exact releaseKey merge\nlive score = 0"]
     DB[("Discovery SQLite\npersistent Compose volume")]
     DMM["DMM fragments"]
     INGEST["HTTP ingestion\nwrapper mismatch"]
@@ -45,19 +45,18 @@ flowchart LR
 
 ### Current strengths
 
-- Candidate storage uses `(infoHash, fileIndex)` rather than hash alone.
+- Candidate storage and public request flow use exact `(infoHash, fileIndex)` identity with canonical `releaseKey`; null file index remains distinct from zero.
 - Release evidence, media associations, and provider observations are separate tables.
 - FTS synchronization is trigger-driven.
 - Live source failures are isolated.
 - Queue publication and claiming are atomic filesystem operations.
-- The importer validates explicit intent, provider identity, file size, Arr identity, and post-import state.
+- The importer persists exact release provenance while retaining provider-authoritative file mapping, and validates explicit intent, provider identity, file size, Arr identity, and post-import state.
 
 ### Current divergence
 
 - Selected media identity reaches live discovery but not local corpus filtering.
 - SQL limits local candidates before composite ranking.
 - Only local candidates receive the six-component score; there is no global rerank after merging.
-- Merging and downstream request boundaries collapse candidate identity to info hash.
 - Provider observation age is stored but ignored in ranking.
 - The active server path does not use the direct TorBox cache checker.
 - DMM source compatibility exists in an unwired module, not in the API-reachable ingestion runner.

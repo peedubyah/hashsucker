@@ -12,8 +12,8 @@ const HASH = '0123456789abcdef0123456789abcdef01234567';
 
 test('episode intent stays S07E03 for both episode and whole-season releases', () => {
   const intent = createRequestIntent({ type: 'series', mediaId: 'tt2085059:7:3' });
-  const episode = createHandoff({ intent, release: { infoHash: HASH, title: 'Black.Mirror.S07E03.2160p' } });
-  const season = createHandoff({ intent, release: { infoHash: HASH, title: 'Black.Mirror.S07.Complete.E01-E06.61GB' } });
+  const episode = createHandoff({ intent, release: { infoHash: HASH, fileIndex: 0, releaseKey: `${HASH}:0`, title: 'Black.Mirror.S07E03.2160p' } });
+  const season = createHandoff({ intent, release: { infoHash: HASH, fileIndex: 1, releaseKey: `${HASH}:1`, title: 'Black.Mirror.S07.Complete.E01-E06.61GB' } });
 
   for (const handoff of [episode, season]) {
     assert.equal(handoff.intent.mediaType, 'tv');
@@ -23,13 +23,16 @@ test('episode intent stays S07E03 for both episode and whole-season releases', (
   }
 });
 
-test('movie handoff preserves explicit movie scope and selected hash', () => {
+test('movie handoff preserves exact selected release identity', () => {
   const intent = createRequestIntent({ type: 'movie', mediaId: 'tt0082971' });
-  const handoff = createHandoff({ intent, release: { infoHash: HASH, title: 'Raiders of the Lost Ark (1981)' } });
+  const handoff = createHandoff({ intent, release: { infoHash: HASH.toUpperCase(), fileIndex: null, releaseKey: `${HASH}:torrent`, title: 'Raiders of the Lost Ark (1981)' } });
   assert.deepEqual(handoff.intent, {
     mediaType: 'movie', streamType: 'movie', scope: 'movie', mediaId: 'tt0082971', baseMediaId: 'tt0082971', season: null, episodes: [],
   });
-  assert.equal(handoff.release.infoHash, HASH);
+  assert.deepEqual(
+    { infoHash: handoff.release.infoHash, fileIndex: handoff.release.fileIndex, releaseKey: handoff.release.releaseKey },
+    { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent` },
+  );
 });
 
 test('queue importer uses incoming and maps all lifecycle directories', async () => {
@@ -37,10 +40,14 @@ test('queue importer uses incoming and maps all lifecycle directories', async ()
   const client = new QueueImporterClient({ root });
   const handoff = createHandoff({
     intent: createRequestIntent({ type: 'series', mediaId: 'tt2085059:7:3' }),
-    release: { infoHash: HASH, title: 'Season pack' },
+    release: { infoHash: HASH, fileIndex: 0, releaseKey: `${HASH}:0`, title: 'Season pack' },
   });
   await client.submitRequest(handoff);
-  assert.equal((await client.getRequestStatus(handoff.requestId)).status, 'queued');
+  assert.deepEqual((await client.getRequestStatus(handoff.requestId)).release, {
+    infoHash: HASH,
+    fileIndex: 0,
+    releaseKey: `${HASH}:0`,
+  });
 
   for (const [directory, expected] of [['processing','processing'], ['done','done'], ['failed','failed']]) {
     for (const name of ['incoming','processing','done','failed']) {
@@ -49,4 +56,28 @@ test('queue importer uses incoming and maps all lifecycle directories', async ()
     await fs.writeFile(path.join(root, directory, `${handoff.requestId}.json`), JSON.stringify(handoff));
     assert.equal((await client.getRequestStatus(handoff.requestId)).status, expected);
   }
+});
+
+test('queue status deliberately maps legacy v1 identity and rejects partial identity', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'media-search-legacy-queue-'));
+  const client = new QueueImporterClient({ root });
+  await fs.mkdir(path.join(root, 'incoming'), { recursive: true });
+
+  const legacyId = '11111111-1111-1111-1111-111111111111';
+  await fs.writeFile(path.join(root, 'incoming', `${legacyId}.json`), JSON.stringify({
+    requestId: legacyId,
+    release: { infoHash: HASH.toUpperCase() },
+  }));
+  assert.deepEqual((await client.getRequestStatus(legacyId)).release, {
+    infoHash: HASH,
+    fileIndex: null,
+    releaseKey: `${HASH}:torrent`,
+  });
+
+  const partialId = '22222222-2222-2222-2222-222222222222';
+  await fs.writeFile(path.join(root, 'incoming', `${partialId}.json`), JSON.stringify({
+    requestId: partialId,
+    release: { infoHash: HASH, fileIndex: 0 },
+  }));
+  await assert.rejects(() => client.getRequestStatus(partialId), /provided together/);
 });

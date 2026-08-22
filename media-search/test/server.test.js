@@ -23,6 +23,7 @@ function createHarness() {
       results: [{
         infoHash: HASH,
         fileIndex: null,
+        releaseKey: `${HASH}:torrent`,
         title: 'Season pack',
         filename: 'Season pack',
         size: null,
@@ -71,6 +72,29 @@ test('server serves API and returns 404 when no frontend build is configured', a
   const text = response.text;
   assert.match(text, /"cached":true/);
   assert.doesNotMatch(text, /TORBOX_SECRET|"raw"/);
+  assert.deepEqual(JSON.parse(text).results[0], {
+    infoHash: HASH,
+    fileIndex: null,
+    releaseKey: `${HASH}:torrent`,
+    title: 'Season pack',
+    filename: 'Season pack',
+    size: null,
+    resolution: '1080p',
+    quality: null,
+    codec: null,
+    hdr: null,
+    audio: null,
+    releaseGroup: null,
+    year: null,
+    season: 7,
+    episode: 3,
+    confidence: 0.85,
+    score: 0.75,
+    components: { relevance: 0.8, quality: 0.7 },
+    providers: { torbox: { cached: true } },
+    media: [],
+    _source: 'corpus',
+  });
 
   const ui = await request('/');
   assert.equal(ui.status, 404);
@@ -135,6 +159,7 @@ test('public release API strips all secret-bearing and internal fields', async (
       results: [{
         infoHash: HASH,
         fileIndex: null,
+        releaseKey: `${HASH}:torrent`,
         title: 'Test Release',
         filename: 'Test Release',
         size: 5000,
@@ -183,6 +208,8 @@ test('public release API strips all secret-bearing and internal fields', async (
   assert.doesNotMatch(text, /SECRET456/, 'sources[].downloadUrl must be excluded');
   // Public fields SHOULD appear
   assert.match(text, /"infoHash"/);
+  assert.match(text, /"fileIndex"/);
+  assert.match(text, /"releaseKey"/);
   assert.match(text, /"title"/);
   assert.match(text, /"cached":true/);
   // combinedSearch response shape: no sources array, uses _source for provenance
@@ -195,15 +222,26 @@ test('request endpoint only accepts an explicit episode and preserves it for sea
   const { request, submitted } = createHarness();
   const valid = await request('/api/requests', {
     method: 'POST',
-    body: JSON.stringify({ mediaId: 'tt2085059:7:3', release: { infoHash: HASH, title: 'S07 Complete E01-E06' } }),
+    body: JSON.stringify({
+      mediaId: 'tt2085059:7:3',
+      release: { infoHash: HASH.toUpperCase(), fileIndex: 0, releaseKey: `${HASH}:0`, title: 'S07 Complete E01-E06' },
+    }),
   });
   assert.equal(valid.status, 202, valid.text);
   assert.deepEqual(submitted[0].intent.episodes, [3]);
   assert.equal(submitted[0].intent.season, 7);
+  assert.deepEqual(
+    { infoHash: submitted[0].release.infoHash, fileIndex: submitted[0].release.fileIndex, releaseKey: submitted[0].release.releaseKey },
+    { infoHash: HASH, fileIndex: 0, releaseKey: `${HASH}:0` },
+  );
 
   for (const body of [
-    { mediaId: 'tt2085059', release: { infoHash: HASH } },
+    { mediaId: 'tt2085059', release: { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent` } },
     { mediaId: 'tt2085059:7:3', release: {} },
+    { mediaId: 'tt2085059:7:3', release: { infoHash: HASH, releaseKey: `${HASH}:torrent` } },
+    { mediaId: 'tt2085059:7:3', release: { infoHash: HASH, fileIndex: null } },
+    { mediaId: 'tt2085059:7:3', release: { infoHash: HASH, fileIndex: 0, releaseKey: `${HASH}:torrent` } },
+    { mediaId: 'tt2085059:7:3', release: { infoHash: HASH, fileIndex: -1, releaseKey: `${HASH}:-1` } },
   ]) {
     const response = await request('/api/requests', { method: 'POST', body: JSON.stringify(body) });
     assert.equal(response.status, 400);
@@ -214,13 +252,21 @@ test('request endpoint accepts explicit movie scope through the same handoff pat
   const { request, submitted } = createHarness();
   const response = await request('/api/requests', {
     method: 'POST',
-    body: JSON.stringify({ type: 'movie', mediaId: 'tt0082971', release: { infoHash: HASH, title: 'Raiders of the Lost Ark (1981)' } }),
+    body: JSON.stringify({
+      type: 'movie',
+      mediaId: 'tt0082971',
+      release: { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent`, title: 'Raiders of the Lost Ark (1981)' },
+    }),
   });
   assert.equal(response.status, 202, response.text);
   assert.equal(submitted[0].intent.mediaType, 'movie');
   assert.equal(submitted[0].intent.scope, 'movie');
   assert.equal(submitted[0].intent.season, null);
   assert.deepEqual(submitted[0].intent.episodes, []);
+  assert.deepEqual(
+    { infoHash: submitted[0].release.infoHash, fileIndex: submitted[0].release.fileIndex, releaseKey: submitted[0].release.releaseKey },
+    { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent` },
+  );
 });
 
 // =============================================================================
@@ -373,6 +419,7 @@ test('GET /api/search for live discovery with mediaId returns releases', async (
       results: [{
         infoHash: HASH,
         fileIndex: null,
+        releaseKey: `${HASH}:torrent`,
         title: 'Movie.1080p.mkv',
         filename: 'Movie.1080p.mkv',
         size: null,
@@ -425,6 +472,7 @@ test('GET /api/search for series episode live discovery returns releases', async
       results: [{
         infoHash: HASH,
         fileIndex: null,
+        releaseKey: `${HASH}:torrent`,
         title: 'Show.S01E01.1080p.mkv',
         filename: 'Show.S01E01.1080p.mkv',
         size: null,
@@ -504,8 +552,8 @@ test('GET /api/search with Torrentio + Comet coexistence', async () => {
     searchCache: cache,
     combinedSearch: async (cache, opts) => ({
       results: [
-        { infoHash: HASH, fileIndex: null, title: 'Torrentio result', filename: 'Torrentio result', size: null, resolution: '1080p', quality: null, codec: null, hdr: null, audio: null, releaseGroup: null, year: null, season: null, episode: null, confidence: 0.85, score: 0.75, components: {}, providers: { torbox: { cached: true } }, media: [], _source: 'live' },
-        { infoHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', fileIndex: null, title: 'Comet result', filename: 'Comet result', size: null, resolution: '720p', quality: null, codec: null, hdr: null, audio: null, releaseGroup: null, year: null, season: null, episode: null, confidence: 0.8, score: 0.7, components: {}, providers: {}, media: [], _source: 'live' },
+        { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent`, title: 'Torrentio result', filename: 'Torrentio result', size: null, resolution: '1080p', quality: null, codec: null, hdr: null, audio: null, releaseGroup: null, year: null, season: null, episode: null, confidence: 0.85, score: 0.75, components: {}, providers: { torbox: { cached: true } }, media: [], _source: 'live' },
+        { infoHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', fileIndex: null, releaseKey: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:torrent', title: 'Comet result', filename: 'Comet result', size: null, resolution: '720p', quality: null, codec: null, hdr: null, audio: null, releaseGroup: null, year: null, season: null, episode: null, confidence: 0.8, score: 0.7, components: {}, providers: {}, media: [], _source: 'live' },
       ],
       total: 2,
       query: { match: '*', filters: {}, titleQuery: null },
@@ -538,7 +586,7 @@ test('GET /api/search with Torznab participation', async () => {
     searchCache: cache,
     combinedSearch: async (cache, opts) => ({
       results: [
-        { infoHash: HASH, fileIndex: null, title: 'Torznab result', filename: 'Torznab result', size: null, resolution: '1080p', quality: null, codec: null, hdr: null, audio: null, releaseGroup: null, year: null, season: 1, episode: 1, confidence: 0.85, score: 0.75, components: {}, providers: { torbox: { cached: false } }, media: [], _source: 'live' },
+        { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent`, title: 'Torznab result', filename: 'Torznab result', size: null, resolution: '1080p', quality: null, codec: null, hdr: null, audio: null, releaseGroup: null, year: null, season: 1, episode: 1, confidence: 0.85, score: 0.75, components: {}, providers: { torbox: { cached: false } }, media: [], _source: 'live' },
       ],
       total: 1,
       query: { match: '*', filters: {}, titleQuery: null },

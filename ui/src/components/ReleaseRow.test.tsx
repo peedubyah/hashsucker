@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { ReleaseRow } from './ReleaseRow';
 import { mockReleases } from '../test/fixtures';
@@ -40,6 +40,14 @@ describe('ReleaseRow', () => {
     expect(screen.getByText('Score')).toBeTruthy();
     expect(screen.getByText('Confidence')).toBeTruthy();
     expect(screen.getByText('Providers')).toBeTruthy();
+  });
+
+  it('expands a live result with empty score components without crashing', () => {
+    const liveRelease = { ...mockReleases[0], _source: 'live' as const, components: {} };
+    render(<ReleaseRow release={liveRelease} rank={1} />);
+    fireEvent.click(screen.getByText(liveRelease.filename).closest('.release-row-main')!);
+    expect(screen.getByText('Score')).toBeTruthy();
+    expect(screen.queryByText('REL')).toBeNull();
   });
 
   it('shows request button when onSelect provided', () => {

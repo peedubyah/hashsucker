@@ -13,7 +13,7 @@ UI/client
   → normalized media fields
 ```
 
-`GET /api/media?type=...&id=...` retrieves normalized details from Cinemeta. The active API uses `title`, `posterUrl`, `backdropUrl`, `overview`, and numeric `year`; current UI types still expect older names.
+`GET /api/media?type=...&id=...` retrieves normalized details from Cinemeta. The active API and UI use `title`, `posterUrl`, `backdropUrl`, `overview`, and numeric `year`.
 
 ## Current release discovery
 
@@ -25,7 +25,7 @@ flowchart TD
     L --> Q["SQL/FTS limit before ranking"]
     Q --> S["Six-component local rank"]
     V --> N["Normalize live candidates\nscore = 0"]
-    S --> M["Merge corpus first by lowercase infoHash"]
+    S --> M["Merge corpus first by exact releaseKey"]
     N --> M
     M --> P["Offset/limit and response"]
 ```
@@ -37,7 +37,7 @@ Current consequences:
 - Identity confidence may use an association for another media item.
 - Only a bounded local set is ranked.
 - Live candidates bypass local ranking and no global rerank occurs.
-- Hash-only merge discards distinct file candidates; corpus rows win collisions.
+- Exact-key merge preserves same-hash file candidates; corpus rows win only exact `releaseKey` collisions.
 - Provider observation age is ignored.
 - Result `total` is the bounded merged count, not a full-corpus total.
 
@@ -73,8 +73,8 @@ Neither path is bounded-memory streaming, and neither provides a production corp
 
 ```mermaid
 flowchart TD
-    A["POST /api/requests"] --> B["Validate explicit movie or one episode"]
-    B --> C["Build TorBox handoff\ninfoHash only"]
+    A["POST /api/requests"] --> B["Validate explicit intent + exact release identity"]
+    B --> C["Build protocol-v1 handoff\ninfoHash + fileIndex + releaseKey"]
     C --> D["Atomic write + rename to incoming/"]
     D --> E["Importer mv -n claim to processing/"]
     E --> F["TorBox placement/job reconciliation"]
@@ -88,9 +88,10 @@ flowchart TD
 
 The filesystem spool is authoritative for physical-mode ownership. The importer independently validates scope, expected hash/provider ID, selected files, media identity, size, Arr import, and cleanup eligibility.
 
-Current defects:
+Current semantics and defects:
 
-- `fileIndex`/`releaseKey` is not persisted across this boundary.
+- Exact `fileIndex`/`releaseKey` provenance is persisted through queue JSON, status, importer SQLite, and logs. It does not replace provider-authoritative TorBox file inventory or `file_id`.
+- Legacy protocol-v1 payloads omitting both fields remain compatible as torrent-level identity; partial exact fields fail validation.
 - The worker repeatedly chooses the first `processing` file. A blocked/manual request can starve later work.
 - Physical acquisition is TorBox-only and downloads bytes locally before Arr import.
 

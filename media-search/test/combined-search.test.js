@@ -22,15 +22,16 @@ const HASH2 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const HASH3 = 'cccccccccccccccccccccccccccccccccccccccc';
 
 function setupCandidate(cache, infoHash, attrs) {
+  const fileIndex = attrs.fileIndex ?? null;
   cache.upsertCandidate({
     infoHash,
-    fileIndex: null,
+    fileIndex,
     filename: attrs.filename,
     title: attrs.title,
   });
   storeReleaseAttributes(cache, {
     infoHash,
-    fileIndex: null,
+    fileIndex,
     filename: attrs.filename,
     source: 'ptn-regex',
     confidence: attrs.confidence || 0.85,
@@ -91,6 +92,8 @@ test('combinedSearch: merges live discovery results with corpus', async () => {
   const mockLiveDiscovery = async () => [
     {
       infoHash: HASH2,
+      fileIndex: null,
+      releaseKey: `${HASH2}:torrent`,
       filename: 'Breaking.Bad.S05E14.720p.mkv',
       title: 'Breaking Bad S05E14',
       season: 5,
@@ -114,9 +117,10 @@ test('combinedSearch: merges live discovery results with corpus', async () => {
   cache.close();
 });
 
-test('combinedSearch: deduplicates by infoHash (corpus wins)', async () => {
+test('combinedSearch: deduplicates only the same releaseKey (corpus wins)', async () => {
   const cache = createDiscoveryCache();
   setupCandidate(cache, HASH1, {
+    fileIndex: 0,
     filename: 'Breaking.Bad.S05E14.1080p.mkv',
     title: 'Breaking Bad',
     season: 5,
@@ -124,12 +128,26 @@ test('combinedSearch: deduplicates by infoHash (corpus wins)', async () => {
     resolution: '1080p',
   });
 
-  // Mock live discovery returns SAME hash as corpus
   const mockLiveDiscovery = async () => [
     {
       infoHash: HASH1,
+      fileIndex: 0,
       filename: 'Different.Filename.mkv',
       title: 'Different',
+      resolution: '480p',
+    },
+    {
+      infoHash: HASH1,
+      fileIndex: 1,
+      filename: 'Different.File.mkv',
+      title: 'Different file',
+      resolution: '720p',
+    },
+    {
+      infoHash: HASH1,
+      fileIndex: null,
+      filename: 'Torrent.Level.mkv',
+      title: 'Torrent-level evidence',
       resolution: '480p',
     },
   ];
@@ -141,10 +159,12 @@ test('combinedSearch: deduplicates by infoHash (corpus wins)', async () => {
     mode: 'ui',
   });
 
-  // Should have only 1 result (deduplicated)
-  assert.equal(result.results.length, 1);
-  assert.equal(result.results[0].infoHash, HASH1);
-  assert.equal(result.results[0].resolution, '1080p');  // Corpus version wins
+  assert.equal(result.results.length, 3);
+  assert.deepEqual(
+    new Set(result.results.map((release) => release.releaseKey)),
+    new Set([`${HASH1}:0`, `${HASH1}:1`, `${HASH1}:torrent`]),
+  );
+  assert.equal(result.results.find((release) => release.fileIndex === 0).resolution, '1080p');
   cache.close();
 });
 
@@ -205,7 +225,7 @@ test('combinedSearch: UI mode maps results to UI-compatible shape', async () => 
 test('combinedSearch: applies pagination', async () => {
   const cache = createDiscoveryCache();
   for (let i = 0; i < 10; i++) {
-    setupCandidate(cache, `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa${i}`, {
+    setupCandidate(cache, `${'a'.repeat(39)}${i}`, {
       filename: `Movie.Episode.${i}.1080p.mkv`,
       title: `Movie Episode ${i}`,
       resolution: '1080p',

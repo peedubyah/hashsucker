@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 
+import { toPublicReleaseDto, validateReleaseIdentity } from '../api/release-contract.js';
 import { QueueImporterClient } from '../lib/importer/queue-client.js';
 import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { searchTitles, getMediaById, getCacheMetrics } from '../lib/metadata/unified-search.js';
@@ -13,7 +14,6 @@ import { createDiscoveryCache } from '../lib/discovery/cache.js';
 import { runDMMIngestion } from '../lib/discovery/dmm-ingestion-runner.js';
 import { runAttributeWorker } from '../lib/discovery/attribute-worker.js';
 
-const HASH_PATTERN = /^[a-f0-9]{40}$/i;
 const CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
   ['.html', 'text/html; charset=utf-8'],
@@ -82,12 +82,11 @@ function validateSupportedRequest(body) {
   if (!singleEpisode && !movie) {
     throw new Error('Only explicit movies and single TV episode requests are supported');
   }
-  if (!HASH_PATTERN.test(String(body.release?.infoHash || ''))) {
-    throw new Error('Selected release must have a valid infoHash');
-  }
+
+  const identity = validateReleaseIdentity(body.release);
   const text = (value, max = 500) => typeof value === 'string' ? value.trim().slice(0, max) || null : null;
   const release = {
-    infoHash: body.release.infoHash.toLowerCase(),
+    ...identity,
     title: text(body.release.title),
     filename: text(body.release.filename),
     size: Number.isFinite(body.release.size) && body.release.size >= 0 ? body.release.size : null,
@@ -197,7 +196,7 @@ export function createRequestHandler(dependencies = {}) {
           });
           return sendJson(response, 200, {
             intent,
-            results: result.results,
+            results: result.results.map(toPublicReleaseDto),
             total: result.total,
             timings: { ...result.timings, totalMs: Math.round(performance.now() - startedAt) },
             stats: result.stats,
@@ -239,7 +238,7 @@ export function createRequestHandler(dependencies = {}) {
       }
       sendJson(response, 404, { error: 'Not found' });
     } catch (error) {
-      const isInput = /invalid|required|supported|valid JSON|too large|2–120|infoHash/i.test(error.message);
+      const isInput = /invalid|required|supported|valid JSON|too large|2–120|infoHash|fileIndex|releaseKey/i.test(error.message);
       sendJson(response, isInput ? 400 : 502, { error: error.message });
     }
   };

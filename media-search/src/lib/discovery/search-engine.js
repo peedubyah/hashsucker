@@ -15,6 +15,7 @@
  * release_attributes table. No manual index management needed.
  */
 
+import { createReleaseIdentity, createReleaseKey } from '../../api/release-contract.js';
 import { rankHits } from './ranking.js';
 
 /**
@@ -372,12 +373,13 @@ export function searchReleases(cache, options = {}) {
   const results = ranked.map(r => ({
     hash: r.hash,
     fileIndex: r.fileIndex,
+    releaseKey: createReleaseKey(r.hash, r.fileIndex),
     filename: r.filename,
     parsed: {
       ...r.releaseAttributes,
       source: r.releaseAttributes.sourceType,  // Backwards-compatible API field name
     },
-    confidence: r.releaseAttributes.confidence,
+    confidence: r.components.releaseConfidence,
     score: r.score,
     relevance: r.components.relevance,
     quality: r.components.quality,
@@ -405,7 +407,8 @@ export function searchReleases(cache, options = {}) {
  * Combined search: DMM corpus (ranked) + live discovery (Torrentio/Torznab).
  *
  * Searches the local DMM corpus first, optionally runs live discovery,
- * merges results by infoHash, and ranks all candidates together.
+ * merges only candidates with the same exact releaseKey, and retains the
+ * existing corpus-first ordering without introducing a new ranking stage.
  *
  * @param {Object} cache - Discovery cache instance
  * @param {Object} options - Search options
@@ -455,7 +458,8 @@ export async function combinedSearch(cache, options = {}) {
         // Normalize live results to match corpus shape
         const normalized = liveResults.map(r => ({
           hash: r.infoHash,
-          fileIndex: r.fileIndex ?? null,
+          fileIndex: r.fileIndex,
+          releaseKey: createReleaseKey(r.infoHash, r.fileIndex),
           filename: r.filename || r.title,
           parsed: {
             title: r.title,
@@ -485,13 +489,12 @@ export async function combinedSearch(cache, options = {}) {
     }
   }
 
-  // Deduplicate by infoHash (corpus takes precedence)
+  // Deduplicate exact physical candidates only (corpus takes precedence).
   const seen = new Map();
   for (const hit of allHits) {
-    const hash = String(hit.hash || '').toLowerCase();
-    if (!hash) continue;
-    if (!seen.has(hash)) {
-      seen.set(hash, hit);
+    const releaseKey = createReleaseKey(hit.hash, hit.fileIndex);
+    if (!seen.has(releaseKey)) {
+      seen.set(releaseKey, { ...hit, releaseKey });
     }
   }
   const deduped = Array.from(seen.values());
@@ -516,15 +519,14 @@ export async function combinedSearch(cache, options = {}) {
  * Matches what prepareReleases() expects.
  */
 function mapToUIShape(r) {
-  const hash = String(r.hash || '').toLowerCase();
+  const identity = createReleaseIdentity(r.hash, r.fileIndex);
   const providers = Array.isArray(r.providers) ? r.providers.reduce((acc, o) => {
     acc[o.provider] = { cached: o.cached, evidence: o.evidence };
     return acc;
   }, {}) : (r.providers || {});
 
   return {
-    infoHash: hash,
-    fileIndex: r.fileIndex ?? null,
+    ...identity,
     title: r.parsed?.title || r.filename,
     filename: r.filename,
     size: r.parsed?.size || null,

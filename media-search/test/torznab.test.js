@@ -31,7 +31,9 @@ test('normalizeTorznabItem extracts infoHash directly', () => {
 
   assert.ok(item);
   assert.equal(item.infoHash, HASH);
-  assert.equal(item.key, `ih:${HASH}`);
+  assert.equal(item.fileIndex, null);
+  assert.equal(item.releaseKey, `${HASH}:torrent`);
+  assert.equal(item.key, `${HASH}:torrent`);
   assert.equal(item.title, 'Test Movie 2024 2160p');
   assert.equal(item.size, 1234567890);
   assert.equal(item.sources[0].addonId, 'torznab.0');

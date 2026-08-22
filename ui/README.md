@@ -8,9 +8,9 @@ React/Vite prototype for title search and release comparison.
 - Vite development proxies `/api` to `http://localhost:3000`.
 - Supports title search, media selection, release filtering/sorting, provider badges, and a release-details panel.
 - Has no season/episode picker.
-- “Request this release” opens details only; it does not submit `POST /api/requests` or poll request status.
-- Current TypeScript metadata fields (`name`, `poster`, `description`) diverge from active backend fields (`title`, `posterUrl`, `overview`). The UI may render missing title/artwork data until roadmap Stage 1.
-- React list identity uses `infoHash` only rather than exact `(infoHash,fileIndex)`.
+- “Request this release” submits the selected exact release to `POST /api/requests` and displays the queued result; ongoing status polling is not implemented.
+- TypeScript metadata fields match active backend fields (`title`, `posterUrl`, `backdropUrl`, `overview`).
+- React list identity uses canonical `releaseKey`, preserving same-hash file indexes and distinguishing `fileIndex: null` from `fileIndex: 0`.
 
 Treat this as a prototype, not a deployed product UI.
 
@@ -28,6 +28,7 @@ Other scripts:
 
 - `npm run build`
 - `npm run lint`
+- `npm run typecheck`
 - `npm run preview`
 - `npm run test:watch`
 
@@ -35,7 +36,7 @@ Other scripts:
 
 All HTTP calls go through `../media-search/src/api/client.js` via the `@api` alias. The current API is documented in [`../media-search/src/api/API_CONTRACT.md`](../media-search/src/api/API_CONTRACT.md).
 
-Until generated/shared types or contract tests exist, code is the final authority. Do not add another copied API narrative. When Stage 1 is implemented, update the backend contract, API client/JSDoc, TypeScript types, UI fixtures, and tests together.
+The backend executable release contract, API client/JSDoc, TypeScript types, UI fixtures, tests, typecheck, and build checks must change together. Do not add another copied API narrative.
 
 ## Product direction
 

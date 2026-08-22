@@ -5,6 +5,8 @@
  * The rest of the frontend uses these functions, never fetch() directly.
  */
 
+import { validateReleaseIdentity } from './release-contract.js';
+
 const BASE = '';
 
 /**
@@ -53,14 +55,20 @@ export async function getMedia(type, id) {
  * @param {string} request.mediaId - Media identifier
  * @param {Object} request.release - Selected release
  * @param {string} request.release.infoHash - 40-char hex infoHash
+ * @param {number|null} request.release.fileIndex - Exact browser/corpus file evidence
+ * @param {string} request.release.releaseKey - Canonical exact release identity
  * @returns {Promise<RequestSubmissionResult>}
  * @throws {Error} On network failure or 400 response
  */
 export async function submitRequest(request) {
+  const identity = validateReleaseIdentity(request?.release);
   const response = await fetch(`${BASE}/api/requests`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(request),
+    body: JSON.stringify({
+      ...request,
+      release: { ...request.release, ...identity },
+    }),
   });
   if (!response.ok) throw new Error(`Request submission failed: ${response.status}`);
   return response.json();

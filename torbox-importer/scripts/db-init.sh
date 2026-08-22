@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS requests (
     episodes_json     TEXT NOT NULL DEFAULT '[]',
 
     info_hash         TEXT NOT NULL,
+    file_index        INTEGER,
+    release_key       TEXT,
 
     release_title     TEXT,
     release_filename  TEXT,
@@ -110,6 +112,29 @@ ON requests(info_hash);
 
 CREATE INDEX IF NOT EXISTS idx_requests_state
 ON requests(state);
+SQL
+
+if [ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name='file_index';")" -eq 0 ]; then
+    sqlite3 "$DB" "ALTER TABLE requests ADD COLUMN file_index INTEGER;"
+fi
+
+if [ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name='release_key';")" -eq 0 ]; then
+    sqlite3 "$DB" "ALTER TABLE requests ADD COLUMN release_key TEXT;"
+fi
+
+sqlite3 "$DB" <<'SQL'
+UPDATE requests
+SET info_hash=lower(info_hash);
+
+UPDATE requests
+SET release_key=info_hash || ':' ||
+    CASE
+        WHEN file_index IS NULL THEN 'torrent'
+        ELSE CAST(file_index AS TEXT)
+    END;
+
+CREATE INDEX IF NOT EXISTS idx_requests_release_key
+ON requests(release_key);
 SQL
 
 printf '%s\n' "db-init: initialized $DB"

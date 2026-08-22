@@ -6,6 +6,8 @@
  * @see https://rendezvois.github.io/miscellaneous/naming-conventions/encodes/
  */
 
+import { createReleaseIdentity } from '../../api/release-contract.js';
+
 const RESOLUTION_ORDER = {
   '2160p': 4,
   '1080p': 3,
@@ -301,9 +303,13 @@ export function normalizeStream(raw, addonMeta = {}) {
   }
 
   const cached = behaviorHints.cached === true;
+  const sourceFileIndex = Object.hasOwn(raw, 'fileIdx') ? raw.fileIdx : null;
+  const identity = infoHash
+    ? createReleaseIdentity(infoHash, sourceFileIndex)
+    : { infoHash: null, fileIndex: null, releaseKey: null };
 
   const key = fingerprint([
-    infoHash ? `ih:${infoHash}` : null,
+    identity.releaseKey,
     !infoHash && nzbUrl ? `nzb:${nzbUrl}` : null,
     !infoHash && !nzbUrl && streamUrl ? `url:${streamUrl}` : null,
   ]);
@@ -329,7 +335,7 @@ export function normalizeStream(raw, addonMeta = {}) {
     size,
     cached,
     filename,
-    infoHash,
+    ...identity,
     nzbUrl,
     url: streamUrl,
     behaviorHints,
@@ -396,6 +402,8 @@ export function mergeStreams(existing, incoming) {
       size: keep.size ?? other.size,
       cached: keep.cached || other.cached,
       infoHash: keep.infoHash || other.infoHash,
+      fileIndex: keep.fileIndex,
+      releaseKey: keep.releaseKey || other.releaseKey,
       nzbUrl: keep.nzbUrl || other.nzbUrl,
       url: keep.url || other.url,
       filename: keep.filename || other.filename,

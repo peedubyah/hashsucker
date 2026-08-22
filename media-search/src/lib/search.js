@@ -1,3 +1,4 @@
+import { createReleaseIdentity } from '../api/release-contract.js';
 import { searchStremio, loadDiscoveryAddons } from './stremio/search.js';
 import { mergeStreams } from './stremio/normalize.js';
 import { searchTorznab } from './torznab/torznab.js';
@@ -105,10 +106,10 @@ function getProvidersForResult(result) {
  * Preserves all candidate fields and adds a sources array from the candidate.
  */
 function candidateToResult(candidate) {
+  const identity = createReleaseIdentity(candidate.infoHash, candidate.fileIndex);
   return {
-    key: candidate.infoHash ? `ih:${candidate.infoHash}` : null,
-    infoHash: candidate.infoHash,
-    fileIndex: candidate.fileIndex,
+    key: identity.releaseKey,
+    ...identity,
     title: candidate.title,
     filename: candidate.filename,
     size: candidate.size,

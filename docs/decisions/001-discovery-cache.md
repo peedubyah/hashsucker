@@ -26,15 +26,13 @@ Use Node.js `node:sqlite` in WAL mode for single-host discovery state.
 
 ## Current reality
 
-The read path, FTS retrieval, ranking, and additional evidence tables are implemented. The deployment does **not** currently satisfy the persistence intent:
+The read path, FTS retrieval, ranking, additional evidence tables, persistent root-Compose volume, and exact release identity through public/request/importer boundaries are implemented.
 
-- The API uses an in-memory database when `DISCOVERY_DB` is unset.
-- Root Compose neither sets `DISCOVERY_DB` nor mounts a discovery volume.
+- Direct local execution uses an in-memory database when `DISCOVERY_DB` is unset; root Compose sets it to the persistent discovery volume.
 - Observation `checked_at` is stored, but active ranking does not enforce freshness or expiry.
-- Exact identity is preserved in SQLite but collapses to hash-only in combined merge and downstream request boundaries.
-- There is no schema-version/migration runner, busy timeout, explicit checkpoint lifecycle, run lock, or transaction API.
+- There is no discovery schema-version/migration runner, busy timeout, explicit checkpoint lifecycle, run lock, or transaction API.
 
-“SQLite discovery cache” therefore describes the chosen storage architecture, not proof that current deployment is durable or identity-safe end to end.
+“SQLite discovery cache” describes the chosen storage architecture; it is not proof of provider freshness, media-scoped retrieval, or whole-corpus capacity.
 
 ## Consequences
 
@@ -47,10 +45,8 @@ The read path, FTS retrieval, ranking, and additional evidence tables are implem
 
 ### Required follow-up
 
-- Persist `DISCOVERY_DB` in deployment and test restart recovery.
 - Add schema versions/migrations and a bounded ingestion lifecycle.
 - Define provider observation state, scope, TTL, error category, current projection, and event history.
-- Propagate exact `releaseKey`/`fileIndex` through all external boundaries.
 - Benchmark measured whole-corpus ingestion/query/maintenance behavior before reconsidering storage.
 
 ## Rejected alternatives

@@ -22,6 +22,14 @@ fi
 "$SCRIPTS_DIR/ingest-request.sh" "$FILE"
 
 REQUEST_ID="$(jq -r '.requestId' "$FILE")"
+RELEASE_KEY="$(
+    sqlite3 "$DB" "
+        SELECT release_key
+        FROM requests
+        WHERE request_id='$REQUEST_ID';
+    "
+)"
+log "persisted exact release identity: $RELEASE_KEY (provider file mapping remains authoritative)"
 
 get_request_state() {
     sqlite3 "$DB" "
@@ -364,4 +372,4 @@ case "$STATE" in
         ;;
 esac
 
-log "request complete: $REQUEST_ID ($STATE)"
+log "request complete: $REQUEST_ID releaseKey=$RELEASE_KEY ($STATE)"
