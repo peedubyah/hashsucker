@@ -277,6 +277,26 @@ export function mergeExactDuplicates(existing, incoming) {
   }
   const mergedSources = Array.from(sourcesById.values());
 
+  // Merge selectedMediaId provenance:
+  // - Preserve non-null selectedMediaId from whichever input has it
+  // - If both inputs have non-null conflicting selectedMediaIds, throw
+  //   (deterministic failure rather than silent pick-one)
+  // - selectedMediaId is intent provenance, NOT identity evidence — it must
+  //   NOT be added to mediaAssociations
+  const existingSelected = existing.selectedMediaId ?? null;
+  const incomingSelected = incoming.selectedMediaId ?? null;
+  let mergedSelectedMediaId = null;
+  if (existingSelected !== null && incomingSelected !== null) {
+    if (existingSelected !== incomingSelected) {
+      throw new Error(
+        `Cannot merge conflicting selectedMediaIds: ${existingSelected} vs ${incomingSelected}`
+      );
+    }
+    mergedSelectedMediaId = existingSelected;
+  } else {
+    mergedSelectedMediaId = existingSelected ?? incomingSelected;
+  }
+
   return {
     hash: existing.hash,
     fileIndex: existing.fileIndex,
@@ -288,6 +308,7 @@ export function mergeExactDuplicates(existing, incoming) {
     mediaAssociations: mergedMediaAssociations,
     providerObservations: mergedProviderObservations,
     sources: mergedSources,
+    selectedMediaId: mergedSelectedMediaId,
   };
 }
 

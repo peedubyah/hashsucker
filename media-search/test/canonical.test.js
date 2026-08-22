@@ -378,6 +378,110 @@ test('mergeExactDuplicates: throws on different fileIndex', () => {
   assert.throws(() => mergeExactDuplicates(a, b), /Cannot merge different/);
 });
 
+test('mergeExactDuplicates: preserves selectedMediaId from live when local has none', () => {
+  const local = {
+    hash: HASH_A, fileIndex: 0, releaseKey: `${HASH_A}:0`,
+    filename: 'Movie.2024.1080p.mkv', relevance: 0.9,
+    releaseAttributes: { title: 'Movie', year: 2024 }, parserConfidence: 0.95,
+    mediaAssociations: [], providerObservations: [],
+    sources: [{ origin: 'corpus', evidenceType: 'fts5-ranked', confidence: 0.95 }],
+    selectedMediaId: null,
+  };
+  const live = {
+    hash: HASH_A, fileIndex: 0, releaseKey: `${HASH_A}:0`,
+    filename: 'Movie.2024.1080p.WEB-DL.mkv', relevance: 0.5,
+    releaseAttributes: { codec: 'x264' }, parserConfidence: 0.5,
+    mediaAssociations: [], providerObservations: [],
+    sources: [{ origin: 'live', evidenceType: 'torrentio', confidence: 0.5 }],
+    selectedMediaId: 'tt0944947',
+  };
+
+  const merged = mergeExactDuplicates(local, live);
+
+  assert.equal(merged.selectedMediaId, 'tt0944947', 'selectedMediaId preserved through merge');
+  // selectedMediaId must NOT become a media association — it is provenance only
+  assert.equal(merged.mediaAssociations.length, 0, 'selectedMediaId does not create mediaAssociations');
+});
+
+test('mergeExactDuplicates: preserves selectedMediaId from local when live has none', () => {
+  const local = {
+    hash: HASH_A, fileIndex: 0, releaseKey: `${HASH_A}:0`,
+    filename: 'Movie.2024.mkv', relevance: 0.9,
+    releaseAttributes: {}, parserConfidence: 0.9,
+    mediaAssociations: [], providerObservations: [],
+    sources: [], selectedMediaId: 'tt123',
+  };
+  const live = {
+    hash: HASH_A, fileIndex: 0, releaseKey: `${HASH_A}:0`,
+    filename: '', relevance: 0.5,
+    releaseAttributes: {}, parserConfidence: 0.5,
+    mediaAssociations: [], providerObservations: [],
+    sources: [{ origin: 'live', evidenceType: 'live-discovery', confidence: 0.5 }],
+    selectedMediaId: null,
+  };
+
+  const merged = mergeExactDuplicates(local, live);
+
+  assert.equal(merged.selectedMediaId, 'tt123', 'selectedMediaId preserved from local');
+});
+
+test('mergeExactDuplicates: throws on conflicting selectedMediaIds', () => {
+  const a = {
+    hash: HASH_A, fileIndex: 0, releaseKey: `${HASH_A}:0`,
+    filename: '', relevance: 0, releaseAttributes: {}, parserConfidence: 0,
+    mediaAssociations: [], providerObservations: [], sources: [],
+    selectedMediaId: 'tt111',
+  };
+  const b = {
+    hash: HASH_A, fileIndex: 0, releaseKey: `${HASH_A}:0`,
+    filename: '', relevance: 0, releaseAttributes: {}, parserConfidence: 0,
+    mediaAssociations: [], providerObservations: [], sources: [],
+    selectedMediaId: 'tt222',
+  };
+
+  assert.throws(
+    () => mergeExactDuplicates(a, b),
+    /Cannot merge conflicting selectedMediaIds: tt111 vs tt222/
+  );
+});
+
+test('mergeExactDuplicates: same selectedMediaId from both inputs preserves it', () => {
+  const a = {
+    hash: HASH_A, fileIndex: 0, releaseKey: `${HASH_A}:0`,
+    filename: '', relevance: 0, releaseAttributes: {}, parserConfidence: 0,
+    mediaAssociations: [], providerObservations: [], sources: [],
+    selectedMediaId: 'tt456',
+  };
+  const b = {
+    hash: HASH_A, fileIndex: 0, releaseKey: `${HASH_A}:0`,
+    filename: '', relevance: 0, releaseAttributes: {}, parserConfidence: 0,
+    mediaAssociations: [], providerObservations: [], sources: [],
+    selectedMediaId: 'tt456',
+  };
+
+  const merged = mergeExactDuplicates(a, b);
+
+  assert.equal(merged.selectedMediaId, 'tt456', 'matching selectedMediaId preserved');
+});
+
+test('mergeExactDuplicates: neither input has selectedMediaId yields null', () => {
+  const a = {
+    hash: HASH_A, fileIndex: 0, releaseKey: `${HASH_A}:0`,
+    filename: '', relevance: 0, releaseAttributes: {}, parserConfidence: 0,
+    mediaAssociations: [], providerObservations: [], sources: [],
+    selectedMediaId: null,
+  };
+  const b = {
+    hash: HASH_A, fileIndex: 0, releaseKey: `${HASH_A}:0`,
+    filename: '', relevance: 0, releaseAttributes: {}, parserConfidence: 0,
+    mediaAssociations: [], providerObservations: [], sources: [],
+  };
+
+  const merged = mergeExactDuplicates(a, b);
+
+  assert.equal(merged.selectedMediaId, null, 'no selectedMediaId on both inputs yields null');
+});
+
 // =============================================================================
 // Dedup Tests
 // =============================================================================
