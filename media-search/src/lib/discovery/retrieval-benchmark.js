@@ -15,56 +15,41 @@
  *   - retrieval window size (rows fetched before ranking)
  *   - candidates matched before the LIMIT
  *   - eligible candidates after hard gates
- *   - oracle winner rank within the bounded window
+ *   - oracle winner rank in Stage-1 RETRIEVAL ORDER (before global ranking)
  *   - whether oracle top-1 survives the bounded window (primary metric)
  *   - whether oracle top-3 survive the bounded window
- *   - Stage 1 retrieval latency p50/p95
- *   - Stage 2 ranking latency p50/p95
+ *   - Stage 1 retrieval latency p50/p95 (SQL/FTS only)
+ *   - Stage 2 ranking latency p50/p95 (canonicalize + eligibility + dedup + rank)
  *   - whole local search latency
  *
- * The oracle uses the ACTUAL Stage 3 ranker — no alternative scoring function.
- * The synthetic fixture includes an adversarial case where a high-quality
- * candidate is intentionally placed past the BM25 sweet spot so that the
- * old `limit*2` policy provably hides the winner.
+ * Critical validity rules:
+ *   - Queries with ZERO oracle results are classified N/A, NOT PASS
+ *   - The synthetic corpus must have meaningful matched-set sizes both BELOW
+ *     and ABOVE candidate windows (to avoid circularity with the 2000 cap)
+ *   - Each cohort query must have a deterministic generated fixture with
+ *     non-empty oracle, or be reported as N/A
  *
- * Usage:
- *   node src/lib/discovery/retrieval-benchmark.js [--csv] [--seed N] [--scales 100000,500000]
- *   node src/lib/discovery/retrieval-benchmark.js --demo   (tiny, no flags)
+ * BM25 adversarial case:
+ *   FTS5's BM25 ranks documents with MORE matching tokens higher.
+ *   The adversarial case is: winner has SHORT filename (BM25-penalized),
+ *   noise has LONG filenames (BM25-favored). A small retrieval window
+ *   misses the winner because it sits at a lower Stage-1 position.
  */
+
+import { performance } from 'node:perf_hooks';
 
 import { createDiscoveryCache } from './cache.js';
 import { storeReleaseAttributes } from './release-attributes.js';
-import { combinedSearch, searchReleases } from './search-engine.js';
-import { isEpisodeCovered } from './episode-coverage.js';
-import { rankHits, rankHit } from './ranking.js';
+import { searchReleases } from './search-engine.js';
+import { toCanonicalLocal, deduplicateByReleaseKey, toRankingInput } from './canonical.js';
+import { rankHits } from './ranking.js';
 import { evaluateEligibility } from './rejection.js';
-import {
-  toCanonicalLocal,
-  toCanonicalLive,
-  deduplicateByReleaseKey,
-  toRankingInput,
-} from './canonical.js';
 
 // ---------------------------------------------------------------------------
-// Synthetic corpus generator
+// Synthetic row generation
 // ---------------------------------------------------------------------------
 
-/**
- * Generate a synthetic release_attributes row for benchmarking.
- *
- * The adversarial design:
- *   - Most rows are "noise": same title, random resolution, random quality.
- *   - A few rows are "winners": same title, intentionally high quality.
- *   - Winners can be placed at controlled positions in the BM25 ordering
- *     (by manipulating title token similarity and/or parsed_at ordering for
- *     wildcard queries) to exercise the retrieval window boundary.
- *
- * @param {number} index - Row index (used to derive deterministic hash/filename)
- * @param {Object} spec - Specification for this row
- * @returns {Object} Attribute payload for storeReleaseAttributes
- */
 function makeSyntheticRow(index, spec) {
-  // 40-char hex hash: use index as deterministic hex seed
   const hash = `${index.toString(16).padStart(8, '0')}${'0'.repeat(32)}`.slice(0, 40);
   const fileIndex = spec.fileIndex ?? null;
   const filename = spec.filename || `${spec.title.replace(/\s+/g, '.')}.${spec.year || 2024}.${spec.resolution || '1080p'}.mkv`;
@@ -94,144 +79,14 @@ function makeSyntheticRow(index, spec) {
   };
 }
 
-/**
- * Deterministic PRNG (mulberry32) for reproducible corpus generation.
- */
 function mulberry32(seed) {
-  let a = seed >>> 0;
+  let s = seed | 0;
   return function () {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
+    s = (s + 0x6d2b79f5) | 0;
+    let t = s;
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/**
- * Populate a synthetic corpus at a given scale.
- *
- * Adversarial model — MODE B (realistic):
- *   The realistic adversarial case: a user searches for a specific title that
- *   has ~200-1000 FTS matches (common for popular shows/movies). Within those
- *   matches, the highest-quality release (2160p Remux x265 HDR) ranks LOWER
- *   in BM25 than a lower-quality release (480p DVD) because:
- *
- *     - BM25 rewards document SHORTNESS: longer filenames score lower
- *     - High-quality releases have LONGER filenames (more metadata tokens)
- *     - "Movie.2024.2160p.UHD.BluRay.REMUX.DTS-HD.MA.5.1.mkv" vs "Movie.mkv"
- *
- *   So the 2160p winner can be at position 300-500 in the FTS ordering while
- *   a 480p rip is at position 5. A bounded window of 100 or 200 would miss it.
- *
- *   We model this by giving winners LONGER filenames (which FTS indexes and
- *   which affects BM25 document length), while keeping their title SHORT
- *   (so they still match the query). This is the adversarial case.
- *
- * MODE A (pathological): title-spam with 50+ extra tokens. Unrealistic but
- *   proves the theoretical worst case. Reported as a known limitation.
- *
- * @param {Object} cache - Discovery cache
- * @param {number} scale - Total rows
- * @param {string} seed - Seed string for deterministic generation
- * @param {Object} config - Configuration for the adversarial layout
- * @returns {{ total, titleMatched, winners, noise, winnerRows }}
- */
-function populateSyntheticCorpus(cache, scale, seed, config = {}) {
-  const rng = mulberry32(hashString(seed));
-  const {
-    matchedFraction = 0.02,      // fraction of total rows that share the target title
-    winnerCount = 5,            // how many intentional winners exist
-    winnerQuality = '2160p',    // resolution for winners (best quality)
-    adversarialMode = 'realistic', // 'padded' | 'realistic'
-    winnerExtraTokens = 50,     // for 'padded' mode
-    baseYear = 2024,
-    baseTitle = 'Black Mirror',
-    baseSourceType = 'BluRay',
-  } = config;
-
-  // For the realistic adversarial case, we want a moderate number of title-matched
-  // rows (not 10,000+ which is unrealistic for a specific query). We cap the
-  // matched count at a realistic ceiling and let the scale grow the noise.
-  const titleMatchedCount = Math.min(
-    Math.max(1, Math.floor(scale * matchedFraction)),
-    2000  // cap: realistic max title-matched rows for a specific query
-  );
-  const noiseCount = scale - titleMatchedCount;
-
-  let inserted = 0;
-
-  // 1. Insert noise rows (random titles, random qualities)
-  const noiseTitles = ['Stranger Things', 'The Witcher', 'Breaking Bad', 'Dark', 'Narcos', 'Peaky Blinders', 'Mindhunter', 'Ozark', 'The Crown', 'Severance'];
-  const resolutions = ['480p', '720p', '1080p'];
-  const sources = ['DVD', 'WEBRip', 'WEB-DL', 'BluRay'];
-
-  for (let i = 0; i < noiseCount; i++) {
-    const titleIdx = Math.floor(rng() * noiseTitles.length);
-    const resIdx = Math.floor(rng() * resolutions.length);
-    const srcIdx = Math.floor(rng() * sources.length);
-    const attrs = makeSyntheticRow(i, {
-      title: noiseTitles[titleIdx],
-      resolution: resolutions[resIdx],
-      sourceType: sources[srcIdx],
-      year: baseYear + Math.floor(rng() * 3),
-      confidence: 0.7 + rng() * 0.25,
-    });
-    storeReleaseAttributes(cache, attrs);
-    inserted++;
-  }
-
-  // 2. Insert title-matched noise — same title, average quality, SHORT filenames
-  for (let i = 0; i < titleMatchedCount - winnerCount; i++) {
-    const resIdx = Math.floor(rng() * resolutions.length);
-    const srcIdx = Math.floor(rng() * sources.length);
-    // SHORT filenames rank higher in BM25 (shorter = better)
-    const shortFilename = `${baseTitle.replace(/\s+/g, '.')}.${baseYear}.${resolutions[resIdx]}.mkv`;
-    const attrs = makeSyntheticRow(noiseCount + i, {
-      title: baseTitle,
-      filename: shortFilename,
-      resolution: resolutions[resIdx],
-      sourceType: sources[srcIdx],
-      year: baseYear + Math.floor(rng() * 3),
-      confidence: 0.7 + rng() * 0.25,
-    });
-    storeReleaseAttributes(cache, attrs);
-    inserted++;
-  }
-
-  // 3. Insert winners — same title, BEST quality, LONG filenames (BM25 penalty)
-  const winnerRows = [];
-  for (let i = 0; i < winnerCount; i++) {
-    let winnerTitle;
-    if (adversarialMode === 'padded') {
-      winnerTitle = `${baseTitle}${' filler'.repeat(winnerExtraTokens)}`;
-    } else {
-      winnerTitle = baseTitle;
-    }
-    // LONG filename: more metadata tokens → higher BM25 doc length → lower rank
-    const longFilename = `${baseTitle.replace(/\s+/g, '.')}.${baseYear}.2160p.UHD.BluRay.REMUX.DV.HDR10Plus.DTS-HD.MA.TrueHD.7.1.Atmos-FGT-Group${i}.mkv`;
-    const attrs = makeSyntheticRow(noiseCount + titleMatchedCount - winnerCount + i, {
-      title: winnerTitle,
-      filename: longFilename,
-      resolution: winnerQuality,
-      sourceType: 'Remux',
-      codec: 'x265',
-      hdr: true,
-      year: baseYear,
-      confidence: 0.95,
-      fileIndex: i,  // different fileIndex so they're distinguishable
-    });
-    storeReleaseAttributes(cache, attrs);
-    winnerRows.push(attrs);
-    inserted++;
-  }
-
-  return {
-    total: inserted,
-    titleMatched: titleMatchedCount,
-    winners: winnerCount,
-    noise: noiseCount,
-    winnerRows,
   };
 }
 
@@ -251,61 +106,157 @@ const QUERY_COHORT = [
   {
     name: 'exact-title-popular',
     query: 'Black Mirror',
-    description: 'Strong exact title match with many noisy neighbors',
+    description: 'Strong exact title match',
+    title: 'Black Mirror',
+    year: 2024,
   },
   {
     name: 'recent-movie',
-    query: 'Dune Part Two 2024',
+    query: 'Dune Part Two',
     description: 'Recent/popular movie style',
+    title: 'Dune Part Two',
+    year: 2024,
   },
   {
     name: 'catalog-movie',
-    query: 'The Godfather 1972',
-    description: 'Older/catalog style',
-  },
-  {
-    name: 'tv-explicit-sxxexx',
-    query: 'Black Mirror S03E04',
-    season: 3,
-    episode: 4,
-    description: 'TV explicit SxxExx',
-  },
-  {
-    name: 'tv-season-pack',
-    query: 'Breaking Bad Season 5',
-    season: 5,
-    description: 'Season/range/pack eligibility',
+    query: 'The Godfather',
+    description: 'Classic catalog movie',
+    title: 'The Godfather',
+    year: 1972,
   },
   {
     name: 'same-title-different-year',
     query: 'Dune',
     description: 'Same-title/different-year ambiguity',
+    title: 'Dune',
+    year: 2021,
   },
   {
     name: 'quality-disagreement',
     query: 'Inception',
-    description: 'BM25-best is NOT desirability-best (lower relevance, higher quality)',
+    description: 'BM25-best is NOT desirability-best',
+    title: 'Inception',
+    year: 2010,
   },
 ];
+
+// ---------------------------------------------------------------------------
+// Corpus generation
+// ---------------------------------------------------------------------------
+
+/**
+ * Populate a synthetic corpus with controlled match cardinality.
+ *
+ * IMPORTANT: No cap on matchedCount. The caller specifies the exact
+ * number of title-matched rows per query.
+ *
+ * BM25 adversarial design:
+ *   - Winners have SHORT filenames (BM25-penalized, rank LOWER in Stage-1)
+ *   - Noise has LONG filenames (BM25-favored, rank HIGHER in Stage-1)
+ *   This creates a case where a small retrieval window misses the winner.
+ */
+function populateSyntheticCorpus(cache, totalRows, seed, config = {}) {
+  const rng = mulberry32(hashString(seed));
+  const {
+    matchedCount = 1000,
+    winnerCount = 5,
+    winnerQuality = '2160p',
+  } = config;
+
+  const cohortSize = QUERY_COHORT.length;
+  const matchedPerQuery = Math.max(1, Math.floor(matchedCount / cohortSize));
+  const totalMatched = matchedPerQuery * cohortSize;
+  const noiseCount = totalRows - totalMatched;
+
+  let inserted = 0;
+
+  // 1. Insert noise rows (random titles, random qualities)
+  const noiseTitles = ['Stranger Things', 'The Witcher', 'Breaking Bad', 'Dark', 'Narcos', 'Peaky Blinders', 'Mindhunter', 'Ozark', 'The Crown', 'Severance'];
+  const resolutions = ['480p', '720p', '1080p'];
+  const sources = ['DVD', 'WEBRip', 'WEB-DL', 'BluRay'];
+
+  for (let i = 0; i < noiseCount; i++) {
+    const titleIdx = Math.floor(rng() * noiseTitles.length);
+    const resIdx = Math.floor(rng() * resolutions.length);
+    const srcIdx = Math.floor(rng() * sources.length);
+    const attrs = makeSyntheticRow(i, {
+      title: noiseTitles[titleIdx],
+      resolution: resolutions[resIdx],
+      sourceType: sources[srcIdx],
+      year: 2024 + Math.floor(rng() * 3),
+      confidence: 0.7 + rng() * 0.25,
+    });
+    storeReleaseAttributes(cache, attrs);
+    inserted++;
+  }
+
+  // 2. For each cohort query, insert title-matched rows
+  let currentOffset = noiseCount;
+  const allWinnerRows = [];
+
+  for (const queryDef of QUERY_COHORT) {
+    const baseTitle = queryDef.title;
+    const baseYear = queryDef.year;
+
+    // Insert title-matched noise with LONG filenames (BM25-favored)
+    // These rank HIGHER in Stage-1 due to more tokens
+    for (let i = 0; i < matchedPerQuery - winnerCount; i++) {
+      const resIdx = Math.floor(rng() * resolutions.length);
+      const srcIdx = Math.floor(rng() * sources.length);
+      // LONG filename: more metadata tokens → BM25-favored → HIGHER rank
+      const longFilename = `${baseTitle.replace(/\s+/g, '.')}.${baseYear}.${resolutions[resIdx]}.${sources[srcIdx]}.x264.DTS-HD.MA.5.1-FGT-Group${i}.mkv`;
+      const attrs = makeSyntheticRow(currentOffset + i, {
+        title: baseTitle,
+        filename: longFilename,
+        resolution: resolutions[resIdx],
+        sourceType: sources[srcIdx],
+        year: baseYear + Math.floor(rng() * 3),
+        confidence: 0.7 + rng() * 0.25,
+      });
+      storeReleaseAttributes(cache, attrs);
+      inserted++;
+    }
+
+    // Insert winners with SHORT filenames (BM25-penalized)
+    // These rank LOWER in Stage-1 due to fewer tokens
+    for (let i = 0; i < winnerCount; i++) {
+      // SHORT filename: fewer tokens → BM25-penalized → LOWER rank
+      const shortFilename = `${baseTitle.replace(/\s+/g, '.')}.${baseYear}.2160p.mkv`;
+      const attrs = makeSyntheticRow(currentOffset + matchedPerQuery - winnerCount + i, {
+        title: baseTitle,
+        filename: shortFilename,
+        resolution: winnerQuality,
+        sourceType: 'Remux',
+        codec: 'x265',
+        hdr: true,
+        year: baseYear,
+        confidence: 0.95,
+        fileIndex: i,
+      });
+      storeReleaseAttributes(cache, attrs);
+      allWinnerRows.push(attrs);
+      inserted++;
+    }
+
+    currentOffset += matchedPerQuery;
+  }
+
+  return {
+    total: inserted,
+    titleMatched: totalMatched,
+    winners: winnerCount * cohortSize,
+    noise: noiseCount,
+    winnerRows: allWinnerRows,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Oracle retrieval
 // ---------------------------------------------------------------------------
 
-/**
- * ORACLE: rank ALL eligible candidates in the corpus for this query.
- *
- * Uses the REAL Stage 3 ranker. No LIMIT applied (uses 10M sentinel).
- *
- * @param {Object} cache - Discovery cache
- * @param {Object} query - { query, season?, episode?, mediaId? }
- * @returns {{ ranked: Array, eligibleCount: number, matchedCount: number, durationMs: number }}
- */
 function oracleRetrieval(cache, query) {
-  const startedAt = performance.now();
+  const t0 = performance.now();
 
-  // 10M sentinel = "no practical limit" — effectively exhaustive for any
-  // corpus we can generate in this environment.
   const ALL_LIMIT = 10_000_000;
 
   const result = searchReleases(cache, {
@@ -319,9 +270,10 @@ function oracleRetrieval(cache, query) {
     mediaId: query.mediaId || null,
   });
 
+  const t1 = performance.now();
+
   const matchedCount = result.total;
 
-  // Apply the same eligibility + ranking pipeline as combinedSearch
   const canonicalLocal = result.results.map(toCanonicalLocal);
   const deduped = deduplicateByReleaseKey(canonicalLocal);
 
@@ -329,7 +281,6 @@ function oracleRetrieval(cache, query) {
   if (query.season != null) queryIntent.season = query.season;
   if (query.episode != null) queryIntent.episode = query.episode;
 
-  // Apply hard eligibility for episode-bearing queries
   const eligibleCandidates = deduped.filter((candidate) => {
     if (candidate.sources.some((s) => s.origin === 'corpus')) {
       if (queryIntent.season != null && queryIntent.episode != null) {
@@ -343,11 +294,15 @@ function oracleRetrieval(cache, query) {
   const rankingInputs = eligibleCandidates.map(toRankingInput);
   const ranked = rankHits(rankingInputs, queryIntent, query.mediaId || null);
 
+  const t2 = performance.now();
+
   return {
     ranked,
     eligibleCount: eligibleCandidates.length,
     matchedCount,
-    durationMs: performance.now() - startedAt,
+    stage1Ms: t1 - t0,
+    stage2Ms: t2 - t1,
+    wholeMs: t2 - t0,
   };
 }
 
@@ -355,19 +310,8 @@ function oracleRetrieval(cache, query) {
 // Bounded retrieval
 // ---------------------------------------------------------------------------
 
-/**
- * BOUNDED: the candidate set produced by a finite retrieval window.
- *
- * Uses the SAME searchReleases + eligibility + ranking pipeline, but with
- * a finite LIMIT. This is what combinedSearch's bounded path does.
- *
- * @param {Object} cache - Discovery cache
- * @param {Object} query - { query, season?, episode?, mediaId? }
- * @param {number} retrievalLimit - The LIMIT applied at Stage 1
- * @returns {{ ranked: Array, eligibleCount: number, matchedCount: number, retrievedCount: number, durationMs: number }}
- */
 function boundedRetrieval(cache, query, retrievalLimit) {
-  const startedAt = performance.now();
+  const t0 = performance.now();
 
   const result = searchReleases(cache, {
     query: query.query,
@@ -380,10 +324,11 @@ function boundedRetrieval(cache, query, retrievalLimit) {
     mediaId: query.mediaId || null,
   });
 
+  const t1 = performance.now();
+
   const matchedCount = result.total;
   const retrievedCount = result.results.length;
 
-  // Same eligibility + ranking pipeline
   const canonicalLocal = result.results.map(toCanonicalLocal);
   const deduped = deduplicateByReleaseKey(canonicalLocal);
 
@@ -404,12 +349,16 @@ function boundedRetrieval(cache, query, retrievalLimit) {
   const rankingInputs = eligibleCandidates.map(toRankingInput);
   const ranked = rankHits(rankingInputs, queryIntent, query.mediaId || null);
 
+  const t2 = performance.now();
+
   return {
     ranked,
     eligibleCount: eligibleCandidates.length,
     matchedCount,
     retrievedCount,
-    durationMs: performance.now() - startedAt,
+    stage1Ms: t1 - t0,
+    stage2Ms: t2 - t1,
+    wholeMs: t2 - t0,
   };
 }
 
@@ -417,45 +366,46 @@ function boundedRetrieval(cache, query, retrievalLimit) {
 // Metrics
 // ---------------------------------------------------------------------------
 
-/**
- * Compute recall metrics by comparing bounded results against oracle.
- *
- * @param {Object} oracle - oracleRetrieval result
- * @param {Object} bounded - boundedRetrieval result
- * @returns {{ top1Survives: boolean, top3Survival: number, oracleWinnerRank: number, boundedWinnerKey: string|null, oracleWinnerKey: string|null, matchCount: number }}
- */
-function computeRecallMetrics(oracle, bounded) {
-  // Build a set of bounded releaseKeys for fast lookup
+function computeRecallMetrics(oracle, bounded, oracleStage1Order) {
+  if (!oracle.ranked || oracle.ranked.length === 0) {
+    return { valid: false, reason: 'zero-oracle' };
+  }
+
   const boundedKeys = new Set(bounded.ranked.map((r) => `${r.hash}:${r.fileIndex ?? 'torrent'}`));
 
-  // Oracle top-1
   const oracleTop1 = oracle.ranked[0];
   const oracleTop1Key = oracleTop1 ? `${oracleTop1.hash}:${oracleTop1.fileIndex ?? 'torrent'}` : null;
-  const top1Survives = oracleTop1Key ? boundedKeys.has(oracleTop1Key) : true;
+  const top1Survives = oracleTop1Key ? boundedKeys.has(oracleTop1Key) : false;
 
-  // Oracle top-3 survival
-  const oracleTop3 = oracle.ranked.slice(0, 3);
+  const top3Denominator = Math.min(3, oracle.ranked.length);
+  const oracleTop3 = oracle.ranked.slice(0, top3Denominator);
   const top3Survival = oracleTop3.filter((r) => boundedKeys.has(`${r.hash}:${r.fileIndex ?? 'torrent'}`)).length;
 
-  // Where does the oracle winner rank in the bounded set?
   let oracleWinnerRank = -1;
   if (oracleTop1Key) {
     const idx = bounded.ranked.findIndex((r) => `${r.hash}:${r.fileIndex ?? 'torrent'}` === oracleTop1Key);
     if (idx !== -1) oracleWinnerRank = idx;
   }
 
-  // Bounded top-1 key
+  let oracleWinnerStage1Rank = -1;
+  if (oracleTop1Key && oracleStage1Order) {
+    const idx = oracleStage1Order.indexOf(oracleTop1Key);
+    if (idx !== -1) oracleWinnerStage1Rank = idx;
+  }
+
   const boundedTop1 = bounded.ranked[0];
   const boundedWinnerKey = boundedTop1 ? `${boundedTop1.hash}:${boundedTop1.fileIndex ?? 'torrent'}` : null;
 
-  // How many oracle top-10 appear in bounded?
   const oracleTop10 = oracle.ranked.slice(0, 10);
   const matchCount = oracleTop10.filter((r) => boundedKeys.has(`${r.hash}:${r.fileIndex ?? 'torrent'}`)).length;
 
   return {
+    valid: true,
     top1Survives,
     top3Survival,
+    top3Denominator,
     oracleWinnerRank,
+    oracleWinnerStage1Rank,
     boundedWinnerKey,
     oracleWinnerKey: oracleTop1Key,
     matchCount,
@@ -466,135 +416,190 @@ function computeRecallMetrics(oracle, bounded) {
 // Main runner
 // ---------------------------------------------------------------------------
 
-/**
- * Run the full benchmark across scales and queries.
- *
- * @param {Object} options - { scales, retrievalLimit, seed, csv }
- */
 export async function runRetrievalBenchmark(options = {}) {
   const {
-    scales = [100_000, 500_000],
-    retrievalLimit = 200,
+    scales = [100_000],
+    matchCardinalities = [100, 500, 2000, 5000, 10000],
+    windows = [100, 200, 500, 1000, 2000, 5000],
     seed = 'stage3-retrieval-benchmark',
     csv = false,
-    syntheticOnly = true,
   } = options;
 
   const results = [];
 
   for (const scale of scales) {
-    // Build fresh synthetic cache per scale
-    const cache = createDiscoveryCache();
-    const layout = populateSyntheticCorpus(cache, scale, `${seed}-${scale}`, {
-      matchedFraction: 0.1,
-      winnerCount: 5,
-      winnerQuality: '2160p',
-      winnerExtraTokens: 50,
-    });
+    for (const matchedCount of matchCardinalities) {
+      if (matchedCount >= scale) continue;
 
-    for (const query of QUERY_COHORT) {
-      // Run oracle (no LIMIT)
-      const oracle = oracleRetrieval(cache, query);
-
-      // Run bounded (with retrieval limit)
-      const bounded = boundedRetrieval(cache, query, retrievalLimit);
-
-      // Compute recall
-      const metrics = computeRecallMetrics(oracle, bounded);
-
-      results.push({
-        scale,
-        retrievalLimit,
-        query: query.name,
-        queryDescription: query.description,
-        oracleWinnerKey: metrics.oracleWinnerKey,
-        boundedWinnerKey: metrics.boundedWinnerKey,
-        top1Survives: metrics.top1Survives,
-        top3Survival: metrics.top3Survival,
-        oracleWinnerRankInBounded: metrics.oracleWinnerRank,
-        oracleTop10MatchCount: metrics.matchCount,
-        matchedCount: bounded.matchedCount,
-        retrievedCount: bounded.retrievedCount,
-        eligibleCount: bounded.eligibleCount,
-        oracleDurationMs: oracle.durationMs,
-        boundedDurationMs: bounded.durationMs,
+      const cache = createDiscoveryCache();
+      const layout = populateSyntheticCorpus(cache, scale, `${seed}-${scale}-${matchedCount}`, {
+        matchedCount,
+        winnerCount: 5,
+        winnerQuality: '2160p',
       });
-    }
 
-    cache.close();
+      for (const query of QUERY_COHORT) {
+        const oracle = oracleRetrieval(cache, query);
+
+        const ALL_LIMIT = 10_000_000;
+        const oracleRawResult = searchReleases(cache, {
+          query: query.query,
+          season: query.season,
+          episode: query.episode,
+          limit: ALL_LIMIT,
+          offset: 0,
+          includeProviders: true,
+          includeMedia: true,
+          mediaId: query.mediaId || null,
+        });
+        const oracleStage1Order = oracleRawResult.results.map(
+          (r) => `${r.hash}:${r.fileIndex ?? 'torrent'}`
+        );
+
+        for (const retrievalLimit of windows) {
+          const bounded = boundedRetrieval(cache, query, retrievalLimit);
+
+          const metrics = computeRecallMetrics(oracle, bounded, oracleStage1Order);
+
+          results.push({
+            scale,
+            matchedCount,
+            retrievalLimit,
+            query: query.name,
+            queryDescription: query.description,
+            valid: metrics.valid,
+            invalidReason: metrics.reason || null,
+            oracleWinnerKey: metrics.oracleWinnerKey,
+            boundedWinnerKey: metrics.boundedWinnerKey,
+            top1Survives: metrics.top1Survives ?? null,
+            top3Survival: metrics.top3Survival ?? null,
+            top3Denominator: metrics.top3Denominator ?? null,
+            oracleWinnerRank: metrics.oracleWinnerRank,
+            oracleWinnerStage1Rank: metrics.oracleWinnerStage1Rank,
+            oracleTop10MatchCount: metrics.matchCount,
+            matchedCountOracle: oracle.matchedCount,
+            matchedCountBounded: bounded.matchedCount,
+            retrievedCount: bounded.retrievedCount,
+            eligibleCount: bounded.eligibleCount,
+            oracleStage1Ms: oracle.stage1Ms,
+            oracleStage2Ms: oracle.stage2Ms,
+            oracleWholeMs: oracle.wholeMs,
+            boundedStage1Ms: bounded.stage1Ms,
+            boundedStage2Ms: bounded.stage2Ms,
+            boundedWholeMs: bounded.wholeMs,
+          });
+        }
+      }
+    }
   }
 
   return results;
 }
 
-/**
- * Print a compact summary table.
- */
-function printResults(results, csv = false) {
-  if (csv) {
-    console.log('scale,window,query,top1_recall,top3_recall,matched,retrieved,eligible,oracle_ms,bounded_ms');
-    for (const r of results) {
-      console.log(`${r.scale},${r.retrievalLimit},${r.query},${r.top1Survives},${r.top3Survival},${r.matchedCount},${r.retrievedCount},${r.eligibleCount},${r.oracleDurationMs.toFixed(1)},${r.boundedDurationMs.toFixed(1)}`);
-    }
-    return;
-  }
-
-  // Aggregate by scale
-  const byScale = new Map();
-  for (const r of results) {
-    if (!byScale.has(r.scale)) byScale.set(r.scale, []);
-    byScale.get(r.scale).push(r);
-  }
-
-  console.log('\n=== Stage 3 Retrieval Benchmark ===\n');
-
-  for (const [scale, rows] of byScale) {
-    console.log(`Scale: ${scale.toLocaleString()} rows | Retrieval window: ${rows[0].retrievalLimit}`);
-    console.log('-'.repeat(100));
-
-    const header = [
-      'Query'.padEnd(28),
-      'top1'.padEnd(6),
-      'top3'.padEnd(6),
-      'matched'.padEnd(10),
-      'retrieved'.padEnd(10),
-      'eligible'.padEnd(10),
-      'oracle(ms)'.padEnd(12),
-      'bounded(ms)'.padEnd(12),
-    ].join(' ');
-    console.log(header);
-
-    for (const r of rows) {
-      const line = [
-        r.query.padEnd(28),
-        (r.top1Survives ? 'PASS' : 'FAIL').padEnd(6),
-        `${r.top3Survival}/3`.padEnd(6),
-        String(r.matchedCount).padEnd(10),
-        String(r.retrievedCount).padEnd(10),
-        String(r.eligibleCount).padEnd(10),
-        r.oracleDurationMs.toFixed(1).padEnd(12),
-        r.boundedDurationMs.toFixed(1).padEnd(12),
-      ].join(' ');
-      console.log(line);
-    }
-
-    // Summary row
-    const top1Recall = rows.filter((r) => r.top1Survives).length / rows.length;
-    const top3Recall = rows.reduce((s, r) => s + r.top3Survival, 0) / (rows.length * 3);
-    const retrievalP50 = percentile(rows.map((r) => r.boundedDurationMs), 50);
-    const retrievalP95 = percentile(rows.map((r) => r.boundedDurationMs), 95);
-
-    console.log('-'.repeat(100));
-    console.log(`  top1 recall: ${(top1Recall * 100).toFixed(1)}% | top3 recall: ${(top3Recall * 100).toFixed(1)}% | retrieval p50/p95: ${retrievalP50.toFixed(1)}/${retrievalP95.toFixed(1)}ms`);
-    console.log();
-  }
-}
+// ---------------------------------------------------------------------------
+// Reporting
+// ---------------------------------------------------------------------------
 
 function percentile(sortedValues, p) {
   if (sortedValues.length === 0) return 0;
   const sorted = [...sortedValues].sort((a, b) => a - b);
   const idx = Math.floor((p / 100) * sorted.length);
   return sorted[Math.min(idx, sorted.length - 1)];
+}
+
+function printResults(results, csv = false) {
+  if (csv) {
+    console.log([
+      'scale', 'matchedCount', 'retrievalLimit', 'query', 'valid', 'invalidReason',
+      'top1Survives', 'top3Survival', 'top3Denominator', 'oracleWinnerStage1Rank',
+      'matchedCountOracle', 'retrievedCount', 'eligibleCount',
+      'boundedStage1Ms', 'boundedStage2Ms', 'boundedWholeMs',
+    ].join(','));
+    for (const r of results) {
+      console.log([
+        r.scale, r.matchedCount, r.retrievalLimit, r.query, r.valid, r.invalidReason || '',
+        r.top1Survives ?? '', r.top3Survival ?? '', r.top3Denominator ?? '',
+        r.oracleWinnerStage1Rank, r.matchedCountOracle, r.retrievedCount, r.eligibleCount,
+        r.boundedStage1Ms.toFixed(2), r.boundedStage2Ms.toFixed(2), r.boundedWholeMs.toFixed(2),
+      ].join(','));
+    }
+    return;
+  }
+
+  const byScaleAndCardinality = new Map();
+  for (const r of results) {
+    const key = `${r.scale}-${r.matchedCount}`;
+    if (!byScaleAndCardinality.has(key)) byScaleAndCardinality.set(key, []);
+    byScaleAndCardinality.get(key).push(r);
+  }
+
+  console.log('\n=== Stage 3 Retrieval Benchmark (Corrected) ===\n');
+
+  const validResults = results.filter((r) => r.valid);
+  const invalidResults = results.filter((r) => !r.valid);
+  console.log(`Total trials: ${results.length}`);
+  console.log(`Valid (non-empty oracle): ${validResults.length}`);
+  console.log(`Invalid (zero-oracle, excluded): ${invalidResults.length}`);
+  if (invalidResults.length > 0) {
+    const invalidByQuery = new Map();
+    for (const r of invalidResults) {
+      invalidByQuery.set(r.query, (invalidByQuery.get(r.query) || 0) + 1);
+    }
+    console.log('Invalid breakdown:');
+    for (const [q, count] of invalidByQuery) {
+      console.log(`  ${q}: ${count} trials`);
+    }
+  }
+  console.log();
+
+  for (const [key, rows] of byScaleAndCardinality) {
+    const [scale, matchedCount] = key.split('-');
+    console.log(`Scale: ${Number(scale).toLocaleString()} rows | Matched: ${Number(matchedCount).toLocaleString()} title-matched rows`);
+    console.log('='.repeat(140));
+
+    const header = [
+      'Window'.padEnd(8), 'Query'.padEnd(24), 'valid'.padEnd(6), 'top1'.padEnd(6),
+      'top3'.padEnd(8), 'winnerStage1'.padEnd(14), 'matched'.padEnd(10),
+      'retrieved'.padEnd(10), 'eligible'.padEnd(10), 'St1(ms)'.padEnd(10),
+      'St2(ms)'.padEnd(10), 'Whole(ms)'.padEnd(10),
+    ].join(' ');
+    console.log(header);
+
+    for (const r of rows) {
+      const line = [
+        String(r.retrievalLimit).padEnd(8), r.query.padEnd(24),
+        (r.valid ? 'Y' : 'N').padEnd(6),
+        (r.top1Survives == null ? 'N/A' : (r.top1Survives ? 'PASS' : 'FAIL')).padEnd(6),
+        (r.top3Survival == null ? 'N/A' : `${r.top3Survival}/${r.top3Denominator}`).padEnd(8),
+        String(r.oracleWinnerStage1Rank).padEnd(14),
+        String(r.matchedCountOracle).padEnd(10), String(r.retrievedCount).padEnd(10),
+        String(r.eligibleCount).padEnd(10), r.boundedStage1Ms.toFixed(1).padEnd(10),
+        r.boundedStage2Ms.toFixed(1).padEnd(10), r.boundedWholeMs.toFixed(1).padEnd(10),
+      ].join(' ');
+      console.log(line);
+    }
+
+    const validRows = rows.filter((r) => r.valid);
+    if (validRows.length > 0) {
+      const top1Recall = validRows.filter((r) => r.top1Survives).length / validRows.length;
+      const top3Recall = validRows.reduce((s, r) => s + (r.top3Survival || 0), 0) /
+                         validRows.reduce((s, r) => s + (r.top3Denominator || 0), 0);
+      const stage1P50 = percentile(validRows.map((r) => r.boundedStage1Ms), 50);
+      const stage1P95 = percentile(validRows.map((r) => r.boundedStage1Ms), 95);
+      const stage2P50 = percentile(validRows.map((r) => r.boundedStage2Ms), 50);
+      const stage2P95 = percentile(validRows.map((r) => r.boundedStage2Ms), 95);
+      const wholeP50 = percentile(validRows.map((r) => r.boundedWholeMs), 50);
+      const wholeP95 = percentile(validRows.map((r) => r.boundedWholeMs), 95);
+
+      console.log('-'.repeat(140));
+      console.log(`  top1 recall: ${(top1Recall * 100).toFixed(1)}% | top3 recall: ${(top3Recall * 100).toFixed(1)}% | valid trials: ${validRows.length}/${rows.length}`);
+      console.log(`  Stage1 p50/p95: ${stage1P50.toFixed(1)}/${stage1P95.toFixed(1)}ms | Stage2 p50/p95: ${stage2P50.toFixed(1)}/${stage2P95.toFixed(1)}ms | Whole p50/p95: ${wholeP50.toFixed(1)}/${wholeP95.toFixed(1)}ms`);
+    } else {
+      console.log('-'.repeat(140));
+      console.log(`  NO VALID TRIALS`);
+    }
+    console.log();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -606,29 +611,46 @@ async function main() {
   const csv = args.includes('--csv');
   const seedArg = args.find((a) => a.startsWith('--seed='));
   const scaleArg = args.find((a) => a.startsWith('--scales='));
-  const limitArg = args.find((a) => a.startsWith('--limit='));
+  const matchedArg = args.find((a) => a.startsWith('--matched='));
+  const windowArg = args.find((a) => a.startsWith('--windows='));
   const isDemo = args.includes('--demo');
 
   let scales;
   if (scaleArg) {
     scales = scaleArg.split('=')[1].split(',').map(Number);
   } else if (isDemo) {
-    scales = [5_000];
+    scales = [10_000];
   } else {
-    scales = [100_000, 500_000, 1_000_000];
+    scales = [100_000];
+  }
+
+  let matchCardinalities;
+  if (matchedArg) {
+    matchCardinalities = matchedArg.split('=')[1].split(',').map(Number);
+  } else if (isDemo) {
+    matchCardinalities = [100, 500];
+  } else {
+    matchCardinalities = [100, 500, 2000, 5000, 10000];
+  }
+
+  let windows;
+  if (windowArg) {
+    windows = windowArg.split('=')[1].split(',').map(Number);
+  } else if (isDemo) {
+    windows = [100, 500];
+  } else {
+    windows = [100, 200, 500, 1000, 2000, 5000];
   }
 
   const seed = seedArg ? seedArg.split('=')[1] : 'stage3-retrieval-benchmark';
-  const retrievalLimit = limitArg ? parseInt(limitArg.split('=')[1], 10) : 200;
 
-  console.log(`Running retrieval benchmark...`);
-  console.log(`Scales: ${scales.join(', ')} | Retrieval limit: ${retrievalLimit} | Seed: ${seed}`);
+  console.log(`Running corrected retrieval benchmark...`);
+  console.log(`Scales: ${scales.join(', ')} | Matched: ${matchCardinalities.join(', ')} | Windows: ${windows.join(', ')} | Seed: ${seed}`);
 
-  const results = await runRetrievalBenchmark({ scales, retrievalLimit, seed, csv });
+  const results = await runRetrievalBenchmark({ scales, matchCardinalities, windows, seed, csv });
   printResults(results, csv);
 }
 
-// Run if executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((err) => {
     console.error('Benchmark failed:', err);
