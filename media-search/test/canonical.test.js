@@ -20,6 +20,7 @@ import {
   deduplicateByReleaseKey,
   toRankingInput,
 } from '../src/lib/discovery/canonical.js';
+import { rankHit } from '../src/lib/discovery/ranking.js';
 import { createReleaseKey } from '../src/api/release-contract.js';
 
 const HASH_A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -183,6 +184,40 @@ test('toCanonicalLive: provider cache hints remain evidence only', () => {
 
   // Provider hints from Torrentio must NOT become authoritative observations
   assert.equal(canonical.providerObservations.length, 0);
+
+  // Provider hint MUST survive as non-authoritative source/provenance evidence
+  assert.ok(canonical.sources.length > 0, 'Provider hint must survive as source evidence');
+  const hintSource = canonical.sources.find(s => s.evidenceType === 'provider-hint:torbox');
+  assert.ok(hintSource, 'Provider hint source must be present');
+  assert.ok(hintSource.providerHint, 'Provider hint source must carry providerHint');
+  assert.equal(hintSource.providerHint.cached, true, 'Provider hint cached state preserved');
+  assert.deepEqual(hintSource.providerHint.evidence, ['torrentio-hint'], 'Provider hint evidence preserved');
+  assert.equal(hintSource.origin, 'live', 'Provider hint source origin is live');
+});
+
+test('toCanonicalLive: preserves selectedMediaId as intent provenance', () => {
+  const raw = {
+    infoHash: HASH_B,
+    fileIndex: null,
+    filename: 'Breaking.Bad.S05E14.720p.mkv',
+    title: 'Breaking Bad',
+    season: 5,
+    episode: 14,
+    resolution: '720p',
+    confidence: 0.8,
+    sources: [{ addonId: 'torrentio.torbox' }],
+  };
+
+  const canonical = toCanonicalLive(raw, { selectedMediaId: 'tt0944947' });
+
+  // selectedMediaId is preserved as intent provenance, NOT as persisted identity
+  assert.equal(canonical.selectedMediaId, 'tt0944947', 'selectedMediaId preserved as provenance');
+
+  // Live candidates never have candidate_media associations
+  assert.equal(canonical.mediaAssociations.length, 0, 'No candidate_media manufactured');
+
+  // selectedMediaId does NOT become a media association
+  // It's purely provenance showing live discovery was scoped by selected media
 });
 
 test('toCanonicalLive: uses provided releaseKey when available', () => {
@@ -429,7 +464,8 @@ test('toRankingInput: maps canonical to ranking shape', () => {
     parserConfidence: 0.9,
     mediaAssociations: [{ mediaId: 'tt123', confidence: 0.95 }],
     providerObservations: [{ provider: 'torbox', cached: true }],
-    sources: [],
+    sources: [{ origin: 'corpus', evidenceType: 'fts5-ranked', confidence: 0.9 }],
+    selectedMediaId: null,
   };
 
   const ranking = toRankingInput(canonical);
@@ -441,8 +477,122 @@ test('toRankingInput: maps canonical to ranking shape', () => {
   assert.equal(ranking.parserConfidence, 0.9);
   assert.equal(ranking.mediaAssociations.length, 1);
   assert.equal(ranking.providerObservations.length, 1);
-  // Sources field is not part of ranking input
-  assert.equal(ranking.sources, undefined);
+  // Sources and selectedMediaId ARE preserved through ranking boundary
+  assert.ok(Array.isArray(ranking.sources), 'sources must be preserved');
+  assert.equal(ranking.sources.length, 1);
+  assert.equal(ranking.sources[0].origin, 'corpus');
+  assert.equal(ranking.selectedMediaId, null);
+});
+
+// =============================================================================
+// Provenance Through Ranking Tests
+// =============================================================================
+
+test('PROVENANCE: pure live result remains identifiable as live through ranking', () => {
+  const liveCanonical = {
+    hash: HASH_A,
+    fileIndex: null,
+    releaseKey: `${HASH_A}:torrent`,
+    filename: 'Movie.2024.1080p.mkv',
+    relevance: 0.5,
+    releaseAttributes: { title: 'Movie', resolution: '1080p', sourceType: 'BluRay' },
+    parserConfidence: 0.8,
+    mediaAssociations: [],
+    providerObservations: [],
+    sources: [{ origin: 'live', evidenceType: 'torrentio.torbox', confidence: 0.8 }],
+    selectedMediaId: null,
+  };
+
+  const rankingInput = toRankingInput(liveCanonical);
+  const ranked = rankHit(rankingInput);
+
+  // Sources must survive ranking
+  assert.ok(Array.isArray(ranked.sources), 'ranked.sources must be an array');
+  assert.equal(ranked.sources.length, 1);
+  assert.equal(ranked.sources[0].origin, 'live', 'Pure live must retain live origin');
+});
+
+test('PROVENANCE: pure corpus result remains identifiable as corpus through ranking', () => {
+  const corpusCanonical = {
+    hash: HASH_A,
+    fileIndex: 0,
+    releaseKey: `${HASH_A}:0`,
+    filename: 'Movie.2024.1080p.mkv',
+    relevance: 0.85,
+    releaseAttributes: { title: 'Movie', resolution: '1080p', sourceType: 'BluRay' },
+    parserConfidence: 0.9,
+    mediaAssociations: [{ mediaId: 'tt123', confidence: 0.95 }],
+    providerObservations: [],
+    sources: [{ origin: 'corpus', evidenceType: 'fts5-ranked', confidence: 0.9 }],
+    selectedMediaId: null,
+  };
+
+  const rankingInput = toRankingInput(corpusCanonical);
+  const ranked = rankHit(rankingInput);
+
+  assert.ok(Array.isArray(ranked.sources), 'ranked.sources must be an array');
+  assert.equal(ranked.sources.length, 1);
+  assert.equal(ranked.sources[0].origin, 'corpus', 'Pure corpus must retain corpus origin');
+});
+
+test('PROVENANCE: exact local+live duplicate retains both origins through ranking', () => {
+  // Simulate merged local+live candidate (from deduplicateByReleaseKey)
+  const mergedCanonical = {
+    hash: HASH_A,
+    fileIndex: null,
+    releaseKey: `${HASH_A}:torrent`,
+    filename: 'Movie.2024.1080p.mkv',
+    relevance: 0.85,
+    releaseAttributes: { title: 'Movie', resolution: '1080p', sourceType: 'BluRay' },
+    parserConfidence: 0.9,
+    mediaAssociations: [{ mediaId: 'tt123', confidence: 0.95 }],
+    providerObservations: [],
+    sources: [
+      { origin: 'corpus', evidenceType: 'fts5-ranked', confidence: 0.9 },
+      { origin: 'live', evidenceType: 'torrentio.torbox', confidence: 0.8 },
+    ],
+    selectedMediaId: null,
+  };
+
+  const rankingInput = toRankingInput(mergedCanonical);
+  const ranked = rankHit(rankingInput);
+
+  // Both origins must survive
+  assert.ok(Array.isArray(ranked.sources), 'ranked.sources must be an array');
+  assert.equal(ranked.sources.length, 2, 'Both sources must survive ranking');
+  const origins = ranked.sources.map(s => s.origin).sort();
+  assert.deepEqual(origins, ['corpus', 'live'], 'Both corpus and live origins preserved');
+});
+
+test('PROVENANCE: ranking does not erase sources', () => {
+  const canonical = {
+    hash: HASH_B,
+    fileIndex: 1,
+    releaseKey: `${HASH_B}:1`,
+    filename: 'Movie.2024.720p.mkv',
+    relevance: 0.5,
+    releaseAttributes: { resolution: '720p', sourceType: 'WEB-DL' },
+    parserConfidence: 0.7,
+    mediaAssociations: [],
+    providerObservations: [],
+    sources: [
+      { origin: 'live', evidenceType: 'provider-hint:torbox', confidence: 0.7, providerHint: { cached: true, evidence: ['hint'] } },
+      { origin: 'live', evidenceType: 'torrentio.torbox', confidence: 0.7 },
+    ],
+    selectedMediaId: 'tt456',
+  };
+
+  const rankingInput = toRankingInput(canonical);
+  const ranked = rankHit(rankingInput);
+
+  // All sources must survive
+  assert.equal(ranked.sources.length, 2, 'All sources must survive ranking');
+  assert.equal(ranked.selectedMediaId, 'tt456', 'selectedMediaId preserved through ranking');
+  // Provider hint source must still carry providerHint
+  const hintSource = ranked.sources.find(s => s.evidenceType === 'provider-hint:torbox');
+  assert.ok(hintSource, 'Provider hint source must survive ranking');
+  assert.ok(hintSource.providerHint, 'providerHint must survive ranking');
+  assert.equal(hintSource.providerHint.cached, true);
 });
 
 // =============================================================================

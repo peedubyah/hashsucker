@@ -208,6 +208,9 @@ export function episodeMatchScore(releaseAttrs = {}, queryIntent = {}) {
 /**
  * Rank a single search hit.
  *
+ * Preserves provenance (sources, selectedMediaId) through the ranking boundary
+ * so that merged local/live evidence survives into the final ranked result.
+ *
  * @param {Object} hit - Search hit with evidence
  * @param {string} hit.hash - InfoHash
  * @param {number|null} hit.fileIndex - File index
@@ -217,6 +220,8 @@ export function episodeMatchScore(releaseAttrs = {}, queryIntent = {}) {
  * @param {number} [hit.parserConfidence] - Parser confidence (0.0-1.0)
  * @param {Array<Object>} [hit.mediaAssociations] - Media associations
  * @param {Array<Object>} [hit.providerObservations] - Provider observations
+ * @param {Array<Object>} [hit.sources] - Provenance sources for evidence
+ * @param {string|null} [hit.selectedMediaId] - Selected media intent provenance
  * @param {Object} [queryIntent] - Query intent for episode matching
  * @param {string} [mediaId] - Selected media ID for identity confidence scoping.
  *   When provided, identity confidence uses only the association to this media.
@@ -232,6 +237,8 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     parserConfidence = NEUTRAL,
     mediaAssociations = [],
     providerObservations = [],
+    sources = [],
+    selectedMediaId = null,
   } = hit;
 
   // Compute component scores
@@ -271,6 +278,8 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     releaseAttributes,
     mediaAssociations,
     providerObservations,
+    sources,
+    selectedMediaId,
   };
 }
 

@@ -19,6 +19,8 @@ const PUBLIC_RELEASE_FIELDS = [
   'providers',
   'media',
   '_source',
+  '_sources',
+  '_selectedMediaId',
 ];
 
 function requireReleaseObject(release) {
@@ -84,19 +86,36 @@ export function validateReleaseIdentity(release) {
  * Validate and project the supported public release response shape. Projection
  * prevents discovery-only fields such as magnets, provider URLs, or raw addon
  * payloads from crossing the HTTP boundary.
+ *
+ * Provenance fields (_sources, _selectedMediaId) are optional — they default to
+ * empty array / null when absent. This preserves backward compatibility while
+ * ensuring that when provenance evidence exists, it survives to the public DTO.
  */
 export function toPublicReleaseDto(release) {
   const value = requireReleaseObject(release);
   const identity = validateReleaseIdentity(value);
-  for (const field of PUBLIC_RELEASE_FIELDS) {
+
+  // Required fields (excluding optional provenance)
+  const requiredFields = PUBLIC_RELEASE_FIELDS.filter(
+    f => f !== '_sources' && f !== '_selectedMediaId'
+  );
+  for (const field of requiredFields) {
     if (!Object.hasOwn(value, field)) {
       throw new Error(`Public release is missing ${field}`);
     }
   }
 
+  // Provenance fields are optional with sensible defaults
+  const sources = Array.isArray(value._sources) ? value._sources : [];
+  const selectedMediaId = value._selectedMediaId ?? null;
+
   return Object.fromEntries([
     ...Object.entries(identity),
-    ...PUBLIC_RELEASE_FIELDS.map((field) => [field, value[field]]),
+    ...PUBLIC_RELEASE_FIELDS.map((field) => {
+      if (field === '_sources') return [field, sources];
+      if (field === '_selectedMediaId') return [field, selectedMediaId];
+      return [field, value[field]];
+    }),
   ]);
 }
 

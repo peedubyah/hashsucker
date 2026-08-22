@@ -531,16 +531,26 @@ export async function combinedSearch(cache, options = {}) {
     includeMedia: true,
   });
 
+  // Media-scoped eligibility: require candidate_media association
+  const mediaId = searchOptions.mediaId || null;
+
   // Convert local results to canonical evidence shape
   const canonicalLocal = corpusResult.results.map(toCanonicalLocal);
 
-  // Optionally run live discovery and normalize to canonical shape
+  // Optionally run live discovery and normalize to canonical shape.
+  // When mediaId is set, live discovery is already scoped by selected media
+  // intent — the liveDiscoveryFn receives mediaId and returns only candidates
+  // relevant to that media. No persisted candidate_media is required.
   let canonicalLive = [];
   if (includeLive && typeof liveDiscoveryFn === 'function') {
     try {
       const liveResults = await liveDiscoveryFn(options);
       if (liveResults && Array.isArray(liveResults)) {
-        canonicalLive = liveResults.map(toCanonicalLive);
+        // Tag live candidates with selected-media intent provenance when
+        // mediaId is set. This preserves the invariant that live discovery
+        // was already scoped by the selected media, without manufacturing
+        // a candidate_media row or treating live intent as persisted identity.
+        canonicalLive = liveResults.map(r => toCanonicalLive(r, { selectedMediaId: mediaId }));
       }
     } catch (error) {
       // Live discovery failure must not break corpus results
@@ -562,19 +572,22 @@ export async function combinedSearch(cache, options = {}) {
   if (parsed.filters.episode != null) queryIntent.episode = parsed.filters.episode;
 
   // Apply Stage 2 episode-coverage eligibility gate for LOCAL candidates.
-  // Live candidates are never eligible for media-scoped episode queries
-  // because they lack candidate_media associations.
-  const mediaId = searchOptions.mediaId || null;
+  // Live candidates are already scoped by selected-media/live-discovery intent
+  // and must NOT be rejected merely for lacking a persisted candidate_media row.
   let eligibleCandidates = deduped;
   if (queryIntent.season != null && queryIntent.episode != null) {
     eligibleCandidates = deduped.filter(candidate => {
-      // Local corpus: apply episode-coverage hard gate
+      // Local corpus: apply episode-coverage hard gate.
+      // Requires candidate_media association (enforced by INNER JOIN in
+      // searchReleases) AND episode coverage.
       if (candidate.sources.some(s => s.origin === 'corpus')) {
         return isEpisodeCovered(candidate.releaseAttributes, queryIntent.season, queryIntent.episode);
       }
-      // Live: only eligible if mediaId is NOT set (i.e., text search path)
-      // When mediaId is set, live candidates without candidate_media are ineligible
-      return mediaId == null;
+      // Live: already scoped by selected-media/live-discovery intent.
+      // The liveDiscoveryFn was called with mediaId, so these candidates
+      // are already relevant to the selected media. No persisted
+      // candidate_media is required to enter the global ranking.
+      return true;
     });
   }
 
@@ -603,6 +616,8 @@ export async function combinedSearch(cache, options = {}) {
  * Matches what prepareReleases() expects and the public DTO contract.
  *
  * Works with both canonical-local and canonical-live ranked results.
+ * Preserves provenance (sources, selectedMediaId) so that UI source
+ * inference can rely on actual origin evidence, not heuristics.
  */
 function mapToUIShape(r) {
   const identity = createReleaseIdentity(r.hash, r.fileIndex);
@@ -618,12 +633,9 @@ function mapToUIShape(r) {
       }, {})
     : observations;
 
-  // Determine source origin for the UI
-  let source = r._source;
-  if (!source) {
-    // Infer from available fields
-    source = r.releaseAttributes?.title ? 'corpus' : 'live';
-  }
+  // Determine source origin from provenance — never from whether title exists.
+  // sources is the authoritative record of which origins contributed evidence.
+  const source = determineSourceOrigin(r);
 
   return {
     ...identity,
@@ -645,7 +657,31 @@ function mapToUIShape(r) {
     providers,
     media: r.mediaAssociations || r.media || [],
     _source: source,
+    // Preserve provenance through to the UI/public shape
+    _sources: r.sources || [],
+    _selectedMediaId: r.selectedMediaId || null,
   };
+}
+
+/**
+ * Determine source origin from provenance evidence.
+ *
+ * Uses the authoritative sources array to determine which origins contributed
+ * to this result. Never infers origin from whether releaseAttributes.title exists,
+ * as that would be unreliable for live results that may or may not have titles.
+ *
+ * @param {Object} r - Ranked result with sources array
+ * @returns {string} Source origin: 'corpus', 'live', 'merged', or 'unknown'
+ */
+function determineSourceOrigin(r) {
+  const sources = r.sources || [];
+  if (sources.length === 0) return r._source || 'unknown';
+
+  const origins = new Set(sources.map(s => s.origin));
+  if (origins.has('corpus') && origins.has('live')) return 'merged';
+  if (origins.has('corpus')) return 'corpus';
+  if (origins.has('live')) return 'live';
+  return r._source || 'unknown';
 }
 
 /**

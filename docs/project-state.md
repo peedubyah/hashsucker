@@ -4,11 +4,11 @@
 
 This is the machine-maintained companion to [`HANDOFF.md`](../HANDOFF.md). It reports only reproducible repository facts and explicit unknowns. It does not prove live runtime, provider, deployment, or test health.
 
-- Generated at (UTC): `2026-08-22T03:51:04.600Z`
+- Generated at (UTC): `2026-08-22T04:36:08.526Z`
 - Generator: [`scripts/update-project-state.mjs`](../scripts/update-project-state.mjs)
 - Repository root: `.` (the Git top-level containing this file)
-- State input fingerprint: `sha256:2ecc19dcf098fbc50804b3d6143d12aee47c4a8a2deea74da6225bb3d524a3d5`
-- Fingerprinted repository paths: `189`
+- State input fingerprint: `sha256:a59d50c0e3a69ca1fa5b5b51fc16ec76c68ae3ae689a6bc0dc4cdb503c99cd0a`
+- Fingerprinted repository paths: `191`
 
 ## Authority and ownership
 

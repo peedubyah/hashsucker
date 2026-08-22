@@ -94,6 +94,8 @@ test('server serves API and returns 404 when no frontend build is configured', a
     providers: { torbox: { cached: true } },
     media: [],
     _source: 'corpus',
+    _sources: [],
+    _selectedMediaId: null,
   });
 
   const ui = await request('/');

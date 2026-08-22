@@ -94,9 +94,13 @@ export function toCanonicalLocal(row) {
  * - Create authoritative provider observations from cache hints
  *
  * @param {Object} raw - Raw live discovery result from runLiveDiscovery()
+ * @param {Object} [options] - Normalization options
+ * @param {string|null} [options.selectedMediaId] - Selected media ID that scoped
+ *   this live discovery. Preserved as intent provenance, NOT as persisted identity.
  * @returns {CanonicalCandidate} Normalized candidate
  */
-export function toCanonicalLive(raw) {
+export function toCanonicalLive(raw, options = {}) {
+  const { selectedMediaId = null } = options;
   const hash = raw.infoHash;
   const fileIndex = raw.fileIndex ?? null;
   const releaseKey = raw.releaseKey || createReleaseKey(hash, fileIndex);
@@ -122,6 +126,29 @@ export function toCanonicalLive(raw) {
 
   // Provenance: track where evidence came from
   const sources = [];
+
+  // Preserve provider cache hints as non-authoritative source/provenance evidence.
+  // This ensures source/provider hints survive as evidence without becoming
+  // authoritative provider_observations.
+  if (raw.providers && typeof raw.providers === 'object') {
+    for (const [providerName, hint] of Object.entries(raw.providers)) {
+      if (hint && typeof hint === 'object') {
+        sources.push({
+          origin: 'live',
+          evidence: hint.evidence || [],
+          confidence: raw.confidence ?? 0.5,
+          evidenceType: `provider-hint:${providerName}`,
+          addonId: providerName,
+          addonName: providerName,
+          providerHint: {
+            cached: hint.cached ?? null,
+            evidence: hint.evidence || [],
+          },
+        });
+      }
+    }
+  }
+
   if (raw.sources && Array.isArray(raw.sources)) {
     for (const src of raw.sources) {
       sources.push({
@@ -158,6 +185,12 @@ export function toCanonicalLive(raw) {
     mediaAssociations: [],
     providerObservations,
     sources,
+    // Selected-media intent provenance: preserved to show live discovery
+    // was already scoped by the selected media. This is NOT persisted identity
+    // evidence — it does not create a candidate_media row or contribute to
+    // identity confidence. It simply records that the live source was already
+    // filtered to the selected media before reaching the global ranker.
+    selectedMediaId,
   };
 }
 
@@ -350,6 +383,9 @@ function normalizeProviderObservations(providers) {
 /**
  * Map a canonical candidate back to a ranking-compatible hit shape.
  *
+ * Preserves provenance (sources, selectedMediaId) through the ranking boundary
+ * so that merged local/live evidence survives into the final ranked result.
+ *
  * @param {CanonicalCandidate} candidate - Canonical candidate
  * @returns {Object} Ranking input shape for rankHit()
  */
@@ -363,5 +399,7 @@ export function toRankingInput(candidate) {
     parserConfidence: candidate.parserConfidence,
     mediaAssociations: candidate.mediaAssociations,
     providerObservations: candidate.providerObservations,
+    sources: candidate.sources || [],
+    selectedMediaId: candidate.selectedMediaId || null,
   };
 }

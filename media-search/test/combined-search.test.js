@@ -412,6 +412,7 @@ test('STAGE 2: wrong local episode remains rejected before global rank', async (
 
 // =============================================================================
 // Test 10: Live regression - no candidate_media required
+// Strengthened: uses selected media TV intent (mediaId + season + episode)
 // =============================================================================
 
 test('LIVE: candidate does not require candidate_media persistence', async () => {
@@ -421,28 +422,90 @@ test('LIVE: candidate does not require candidate_media persistence', async () =>
   const mockLiveDiscovery = async () => [{
     infoHash: HASH1,
     fileIndex: null,
-    filename: 'Movie.2024.1080p.mkv',
-    title: 'Movie',
+    filename: 'Breaking.Bad.S05E14.1080p.mkv',
+    title: 'Breaking Bad',
+    season: 5,
+    episode: 14,
     resolution: '1080p',
     confidence: 0.8,
     sources: [{ addonId: 'torrentio.torbox' }],
   }];
 
   const result = await combinedSearch(cache, {
-    query: 'Movie',
+    query: 'Breaking Bad S05E14',
+    season: 5,
+    episode: 14,
+    mediaId: 'tt0944947', // Selected media ID — live must NOT require candidate_media
     includeLive: true,
     liveDiscoveryFn: mockLiveDiscovery,
     mode: 'ui',
   });
 
   // Live should appear even without any candidate_media association
-  assert.equal(result.results.length, 1);
+  // when mediaId is set with explicit season+episode intent
+  assert.equal(result.results.length, 1, 'Live candidate should survive selected-TV intent');
   assert.equal(result.results[0].infoHash, HASH1);
+  assert.equal(result.results[0]._source, 'live', 'Source should be live');
+  assert.equal(result.results[0]._selectedMediaId, 'tt0944947', 'Selected media intent provenance preserved');
+  cache.close();
+});
+
+// =============================================================================
+// Test 10b: Selected-TV live survives while wrong LOCAL rejected
+// Proves both directions of the fix in a single search
+// =============================================================================
+
+test('LIVE: selected-TV live survives while wrong LOCAL rejected in same search', async () => {
+  const cache = createDiscoveryCache();
+
+  // LOCAL candidate: wrong episode (S05E15, not S05E14) — must be rejected
+  // by Stage 2 episode coverage gate
+  setupCandidate(cache, HASH2, {
+    filename: 'Breaking.Bad.S05E15.Wrong.Episode.1080p.mkv',
+    title: 'Breaking Bad',
+    season: 5,
+    episode: 15, // Wrong episode
+    resolution: '1080p',
+    confidence: 0.9,
+  });
+
+  // LIVE candidate: correct episode, no persisted candidate_media
+  const mockLiveDiscovery = async () => [{
+    infoHash: HASH1,
+    fileIndex: null,
+    filename: 'Breaking.Bad.S05E14.720p.mkv',
+    title: 'Breaking Bad',
+    season: 5,
+    episode: 14,
+    resolution: '720p',
+    confidence: 0.8,
+    sources: [{ addonId: 'torrentio.torbox' }],
+  }];
+
+  const result = await combinedSearch(cache, {
+    query: 'Breaking Bad S05E14',
+    season: 5,
+    episode: 14,
+    mediaId: 'tt0944947',
+    includeLive: true,
+    liveDiscoveryFn: mockLiveDiscovery,
+    mode: 'ui',
+  });
+
+  // Only the valid live candidate should appear — wrong LOCAL rejected
+  assert.equal(result.results.length, 1, 'Only valid live candidate should survive');
+  assert.equal(result.results[0].infoHash, HASH1, 'Live candidate survives');
+  assert.equal(result.results[0]._source, 'live', 'Source should be live');
+
+  // Verify the wrong LOCAL candidate was filtered out
+  const hashes = result.results.map(r => r.infoHash);
+  assert.ok(!hashes.includes(HASH2), 'Wrong LOCAL candidate (wrong episode) must be rejected');
   cache.close();
 });
 
 // =============================================================================
 // Test 11: Provider semantics - cache hints don't become authoritative
+// Strengthened: real assertions about provider hint handling
 // =============================================================================
 
 test('PROVIDER: source cache hints do not become authoritative observations', async () => {
@@ -467,10 +530,108 @@ test('PROVIDER: source cache hints do not become authoritative observations', as
     mode: 'ui',
   });
 
-  // Live candidate should appear but provider hint must NOT become authoritative observation
   assert.equal(result.results.length, 1);
-  // The providers field should NOT contain the hint as authoritative
-  // (in normalized output, it may be present in sources but not as authoritative observation)
+
+  const release = result.results[0];
+
+  // 1. Provider hint must NOT become authoritative observation
+  // The providers field (authoritative observations) should NOT contain torbox
+  assert.ok(!release.providers || !release.providers.torbox,
+    'Provider cache hint must NOT become authoritative observation');
+
+  // 2. Provider hint MUST survive as source/provenance evidence
+  assert.ok(release._sources && release._sources.length > 0,
+    'Provider hint must survive as source evidence');
+  const hintSource = release._sources.find(s =>
+    s.evidenceType === 'provider-hint:torbox' || s.addonId === 'torrentio.torbox'
+  );
+  assert.ok(hintSource, 'Provider hint source must be present in _sources');
+  assert.ok(hintSource.providerHint, 'Provider hint source must carry providerHint');
+  assert.equal(hintSource.providerHint.cached, true, 'Provider hint cached state preserved');
+
+  // 3. The source origin should be live (not inferred from title presence)
+  assert.equal(release._source, 'live', 'Source origin should be live');
+  cache.close();
+});
+
+// =============================================================================
+// Test 12: Provenance through full pipeline (end-to-end)
+// =============================================================================
+
+test('PROVENANCE: exact local+live duplicate retains both origins end-to-end', async () => {
+  const cache = createDiscoveryCache();
+
+  // LOCAL candidate with same hash as live (exact duplicate)
+  setupCandidate(cache, HASH1, {
+    filename: 'Movie.2024.1080p.mkv',
+    title: 'Movie',
+    resolution: '1080p',
+    source: 'BluRay',
+    confidence: 0.9,
+  });
+
+  // LIVE candidate: same hash, same fileIndex (exact duplicate)
+  const mockLiveDiscovery = async () => [{
+    infoHash: HASH1,
+    fileIndex: null,
+    filename: 'Movie.2024.1080p.mkv',
+    title: 'Movie',
+    resolution: '1080p',
+    confidence: 0.7,
+    sources: [{ addonId: 'torrentio.torbox' }],
+  }];
+
+  const result = await combinedSearch(cache, {
+    query: 'Movie',
+    includeLive: true,
+    liveDiscoveryFn: mockLiveDiscovery,
+    mode: 'ui',
+  });
+
+  assert.equal(result.results.length, 1, 'Exact duplicates should merge to one result');
+
+  const release = result.results[0];
+
+  // The merged result should show 'merged' origin
+  assert.equal(release._source, 'merged', 'Merged result should have merged origin');
+
+  // Both origins should be preserved in _sources
+  assert.ok(release._sources && release._sources.length >= 2,
+    'Both corpus and live sources must survive');
+  const origins = new Set(release._sources.map(s => s.origin));
+  assert.ok(origins.has('corpus'), 'Corpus origin preserved');
+  assert.ok(origins.has('live'), 'Live origin preserved');
+  cache.close();
+});
+
+test('PROVENANCE: source origin is NOT inferred from title presence', async () => {
+  const cache = createDiscoveryCache();
+
+  // Live result WITHOUT title — source must still be identifiable as live
+  const mockLiveDiscovery = async () => [{
+    infoHash: HASH1,
+    fileIndex: null,
+    filename: 'Movie.2024.1080p.mkv',
+    // title intentionally missing
+    resolution: '1080p',
+    confidence: 0.8,
+    sources: [{ addonId: 'torrentio.torbox' }],
+  }];
+
+  const result = await combinedSearch(cache, {
+    query: 'Movie',
+    includeLive: true,
+    liveDiscoveryFn: mockLiveDiscovery,
+    mode: 'ui',
+  });
+
+  assert.equal(result.results.length, 1);
+  // Source must be live, NOT inferred from title absence
+  assert.equal(result.results[0]._source, 'live',
+    'Source must be live even without title — never inferred from title presence');
+  assert.ok(result.results[0]._sources.length > 0,
+    'Sources array must be non-empty for live result');
+  assert.equal(result.results[0]._sources[0].origin, 'live');
   cache.close();
 });
 
