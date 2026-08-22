@@ -1,0 +1,576 @@
+import { randomUUID } from 'node:crypto';
+
+import { DatabaseSync } from 'node:sqlite';
+
+import { createReleaseIdentity, validateReleaseIdentity } from '../../api/release-contract.js';
+import {
+  addDeterministicCollisionSuffix,
+  buildPreferredCanonicalPath,
+  createLibraryIdentityKey,
+  normalizeCanonicalPath,
+  stableLibraryItemId,
+} from './canonical-path.js';
+import { createLifecycleEvent, projectLifecycle } from './lifecycle.js';
+
+const CONTROL_PLANE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS library_items (
+  id TEXT PRIMARY KEY,
+  identity_key TEXT NOT NULL UNIQUE,
+  media_type TEXT NOT NULL CHECK (media_type IN ('movie', 'episode')),
+  media_id TEXT NOT NULL,
+  edition_key TEXT NOT NULL DEFAULT 'default',
+  title TEXT NOT NULL,
+  year INTEGER,
+  season INTEGER,
+  episode INTEGER,
+  desired_state TEXT NOT NULL CHECK (desired_state IN ('present', 'absent')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK ((media_type = 'movie' AND season IS NULL AND episode IS NULL)
+    OR (media_type = 'episode' AND season IS NOT NULL AND episode IS NOT NULL))
+);
+
+CREATE TABLE IF NOT EXISTS library_paths (
+  id TEXT PRIMARY KEY,
+  library_item_id TEXT NOT NULL,
+  canonical_path TEXT NOT NULL UNIQUE,
+  preferred_path TEXT NOT NULL,
+  collision_key TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  created_at INTEGER NOT NULL,
+  retired_at INTEGER,
+  FOREIGN KEY (library_item_id) REFERENCES library_items(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_library_paths_one_active
+  ON library_paths(library_item_id) WHERE active = 1;
+
+CREATE TABLE IF NOT EXISTS provider_placements (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  account_scope TEXT NOT NULL,
+  info_hash TEXT NOT NULL,
+  provider_resource_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'ready', 'degraded', 'error', 'removed', 'unknown')),
+  ownership TEXT NOT NULL CHECK (ownership IN ('owned', 'reused', 'external', 'unknown')),
+  owner_key TEXT,
+  provenance TEXT NOT NULL,
+  idempotency_key TEXT,
+  observed_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  failure_category TEXT,
+  retryable INTEGER,
+  UNIQUE (provider, account_scope, provider_resource_id),
+  UNIQUE (provider, account_scope, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_provider_placements_hash
+  ON provider_placements(provider, account_scope, info_hash);
+
+CREATE TABLE IF NOT EXISTS provider_files (
+  id TEXT PRIMARY KEY,
+  placement_id TEXT NOT NULL,
+  provider_file_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  name TEXT NOT NULL,
+  size INTEGER,
+  selected INTEGER CHECK (selected IN (0, 1)),
+  media_hint TEXT,
+  inventory_observed_at INTEGER NOT NULL,
+  inventory_expires_at INTEGER,
+  evidence TEXT,
+  UNIQUE (placement_id, provider_file_id),
+  FOREIGN KEY (placement_id) REFERENCES provider_placements(id)
+);
+
+CREATE TABLE IF NOT EXISTS candidate_file_mappings (
+  id TEXT PRIMARY KEY,
+  info_hash TEXT NOT NULL,
+  file_index INTEGER,
+  file_index_key INTEGER NOT NULL,
+  release_key TEXT NOT NULL,
+  placement_id TEXT NOT NULL,
+  provider_file_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('mapped', 'ambiguous', 'missing', 'stale')),
+  method TEXT NOT NULL,
+  authoritative INTEGER NOT NULL CHECK (authoritative IN (0, 1)),
+  evidence TEXT,
+  mapped_at INTEGER NOT NULL,
+  failure_category TEXT,
+  UNIQUE (release_key, placement_id),
+  FOREIGN KEY (placement_id) REFERENCES provider_placements(id),
+  FOREIGN KEY (placement_id, provider_file_id) REFERENCES provider_files(placement_id, provider_file_id)
+);
+
+CREATE TABLE IF NOT EXISTS exposures (
+  id TEXT PRIMARY KEY,
+  placement_id TEXT NOT NULL,
+  provider_file_id TEXT NOT NULL,
+  transport TEXT NOT NULL,
+  exposure_key TEXT NOT NULL,
+  relative_path TEXT,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'visible', 'missing', 'degraded', 'error', 'unknown')),
+  read_only INTEGER NOT NULL CHECK (read_only IN (0, 1)),
+  observed_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  failure_category TEXT,
+  retryable INTEGER,
+  UNIQUE (transport, exposure_key),
+  FOREIGN KEY (placement_id, provider_file_id) REFERENCES provider_files(placement_id, provider_file_id)
+);
+
+CREATE TABLE IF NOT EXISTS bindings (
+  id TEXT PRIMARY KEY,
+  library_item_id TEXT NOT NULL,
+  library_path_id TEXT NOT NULL,
+  release_key TEXT NOT NULL,
+  info_hash TEXT NOT NULL,
+  file_index INTEGER,
+  file_index_key INTEGER NOT NULL,
+  placement_id TEXT NOT NULL,
+  provider_file_id TEXT NOT NULL,
+  exposure_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'superseded', 'degraded', 'failed')),
+  reason TEXT NOT NULL,
+  valid_from INTEGER NOT NULL,
+  superseded_at INTEGER,
+  reconciled_at INTEGER NOT NULL,
+  failure_category TEXT,
+  UNIQUE (library_item_id, version),
+  FOREIGN KEY (library_item_id) REFERENCES library_items(id),
+  FOREIGN KEY (library_path_id) REFERENCES library_paths(id),
+  FOREIGN KEY (placement_id, provider_file_id) REFERENCES provider_files(placement_id, provider_file_id),
+  FOREIGN KEY (exposure_id) REFERENCES exposures(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bindings_one_active
+  ON bindings(library_item_id) WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS lifecycle_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  library_item_id TEXT NOT NULL,
+  milestone TEXT NOT NULL,
+  status TEXT NOT NULL,
+  occurred_at INTEGER NOT NULL,
+  failure_category TEXT,
+  retryable INTEGER,
+  retry_after_ms INTEGER,
+  source TEXT NOT NULL,
+  reason TEXT,
+  evidence TEXT,
+  correlation_id TEXT,
+  recorded_at INTEGER NOT NULL,
+  FOREIGN KEY (library_item_id) REFERENCES library_items(id)
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_events_item
+  ON lifecycle_events(library_item_id, milestone, occurred_at DESC);
+`;
+
+export function createControlPlaneStore({ dbPath = ':memory:', database = null, now = () => Date.now() } = {}) {
+  const db = database || new DatabaseSync(dbPath);
+  db.exec('PRAGMA journal_mode = WAL');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec(CONTROL_PLANE_SCHEMA);
+
+  function transaction(work) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = work();
+      db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  function ensureLibraryItem(input) {
+    const identityKey = createLibraryIdentityKey(input);
+    const id = stableLibraryItemId(identityKey);
+    const timestamp = now();
+    const mediaType = input.mediaType;
+    const season = input.season ?? null;
+    const episode = input.episode ?? null;
+    db.prepare(`
+      INSERT INTO library_items (
+        id, identity_key, media_type, media_id, edition_key, title, year,
+        season, episode, desired_state, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(identity_key) DO UPDATE SET
+        title = EXCLUDED.title,
+        year = COALESCE(EXCLUDED.year, library_items.year),
+        desired_state = EXCLUDED.desired_state,
+        updated_at = EXCLUDED.updated_at
+    `).run(
+      id, identityKey, mediaType, input.mediaId, input.editionKey ?? 'default',
+      requireString(input.title, 'title'), input.year ?? null, season, episode,
+      input.desiredState ?? 'present', timestamp, timestamp,
+    );
+    return getLibraryItem(id);
+  }
+
+  function getLibraryItem(id) {
+    const row = db.prepare('SELECT * FROM library_items WHERE id = ?').get(id);
+    return row ? rowToLibraryItem(row) : null;
+  }
+
+  function ensureCanonicalPath(libraryItemId, options = {}) {
+    const item = requireLibraryItem(libraryItemId);
+    const preferredPath = options.canonicalPath
+      ? normalizeCanonicalPath(options.canonicalPath)
+      : buildPreferredCanonicalPath(item, options);
+    const existing = db.prepare(
+      'SELECT * FROM library_paths WHERE library_item_id = ? AND active = 1',
+    ).get(libraryItemId);
+    if (existing) return rowToLibraryPath(existing);
+
+    const owner = db.prepare(
+      'SELECT library_item_id FROM library_paths WHERE canonical_path = ? AND active = 1',
+    ).get(preferredPath);
+    const canonicalPath = owner && owner.library_item_id !== libraryItemId
+      ? addDeterministicCollisionSuffix(preferredPath, item.identityKey)
+      : preferredPath;
+    const timestamp = now();
+    const id = `lp_${randomUUID()}`;
+    db.prepare(`
+      INSERT INTO library_paths (
+        id, library_item_id, canonical_path, preferred_path, collision_key, active, created_at
+      ) VALUES (?, ?, ?, ?, ?, 1, ?)
+    `).run(id, libraryItemId, canonicalPath, preferredPath, item.identityKey, timestamp);
+    return rowToLibraryPath(db.prepare('SELECT * FROM library_paths WHERE id = ?').get(id));
+  }
+
+  function recordPlacement(input) {
+    const identity = createReleaseIdentity(input.infoHash, null);
+    const timestamp = now();
+    const id = input.id ?? `pl_${randomUUID()}`;
+    db.prepare(`
+      INSERT INTO provider_placements (
+        id, provider, account_scope, info_hash, provider_resource_id, state,
+        ownership, owner_key, provenance, idempotency_key, observed_at, expires_at,
+        created_at, updated_at, failure_category, retryable
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(provider, account_scope, provider_resource_id) DO UPDATE SET
+        state = EXCLUDED.state,
+        observed_at = EXCLUDED.observed_at,
+        expires_at = EXCLUDED.expires_at,
+        updated_at = EXCLUDED.updated_at,
+        failure_category = EXCLUDED.failure_category,
+        retryable = EXCLUDED.retryable
+    `).run(
+      id, normalizeIdentifier(input.provider), normalizeIdentifier(input.accountScope ?? 'default'),
+      identity.infoHash, requireString(input.providerResourceId, 'providerResourceId'),
+      input.state ?? 'unknown', input.ownership ?? 'unknown', input.ownerKey ?? null,
+      requireString(input.provenance, 'provenance'), input.idempotencyKey ?? null,
+      input.observedAt ?? timestamp, input.expiresAt ?? null, timestamp, timestamp,
+      input.failureCategory ?? null, booleanOrNull(input.retryable),
+    );
+    return rowToPlacement(db.prepare(`
+      SELECT * FROM provider_placements
+      WHERE provider = ? AND account_scope = ? AND provider_resource_id = ?
+    `).get(normalizeIdentifier(input.provider), normalizeIdentifier(input.accountScope ?? 'default'), input.providerResourceId));
+  }
+
+  function replaceProviderFileInventory(placementId, files, options = {}) {
+    requirePlacement(placementId);
+    if (!Array.isArray(files)) throw new TypeError('files must be an array');
+    const observedAt = options.observedAt ?? now();
+    const seen = new Set();
+    return transaction(() => {
+      db.prepare('DELETE FROM provider_files WHERE placement_id = ?').run(placementId);
+      const insert = db.prepare(`
+        INSERT INTO provider_files (
+          id, placement_id, provider_file_id, path, name, size, selected, media_hint,
+          inventory_observed_at, inventory_expires_at, evidence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const file of files) {
+        const providerFileId = requireString(file.providerFileId, 'providerFileId');
+        if (seen.has(providerFileId)) throw new TypeError(`Duplicate providerFileId: ${providerFileId}`);
+        seen.add(providerFileId);
+        insert.run(
+          `pf_${randomUUID()}`, placementId, providerFileId,
+          requireString(file.path, 'path', 2000), requireString(file.name, 'name', 1000),
+          file.size ?? null, booleanOrNull(file.selected), file.mediaHint ?? null,
+          observedAt, options.expiresAt ?? null,
+          file.evidence == null ? null : JSON.stringify(file.evidence),
+        );
+      }
+      return listProviderFiles(placementId);
+    });
+  }
+
+  function listProviderFiles(placementId) {
+    return db.prepare(
+      'SELECT * FROM provider_files WHERE placement_id = ? ORDER BY path, provider_file_id',
+    ).all(placementId).map(rowToProviderFile);
+  }
+
+  function recordFileMapping(input) {
+    const identity = validateReleaseIdentity(input);
+    const file = requireProviderFile(input.placementId, input.providerFileId);
+    const id = input.id ?? `fm_${randomUUID()}`;
+    db.prepare(`
+      INSERT INTO candidate_file_mappings (
+        id, info_hash, file_index, file_index_key, release_key, placement_id,
+        provider_file_id, state, method, authoritative, evidence, mapped_at, failure_category
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(release_key, placement_id) DO UPDATE SET
+        provider_file_id = EXCLUDED.provider_file_id,
+        state = EXCLUDED.state,
+        method = EXCLUDED.method,
+        authoritative = EXCLUDED.authoritative,
+        evidence = EXCLUDED.evidence,
+        mapped_at = EXCLUDED.mapped_at,
+        failure_category = EXCLUDED.failure_category
+    `).run(
+      id, identity.infoHash, identity.fileIndex, identity.fileIndex ?? -1, identity.releaseKey,
+      input.placementId, file.providerFileId, input.state ?? 'mapped',
+      requireString(input.method, 'method'), Number(input.authoritative === true),
+      input.evidence == null ? null : JSON.stringify(input.evidence), now(),
+      input.failureCategory ?? null,
+    );
+    return rowToFileMapping(db.prepare(`
+      SELECT * FROM candidate_file_mappings WHERE release_key = ? AND placement_id = ?
+    `).get(identity.releaseKey, input.placementId));
+  }
+
+  function recordExposure(input) {
+    requireProviderFile(input.placementId, input.providerFileId);
+    const id = input.id ?? `ex_${randomUUID()}`;
+    db.prepare(`
+      INSERT INTO exposures (
+        id, placement_id, provider_file_id, transport, exposure_key, relative_path,
+        state, read_only, observed_at, expires_at, failure_category, retryable
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(transport, exposure_key) DO UPDATE SET
+        state = EXCLUDED.state,
+        relative_path = EXCLUDED.relative_path,
+        read_only = EXCLUDED.read_only,
+        observed_at = EXCLUDED.observed_at,
+        expires_at = EXCLUDED.expires_at,
+        failure_category = EXCLUDED.failure_category,
+        retryable = EXCLUDED.retryable
+    `).run(
+      id, input.placementId, input.providerFileId, normalizeIdentifier(input.transport),
+      requireString(input.exposureKey, 'exposureKey', 1000), input.relativePath ?? null,
+      input.state ?? 'unknown', Number(input.readOnly === true), input.observedAt ?? now(),
+      input.expiresAt ?? null, input.failureCategory ?? null, booleanOrNull(input.retryable),
+    );
+    return rowToExposure(db.prepare(
+      'SELECT * FROM exposures WHERE transport = ? AND exposure_key = ?',
+    ).get(normalizeIdentifier(input.transport), input.exposureKey));
+  }
+
+  function activateBinding(input) {
+    const identity = validateReleaseIdentity(input);
+    const item = requireLibraryItem(input.libraryItemId);
+    const libraryPath = db.prepare(
+      'SELECT * FROM library_paths WHERE id = ? AND library_item_id = ? AND active = 1',
+    ).get(input.libraryPathId, item.id);
+    if (!libraryPath) throw new Error('Active canonical path does not belong to library item');
+    const file = requireProviderFile(input.placementId, input.providerFileId);
+    const exposure = db.prepare(`
+      SELECT * FROM exposures
+      WHERE id = ? AND placement_id = ? AND provider_file_id = ?
+    `).get(input.exposureId, input.placementId, file.providerFileId);
+    if (!exposure) throw new Error('Exposure does not identify the mapped provider file');
+    if (exposure.state !== 'visible') throw new Error('Cannot bind a provider file without visible exposure');
+
+    return transaction(() => {
+      const active = db.prepare(
+        "SELECT * FROM bindings WHERE library_item_id = ? AND status = 'active'",
+      ).get(item.id);
+      if (active && active.release_key === identity.releaseKey
+        && active.placement_id === input.placementId
+        && active.provider_file_id === input.providerFileId
+        && active.exposure_id === input.exposureId) {
+        return rowToBinding(active);
+      }
+
+      const timestamp = now();
+      if (active) {
+        db.prepare(`
+          UPDATE bindings SET status = 'superseded', superseded_at = ?, reconciled_at = ?
+          WHERE id = ?
+        `).run(timestamp, timestamp, active.id);
+      }
+      const version = (db.prepare(
+        'SELECT COALESCE(MAX(version), 0) AS version FROM bindings WHERE library_item_id = ?',
+      ).get(item.id).version ?? 0) + 1;
+      const id = `bd_${randomUUID()}`;
+      db.prepare(`
+        INSERT INTO bindings (
+          id, library_item_id, library_path_id, release_key, info_hash, file_index,
+          file_index_key, placement_id, provider_file_id, exposure_id, version,
+          status, reason, valid_from, reconciled_at, failure_category
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+      `).run(
+        id, item.id, libraryPath.id, identity.releaseKey, identity.infoHash,
+        identity.fileIndex, identity.fileIndex ?? -1, input.placementId,
+        input.providerFileId, input.exposureId, version,
+        requireString(input.reason, 'reason', 1000), timestamp, timestamp,
+        input.failureCategory ?? null,
+      );
+      return rowToBinding(db.prepare('SELECT * FROM bindings WHERE id = ?').get(id));
+    });
+  }
+
+  function listBindings(libraryItemId) {
+    return db.prepare(
+      'SELECT * FROM bindings WHERE library_item_id = ? ORDER BY version',
+    ).all(libraryItemId).map(rowToBinding);
+  }
+
+  function appendLifecycleEvent(input) {
+    requireLibraryItem(input.libraryItemId);
+    const event = createLifecycleEvent(input, { now: now() });
+    const result = db.prepare(`
+      INSERT INTO lifecycle_events (
+        library_item_id, milestone, status, occurred_at, failure_category,
+        retryable, retry_after_ms, source, reason, evidence, correlation_id, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      event.libraryItemId, event.milestone, event.status, event.occurredAt,
+      event.failureCategory, booleanOrNull(event.retryable), event.retryAfterMs,
+      event.source, event.reason, event.evidence == null ? null : JSON.stringify(event.evidence),
+      event.correlationId, now(),
+    );
+    return rowToLifecycleEvent(db.prepare('SELECT * FROM lifecycle_events WHERE id = ?').get(result.lastInsertRowid));
+  }
+
+  function getLifecycle(libraryItemId) {
+    requireLibraryItem(libraryItemId);
+    const events = db.prepare(
+      'SELECT * FROM lifecycle_events WHERE library_item_id = ? ORDER BY occurred_at, id',
+    ).all(libraryItemId).map(rowToLifecycleEvent);
+    return { events, milestones: projectLifecycle(events) };
+  }
+
+  function requireLibraryItem(id) {
+    const item = getLibraryItem(id);
+    if (!item) throw new Error(`Unknown library item: ${id}`);
+    return item;
+  }
+  function requirePlacement(id) {
+    const row = db.prepare('SELECT * FROM provider_placements WHERE id = ?').get(id);
+    if (!row) throw new Error(`Unknown provider placement: ${id}`);
+    return rowToPlacement(row);
+  }
+  function requireProviderFile(placementId, providerFileId) {
+    const row = db.prepare(`
+      SELECT * FROM provider_files WHERE placement_id = ? AND provider_file_id = ?
+    `).get(placementId, providerFileId);
+    if (!row) throw new Error('Provider file is not present in authoritative placement inventory');
+    return rowToProviderFile(row);
+  }
+
+  return {
+    ensureLibraryItem,
+    getLibraryItem,
+    ensureCanonicalPath,
+    recordPlacement,
+    replaceProviderFileInventory,
+    listProviderFiles,
+    recordFileMapping,
+    recordExposure,
+    activateBinding,
+    listBindings,
+    appendLifecycleEvent,
+    getLifecycle,
+    close() { db.close(); },
+    get db() { return db; },
+  };
+}
+
+function rowToLibraryItem(row) {
+  return {
+    id: row.id, identityKey: row.identity_key, mediaType: row.media_type,
+    mediaId: row.media_id, editionKey: row.edition_key, title: row.title,
+    year: row.year, season: row.season, episode: row.episode,
+    desiredState: row.desired_state, createdAt: row.created_at, updatedAt: row.updated_at,
+  };
+}
+function rowToLibraryPath(row) {
+  return {
+    id: row.id, libraryItemId: row.library_item_id, canonicalPath: row.canonical_path,
+    preferredPath: row.preferred_path, collisionKey: row.collision_key,
+    active: row.active === 1, createdAt: row.created_at, retiredAt: row.retired_at,
+  };
+}
+function rowToPlacement(row) {
+  return {
+    id: row.id, provider: row.provider, accountScope: row.account_scope,
+    infoHash: row.info_hash, providerResourceId: row.provider_resource_id,
+    state: row.state, ownership: row.ownership, ownerKey: row.owner_key,
+    provenance: row.provenance, idempotencyKey: row.idempotency_key,
+    observedAt: row.observed_at, expiresAt: row.expires_at,
+    createdAt: row.created_at, updatedAt: row.updated_at,
+    failureCategory: row.failure_category, retryable: fromSqlBoolean(row.retryable),
+  };
+}
+function rowToProviderFile(row) {
+  return {
+    id: row.id, placementId: row.placement_id, providerFileId: row.provider_file_id,
+    path: row.path, name: row.name, size: row.size, selected: fromSqlBoolean(row.selected),
+    mediaHint: row.media_hint, inventoryObservedAt: row.inventory_observed_at,
+    inventoryExpiresAt: row.inventory_expires_at,
+    evidence: row.evidence ? JSON.parse(row.evidence) : null,
+  };
+}
+function rowToFileMapping(row) {
+  return {
+    id: row.id, infoHash: row.info_hash, fileIndex: row.file_index,
+    releaseKey: row.release_key, placementId: row.placement_id,
+    providerFileId: row.provider_file_id, state: row.state, method: row.method,
+    authoritative: row.authoritative === 1, evidence: row.evidence ? JSON.parse(row.evidence) : null,
+    mappedAt: row.mapped_at, failureCategory: row.failure_category,
+  };
+}
+function rowToExposure(row) {
+  return {
+    id: row.id, placementId: row.placement_id, providerFileId: row.provider_file_id,
+    transport: row.transport, exposureKey: row.exposure_key, relativePath: row.relative_path,
+    state: row.state, readOnly: row.read_only === 1, observedAt: row.observed_at,
+    expiresAt: row.expires_at, failureCategory: row.failure_category,
+    retryable: fromSqlBoolean(row.retryable),
+  };
+}
+function rowToBinding(row) {
+  return {
+    id: row.id, libraryItemId: row.library_item_id, libraryPathId: row.library_path_id,
+    releaseKey: row.release_key, infoHash: row.info_hash, fileIndex: row.file_index,
+    placementId: row.placement_id, providerFileId: row.provider_file_id,
+    exposureId: row.exposure_id, version: row.version, status: row.status,
+    reason: row.reason, validFrom: row.valid_from, supersededAt: row.superseded_at,
+    reconciledAt: row.reconciled_at, failureCategory: row.failure_category,
+  };
+}
+function rowToLifecycleEvent(row) {
+  return {
+    id: Number(row.id), libraryItemId: row.library_item_id, milestone: row.milestone,
+    status: row.status, occurredAt: row.occurred_at, failureCategory: row.failure_category,
+    retryable: fromSqlBoolean(row.retryable), retryAfterMs: row.retry_after_ms,
+    source: row.source, reason: row.reason,
+    evidence: row.evidence ? JSON.parse(row.evidence) : null,
+    correlationId: row.correlation_id,
+  };
+}
+function normalizeIdentifier(value) {
+  if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value.trim())) {
+    throw new TypeError('Provider identifier is invalid');
+  }
+  return value.trim().toLowerCase();
+}
+function requireString(value, field, max = 256) {
+  if (typeof value !== 'string' || value.trim().length === 0 || value.length > max) {
+    throw new TypeError(`${field} must be a non-empty string up to ${max} characters`);
+  }
+  return value.trim();
+}
+function booleanOrNull(value) {
+  return value == null ? null : Number(Boolean(value));
+}
+function fromSqlBoolean(value) {
+  return value == null ? null : value === 1;
+}
