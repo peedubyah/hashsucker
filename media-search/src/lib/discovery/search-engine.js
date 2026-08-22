@@ -221,11 +221,16 @@ function qualityBonus(attrs) {
 function providerBonus(cache, infoHash, fileIndex) {
   if (!cache) return 0;
 
-  const observations = cache.getProviderObservations(infoHash, fileIndex);
+  // Ranking may use only fresh authoritative truth. Stale history, inferred
+  // hints, and predictions remain visible evidence but cannot masquerade as a
+  // current confirmed cache observation.
+  const observations = cache.getProviderObservations(infoHash, fileIndex, {
+    includeStale: false,
+    kinds: ['authoritative'],
+  });
   if (observations.length === 0) return 0;
 
-  // Any cached provider gives bonus (cached may be boolean true or integer 1)
-  const cached = observations.filter(o => o.cached === 1 || o.cached === true);
+  const cached = observations.filter(o => o.state === 'cached');
   if (cached.length === 0) return 0;
 
   // More cached providers = higher bonus
@@ -435,8 +440,13 @@ export function searchReleases(cache, options = {}) {
       },
       parserConfidence: row.confidence || 0.5,
       mediaAssociations: fetchMedia ? cache.getMediaAssociations(row.info_hash, fileIndexForKey) : [],
-      // Always fetch provider observations for ranking (even if not included in output)
-      providerObservations: cache.getProviderObservations(row.info_hash, fileIndexForKey),
+      // Only fresh authoritative observations may influence desirability ranking.
+      // Full current evidence is attached separately for optional API output.
+      providerObservations: cache.getProviderObservations(row.info_hash, fileIndexForKey, {
+        includeStale: false,
+        kinds: ['authoritative'],
+      }),
+      providerEvidence: cache.getProviderObservations(row.info_hash, fileIndexForKey),
     };
   });
 
@@ -473,7 +483,7 @@ export function searchReleases(cache, options = {}) {
     provider: r.components.providerAvailability,
     episodeMatch: r.components.episodeMatch,
     components: r.components,
-    ...(includeProviders && { providers: r.providerObservations }),
+    ...(includeProviders && { providers: r.providerEvidence }),
     ...(includeMedia && { media: r.mediaAssociations }),
   }));
 
@@ -696,7 +706,22 @@ function mapToUIShape(r) {
   const observations = r.providerObservations || r.providers || [];
   const providers = Array.isArray(observations)
     ? observations.reduce((acc, o) => {
-        acc[o.provider] = { cached: o.cached, evidence: o.evidence };
+        acc[o.provider] = {
+          cached: o.cached,
+          state: o.state,
+          kind: o.kind,
+          scope: o.scope,
+          observedAt: o.observedAt,
+          expiresAt: o.expiresAt,
+          freshness: o.freshness,
+          fresh: o.fresh,
+          ageMs: o.ageMs,
+          source: o.source,
+          evidence: o.evidence,
+          errorCategory: o.errorCategory,
+          retryable: o.retryable,
+          retryAfterMs: o.retryAfterMs,
+        };
         return acc;
       }, {})
     : observations;

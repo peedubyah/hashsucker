@@ -144,7 +144,7 @@ function normalizeSubject(subject, infoHash, fileIndex, scope) {
       type: scope === 'torrent' ? 'torrent' : 'candidate',
       key: scope === 'torrent' ? identity.infoHash : identity.releaseKey,
       infoHash: identity.infoHash,
-      fileIndex: identity.fileIndex,
+      fileIndex: scope === 'torrent' ? null : identity.fileIndex,
     };
   }
 

@@ -240,6 +240,7 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     parserConfidence = NEUTRAL,
     mediaAssociations = [],
     providerObservations = [],
+    providerEvidence = providerObservations,
     sources = [],
     selectedMediaId = null,
   } = hit;
@@ -293,6 +294,7 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     releaseAttributes,
     mediaAssociations,
     providerObservations,
+    providerEvidence,
     sources,
     selectedMediaId,
   };

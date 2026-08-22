@@ -16,6 +16,13 @@
 
 import { DatabaseSync } from 'node:sqlite';
 
+import {
+  createCacheObservation,
+  evaluateObservationFreshness,
+  legacyObservationInput,
+  toLegacyCachedState,
+} from '../providers/observations.js';
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS candidates (
   info_hash TEXT NOT NULL,
@@ -51,6 +58,72 @@ CREATE TABLE IF NOT EXISTS provider_observations (
 CREATE INDEX IF NOT EXISTS idx_candidates_last_seen ON candidates(last_seen);
 CREATE INDEX IF NOT EXISTS idx_candidates_search_key ON candidates(search_key);
 CREATE INDEX IF NOT EXISTS idx_observations_checked_at ON provider_observations(checked_at);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  name TEXT PRIMARY KEY,
+  applied_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provider_observation_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL,
+  account_scope TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  subject_type TEXT NOT NULL,
+  subject_key TEXT NOT NULL,
+  info_hash TEXT,
+  file_index INTEGER,
+  file_index_key INTEGER NOT NULL DEFAULT -1,
+  kind TEXT NOT NULL,
+  state TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  source TEXT NOT NULL,
+  evidence TEXT,
+  error_category TEXT,
+  retryable INTEGER,
+  retry_after_ms INTEGER,
+  latency_ms INTEGER,
+  correlation_id TEXT,
+  recorded_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_observation_events_subject
+  ON provider_observation_events(subject_type, subject_key, provider, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_provider_observation_events_candidate
+  ON provider_observation_events(info_hash, file_index_key, provider, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_provider_observation_events_expiry
+  ON provider_observation_events(expires_at);
+
+CREATE TABLE IF NOT EXISTS provider_observation_current (
+  provider TEXT NOT NULL,
+  account_scope TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  subject_type TEXT NOT NULL,
+  subject_key TEXT NOT NULL,
+  info_hash TEXT,
+  file_index INTEGER,
+  file_index_key INTEGER NOT NULL DEFAULT -1,
+  kind TEXT NOT NULL,
+  state TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  source TEXT NOT NULL,
+  evidence TEXT,
+  error_category TEXT,
+  retryable INTEGER,
+  retry_after_ms INTEGER,
+  latency_ms INTEGER,
+  correlation_id TEXT,
+  event_id INTEGER NOT NULL,
+  PRIMARY KEY (provider, account_scope, scope, subject_type, subject_key, kind),
+  FOREIGN KEY (event_id) REFERENCES provider_observation_events(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_observation_current_candidate
+  ON provider_observation_current(info_hash, file_index_key, provider);
+CREATE INDEX IF NOT EXISTS idx_provider_observation_current_expiry
+  ON provider_observation_current(expires_at);
 
 CREATE TABLE IF NOT EXISTS candidate_media (
   info_hash TEXT NOT NULL,
@@ -152,10 +225,22 @@ const GET_CANDIDATE = `
 SELECT * FROM candidates WHERE info_hash = @info_hash AND file_index_key = @file_index_key;
 `;
 
-const GET_OBSERVATIONS = `
-SELECT provider, cached, evidence, checked_at
-FROM provider_observations
-WHERE info_hash = @info_hash AND file_index_key = @file_index_key;
+const GET_CURRENT_OBSERVATIONS = `
+SELECT *
+FROM provider_observation_current
+WHERE info_hash = @info_hash AND file_index_key = @file_index_key
+ORDER BY provider, account_scope, kind;
+`;
+
+const GET_OBSERVATION_HISTORY = `
+SELECT *
+FROM provider_observation_events
+WHERE info_hash = @info_hash AND file_index_key = @file_index_key
+  AND (@provider IS NULL OR provider = @provider)
+  AND (@account_scope IS NULL OR account_scope = @account_scope)
+  AND (@kind IS NULL OR kind = @kind)
+ORDER BY observed_at DESC, id DESC
+LIMIT @limit;
 `;
 
 const SELECT_ALL_CANDIDATES = `
@@ -166,16 +251,48 @@ const SELECT_CANDIDATES_BY_KEY = `
 SELECT * FROM candidates WHERE search_key = @search_key ORDER BY last_seen DESC;
 `;
 
-const UPSERT_OBSERVATION = `
-INSERT INTO provider_observations (
-  info_hash, file_index, file_index_key, provider, cached, evidence, checked_at
+const INSERT_OBSERVATION_EVENT = `
+INSERT INTO provider_observation_events (
+  provider, account_scope, scope, subject_type, subject_key,
+  info_hash, file_index, file_index_key, kind, state,
+  observed_at, expires_at, source, evidence, error_category,
+  retryable, retry_after_ms, latency_ms, correlation_id, recorded_at
 ) VALUES (
-  @info_hash, @file_index, @file_index_key, @provider, @cached, @evidence, @checked_at
+  @provider, @account_scope, @scope, @subject_type, @subject_key,
+  @info_hash, @file_index, @file_index_key, @kind, @state,
+  @observed_at, @expires_at, @source, @evidence, @error_category,
+  @retryable, @retry_after_ms, @latency_ms, @correlation_id, @recorded_at
+) RETURNING id;
+`;
+
+const UPSERT_CURRENT_OBSERVATION = `
+INSERT INTO provider_observation_current (
+  provider, account_scope, scope, subject_type, subject_key,
+  info_hash, file_index, file_index_key, kind, state,
+  observed_at, expires_at, source, evidence, error_category,
+  retryable, retry_after_ms, latency_ms, correlation_id, event_id
+) VALUES (
+  @provider, @account_scope, @scope, @subject_type, @subject_key,
+  @info_hash, @file_index, @file_index_key, @kind, @state,
+  @observed_at, @expires_at, @source, @evidence, @error_category,
+  @retryable, @retry_after_ms, @latency_ms, @correlation_id, @event_id
 )
-ON CONFLICT(info_hash, file_index_key, provider) DO UPDATE SET
-  cached = EXCLUDED.cached,
+ON CONFLICT(provider, account_scope, scope, subject_type, subject_key, kind) DO UPDATE SET
+  info_hash = EXCLUDED.info_hash,
+  file_index = EXCLUDED.file_index,
+  file_index_key = EXCLUDED.file_index_key,
+  state = EXCLUDED.state,
+  observed_at = EXCLUDED.observed_at,
+  expires_at = EXCLUDED.expires_at,
+  source = EXCLUDED.source,
   evidence = EXCLUDED.evidence,
-  checked_at = EXCLUDED.checked_at;
+  error_category = EXCLUDED.error_category,
+  retryable = EXCLUDED.retryable,
+  retry_after_ms = EXCLUDED.retry_after_ms,
+  latency_ms = EXCLUDED.latency_ms,
+  correlation_id = EXCLUDED.correlation_id,
+  event_id = EXCLUDED.event_id
+WHERE EXCLUDED.observed_at >= provider_observation_current.observed_at;
 `;
 
 const INSERT_MEDIA_ASSOCIATION = `
@@ -265,15 +382,71 @@ LEFT JOIN release_attributes ra ON c.info_hash = ra.info_hash AND c.file_index_k
 WHERE ra.info_hash IS NULL;
 `;
 
+const LEGACY_OBSERVATION_MIGRATION = 'provider-observations-v2';
+
+function migrateLegacyProviderObservations(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(LEGACY_OBSERVATION_MIGRATION);
+  if (applied) return;
+
+  const rows = db.prepare('SELECT * FROM provider_observations ORDER BY checked_at, rowid').all();
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const insertEvent = db.prepare(INSERT_OBSERVATION_EVENT);
+    const upsertCurrent = db.prepare(UPSERT_CURRENT_OBSERVATION);
+    for (const row of rows) {
+      const fileIndex = row.file_index ?? null;
+      const state = row.cached === 1 ? 'cached' : row.cached === 0 ? 'uncached' : 'unknown';
+      const params = {
+        provider: String(row.provider).toLowerCase(),
+        account_scope: 'default',
+        scope: fileIndex == null ? 'torrent' : 'candidate',
+        subject_type: fileIndex == null ? 'torrent' : 'candidate',
+        subject_key: fileIndex == null ? row.info_hash : `${row.info_hash}:${fileIndex}`,
+        info_hash: row.info_hash,
+        file_index: fileIndex,
+        file_index_key: row.file_index_key,
+        kind: 'authoritative',
+        state,
+        observed_at: row.checked_at,
+        expires_at: null,
+        source: 'legacy-observation-migration',
+        evidence: row.evidence,
+        error_category: null,
+        retryable: null,
+        retry_after_ms: null,
+        latency_ms: null,
+        correlation_id: null,
+        recorded_at: Date.now(),
+      };
+      const event = insertEvent.get(params);
+      const { recorded_at: _recordedAt, ...currentParams } = params;
+      upsertCurrent.run({ ...currentParams, event_id: event.id });
+    }
+    db.prepare(
+      'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+    ).run(LEGACY_OBSERVATION_MIGRATION, Date.now());
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
 export function createDiscoveryCache({ dbPath = ':memory:', database = null } = {}) {
   const db = database || new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec(SCHEMA);
 
+  migrateLegacyProviderObservations(db);
+
   const insertCandidateStmt = db.prepare(INSERT_CANDIDATE);
   const getCandidateStmt = db.prepare(GET_CANDIDATE);
-  const upsertObservationStmt = db.prepare(UPSERT_OBSERVATION);
-  const getObservationsStmt = db.prepare(GET_OBSERVATIONS);
+  const insertObservationEventStmt = db.prepare(INSERT_OBSERVATION_EVENT);
+  const upsertCurrentObservationStmt = db.prepare(UPSERT_CURRENT_OBSERVATION);
+  const getCurrentObservationsStmt = db.prepare(GET_CURRENT_OBSERVATIONS);
+  const getObservationHistoryStmt = db.prepare(GET_OBSERVATION_HISTORY);
   const selectAllCandidatesStmt = db.prepare(SELECT_ALL_CANDIDATES);
   const selectCandidatesByKeyStmt = db.prepare(SELECT_CANDIDATES_BY_KEY);
   const insertMediaAssocStmt = db.prepare(INSERT_MEDIA_ASSOCIATION);
@@ -333,12 +506,55 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     };
   }
 
-  function rowToObservation(row) {
-    return {
+  function rowToObservation(row, now = Date.now()) {
+    const observation = {
+      id: row.id ?? row.event_id,
       provider: row.provider,
-      cached: row.cached === 1 ? true : row.cached === 0 ? false : null,
+      accountScope: row.account_scope,
+      scope: row.scope,
+      subjectType: row.subject_type,
+      subjectKey: row.subject_key,
+      infoHash: row.info_hash,
+      fileIndex: row.file_index,
+      kind: row.kind,
+      state: row.state,
+      cached: toLegacyCachedState(row.state),
+      observedAt: row.observed_at,
+      checkedAt: row.observed_at,
+      expiresAt: row.expires_at,
+      source: row.source,
       evidence: row.evidence ? JSON.parse(row.evidence) : null,
-      checkedAt: row.checked_at,
+      errorCategory: row.error_category,
+      retryable: row.retryable == null ? null : row.retryable === 1,
+      retryAfterMs: row.retry_after_ms,
+      latencyMs: row.latency_ms,
+      correlationId: row.correlation_id,
+    };
+    return { ...observation, ...evaluateObservationFreshness(observation, { now }) };
+  }
+
+  function observationParams(observation, recordedAt = Date.now()) {
+    return {
+      provider: observation.provider,
+      account_scope: observation.accountScope,
+      scope: observation.scope,
+      subject_type: observation.subjectType,
+      subject_key: observation.subjectKey,
+      info_hash: observation.infoHash,
+      file_index: observation.fileIndex,
+      file_index_key: fileIndexKey(observation.fileIndex),
+      kind: observation.kind,
+      state: observation.state,
+      observed_at: observation.observedAt,
+      expires_at: observation.expiresAt,
+      source: observation.source,
+      evidence: observation.evidence == null ? null : JSON.stringify(observation.evidence),
+      error_category: observation.errorCategory,
+      retryable: observation.retryable == null ? null : Number(observation.retryable),
+      retry_after_ms: observation.retryAfterMs,
+      latency_ms: observation.latencyMs,
+      correlation_id: observation.correlationId,
+      recorded_at: recordedAt,
     };
   }
 
@@ -366,28 +582,65 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   }
 
   /**
-   * Record a provider observation for a candidate. Independent of candidate
-   * existence — observations can be recorded before a candidate row is written,
-   * though normal flow writes the candidate first.
+   * Append a normalized provider observation and update its current projection.
+   * Older events remain in history but cannot replace newer current truth.
    */
-  function recordProviderObservation(infoHash, fileIndex, provider, observation) {
-    upsertObservationStmt.run({
-      info_hash: infoHash,
-      file_index: fileIndex ?? null,
-      file_index_key: fileIndexKey(fileIndex),
-      provider,
-      cached: observation.cached === true ? 1 : observation.cached === false ? 0 : null,
-      evidence: observation.evidence != null ? JSON.stringify(observation.evidence) : null,
-      checked_at: observation.checkedAt ?? Date.now(),
-    });
+  function appendProviderObservation(input) {
+    const observation = createCacheObservation(input);
+    const params = observationParams(observation);
+
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const inserted = insertObservationEventStmt.get(params);
+      const { recorded_at: _recordedAt, ...currentParams } = params;
+      upsertCurrentObservationStmt.run({ ...currentParams, event_id: inserted.id });
+      db.exec('COMMIT');
+      return { ...observation, id: inserted.id };
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
-  function getProviderObservations(infoHash, fileIndex) {
-    const rows = getObservationsStmt.all({
+  /**
+   * Compatibility boundary for exact-candidate callers. New callers should
+   * prefer appendProviderObservation() so scope/kind/freshness are explicit.
+   */
+  function recordProviderObservation(infoHash, fileIndex, provider, observation) {
+    return appendProviderObservation(
+      legacyObservationInput(infoHash, fileIndex, provider, observation),
+    );
+  }
+
+  function getProviderObservations(infoHash, fileIndex, options = {}) {
+    const now = options.now ?? Date.now();
+    const includeStale = options.includeStale ?? true;
+    const kinds = options.kinds == null ? null : new Set(options.kinds);
+    const rows = getCurrentObservationsStmt.all({
       info_hash: infoHash,
       file_index_key: fileIndexKey(fileIndex),
     });
-    return rows.map(rowToObservation);
+    return rows
+      .map((row) => rowToObservation(row, now))
+      .filter((observation) => includeStale || observation.freshness !== 'stale')
+      .filter((observation) => kinds == null || kinds.has(observation.kind));
+  }
+
+  function getProviderObservationHistory(infoHash, fileIndex, options = {}) {
+    const limit = options.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
+      throw new TypeError('Observation history limit must be between 1 and 1000');
+    }
+    const rows = getObservationHistoryStmt.all({
+      info_hash: infoHash,
+      file_index_key: fileIndexKey(fileIndex),
+      provider: options.provider ?? null,
+      account_scope: options.accountScope ?? null,
+      kind: options.kind ?? null,
+      limit,
+    });
+    const now = options.now ?? Date.now();
+    return rows.map((row) => rowToObservation(row, now));
   }
 
   /**
@@ -658,8 +911,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     closed = true;
     try { insertCandidateStmt.finalize(); } catch {}
     try { getCandidateStmt.finalize(); } catch {}
-    try { upsertObservationStmt.finalize(); } catch {}
-    try { getObservationsStmt.finalize(); } catch {}
+    try { insertObservationEventStmt.finalize(); } catch {}
+    try { upsertCurrentObservationStmt.finalize(); } catch {}
+    try { getCurrentObservationsStmt.finalize(); } catch {}
+    try { getObservationHistoryStmt.finalize(); } catch {}
     try { selectAllCandidatesStmt.finalize(); } catch {}
     try { selectCandidatesByKeyStmt.finalize(); } catch {}
     try { insertMediaAssocStmt.finalize(); } catch {}
@@ -676,8 +931,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   return {
     upsertCandidate,
     getCandidate,
+    appendProviderObservation,
     recordProviderObservation,
     getProviderObservations,
+    getProviderObservationHistory,
     queryCachedCandidates,
     associateMedia,
     getMediaAssociations,
@@ -767,11 +1024,20 @@ export function withCacheFailureIsolation(cache, log = () => {}) {
         return { candidate: null, error };
       }
     },
+    async appendProviderObservation(observation) {
+      try {
+        return await cache.appendProviderObservation(observation);
+      } catch (error) {
+        log(error);
+        return null;
+      }
+    },
     async recordProviderObservation(infoHash, fileIndex, provider, observation) {
       try {
         return await cache.recordProviderObservation(infoHash, fileIndex, provider, observation);
       } catch (error) {
         log(error);
+        return null;
       }
     },
     async upsertCandidate(candidate) {

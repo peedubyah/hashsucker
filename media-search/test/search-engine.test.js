@@ -363,6 +363,31 @@ test('provider observations add ranking bonus', () => {
   cache.close();
 });
 
+test('stale authoritative cache and fresh predictions do not add ranking bonus', () => {
+  const cache = createDiscoveryCache();
+  makeCandidateWithAttributes(cache, HASH, {
+    filename: 'Movie.1080p.mkv', title: 'Movie', resolution: '1080p', confidence: 0.9,
+  });
+  makeCandidateWithAttributes(cache, OTHER_HASH, {
+    filename: 'Movie.1080p.mkv', title: 'Movie', resolution: '1080p', confidence: 0.9,
+  });
+  cache.appendProviderObservation({
+    provider: 'torbox', infoHash: HASH, fileIndex: null,
+    scope: 'torrent', kind: 'authoritative', state: 'cached',
+    observedAt: 1, expiresAt: 2, source: 'torbox-api',
+  });
+  cache.appendProviderObservation({
+    provider: 'torbox', infoHash: OTHER_HASH, fileIndex: null,
+    scope: 'torrent', kind: 'predicted', state: 'cached',
+    observedAt: Date.now(), ttlMs: 60_000, source: 'prior-v1',
+  });
+
+  const result = searchReleases(cache, { query: 'movie' });
+  assert.equal(result.results.find((item) => item.hash === HASH).provider, 0.5);
+  assert.equal(result.results.find((item) => item.hash === OTHER_HASH).provider, 0.5);
+  cache.close();
+});
+
 test('searchReleases includes provider data when requested', () => {
   const cache = createDiscoveryCache();
   makeCandidateWithAttributes(cache, HASH, {

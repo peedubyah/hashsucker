@@ -168,6 +168,122 @@ test('provider observations are stored separately and refresh independently', ()
   cache.close();
 });
 
+test('provider observation history is append-only while current projection is newest', () => {
+  const cache = createDiscoveryCache();
+  cache.recordProviderObservation(HASH, null, 'torbox', {
+    state: 'cached',
+    checkedAt: 10_000,
+    expiresAt: 11_000,
+    source: 'torbox-api',
+  });
+  cache.recordProviderObservation(HASH, null, 'torbox', {
+    state: 'uncached',
+    checkedAt: 12_000,
+    expiresAt: 13_000,
+    source: 'torbox-api',
+  });
+
+  const history = cache.getProviderObservationHistory(HASH, null, {
+    provider: 'torbox',
+    now: 12_500,
+  });
+  assert.equal(history.length, 2);
+  assert.deepEqual(history.map((entry) => entry.state), ['uncached', 'cached']);
+  assert.equal(history[0].freshness, 'fresh');
+  assert.equal(history[1].freshness, 'stale');
+
+  const current = cache.getProviderObservations(HASH, null, { now: 12_500 });
+  assert.equal(current.length, 1);
+  assert.equal(current[0].state, 'uncached');
+  assert.equal(current[0].freshness, 'fresh');
+  cache.close();
+});
+
+test('late older observations remain history but cannot overwrite current truth', () => {
+  const cache = createDiscoveryCache();
+  cache.appendProviderObservation({
+    provider: 'realdebrid',
+    accountScope: 'primary',
+    infoHash: HASH,
+    fileIndex: 0,
+    scope: 'candidate',
+    kind: 'authoritative',
+    state: 'cached',
+    observedAt: 20_000,
+    ttlMs: 5_000,
+    source: 'rd-api',
+  });
+  cache.appendProviderObservation({
+    provider: 'realdebrid',
+    accountScope: 'primary',
+    infoHash: HASH,
+    fileIndex: 0,
+    scope: 'candidate',
+    kind: 'authoritative',
+    state: 'uncached',
+    observedAt: 19_000,
+    ttlMs: 5_000,
+    source: 'delayed-worker',
+  });
+
+  const current = cache.getProviderObservations(HASH, 0, { now: 21_000 });
+  assert.equal(current.length, 1);
+  assert.equal(current[0].state, 'cached');
+  assert.equal(cache.getProviderObservationHistory(HASH, 0).length, 2);
+  assert.equal(cache.getProviderObservations(HASH, null).length, 0, 'null file index remains separate');
+  cache.close();
+});
+
+test('stale and predicted observations are visible but excluded from current authoritative reads', () => {
+  const cache = createDiscoveryCache();
+  cache.appendProviderObservation({
+    provider: 'torbox', infoHash: HASH, fileIndex: null,
+    scope: 'torrent', kind: 'authoritative', state: 'cached',
+    observedAt: 1_000, expiresAt: 2_000, source: 'torbox-api',
+  });
+  cache.appendProviderObservation({
+    provider: 'torbox', infoHash: HASH, fileIndex: null,
+    scope: 'torrent', kind: 'predicted', state: 'cached',
+    observedAt: 3_000, expiresAt: 4_000, source: 'prior-v1',
+  });
+
+  const visible = cache.getProviderObservations(HASH, null, { now: 3_500 });
+  assert.equal(visible.length, 2);
+  assert.equal(visible.find((item) => item.kind === 'authoritative').freshness, 'stale');
+  assert.equal(visible.find((item) => item.kind === 'predicted').freshness, 'fresh');
+
+  const usable = cache.getProviderObservations(HASH, null, {
+    now: 3_500,
+    includeStale: false,
+    kinds: ['authoritative'],
+  });
+  assert.deepEqual(usable, []);
+  cache.close();
+});
+
+test('legacy provider observations migrate transactionally without losing exact identity', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hashsucker-observations-'));
+  const dbPath = path.join(dir, 'cache.db');
+  const first = createDiscoveryCache({ dbPath });
+  first.db.prepare(`
+    INSERT INTO provider_observations
+      (info_hash, file_index, file_index_key, provider, cached, evidence, checked_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(HASH, 0, 0, 'torbox', 1, '{"legacy":true}', 9_000);
+  first.db.prepare('DELETE FROM schema_migrations WHERE name = ?').run('provider-observations-v2');
+  first.close();
+
+  const migrated = createDiscoveryCache({ dbPath });
+  const current = migrated.getProviderObservations(HASH, 0, { now: 9_500 });
+  assert.equal(current.length, 1);
+  assert.equal(current[0].state, 'cached');
+  assert.equal(current[0].source, 'legacy-observation-migration');
+  assert.deepEqual(current[0].evidence, { legacy: true });
+  assert.equal(migrated.getProviderObservations(HASH, null).length, 0);
+  migrated.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('ingestCandidate returns error instead of throwing on cache failure', () => {
   const cache = createDiscoveryCache();
   // Force a failure by closing the cache mid-operation

@@ -36,12 +36,14 @@ export function ingestCandidates(cache, { source = DEFAULT_SOURCE, entries = [],
     associated += result.associated;
   }
 
-  // Record provider observations only if explicitly supplied
-  for (const obs of providerObservations) {
-    cache.recordProviderObservation(obs.infoHash, obs.fileIndex, obs.provider, {
-      cached: obs.cached,
-      evidence: obs.evidence,
-      checkedAt: obs.checkedAt,
+  // Record provider observations only if explicitly supplied. Ingestion must
+  // declare whether evidence is authoritative, inferred, or predicted; legacy
+  // payloads remain authoritative for compatibility but never gain an implicit TTL.
+  for (const observation of providerObservations) {
+    cache.appendProviderObservation({
+      ...observation,
+      kind: observation.kind ?? 'authoritative',
+      source: observation.source ?? source,
     });
   }
 
