@@ -173,7 +173,9 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   const db = database || new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
+  db.exec('PRAGMA busy_timeout = 5000');
   db.exec(CONTROL_PLANE_SCHEMA);
+  let closed = false;
 
   function transaction(work) {
     db.exec('BEGIN IMMEDIATE');
@@ -215,6 +217,27 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   function getLibraryItem(id) {
     const row = db.prepare('SELECT * FROM library_items WHERE id = ?').get(id);
     return row ? rowToLibraryItem(row) : null;
+  }
+
+  function listLibraryItems({ mediaId, limit = 50 } = {}) {
+    const exactMediaId = requireString(mediaId, 'mediaId');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new TypeError('limit must be between 1 and 100');
+    }
+    return db.prepare(`
+      SELECT * FROM library_items
+      WHERE media_id = ?
+      ORDER BY identity_key
+      LIMIT ?
+    `).all(exactMediaId, limit).map(rowToLibraryItem);
+  }
+
+  function getActiveCanonicalPath(libraryItemId) {
+    requireLibraryItem(libraryItemId);
+    const row = db.prepare(
+      'SELECT * FROM library_paths WHERE library_item_id = ? AND active = 1',
+    ).get(libraryItemId);
+    return row ? rowToLibraryPath(row) : null;
   }
 
   function ensureCanonicalPath(libraryItemId, options = {}) {
@@ -549,6 +572,8 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   return {
     ensureLibraryItem,
     getLibraryItem,
+    listLibraryItems,
+    getActiveCanonicalPath,
     ensureCanonicalPath,
     recordPlacement,
     replaceProviderFileInventory,
@@ -560,7 +585,11 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     getReconciliationSnapshot,
     appendLifecycleEvent,
     getLifecycle,
-    close() { db.close(); },
+    close() {
+      if (closed) return;
+      closed = true;
+      db.close();
+    },
     get db() { return db; },
   };
 }

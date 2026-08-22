@@ -16,6 +16,7 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     REQUESTS_ROOT=/requests \
     DISCOVERY_DB=/data/discovery-cache.db \
+    CONTROL_PLANE_DB=/data/control-plane.db \
     STATIC_ROOT=/app/public
 
 COPY --chown=node:node media-search/package.json media-search/package-lock.json ./

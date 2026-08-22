@@ -5,6 +5,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import test from 'node:test';
 
+import { createControlPlaneStore } from '../src/lib/control-plane/store.js';
 import { createDiscoveryCache } from '../src/lib/discovery/cache.js';
 import { createRequestHandler } from '../src/server/app.js';
 
@@ -64,6 +65,25 @@ function createHarness() {
   return { request, submitted };
 }
 
+function createRequest(handler) {
+  return async (url, { method = 'GET', body } = {}) => {
+    const input = Readable.from(body ? [Buffer.from(body)] : []);
+    input.method = method;
+    input.url = url;
+    return new Promise((resolve, reject) => {
+      const chunks = [];
+      const response = {
+        writeHead(status, headers) { this.status = status; this.headers = headers; },
+        end(chunk) {
+          if (chunk) chunks.push(Buffer.from(chunk));
+          resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8'), headers: this.headers });
+        },
+      };
+      handler(input, response).catch(reject);
+    });
+  };
+}
+
 test('server serves API and returns 404 when no frontend build is configured', async () => {
   const { request } = createHarness();
 
@@ -104,6 +124,81 @@ test('server serves API and returns 404 when no frontend build is configured', a
   const requestId = '12345678-1234-1234-1234-123456789abc';
   const status = await request(`/api/requests/${requestId}`);
   assert.deepEqual(JSON.parse(status.text), { requestId, status: 'processing' });
+});
+
+test('read-only control-plane endpoints expose redacted lifecycle, evidence, and unexecuted shadow plan', async (t) => {
+  let time = 10_000;
+  const now = () => time;
+  const controlPlaneStore = createControlPlaneStore({ now });
+  const searchCache = createDiscoveryCache();
+  t.after(() => controlPlaneStore.close());
+  t.after(() => searchCache.close());
+
+  const item = controlPlaneStore.ensureLibraryItem({
+    mediaType: 'movie', mediaId: 'tt0133093', title: 'The Matrix', year: 1999,
+  });
+  controlPlaneStore.ensureCanonicalPath(item.id);
+  controlPlaneStore.appendLifecycleEvent({
+    libraryItemId: item.id, milestone: 'requested', status: 'satisfied', source: 'test',
+  });
+  searchCache.appendProviderObservation({
+    provider: 'torbox', accountScope: 'primary', scope: 'candidate',
+    infoHash: HASH, fileIndex: 0, state: 'cached', kind: 'authoritative',
+    observedAt: 9_000, expiresAt: 20_000, source: 'test-observer',
+    evidence: { secretProviderPath: '/private/movie.mkv' },
+  });
+
+  const request = createRequest(createRequestHandler({
+    controlPlaneStore, searchCache, now,
+    getControlPlaneHealth: () => ({ ok: true, mode: 'read-only-shadow', errors: [] }),
+  }));
+
+  const listed = await request('/api/control-plane/items?mediaId=tt0133093');
+  assert.equal(listed.status, 200);
+  const listBody = JSON.parse(listed.text);
+  assert.equal(listBody.items.length, 1);
+  assert.equal(listBody.items[0].item.id, item.id);
+  assert.equal(listBody.items[0].lifecycle.requested.status, 'satisfied');
+  assert.equal(listBody.items[0].lifecycle.playable, null);
+
+  const detail = await request(
+    `/api/control-plane/items/${item.id}?infoHash=${HASH}&fileIndex=0`,
+  );
+  assert.equal(detail.status, 200);
+  const detailBody = JSON.parse(detail.text);
+  assert.equal(detailBody.release.releaseKey, `${HASH}:0`);
+  assert.equal(detailBody.providerObservations[0].kind, 'authoritative');
+  assert.equal(detailBody.providerObservations[0].freshness, 'fresh');
+  assert.equal(detailBody.shadowPlan.mode, 'shadow');
+  assert.equal(detailBody.shadowPlan.executed, false);
+  assert.equal(detailBody.shadowPlan.destructiveActionCount, 0);
+  assert.doesNotMatch(detail.text, /secretProviderPath|private\/movie|providerResourceId|exposureKey/);
+
+  const health = await request('/api/control-plane/health');
+  assert.deepEqual(JSON.parse(health.text), { ok: true, mode: 'read-only-shadow', errors: [] });
+  time = 21_000;
+  const stale = await request(
+    `/api/control-plane/items/${item.id}?infoHash=${HASH}&fileIndex=0`,
+  );
+  assert.equal(JSON.parse(stale.text).providerObservations[0].freshness, 'stale');
+});
+
+test('control-plane routes reject unbounded and partial reads without adding mutations', async (t) => {
+  const controlPlaneStore = createControlPlaneStore();
+  const searchCache = createDiscoveryCache();
+  t.after(() => controlPlaneStore.close());
+  t.after(() => searchCache.close());
+  const item = controlPlaneStore.ensureLibraryItem({
+    mediaType: 'movie', mediaId: 'tt0133093', title: 'The Matrix', year: 1999,
+  });
+  const request = createRequest(createRequestHandler({ controlPlaneStore, searchCache }));
+
+  assert.equal((await request('/api/control-plane/items')).status, 400);
+  assert.equal((await request('/api/control-plane/items?mediaId=tt0133093&limit=101')).status, 400);
+  assert.equal((await request(`/api/control-plane/items/${item.id}?infoHash=${HASH}`)).status, 400);
+  assert.equal((await request(`/api/control-plane/items/${item.id}?infoHash=${HASH}&fileIndex=-1`)).status, 400);
+  assert.equal((await request('/api/control-plane/items/li_missing')).status, 404);
+  assert.equal((await request('/api/control-plane/items', { method: 'POST' })).status, 404);
 });
 
 test('server serves the built frontend and preserves API 404s', async (t) => {

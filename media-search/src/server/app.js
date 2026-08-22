@@ -2,7 +2,10 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 
-import { toPublicReleaseDto, validateReleaseIdentity } from '../api/release-contract.js';
+import { toControlPlaneItemDetail, toControlPlaneItemSummary } from '../api/control-plane-dto.js';
+import { createReleaseIdentity, toPublicReleaseDto, validateReleaseIdentity } from '../api/release-contract.js';
+import { getControlPlaneHealth } from '../lib/control-plane/health.js';
+import { planReconciliation } from '../lib/control-plane/reconciler.js';
 import { QueueImporterClient } from '../lib/importer/queue-client.js';
 import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { searchTitles, getMediaById, getCacheMetrics } from '../lib/metadata/unified-search.js';
@@ -75,6 +78,37 @@ async function readBody(request) {
   }
 }
 
+function requireControlPlaneStore(store) {
+  if (!store) throw new Error('Control-plane store is not configured');
+}
+
+function parseBoundedLimit(value) {
+  if (value == null || value === '') return 50;
+  const limit = Number(value);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error('limit must be between 1 and 100');
+  }
+  return limit;
+}
+
+function parseOptionalReleaseIdentity(params) {
+  const infoHash = params.get('infoHash');
+  const fileIndexValue = params.get('fileIndex');
+  if (infoHash == null && fileIndexValue == null) return null;
+  if (infoHash == null || fileIndexValue == null) {
+    throw new Error('infoHash and fileIndex are required together');
+  }
+  let fileIndex;
+  if (fileIndexValue === 'torrent') {
+    fileIndex = null;
+  } else if (/^(0|[1-9]\d*)$/.test(fileIndexValue)) {
+    fileIndex = Number(fileIndexValue);
+  } else {
+    throw new Error('fileIndex must be torrent or a non-negative integer');
+  }
+  return createReleaseIdentity(infoHash, fileIndex);
+}
+
 function validateSupportedRequest(body) {
   const intent = createRequestIntent({ type: body.type || 'series', mediaId: body.mediaId });
   const singleEpisode = intent.mediaType === 'tv' && intent.scope === 'episode' && intent.episodes.length === 1;
@@ -112,6 +146,9 @@ export function createRequestHandler(dependencies = {}) {
   // Defaults to in-memory for testing (when no dbPath provided).
   const dbPath = dependencies.dbPath || process.env.DISCOVERY_DB;
   const searchCache = dependencies.searchCache || dependencies.discoveryCache || createDiscoveryCache(dbPath ? { dbPath } : {});
+  const controlPlaneStore = dependencies.controlPlaneStore ?? null;
+  const controlPlaneHealth = dependencies.getControlPlaneHealth || getControlPlaneHealth;
+  const clock = dependencies.now || (() => Date.now());
   const staticRoot = dependencies.staticRoot === undefined ? process.env.STATIC_ROOT : dependencies.staticRoot;
 
   return async (request, response) => {
@@ -119,6 +156,54 @@ export function createRequestHandler(dependencies = {}) {
     try {
       if (request.method === 'GET' && url.pathname === '/health') {
         return sendJson(response, 200, { ok: true });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/control-plane/health') {
+        return sendJson(response, 200, controlPlaneHealth({ now: clock }));
+      }
+      if (request.method === 'GET' && url.pathname === '/api/control-plane/items') {
+        requireControlPlaneStore(controlPlaneStore);
+        const mediaId = url.searchParams.get('mediaId');
+        const limit = parseBoundedLimit(url.searchParams.get('limit'));
+        const items = controlPlaneStore.listLibraryItems({ mediaId, limit });
+        return sendJson(response, 200, {
+          generatedAt: clock(),
+          items: items.map((item) => toControlPlaneItemSummary({
+            item,
+            canonicalPath: controlPlaneStore.getActiveCanonicalPath(item.id),
+            bindings: controlPlaneStore.listBindings(item.id),
+            lifecycle: controlPlaneStore.getLifecycle(item.id),
+          })),
+        });
+      }
+      const controlPlaneItemMatch = request.method === 'GET'
+        && url.pathname.match(/^\/api\/control-plane\/items\/(li_[a-z0-9_-]+)$/i);
+      if (controlPlaneItemMatch) {
+        requireControlPlaneStore(controlPlaneStore);
+        const item = controlPlaneStore.getLibraryItem(controlPlaneItemMatch[1]);
+        if (!item) return sendJson(response, 404, { error: 'Library item not found' });
+        const generatedAt = clock();
+        const release = parseOptionalReleaseIdentity(url.searchParams);
+        let snapshot = null;
+        let shadowPlan = null;
+        let providerObservations = [];
+        if (release) {
+          snapshot = controlPlaneStore.getReconciliationSnapshot(item.id, release);
+          shadowPlan = planReconciliation(snapshot, { destructive: false, now: generatedAt });
+          providerObservations = searchCache.getProviderObservations(
+            release.infoHash, release.fileIndex, { now: generatedAt },
+          );
+        }
+        return sendJson(response, 200, toControlPlaneItemDetail({
+          generatedAt,
+          item,
+          canonicalPath: controlPlaneStore.getActiveCanonicalPath(item.id),
+          bindings: controlPlaneStore.listBindings(item.id),
+          lifecycle: controlPlaneStore.getLifecycle(item.id),
+          release,
+          providerObservations,
+          snapshot,
+          shadowPlan,
+        }));
       }
       if (request.method === 'GET' && url.pathname === '/api/search/stats') {
         return sendJson(response, 200, getSearchStats(searchCache));
@@ -240,7 +325,7 @@ export function createRequestHandler(dependencies = {}) {
       }
       sendJson(response, 404, { error: 'Not found' });
     } catch (error) {
-      const isInput = /invalid|required|supported|valid JSON|too large|2–120|infoHash|fileIndex|releaseKey/i.test(error.message);
+      const isInput = /invalid|required|supported|valid JSON|too large|must be|between 1 and 100|2–120|infoHash|fileIndex|releaseKey/i.test(error.message);
       sendJson(response, isInput ? 400 : 502, { error: error.message });
     }
   };
