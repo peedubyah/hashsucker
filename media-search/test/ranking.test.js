@@ -135,12 +135,12 @@ test('episodeMatchScore: exact match returns 1.0', () => {
   assert.equal(score, 1.0);
 });
 
-test('episodeMatchScore: right season wrong episode returns 0.5', () => {
+test('episodeMatchScore: right season wrong episode returns 0.0 (hard gate rejects before scoring)', () => {
   const score = episodeMatchScore(
     { season: 5, episode: 14 },
     { season: 5, episode: 10 }
   );
-  assert.equal(score, 0.5);
+  assert.equal(score, 0.0);
 });
 
 test('episodeMatchScore: wrong season returns 0.0', () => {
@@ -375,7 +375,7 @@ test('scenario: episode match bonus applies when query has season/episode', () =
   assert.equal(withoutEpisode.components.episodeMatch, 0.5);  // Neutral
 });
 
-test('scenario: wrong episode gets lower bonus than exact match', () => {
+test('scenario: wrong episode scores 0.0 (hard gate rejects before ranking)', () => {
   const hitCorrect = {
     hash: HASH1,
     filename: 'S05E14.mkv',
@@ -396,8 +396,8 @@ test('scenario: wrong episode gets lower bonus than exact match', () => {
   const rankedWrong = rankHit(hitWrong, { season: 5, episode: 14 });
 
   assert.equal(rankedCorrect.components.episodeMatch, 1.0);
-  assert.equal(rankedWrong.components.episodeMatch, 0.5);
-  assert.ok(rankedCorrect.score > rankedWrong.score);
+  // Wrong episode gets 0.0 in preference (hard gate should have rejected it)
+  assert.equal(rankedWrong.components.episodeMatch, 0.0);
 });
 
 // =============================================================================

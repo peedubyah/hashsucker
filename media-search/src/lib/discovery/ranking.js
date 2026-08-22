@@ -148,28 +148,63 @@ export function providerAvailabilityScore(providerObservations = []) {
 }
 
 /**
- * Compute episode match bonus.
+ * Compute episode match preference among ALREADY-ELIGIBLE candidates.
  *
- * Only applies when the query specifies season/episode and the release matches.
+ * Hard coverage eligibility (wrong season, wrong episode, out-of-range,
+ * unknown coverage) is enforced by the episode-coverage gate BEFORE scoring
+ * and must not be duplicated here. This function expresses preference tiers
+ * among candidates that provably cover the requested episode:
+ *
+ *   - Exact single-episode match (season+episode)  → 1.0
+ *   - Episode range containing the requested E     → 0.8
+ *   - Season pack for the requested season         → 0.6
+ *
+ * When the query has no explicit season/episode intent, returns NEUTRAL.
  *
  * @param {Object} releaseAttrs - Release attributes
  * @param {number} [releaseAttrs.season] - Release season
  * @param {number} [releaseAttrs.episode] - Release episode
+ * @param {string} [releaseAttrs.episodeRange] - Release episode range "start-end"
+ * @param {boolean} [releaseAttrs.seasonOnly] - Parser-flagged season pack
+ * @param {string} [releaseAttrs.mediaType] - Parser media type guess
  * @param {Object} [queryIntent] - Query intent (optional)
  * @param {number} [queryIntent.season] - Query season
  * @param {number} [queryIntent.episode] - Query episode
  * @returns {number} 0.0-1.0
  */
 export function episodeMatchScore(releaseAttrs = {}, queryIntent = {}) {
-  // Only score if query has season/episode
+  // Only score if query has explicit season/episode intent
   if (queryIntent.season == null || queryIntent.episode == null) return NEUTRAL;
 
-  const seasonMatch = releaseAttrs.season != null && releaseAttrs.season === queryIntent.season;
-  const episodeMatch = releaseAttrs.episode != null && releaseAttrs.episode === queryIntent.episode;
+  const { season, episode, episodeRange, seasonOnly, mediaType } = releaseAttrs;
 
-  if (seasonMatch && episodeMatch) return 1.0;
-  if (seasonMatch) return 0.5;  // Right season, wrong episode
-  return 0.0;  // Wrong season
+  // Wrong season — defensive; hard gate should have rejected already.
+  if (season == null || season !== queryIntent.season) return 0.0;
+
+  // Exact single-episode match
+  if (episode != null && episode === queryIntent.episode) return 1.0;
+
+  // Episode range containing requested episode
+  if (episodeRange != null) {
+    const parts = episodeRange.split('-');
+    if (parts.length === 2) {
+      const start = parseInt(parts[0].trim(), 10);
+      const end = parseInt(parts[1].trim(), 10);
+      if (Number.isInteger(start) && Number.isInteger(end) &&
+          start > 0 && end >= start &&
+          queryIntent.episode >= start && queryIntent.episode <= end) {
+        return 0.8;
+      }
+    }
+    // Malformed or non-covering range — defensive low score
+    return 0.0;
+  }
+
+  // Season pack for correct season
+  if (seasonOnly === true || mediaType === 'season') return 0.6;
+
+  // Correct season but no episode/range/pack evidence — unknown coverage
+  return 0.0;
 }
 
 /**

@@ -17,6 +17,7 @@
 
 import { createReleaseIdentity, createReleaseKey } from '../../api/release-contract.js';
 import { rankHits } from './ranking.js';
+import { isEpisodeCovered } from './episode-coverage.js';
 
 /**
  * Build FTS5 MATCH expression from user query.
@@ -116,8 +117,13 @@ function buildFilterClause(filters) {
   if (filters.season != null) {
     clauses.push('ra.season = @season');
     params.season = filters.season;
+    // When explicit episode intent exists alongside a season, do NOT filter
+    // by exact episode in SQL. Episode ranges and season packs have NULL
+    // episode but may still cover the requested episode. Precise coverage is
+    // determined by the post-fetch hard eligibility gate.
   }
-  if (filters.episode != null) {
+  if (filters.episode != null && filters.season == null) {
+    // Season not specified — filter by exact episode only
     clauses.push('ra.episode = @episode');
     params.episode = filters.episode;
   }
@@ -283,6 +289,8 @@ export function searchReleases(cache, options = {}) {
         ra.year,
         ra.season,
         ra.episode,
+        ra.episode_range,
+        ra.media_type,
         ra.resolution,
         ra.source_type,
         ra.codec,
@@ -314,6 +322,8 @@ export function searchReleases(cache, options = {}) {
         ra.year,
         ra.season,
         ra.episode,
+        ra.episode_range,
+        ra.media_type,
         ra.resolution,
         ra.source_type,
         ra.codec,
@@ -385,6 +395,8 @@ export function searchReleases(cache, options = {}) {
         year: row.year,
         season: row.season,
         episode: row.episode,
+        episodeRange: row.episode_range || null,
+        seasonOnly: row.media_type === 'season',
         resolution: row.resolution,
         sourceType: row.source_type,
         codec: row.codec,
@@ -399,8 +411,19 @@ export function searchReleases(cache, options = {}) {
     };
   });
 
+  // Hard episode-coverage eligibility gate for explicit TV episode intent.
+  // Must run BEFORE preference scoring: a release that does not cover the
+  // requested episode is ineligible regardless of other evidence.
+  // Only applies when the query carries explicit season+episode intent.
+  let eligibleHits = hits;
+  if (queryIntent.season != null && queryIntent.episode != null) {
+    eligibleHits = hits.filter(hit =>
+      isEpisodeCovered(hit.releaseAttributes, queryIntent.season, queryIntent.episode)
+    );
+  }
+
   // Pass mediaId for identity confidence scoping
-  const ranked = rankHits(hits, queryIntent, mediaId);
+  const ranked = rankHits(eligibleHits, queryIntent, mediaId);
 
   // Map back to the expected output format
   const results = ranked.map(r => ({

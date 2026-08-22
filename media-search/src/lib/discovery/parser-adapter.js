@@ -130,7 +130,7 @@ export function parseFilename(filename) {
     if (seInfo.season != null) parsed.season = seInfo.season;
     if (seInfo.episode != null) parsed.episode = seInfo.episode;
     if (seInfo.episodeRange) parsed.episodeRange = seInfo.episodeRange;
-    if (seInfo.seasonOnly) parsed.mediaType = 'unknown'; // season pack
+    if (seInfo.seasonOnly) parsed.mediaType = 'season'; // season pack
     evidence.push(...seInfo.evidence);
   }
 
