@@ -211,6 +211,9 @@ export function episodeMatchScore(releaseAttrs = {}, queryIntent = {}) {
  * Preserves provenance (sources, selectedMediaId) through the ranking boundary
  * so that merged local/live evidence survives into the final ranked result.
  *
+ * Stores the actual (unrounded) weighted contributions so explainRank() can
+ * report what determined the score without recomputing from rounded components.
+ *
  * @param {Object} hit - Search hit with evidence
  * @param {string} hit.hash - InfoHash
  * @param {number|null} hit.fileIndex - File index
@@ -225,7 +228,7 @@ export function episodeMatchScore(releaseAttrs = {}, queryIntent = {}) {
  * @param {Object} [queryIntent] - Query intent for episode matching
  * @param {string} [mediaId] - Selected media ID for identity confidence scoping.
  *   When provided, identity confidence uses only the association to this media.
- * @returns {Object} Ranked result with component scores
+ * @returns {Object} Ranked result with component scores and raw contributions
  */
 export function rankHit(hit, queryIntent = {}, mediaId = null) {
   const {
@@ -252,14 +255,25 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
   const providerAvailability = providerAvailabilityScore(providerObservations);
   const episodeMatch = episodeMatchScore(releaseAttributes, queryIntent);
 
-  // Compute weighted composite score
+  // Compute weighted contributions (raw, before rounding) — these are what
+  // actually produced the score. Stored so explainRank() doesn't recompute
+  // from rounded component values and drift from the true score.
+  const contributions = {
+    relevance: relevance * WEIGHTS.relevance,
+    quality: quality * WEIGHTS.quality,
+    releaseConfidence: releaseConfidence * WEIGHTS.releaseConfidence,
+    identityConfidence: identityConfidence * WEIGHTS.identityConfidence,
+    providerAvailability: providerAvailability * WEIGHTS.providerAvailability,
+    episodeMatch: episodeMatch * WEIGHTS.episodeMatch,
+  };
+
   const score = (
-    relevance * WEIGHTS.relevance +
-    quality * WEIGHTS.quality +
-    releaseConfidence * WEIGHTS.releaseConfidence +
-    identityConfidence * WEIGHTS.identityConfidence +
-    providerAvailability * WEIGHTS.providerAvailability +
-    episodeMatch * WEIGHTS.episodeMatch
+    contributions.relevance +
+    contributions.quality +
+    contributions.releaseConfidence +
+    contributions.identityConfidence +
+    contributions.providerAvailability +
+    contributions.episodeMatch
   );
 
   return {
@@ -275,11 +289,151 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
       providerAvailability: Math.round(providerAvailability * 1000) / 1000,
       episodeMatch: Math.round(episodeMatch * 1000) / 1000,
     },
+    contributions,
     releaseAttributes,
     mediaAssociations,
     providerObservations,
     sources,
     selectedMediaId,
+  };
+}
+
+/**
+ * Compare two ranked results using the FULL ordering contract.
+ *
+ * This is the SINGLE source of truth for ranking order. Both rankHits() and
+ * compareRanked() use this function so they cannot drift.
+ *
+ * Ordering precedence:
+ * 1. Higher composite score wins
+ * 2. Higher releaseConfidence wins (parser evidence strength)
+ * 3. Higher quality wins (resolution/source evidence)
+ * 4. Higher relevance wins (title match strength)
+ * 5. Lower hash string wins (deterministic, content-derived)
+ * 6. Lower fileIndex wins (null sorts after 0)
+ *
+ * @param {Object} a - First ranked result
+ * @param {Object} b - Second ranked result
+ * @returns {number} -1 if a before b, 1 if b before a, 0 if equal
+ */
+export function compareHits(a, b) {
+  // Primary: composite score (higher wins)
+  const aScore = a.score ?? 0;
+  const bScore = b.score ?? 0;
+  if (aScore !== bScore) return bScore - aScore > 0 ? 1 : -1;
+
+  // Tie-break 1: releaseConfidence (higher wins)
+  const aConf = a.components?.releaseConfidence ?? 0;
+  const bConf = b.components?.releaseConfidence ?? 0;
+  if (aConf !== bConf) return bConf - aConf > 0 ? 1 : -1;
+
+  // Tie-break 2: quality (higher wins)
+  const aQual = a.components?.quality ?? 0;
+  const bQual = b.components?.quality ?? 0;
+  if (aQual !== bQual) return bQual - aQual > 0 ? 1 : -1;
+
+  // Tie-break 3: relevance (higher wins)
+  const aRel = a.components?.relevance ?? 0;
+  const bRel = b.components?.relevance ?? 0;
+  if (aRel !== bRel) return bRel - aRel > 0 ? 1 : -1;
+
+  // Tie-break 4: hash (lexicographic, lower wins — deterministic)
+  if (a.hash !== b.hash) return a.hash < b.hash ? -1 : 1;
+
+  // Tie-break 5: fileIndex (lower wins, null sorts after 0)
+  const aIdx = a.fileIndex ?? Number.MAX_SAFE_INTEGER;
+  const bIdx = b.fileIndex ?? Number.MAX_SAFE_INTEGER;
+  if (aIdx !== bIdx) return aIdx - bIdx;
+
+  return 0;
+}
+
+/**
+ * Explain why one result outranks another using the SAME ordering contract
+ * as rankHits(). Returns the FIRST difference found (the decisive factor).
+ *
+ * @param {Object} a - First ranked result
+ * @param {Object} b - Second ranked result
+ * @returns {Object} Explanation of ordering
+ */
+export function explainOrder(a, b) {
+  const aScore = a.score ?? 0;
+  const bScore = b.score ?? 0;
+  if (aScore !== bScore) {
+    return {
+      decisiveFactor: 'score',
+      aValue: aScore,
+      bValue: bScore,
+      winner: aScore > bScore ? 'a' : 'b',
+      reason: `${aScore > bScore ? 'A' : 'B'} has higher composite score (${aScore} vs ${bScore})`,
+    };
+  }
+
+  const aConf = a.components?.releaseConfidence ?? 0;
+  const bConf = b.components?.releaseConfidence ?? 0;
+  if (aConf !== bConf) {
+    return {
+      decisiveFactor: 'releaseConfidence',
+      aValue: aConf,
+      bValue: bConf,
+      winner: aConf > bConf ? 'a' : 'b',
+      reason: `${aConf > bConf ? 'A' : 'B'} wins tie-break on release confidence (${aConf} vs ${bConf})`,
+    };
+  }
+
+  const aQual = a.components?.quality ?? 0;
+  const bQual = b.components?.quality ?? 0;
+  if (aQual !== bQual) {
+    return {
+      decisiveFactor: 'quality',
+      aValue: aQual,
+      bValue: bQual,
+      winner: aQual > bQual ? 'a' : 'b',
+      reason: `${aQual > bQual ? 'A' : 'B'} wins tie-break on quality (${aQual} vs ${bQual})`,
+    };
+  }
+
+  const aRel = a.components?.relevance ?? 0;
+  const bRel = b.components?.relevance ?? 0;
+  if (aRel !== bRel) {
+    return {
+      decisiveFactor: 'relevance',
+      aValue: aRel,
+      bValue: bRel,
+      winner: aRel > bRel ? 'a' : 'b',
+      reason: `${aRel > bRel ? 'A' : 'B'} wins tie-break on relevance (${aRel} vs ${bRel})`,
+    };
+  }
+
+  if (a.hash !== b.hash) {
+    const winner = a.hash < b.hash ? 'a' : 'b';
+    return {
+      decisiveFactor: 'hash',
+      aValue: a.hash,
+      bValue: b.hash,
+      winner,
+      reason: `${winner === 'a' ? 'A' : 'B'} wins tie-break on hash (lexicographic)`,
+    };
+  }
+
+  const aIdx = a.fileIndex ?? Number.MAX_SAFE_INTEGER;
+  const bIdx = b.fileIndex ?? Number.MAX_SAFE_INTEGER;
+  if (aIdx !== bIdx) {
+    return {
+      decisiveFactor: 'fileIndex',
+      aValue: a.fileIndex,
+      bValue: b.fileIndex,
+      winner: aIdx < bIdx ? 'a' : 'b',
+      reason: `${aIdx < bIdx ? 'A' : 'B'} wins tie-break on file index (${a.fileIndex} vs ${b.fileIndex})`,
+    };
+  }
+
+  return {
+    decisiveFactor: null,
+    aValue: null,
+    bValue: null,
+    winner: 'tie',
+    reason: 'identical scores and all tie-breakers',
   };
 }
 
@@ -302,29 +456,80 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
  */
 export function rankHits(hits, queryIntent = {}, mediaId = null) {
   const ranked = hits.map(hit => rankHit(hit, queryIntent, mediaId));
-  ranked.sort((a, b) => {
-    // Primary: composite score (higher wins)
-    if (b.score !== a.score) return b.score - a.score;
-    // Tie-break 1: releaseConfidence (higher wins)
-    const aConf = a.components?.releaseConfidence ?? 0;
-    const bConf = b.components?.releaseConfidence ?? 0;
-    if (bConf !== aConf) return bConf - aConf;
-    // Tie-break 2: quality (higher wins)
-    const aQual = a.components?.quality ?? 0;
-    const bQual = b.components?.quality ?? 0;
-    if (bQual !== aQual) return bQual - aQual;
-    // Tie-break 3: relevance (higher wins)
-    const aRel = a.components?.relevance ?? 0;
-    const bRel = b.components?.relevance ?? 0;
-    if (bRel !== aRel) return bRel - aRel;
-    // Tie-break 4: hash (lexicographic, lower wins — deterministic)
-    if (a.hash !== b.hash) return a.hash < b.hash ? -1 : 1;
-    // Tie-break 5: fileIndex (lower wins, null sorts after 0)
-    const aIdx = a.fileIndex ?? Number.MAX_SAFE_INTEGER;
-    const bIdx = b.fileIndex ?? Number.MAX_SAFE_INTEGER;
-    return aIdx - bIdx;
-  });
+  ranked.sort(compareHits);
   return ranked;
+}
+
+/**
+ * Compare two ranked results to explain why one outranks the other.
+ *
+ * Uses the SAME ordering contract as rankHits() via compareHits() and
+ * explainOrder(). Guaranteed to never drift from actual ranking behavior.
+ *
+ * @param {Object} a - First ranked result (or its explanation)
+ * @param {Object} b - Second ranked result (or its explanation)
+ * @returns {Object} Comparison result
+ */
+export function compareRanked(a, b) {
+  if (!a || !b) return null;
+
+  const order = explainOrder(a, b);
+  const aComponents = a.components || {};
+  const bComponents = b.components || {};
+  const weights = WEIGHTS;
+
+  // Compute weighted contribution diffs (raw, from stored contributions when available)
+  const aContrib = a.contributions || {};
+  const bContrib = b.contributions || {};
+  const diffs = {};
+  for (const key of Object.keys(weights)) {
+    const aWeighted = aContrib[key] ?? (aComponents[key] || 0) * weights[key];
+    const bWeighted = bContrib[key] ?? (bComponents[key] || 0) * weights[key];
+    diffs[key] = Math.round((aWeighted - bWeighted) * 1000) / 1000;
+  }
+
+  return {
+    winner: order.winner,
+    scoreDiff: Math.round(((a.score ?? 0) - (b.score ?? 0)) * 1000) / 1000,
+    componentDiffs: diffs,
+    decisiveFactor: order.decisiveFactor,
+    primaryReason: order.reason,
+  };
+}
+
+/**
+ * Build factual quality reasons from releaseAttributes.
+ *
+ * Describes ACTUAL release properties (resolution, source, codec, HDR),
+ * never inferring resolution from the aggregate quality score.
+ *
+ * @param {Object} attrs - Release attributes
+ * @returns {string[]} Human-readable quality reasons
+ */
+function buildQualityReasons(attrs = {}) {
+  const reasons = [];
+
+  // Resolution — describe what IS, not what the composite score implies
+  if (attrs.resolution) {
+    reasons.push(attrs.resolution);
+  }
+
+  // Source type
+  if (attrs.sourceType) {
+    reasons.push(attrs.sourceType);
+  }
+
+  // Codec
+  if (attrs.codec) {
+    reasons.push(attrs.codec);
+  }
+
+  // HDR
+  if (attrs.hdr) {
+    reasons.push('HDR');
+  }
+
+  return reasons;
 }
 
 /**
@@ -334,6 +539,12 @@ export function rankHits(hits, queryIntent = {}, mediaId = null) {
  * rankHit() used. Does NOT duplicate ranking calculations — it reads the
  * components already computed by rankHit().
  *
+ * Uses the ACTUAL weighted contributions stored by rankHit() (not recomputed
+ * from rounded component values) so the explanation reconciles with the score.
+ *
+ * Quality explanations describe FACTS from releaseAttributes (resolution,
+ * source, codec, HDR) — never inferring resolution from the aggregate score.
+ *
  * Provider hints (non-authoritative) are never described as confirmed
  * provider availability. Only authoritative providerObservations contribute
  * to the providerAvailability component.
@@ -341,6 +552,7 @@ export function rankHits(hits, queryIntent = {}, mediaId = null) {
  * @param {Object} ranked - Output of rankHit()
  * @param {number} ranked.score - Composite score
  * @param {Object} ranked.components - Component scores (relevance, quality, releaseConfidence, identityConfidence, providerAvailability, episodeMatch)
+ * @param {Object} [ranked.contributions] - Raw weighted contributions (from rankHit)
  * @param {string} ranked.hash - InfoHash
  * @param {number|null} ranked.fileIndex - File index
  * @param {string} ranked.filename - Release filename
@@ -355,15 +567,19 @@ export function explainRank(ranked) {
   const components = ranked.components || {};
   const weights = WEIGHTS;
 
-  // Weighted contributions (what actually determined the score)
-  const contributions = {
-    relevance: components.relevance * weights.relevance,
-    quality: components.quality * weights.quality,
-    releaseConfidence: components.releaseConfidence * weights.releaseConfidence,
-    identityConfidence: components.identityConfidence * weights.identityConfidence,
-    providerAvailability: components.providerAvailability * weights.providerAvailability,
-    episodeMatch: components.episodeMatch * weights.episodeMatch,
-  };
+  // Use ACTUAL contributions from rankHit() if available (raw, unrounded).
+  // These are what produced the score. Only fall back to recomputing from
+  // rounded components if contributions weren't stored (backward compat).
+  const contributions = ranked.contributions
+    ? { ...ranked.contributions }
+    : {
+        relevance: components.relevance * weights.relevance,
+        quality: components.quality * weights.quality,
+        releaseConfidence: components.releaseConfidence * weights.releaseConfidence,
+        identityConfidence: components.identityConfidence * weights.identityConfidence,
+        providerAvailability: components.providerAvailability * weights.providerAvailability,
+        episodeMatch: components.episodeMatch * weights.episodeMatch,
+      };
 
   // Build deterministic human-readable reasons
   const reasons = [];
@@ -377,16 +593,9 @@ export function explainRank(ranked) {
     reasons.push('weak title match');
   }
 
-  // Quality
-  if (components.quality >= 0.9) {
-    reasons.push('excellent quality (2160p/UHD)');
-  } else if (components.quality >= 0.7) {
-    reasons.push('good quality (1080p)');
-  } else if (components.quality >= 0.4) {
-    reasons.push('acceptable quality (720p)');
-  } else if (components.quality > 0) {
-    reasons.push('low quality');
-  }
+  // Quality — describe FACTS from releaseAttributes, not composite thresholds
+  const qualityReasons = buildQualityReasons(ranked.releaseAttributes || {});
+  reasons.push(...qualityReasons);
 
   // Release confidence (parser evidence)
   if (components.releaseConfidence >= 0.8) {
@@ -447,38 +656,6 @@ export function explainRank(ranked) {
     summary: topFactors.length > 0
       ? `Top factors: ${topFactors.join(', ')}`
       : 'No significant ranking factors',
-  };
-}
-
-/**
- * Compare two ranked results to explain why one outranks the other.
- *
- * Pure function — no mutation. Takes the outputs of rankHit()/explainRank()
- * and produces a deterministic comparison.
- *
- * @param {Object} a - First ranked result (or its explanation)
- * @param {Object} b - Second ranked result (or its explanation)
- * @returns {Object} Comparison result
- */
-export function compareRanked(a, b) {
-  if (!a || !b) return null;
-  const aComponents = a.components || {};
-  const bComponents = b.components || {};
-  const weights = WEIGHTS;
-  const diffs = {};
-  for (const key of Object.keys(weights)) {
-    const aWeighted = (aComponents[key] || 0) * weights[key];
-    const bWeighted = (bComponents[key] || 0) * weights[key];
-    diffs[key] = Math.round((aWeighted - bWeighted) * 1000) / 1000;
-  }
-  const aScore = a.score ?? aComponents.score ?? 0;
-  const bScore = b.score ?? bComponents.score ?? 0;
-  const winner = aScore > bScore ? 'a' : (aScore < bScore ? 'b' : 'tie');
-  return {
-    winner,
-    scoreDiff: Math.round((aScore - bScore) * 1000) / 1000,
-    componentDiffs: diffs,
-    primaryReason: winner === 'tie' ? 'identical scores' : `Higher ${Object.entries(diffs).sort(([, x], [, y]) => y - x)[0]?.[0] || 'score'}`,
   };
 }
 

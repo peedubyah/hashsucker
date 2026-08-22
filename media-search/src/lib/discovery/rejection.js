@@ -5,14 +5,18 @@
  * Rejection answers "Can this candidate satisfy the request?" — it is NOT
  * about preference or desirability.
  *
- * Taxonomy:
- *   NO_MEDIA_ASSOCIATION — Local corpus candidate has no candidate_media row
- *                          for the requested mediaId (enforced by INNER JOIN).
+ * Taxonomy (all reasons produced at the eligibility/ranking boundary):
  *   WRONG_SEASON          — Release season does not match requested season.
  *   WRONG_EPISODE         — Exact episode evidence does not match requested.
  *   OUT_OF_RANGE          — Requested episode is outside the release's range.
  *   UNKNOWN_EPISODE_COVERAGE — Correct season but no episode/range/pack evidence.
  *   MALFORMED_RANGE       — Episode range string is malformed/unparseable.
+ *
+ * NOTE: Missing selected-media association is enforced UPSTREAM by the
+ * candidate_media INNER JOIN in searchReleases(). Candidates without an
+ * association never reach combinedSearch(), so this rejection is NOT observable
+ * in the combinedSearch() debug.rejections output. This is intentional — the
+ * INNER JOIN is the hard gate, and it remains fail-closed.
  *
  * This module is pure — it does NOT:
  * - Perform I/O
@@ -28,7 +32,6 @@ import { coversEpisode } from './episode-coverage.js';
  * @enum {string}
  */
 export const RejectionReason = Object.freeze({
-  NO_MEDIA_ASSOCIATION: 'no-media-association',
   WRONG_SEASON: 'wrong-season',
   WRONG_EPISODE: 'wrong-episode',
   OUT_OF_RANGE: 'out-of-range',
@@ -65,8 +68,6 @@ export function reasonFromCoverage(reason) {
  */
 export function describeRejection(reason) {
   switch (reason) {
-    case RejectionReason.NO_MEDIA_ASSOCIATION:
-      return 'No candidate-media association for selected media';
     case RejectionReason.WRONG_SEASON:
       return 'Wrong season for selected episode';
     case RejectionReason.WRONG_EPISODE:

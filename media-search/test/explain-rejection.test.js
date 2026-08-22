@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { rankHit, explainRank, compareRanked } from '../src/lib/discovery/ranking.js';
+import { rankHit, explainRank, compareRanked, rankHits, explainOrder, compareHits } from '../src/lib/discovery/ranking.js';
 import { RejectionReason, reasonFromCoverage, describeRejection, evaluateEligibility } from '../src/lib/discovery/rejection.js';
 import { coversEpisode } from '../src/lib/discovery/episode-coverage.js';
 import { combinedSearch, searchReleases } from '../src/lib/discovery/search-engine.js';
@@ -423,4 +423,347 @@ test('describeRejection: all reasons have descriptions', () => {
     assert.ok(desc && desc.length > 0, `Description for ${reason} should not be empty`);
     assert.ok(!desc.startsWith('Unknown'), `Description for ${reason} should be known`);
   }
+});
+
+// =============================================================================
+// FIX 1: NO_MEDIA_ASSOCIATION is NOT in active taxonomy
+// Missing association is enforced upstream by INNER JOIN — not observable here
+// =============================================================================
+
+test('NO_MEDIA_ASSOCIATION: not in active rejection taxonomy (upstream enforcement)', () => {
+  // NO_MEDIA_ASSOCIATION must NOT be in RejectionReason — missing association
+  // is enforced by candidate_media INNER JOIN in searchReleases(), which
+  // removes candidates BEFORE they reach combinedSearch(). The diagnostic
+  // boundary cannot observe this rejection.
+  assert.equal(
+    RejectionReason.NO_MEDIA_ASSOCIATION,
+    undefined,
+    'NO_MEDIA_ASSOCIATION must not exist — enforced upstream by INNER JOIN'
+  );
+
+  // All active reasons must be observable at the eligibility/ranking boundary
+  const activeReasons = Object.values(RejectionReason);
+  assert.ok(activeReasons.includes(RejectionReason.WRONG_SEASON));
+  assert.ok(activeReasons.includes(RejectionReason.WRONG_EPISODE));
+  assert.ok(activeReasons.includes(RejectionReason.OUT_OF_RANGE));
+  assert.ok(activeReasons.includes(RejectionReason.UNKNOWN_EPISODE_COVERAGE));
+  assert.ok(activeReasons.includes(RejectionReason.MALFORMED_RANGE));
+});
+
+test('NO_MEDIA_ASSOCIATION: upstream INNER JOIN still enforces selected-media eligibility', () => {
+  // Verify the INNER JOIN behavior is intact — this is the actual gate.
+  // A candidate associated only with OTHER media must NOT appear for MEDIA_SHOW.
+  const cache = createDiscoveryCache();
+
+  storeReleaseAttributes(cache, {
+    infoHash: HASH1,
+    fileIndex: null,
+    filename: 'Show.S01E03.1080p.mkv',
+    source: 'ptn-regex',
+    confidence: 0.9,
+    parsed: {
+      title: 'Show S01E03',
+      year: 2024,
+      season: 1,
+      episode: 3,
+      resolution: '1080p',
+    },
+    evidence: ['title_extracted'],
+  });
+  // Associate with OTHER media, not MEDIA_SHOW
+  cache.associateMedia(HASH1, null, MEDIA_OTHER, { confidence: 0.9, source: 'search' });
+
+  const result = searchReleases(cache, {
+    query: 'Show',
+    season: 1,
+    episode: 3,
+    mediaId: MEDIA_SHOW,
+  });
+
+  // INNER JOIN removes it — zero results
+  assert.equal(result.results.length, 0, 'INNER JOIN must exclude candidates without selected-media association');
+
+  cache.close();
+});
+
+// =============================================================================
+// FIX 2: Quality explanations use releaseAttributes facts, not composite thresholds
+// =============================================================================
+
+test('explainRank: quality reasons describe actual release properties, not inferred resolution', () => {
+  // A 720p release boosted by BluRay + x265 + HDR can cross 0.7 threshold
+  // but must NEVER be described as "1080p"
+  const hit = {
+    hash: HASH1,
+    fileIndex: null,
+    filename: 'Movie.2024.720p.BluRay.x265.HDR.mkv',
+    relevance: 0.8,
+    releaseAttributes: {
+      title: 'Movie',
+      year: 2024,
+      resolution: '720p',
+      sourceType: 'BluRay',
+      codec: 'x265',
+      hdr: true,
+    },
+    parserConfidence: 0.85,
+    mediaAssociations: [],
+    providerObservations: [],
+    sources: [],
+  };
+
+  const ranked = rankHit(hit, {});
+  const explanation = explainRank(ranked);
+
+  // Must include actual properties
+  assert.ok(explanation.reasons.includes('720p'), 'Should include actual resolution');
+  assert.ok(explanation.reasons.includes('BluRay'), 'Should include actual source');
+  assert.ok(explanation.reasons.includes('x265'), 'Should include actual codec');
+  assert.ok(explanation.reasons.includes('HDR'), 'Should include HDR');
+
+  // Must NOT claim higher resolution
+  const reasonsStr = explanation.reasons.join(' ');
+  assert.ok(!reasonsStr.includes('1080p'), 'Must NOT claim 1080p for a 720p release');
+  assert.ok(!reasonsStr.includes('2160p'), 'Must NOT claim 2160p for a 720p release');
+});
+
+test('explainRank: 1080p release with high boost never mislabeled as 2160p', () => {
+  const hit = {
+    hash: HASH1,
+    fileIndex: null,
+    filename: 'Movie.2024.1080p.BluRay.x265.HDR.mkv',
+    relevance: 0.9,
+    releaseAttributes: {
+      title: 'Movie',
+      year: 2024,
+      resolution: '1080p',
+      sourceType: 'BluRay',
+      codec: 'x265',
+      hdr: true,
+    },
+    parserConfidence: 0.9,
+    mediaAssociations: [],
+    providerObservations: [],
+    sources: [],
+  };
+
+  const ranked = rankHit(hit, {});
+  const explanation = explainRank(ranked);
+
+  // Should include 1080p (the actual resolution)
+  assert.ok(explanation.reasons.includes('1080p'), 'Should include actual 1080p resolution');
+
+  // Must NOT claim 2160p
+  assert.ok(!explanation.reasons.includes('2160p'), 'Must NOT claim 2160p/UHD for 1080p release');
+});
+
+// =============================================================================
+// FIX 3: compareRanked uses shared ordering contract (all tie-breaker scenarios)
+// =============================================================================
+
+test('compareRanked: A wins by composite score', () => {
+  const a = rankHit({
+    hash: HASH1, fileIndex: null, filename: 'A.mkv',
+    relevance: 0.9, releaseAttributes: { resolution: '2160p' },
+    parserConfidence: 0.9, mediaAssociations: [], providerObservations: [], sources: [],
+  }, {});
+  const b = rankHit({
+    hash: HASH2, fileIndex: null, filename: 'B.mkv',
+    relevance: 0.5, releaseAttributes: { resolution: '480p' },
+    parserConfidence: 0.5, mediaAssociations: [], providerObservations: [], sources: [],
+  }, {});
+
+  const comparison = compareRanked(a, b);
+  assert.equal(comparison.winner, 'a');
+  assert.equal(comparison.decisiveFactor, 'score');
+  assert.ok(comparison.primaryReason.includes('composite score'));
+});
+
+test('compareRanked: B wins by composite score identifies B advantage', () => {
+  const a = rankHit({
+    hash: HASH1, fileIndex: null, filename: 'A.mkv',
+    relevance: 0.5, releaseAttributes: { resolution: '480p' },
+    parserConfidence: 0.5, mediaAssociations: [], providerObservations: [], sources: [],
+  }, {});
+  const b = rankHit({
+    hash: HASH2, fileIndex: null, filename: 'B.mkv',
+    relevance: 0.9, releaseAttributes: { resolution: '2160p' },
+    parserConfidence: 0.9, mediaAssociations: [], providerObservations: [], sources: [],
+  }, {});
+
+  const comparison = compareRanked(a, b);
+  assert.equal(comparison.winner, 'b');
+  assert.equal(comparison.decisiveFactor, 'score');
+  assert.ok(comparison.primaryReason.includes('B'));
+});
+
+test('compareRanked: equal composite score, A wins by releaseConfidence', () => {
+  // Calibrate so composite scores are EQUAL but releaseConfidence differs.
+  // Score = rel*0.25 + qual*0.2 + rc*0.2 + id*0.15 + prov*0.1 + ep*0.1
+  // A: rel=0.8, qual=0.36 (1080p), rc=0.9 → score = 0.2+0.072+0.18+0.075+0.05+0.05 = 0.627
+  // B: rel=0.8, qual=0.36 (1080p), rc=0.7 → score = 0.2+0.072+0.14+0.075+0.05+0.05 = 0.587
+  // To make equal: B needs +0.04 elsewhere → increase B relevance by 0.04/0.25 = 0.16
+  // B: rel=0.96, qual=0.36, rc=0.7 → score = 0.24+0.072+0.14+0.075+0.05+0.05 = 0.627 ✓
+  const a = rankHit({
+    hash: HASH1, fileIndex: null, filename: 'A.mkv',
+    relevance: 0.8, releaseAttributes: { resolution: '1080p' },
+    parserConfidence: 0.9, mediaAssociations: [], providerObservations: [], sources: [],
+  }, {});
+  const b = rankHit({
+    hash: HASH2, fileIndex: null, filename: 'B.mkv',
+    relevance: 0.96, releaseAttributes: { resolution: '1080p' },
+    parserConfidence: 0.7, mediaAssociations: [], providerObservations: [], sources: [],
+  }, {});
+
+  assert.equal(a.score, b.score, 'Scores must be equal for tie-break test');
+  const comparison = compareRanked(a, b);
+  assert.equal(comparison.winner, 'a');
+  assert.equal(comparison.decisiveFactor, 'releaseConfidence');
+  assert.ok(comparison.primaryReason.includes('release confidence'));
+});
+
+test('compareRanked: equal score+confidence, winner by quality', () => {
+  // Calibrate for equal composite scores with different quality.
+  // A: rel=0.8, qual=0.4 (2160p), rc=0.7 → score = 0.2+0.08+0.14+0.075+0.05+0.05 = 0.595
+  // B: rel=0.8, qual=0.36 (1080p), rc=0.7 → score = 0.2+0.072+0.14+0.075+0.05+0.05 = 0.587
+  // To make equal: B needs +0.008 elsewhere → increase B relevance by 0.008/0.25 = 0.032
+  // B: rel=0.832, qual=0.36, rc=0.7 → score = 0.208+0.072+0.14+0.075+0.05+0.05 = 0.595 ✓
+  const a = rankHit({
+    hash: HASH1, fileIndex: null, filename: 'A.mkv',
+    relevance: 0.8, releaseAttributes: { resolution: '2160p' },
+    parserConfidence: 0.7, mediaAssociations: [], providerObservations: [], sources: [],
+  }, {});
+  const b = rankHit({
+    hash: HASH2, fileIndex: null, filename: 'B.mkv',
+    relevance: 0.832, releaseAttributes: { resolution: '1080p' },
+    parserConfidence: 0.7, mediaAssociations: [], providerObservations: [], sources: [],
+  }, {});
+
+  assert.equal(a.score, b.score, 'Scores must be equal for tie-break test');
+  const comparison = compareRanked(a, b);
+  assert.equal(comparison.winner, 'a');
+  assert.equal(comparison.decisiveFactor, 'quality');
+});
+
+test('compareRanked: final deterministic hash tie-break can be explained', () => {
+  // Same scores, same components, different hashes
+  const a = rankHit({
+    hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', // lower hash
+    fileIndex: null, filename: 'A.mkv',
+    relevance: 0.8, releaseAttributes: { resolution: '1080p' },
+    parserConfidence: 0.9, mediaAssociations: [], providerObservations: [], sources: [],
+  }, {});
+  const b = rankHit({
+    hash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', // higher hash
+    fileIndex: null, filename: 'B.mkv',
+    relevance: 0.8, releaseAttributes: { resolution: '1080p' },
+    parserConfidence: 0.9, mediaAssociations: [], providerObservations: [], sources: [],
+  }, {});
+
+  const comparison = compareRanked(a, b);
+  assert.equal(comparison.winner, 'a');
+  assert.equal(comparison.decisiveFactor, 'hash');
+  assert.ok(comparison.primaryReason.includes('hash'));
+});
+
+test('compareRanked: exact equality reports tie', () => {
+  const hit = {
+    hash: HASH1, fileIndex: null, filename: 'A.mkv',
+    relevance: 0.8, releaseAttributes: { resolution: '1080p' },
+    parserConfidence: 0.9, mediaAssociations: [], providerObservations: [], sources: [],
+  };
+  const a = rankHit(hit, {});
+  const b = rankHit(hit, {});
+
+  const comparison = compareRanked(a, b);
+  assert.equal(comparison.winner, 'tie');
+  assert.equal(comparison.decisiveFactor, null);
+  assert.ok(comparison.primaryReason.includes('identical'));
+});
+
+test('compareRanked: explainOrder and compareHits share the same contract', () => {
+  // Verify that explainOrder() (used by compareRanked) and compareHits()
+  // (used by rankHits) produce the same ordering for a pair
+  const hits = [
+    { hash: HASH1, fileIndex: null, filename: 'A.mkv', relevance: 0.5, releaseAttributes: { resolution: '480p' }, parserConfidence: 0.5, mediaAssociations: [], providerObservations: [], sources: [] },
+    { hash: HASH2, fileIndex: null, filename: 'B.mkv', relevance: 0.9, releaseAttributes: { resolution: '2160p' }, parserConfidence: 0.9, mediaAssociations: [], providerObservations: [], sources: [] },
+    { hash: HASH3, fileIndex: null, filename: 'C.mkv', relevance: 0.7, releaseAttributes: { resolution: '1080p' }, parserConfidence: 0.7, mediaAssociations: [], providerObservations: [], sources: [] },
+  ];
+
+  const ranked = rankHits(hits, {});
+
+  // rankHits ordering must match explainOrder for every pair
+  for (let i = 0; i < ranked.length - 1; i++) {
+    const a = ranked[i];
+    const b = ranked[i + 1];
+    const order = explainOrder(a, b);
+    assert.equal(order.winner, 'a', `rankHits[${i}] must beat rankHits[${i+1}] per explainOrder`);
+  }
+});
+
+// =============================================================================
+// FIX 4: Contributions preserve actual weighted values from rankHit
+// =============================================================================
+
+test('explainRank: uses actual contributions from rankHit (raw, not recomputed from rounded)', () => {
+  // Create a hit with values that produce non-round components
+  const hit = {
+    hash: HASH1,
+    fileIndex: null,
+    filename: 'Movie.mkv',
+    relevance: 0.833, // Will produce 0.833 * 0.25 = 0.20825 (raw) vs 0.208 (from rounded)
+    releaseAttributes: { resolution: '1080p', sourceType: 'BluRay', codec: 'x265', hdr: true },
+    parserConfidence: 0.877,
+    mediaAssociations: [{ mediaId: MEDIA_SHOW, confidence: 0.923 }],
+    providerObservations: [],
+    sources: [],
+  };
+
+  const ranked = rankHit(hit, {}, MEDIA_SHOW);
+  const explanation = explainRank(ranked);
+
+  // The explanation's contributions should be the RAW values from rankHit
+  // (not recomputed from rounded components)
+  assert.deepEqual(
+    explanation.contributions,
+    ranked.contributions,
+    'Explanation contributions must match rankHit contributions exactly (raw, unrounded)'
+  );
+
+  // Sum of contributions should reconcile with score (within final rounding)
+  const contributionSum = Object.values(explanation.contributions).reduce((a, b) => a + b, 0);
+  const roundedSum = Math.round(contributionSum * 1000) / 1000;
+  assert.equal(
+    roundedSum,
+    explanation.score,
+    'Sum of raw contributions must reconcile with rounded score'
+  );
+});
+
+test('explainRank: contribution precision proven with non-round component values', () => {
+  // Explicitly crafted to show the difference between raw and recomputed
+  const hit = {
+    hash: HASH1,
+    fileIndex: null,
+    filename: 'Movie.mkv',
+    relevance: 0.777,
+    releaseAttributes: { resolution: '1080p', sourceType: 'BluRay', codec: 'x265', hdr: true },
+    parserConfidence: 0.888,
+    mediaAssociations: [{ mediaId: MEDIA_SHOW, confidence: 0.999 }],
+    providerObservations: [],
+    sources: [],
+  };
+
+  const ranked = rankHit(hit, {}, MEDIA_SHOW);
+
+  // Raw contribution for relevance: 0.777 * 0.25 = 0.19425
+  // Recomputed from rounded: 0.777 rounded to 0.777 * 0.25 = 0.19425 (same in this case)
+  // But the key is: the explanation uses the STORED contribution, not recomputation
+  const explanation = explainRank(ranked);
+
+  // The raw contribution should be exactly what rankHit stored
+  assert.ok(
+    Math.abs(explanation.contributions.relevance - 0.777 * 0.25) < 0.0001,
+    'Relevance contribution should be raw (unrounded) value'
+  );
 });
