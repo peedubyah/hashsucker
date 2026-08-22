@@ -4,11 +4,11 @@
 
 This is the machine-maintained companion to [`HANDOFF.md`](../HANDOFF.md). It reports only reproducible repository facts and explicit unknowns. It does not prove live runtime, provider, deployment, or test health.
 
-- Generated at (UTC): `2026-08-22T19:24:59.471Z`
+- Generated at (UTC): `2026-08-22T22:29:19.155Z`
 - Generator: [`scripts/update-project-state.mjs`](../scripts/update-project-state.mjs)
 - Repository root: `.` (the Git top-level containing this file)
-- State input fingerprint: `sha256:6b7c8238b3664132f993342644af98166e100e2e94de03464fa2e0afabaced1f`
-- Fingerprinted repository paths: `201`
+- State input fingerprint: `sha256:cadc442ff08ccda776a05d9976a65886443f8039f31152100f7483f8d84c16a6`
+- Fingerprinted repository paths: `221`
 
 ## Authority and ownership
 
@@ -88,10 +88,10 @@ No DMM source, corpus, remote API, or database workload is contacted by this upd
 | TorBox physical fulfillment | implemented by `torbox-importer` | required TorBox/importer paths in root Compose | unknown |
 | Sonarr physical import | implemented/configured surface | required `SONARR_URL` and `SONARR_API_KEY` | unknown |
 | Radarr physical import | implemented/configured surface | required `RADARR_URL` and `RADARR_API_KEY` | unknown |
-| Direct Real-Debrid provider adapter | not detected | discovery key is not a direct adapter | not recorded |
+| Direct Real-Debrid provider adapter | implementation module detected | discovery key is not a direct adapter | not recorded |
 | Zurg / rclone / provider WebDAV / Plex | not detected in root Compose | none detected | not recorded |
 
-- Direct provider adapter modules found: `capabilities.js`, `errors.js`, `observations.js`, `torbox.js`.
+- Direct provider adapter modules found: `capabilities.js`, `errors.js`, `filesystem-exposure.js`, `observations.js`, `realdebrid.js`, `resources.js`, `torbox-inventory.js`, `torbox.js`, `zurg-metadata.js`.
 - Runtime configuration values are never read or emitted by this updater.
 
 ## Canonical document locations

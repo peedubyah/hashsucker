@@ -19,7 +19,7 @@
 
 ### Incomplete provider observation integration
 
-The provider-neutral contract, typed errors, explicit scope/authority/freshness model, append-only history/current projection, and TorBox cache capability now exist. Only fresh authoritative observations can affect the legacy ranking component. The active combined server path does not yet use the capability adapter, Real-Debrid has no direct adapter, public DTOs are not fully migrated, and runtime TTL/rate-limit policy still requires provider validation.
+The provider-neutral contract, typed errors, explicit scope/authority/freshness model, append-only history/current projection, TorBox cache/account-inventory capabilities, and an injected Real-Debrid placement/readiness/inventory boundary now exist. Only fresh authoritative observations can affect the legacy ranking component. The active combined server path does not yet use these capability adapters, Real-Debrid has no fixture-verified direct HTTP gateway, public DTOs are not fully migrated, and runtime TTL/rate-limit policy still requires provider validation.
 
 ### Weak identity/enrichment correction
 
@@ -37,10 +37,9 @@ A no-request legacy movie path may choose `delete-legacy`. Default cleanup shoul
 
 These are absent, not partially implemented:
 
-- Direct Real-Debrid cache/placement/file adapter.
+- Fixture-verified direct Real-Debrid cache/placement/file HTTP gateway and active-path wiring.
 - Validated TorBox native WebDAV contract.
-- Zurg/provider WebDAV/rclone deployment and health inventory.
-- Provider-neutral capability contract.
+- Pinned Zurg/provider WebDAV/rclone deployment, health inventory, and controlled repair/restart experiment. Static evidence and read-only observation seams are documented in [`evaluation/ZURG-REPAIR-EVIDENCE-2026-08-22.md`](evaluation/ZURG-REPAIR-EVIDENCE-2026-08-22.md).
 - Provider-authoritative file mapping persisted end to end.
 - Canonical library item/path/binding model and binding history.
 - Shadow/active reconciler for provider, mount, projection, and catalog state.

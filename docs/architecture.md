@@ -39,7 +39,8 @@ flowchart LR
 
 - **`media-search`** owns metadata lookup, discovery storage, local retrieval/ranking, live-source normalization, request publication, operator-triggered ingestion/attribute work, and same-origin static UI serving in production.
 - **Discovery SQLite** separates exact candidates, parsed release evidence, media associations, append-only provider observation history/current projection, and FTS data. Root deployment persists it at `/data/discovery-cache.db` on the `discovery-data` volume.
-- **Provider capability foundation** exposes cache observation, placement lookup/create, readiness, file inventory, exposure, and removal as independent optional capabilities with typed errors. TorBox currently implements only the authoritative cache-observation capability; this does not imply placement or WebDAV support.
+- **Provider capability foundation** exposes cache observation, placement lookup/create, readiness, file inventory, exposure, and removal as independent optional capabilities with typed errors. TorBox currently implements authoritative cache observation plus a fixture-verified account inventory boundary; Real-Debrid has an injected placement/readiness/inventory boundary but no fabricated direct HTTP implementation.
+- **Read-only transport observation foundations** include exact filesystem-path observers for externally managed Zurg/rclone and TorBox WebDAV/rclone mounts. A separate explicit-path Zurg `.zurgtorrent` observer exposes sanitized torrent/file repair metadata without claiming Real-Debrid placement authority or mount visibility. Neither observer is wired to a live deployment.
 - **`ui`** is a React/Vite prototype built into the production `media-search` image; Vite remains separate for local development.
 - **`torbox-importer`** starts its worker by default and owns physical TorBox acquisition, staging, provider/hash reconciliation, file selection, Arr validation/import, settlement, and conservative cleanup.
 - **Filesystem queue** is the authority for physical-acquisition ownership and terminal movement.
@@ -59,7 +60,8 @@ flowchart LR
 - SQL limits local candidates before composite ranking.
 - Only local candidates receive the six-component score; there is no global rerank after merging.
 - Provider observations now carry scope, authority kind, TTL/freshness, source, typed error/retry metadata, append-only history, and a current projection. Only fresh authoritative observations can affect the legacy provider ranking component; the active API path does not yet expose the full model consistently.
-- The legacy active search path still calls the direct TorBox checker instead of the new capability adapter; no direct Real-Debrid adapter exists.
+- The legacy active search path still calls the direct TorBox checker instead of the new capability adapter; no fixture-verified direct Real-Debrid HTTP gateway exists.
+- Zurg static evidence confirms mutable repair resource IDs, durable `.zurgtorrent` state, restart cleanup, and rename side effects, but no pinned live Zurg/rclone deployment or controlled provider experiment exists. See [`evaluation/ZURG-REPAIR-EVIDENCE-2026-08-22.md`](evaluation/ZURG-REPAIR-EVIDENCE-2026-08-22.md).
 - DMM source compatibility exists in an unwired module, not in the API-reachable ingestion runner.
 - No current component models virtual placement through playable catalog state.
 

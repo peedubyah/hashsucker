@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto';
 import { lstat as defaultLstat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { PROVIDER_CAPABILITIES, createProviderAdapter } from './capabilities.js';
-import { classifyProviderError } from './errors.js';
+import { classifyProviderError, ProviderOperationError } from './errors.js';
 import { createExposureObservation } from './resources.js';
 
 const DEFAULT_EXPOSURE_TTL_MS = 30_000;
@@ -15,6 +16,7 @@ export function createFilesystemExposureProvider(options = {}) {
   const {
     provider,
     accountScope = 'default',
+    mountScope = 'default',
     rootPath,
     transport,
     readOnly = false,
@@ -22,6 +24,10 @@ export function createFilesystemExposureProvider(options = {}) {
     now = () => Date.now(),
     exposureTtlMs = DEFAULT_EXPOSURE_TTL_MS,
   } = options;
+  const normalizedProvider = requireIdentifier(provider, 'provider');
+  const normalizedAccountScope = requireIdentifier(accountScope, 'accountScope');
+  const normalizedMountScope = requireIdentifier(mountScope, 'mountScope');
+  const normalizedTransport = requireIdentifier(transport, 'transport');
   const root = requireAbsolutePath(rootPath, 'rootPath');
   if (readOnly !== true) throw new TypeError('Filesystem exposure provider requires an explicitly read-only transport');
   if (!Number.isSafeInteger(exposureTtlMs) || exposureTtlMs < 0) {
@@ -29,8 +35,8 @@ export function createFilesystemExposureProvider(options = {}) {
   }
 
   return createProviderAdapter({
-    provider,
-    accountScope,
+    provider: normalizedProvider,
+    accountScope: normalizedAccountScope,
     capabilities: {
       [PROVIDER_CAPABILITIES.EXPOSURE]: {
         async observeExposure(file, context = {}) {
@@ -47,7 +53,7 @@ export function createFilesystemExposureProvider(options = {}) {
           let evidence = null;
           try {
             const stat = await lstatFn(absolutePath, { signal: context.signal });
-            state = stat.isFile() || stat.isSymbolicLink() ? 'visible' : 'missing';
+            state = stat.isFile() ? 'visible' : 'missing';
             evidence = {
               kind: stat.isSymbolicLink() ? 'symbolic-link' : stat.isFile() ? 'file' : 'other',
               size: Number.isSafeInteger(stat.size) ? stat.size : null,
@@ -56,8 +62,8 @@ export function createFilesystemExposureProvider(options = {}) {
             if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') {
               state = 'missing';
             } else {
-              const providerError = classifyProviderError(error, {
-                provider, operation: 'observe-exposure',
+              const providerError = classifyFilesystemError(error, {
+                provider: normalizedProvider, operation: 'observe-exposure',
               });
               state = 'error';
               failureCategory = providerError.category;
@@ -66,12 +72,18 @@ export function createFilesystemExposureProvider(options = {}) {
           }
 
           return createExposureObservation({
-            provider,
-            accountScope,
+            provider: normalizedProvider,
+            accountScope: normalizedAccountScope,
             providerResourceId,
             providerFileId,
-            transport,
-            exposureKey: `${transport}:${providerResourceId}:${providerFileId}`,
+            transport: normalizedTransport,
+            exposureKey: createPathExposureKey({
+              provider: normalizedProvider,
+              accountScope: normalizedAccountScope,
+              mountScope: normalizedMountScope,
+              transport: normalizedTransport,
+              relativePath,
+            }),
             relativePath,
             state,
             readOnly: true,
@@ -87,7 +99,14 @@ export function createFilesystemExposureProvider(options = {}) {
   });
 }
 
-/** Real-Debrid exposure seam for an externally managed Zurg/rclone mount. */
+/**
+ * Real-Debrid file exposure seam for an externally managed Zurg/rclone mount.
+ *
+ * Zurg repair can persist a working link in `.zurgtorrent` metadata while
+ * deleting the temporary Real-Debrid resource, so `providerResourceId` is only
+ * placement context. Exact visibility remains the explicit mapped mount path;
+ * metadata/lifecycle evidence belongs in the separate Zurg metadata observer.
+ */
 export function createZurgExposureProvider(options = {}) {
   return createFilesystemExposureProvider({
     ...options,
@@ -129,4 +148,37 @@ function requireString(value, field) {
     throw new TypeError(`${field} must be a non-empty string`);
   }
   return value.trim();
+}
+
+function requireIdentifier(value, field) {
+  if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value.trim())) {
+    throw new TypeError(`${field} must be a non-empty provider-safe identifier`);
+  }
+  return value.trim().toLowerCase();
+}
+
+function createPathExposureKey(scope) {
+  const tuple = JSON.stringify([
+    scope.provider,
+    scope.accountScope,
+    scope.mountScope,
+    scope.transport,
+    scope.relativePath,
+  ]);
+  return `path-sha256:${createHash('sha256').update(tuple).digest('hex')}`;
+}
+
+function classifyFilesystemError(error, context) {
+  const code = String(error?.code || '').toUpperCase();
+  if (code === 'EACCES' || code === 'EPERM') {
+    return new ProviderOperationError(error?.message || 'Filesystem access denied', {
+      ...context, category: 'authorization', retryable: false, cause: error,
+    });
+  }
+  if (['EIO', 'ESTALE', 'ENOTCONN', 'EHOSTUNREACH'].includes(code)) {
+    return new ProviderOperationError(error?.message || 'Filesystem transport unavailable', {
+      ...context, category: 'temporarily-unavailable', retryable: true, cause: error,
+    });
+  }
+  return classifyProviderError(error, context);
 }
