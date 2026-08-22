@@ -219,6 +219,75 @@ test('repeated binding activation is idempotent and does not create versions', (
   store.close();
 });
 
+test('inventory refresh preserves mapped history and marks disappeared files absent', () => {
+  const store = createControlPlaneStore();
+  const item = store.ensureLibraryItem(movie());
+  const identity = createReleaseIdentity(HASH, 0);
+  const data = setupBindable(store, item, identity, { providerFileId: 'mapped-file' });
+
+  store.replaceProviderFileInventory(data.placement.id, [{
+    providerFileId: 'replacement-file', path: '/new.mkv', name: 'new.mkv',
+    corpusFileIndex: 1,
+  }], { observedAt: 2_000, expiresAt: 3_000 });
+
+  assert.deepEqual(store.listProviderFiles(data.placement.id).map((file) => file.providerFileId), [
+    'replacement-file',
+  ]);
+  const history = store.listProviderFiles(data.placement.id, { includeMissing: true });
+  const missing = history.find((file) => file.providerFileId === 'mapped-file');
+  assert.equal(missing.present, false);
+  assert.equal(missing.missingSince, 2_000);
+  assert.equal(store.listBindings(item.id).length, 0);
+  store.close();
+});
+
+test('writable exposure cannot be bound even if visible', () => {
+  const store = createControlPlaneStore();
+  const item = store.ensureLibraryItem(movie());
+  const path = store.ensureCanonicalPath(item.id);
+  const placement = store.recordPlacement({
+    provider: 'realdebrid', accountScope: 'primary', infoHash: HASH,
+    providerResourceId: 'rd-writable', state: 'ready', ownership: 'external',
+    provenance: 'test',
+  });
+  store.replaceProviderFileInventory(placement.id, [{
+    providerFileId: 'file-1', path: '/movie.mkv', name: 'movie.mkv', corpusFileIndex: 0,
+  }]);
+  const exposure = store.recordExposure({
+    placementId: placement.id, providerFileId: 'file-1', transport: 'test-mount',
+    exposureKey: 'writable:file-1', state: 'visible', readOnly: false,
+  });
+  assert.throws(() => store.activateBinding({
+    libraryItemId: item.id, libraryPathId: path.id,
+    ...createReleaseIdentity(HASH, 0), placementId: placement.id,
+    providerFileId: 'file-1', exposureId: exposure.id, reason: 'unsafe',
+  }), /writable exposure/);
+  store.close();
+});
+
+test('reconciliation snapshot is account-scoped evidence with exact file indices', () => {
+  const store = createControlPlaneStore();
+  const item = store.ensureLibraryItem(movie());
+  store.ensureCanonicalPath(item.id);
+  const identity = createReleaseIdentity(HASH, 0);
+  const data = setupBindable(store, item, identity, { providerFileId: 'file-900' });
+  store.replaceProviderFileInventory(data.placement.id, [{
+    providerFileId: 'file-900', path: '/movie.mkv', name: 'movie.mkv',
+    corpusFileIndex: 0,
+  }], { observedAt: 10_000, expiresAt: 20_000 });
+  const snapshot = store.getReconciliationSnapshot(item.id, identity);
+
+  assert.equal(snapshot.desired.libraryItemId, item.id);
+  assert.equal(snapshot.desired.releaseKey, identity.releaseKey);
+  assert.equal(snapshot.placements[0].accountScope, 'primary');
+  assert.equal(snapshot.placements[0].dependentBindingCount, 0);
+  assert.equal(snapshot.providerFiles[0].corpusFileIndex, 0);
+  assert.equal(snapshot.mappings[0].providerFileId, 'file-900');
+  assert.equal(snapshot.exposures[0].readOnly, true);
+  assert.equal(snapshot.currentBinding, null);
+  store.close();
+});
+
 test('lifecycle milestones are orthogonal and binding does not imply catalog or playback', () => {
   const store = createControlPlaneStore();
   const item = store.ensureLibraryItem(movie());

@@ -76,8 +76,11 @@ CREATE TABLE IF NOT EXISTS provider_files (
   size INTEGER,
   selected INTEGER CHECK (selected IN (0, 1)),
   media_hint TEXT,
+  corpus_file_index INTEGER,
+  present INTEGER NOT NULL DEFAULT 1 CHECK (present IN (0, 1)),
   inventory_observed_at INTEGER NOT NULL,
   inventory_expires_at INTEGER,
+  missing_since INTEGER,
   evidence TEXT,
   UNIQUE (placement_id, provider_file_id),
   FOREIGN KEY (placement_id) REFERENCES provider_placements(id)
@@ -277,33 +280,65 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     const observedAt = options.observedAt ?? now();
     const seen = new Set();
     return transaction(() => {
-      db.prepare('DELETE FROM provider_files WHERE placement_id = ?').run(placementId);
-      const insert = db.prepare(`
+      const upsert = db.prepare(`
         INSERT INTO provider_files (
           id, placement_id, provider_file_id, path, name, size, selected, media_hint,
-          inventory_observed_at, inventory_expires_at, evidence
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          corpus_file_index, present, inventory_observed_at, inventory_expires_at,
+          missing_since, evidence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)
+        ON CONFLICT(placement_id, provider_file_id) DO UPDATE SET
+          path = EXCLUDED.path,
+          name = EXCLUDED.name,
+          size = EXCLUDED.size,
+          selected = EXCLUDED.selected,
+          media_hint = EXCLUDED.media_hint,
+          corpus_file_index = EXCLUDED.corpus_file_index,
+          present = 1,
+          inventory_observed_at = EXCLUDED.inventory_observed_at,
+          inventory_expires_at = EXCLUDED.inventory_expires_at,
+          missing_since = NULL,
+          evidence = EXCLUDED.evidence
       `);
       for (const file of files) {
         const providerFileId = requireString(file.providerFileId, 'providerFileId');
         if (seen.has(providerFileId)) throw new TypeError(`Duplicate providerFileId: ${providerFileId}`);
         seen.add(providerFileId);
-        insert.run(
+        upsert.run(
           `pf_${randomUUID()}`, placementId, providerFileId,
           requireString(file.path, 'path', 2000), requireString(file.name, 'name', 1000),
           file.size ?? null, booleanOrNull(file.selected), file.mediaHint ?? null,
-          observedAt, options.expiresAt ?? null,
+          normalizeOptionalFileIndex(file.corpusFileIndex), observedAt,
+          options.expiresAt ?? null,
           file.evidence == null ? null : JSON.stringify(file.evidence),
         );
+      }
+      if (seen.size === 0) {
+        db.prepare(`
+          UPDATE provider_files
+          SET present = 0, inventory_observed_at = ?, inventory_expires_at = ?,
+              missing_since = COALESCE(missing_since, ?)
+          WHERE placement_id = ? AND present = 1
+        `).run(observedAt, options.expiresAt ?? null, observedAt, placementId);
+      } else {
+        const placeholders = [...seen].map(() => '?').join(', ');
+        db.prepare(`
+          UPDATE provider_files
+          SET present = 0, inventory_observed_at = ?, inventory_expires_at = ?,
+              missing_since = COALESCE(missing_since, ?)
+          WHERE placement_id = ? AND present = 1
+            AND provider_file_id NOT IN (${placeholders})
+        `).run(observedAt, options.expiresAt ?? null, observedAt, placementId, ...seen);
       }
       return listProviderFiles(placementId);
     });
   }
 
-  function listProviderFiles(placementId) {
-    return db.prepare(
-      'SELECT * FROM provider_files WHERE placement_id = ? ORDER BY path, provider_file_id',
-    ).all(placementId).map(rowToProviderFile);
+  function listProviderFiles(placementId, { includeMissing = false } = {}) {
+    return db.prepare(`
+      SELECT * FROM provider_files
+      WHERE placement_id = ?${includeMissing ? '' : ' AND present = 1'}
+      ORDER BY path, provider_file_id
+    `).all(placementId).map(rowToProviderFile);
   }
 
   function recordFileMapping(input) {
@@ -376,6 +411,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     `).get(input.exposureId, input.placementId, file.providerFileId);
     if (!exposure) throw new Error('Exposure does not identify the mapped provider file');
     if (exposure.state !== 'visible') throw new Error('Cannot bind a provider file without visible exposure');
+    if (exposure.read_only !== 1) throw new Error('Cannot bind a provider file through writable exposure');
 
     return transaction(() => {
       const active = db.prepare(
@@ -420,6 +456,51 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     return db.prepare(
       'SELECT * FROM bindings WHERE library_item_id = ? ORDER BY version',
     ).all(libraryItemId).map(rowToBinding);
+  }
+
+  function getReconciliationSnapshot(libraryItemId, identityInput) {
+    const item = requireLibraryItem(libraryItemId);
+    const identity = validateReleaseIdentity(identityInput);
+    const placements = db.prepare(`
+      SELECT p.*, COUNT(b.id) AS dependent_binding_count
+      FROM provider_placements p
+      LEFT JOIN bindings b
+        ON b.placement_id = p.id AND b.status = 'active'
+      WHERE p.info_hash = ?
+      GROUP BY p.id
+      ORDER BY p.provider, p.account_scope, p.id
+    `).all(identity.infoHash).map((row) => ({
+      ...rowToPlacement(row),
+      dependentBindingCount: Number(row.dependent_binding_count),
+    }));
+    const placementIds = placements.map((placement) => placement.id);
+    const providerFiles = queryRowsForIds(
+      db, 'SELECT * FROM provider_files WHERE present = 1 AND placement_id', placementIds,
+    ).map(rowToProviderFile);
+    const mappings = queryRowsForIds(
+      db, 'SELECT * FROM candidate_file_mappings WHERE placement_id', placementIds,
+    ).filter((row) => row.release_key === identity.releaseKey).map(rowToFileMapping);
+    const exposures = queryRowsForIds(
+      db, 'SELECT * FROM exposures WHERE placement_id', placementIds,
+    ).map(rowToExposure);
+    const activeBindingRow = db.prepare(
+      "SELECT * FROM bindings WHERE library_item_id = ? AND status = 'active'",
+    ).get(item.id);
+    return {
+      desired: {
+        libraryItemId: item.id,
+        libraryPathId: db.prepare(
+          'SELECT id FROM library_paths WHERE library_item_id = ? AND active = 1',
+        ).get(item.id)?.id ?? null,
+        desiredState: item.desiredState,
+        ...identity,
+      },
+      placements,
+      providerFiles,
+      mappings,
+      exposures,
+      currentBinding: activeBindingRow ? rowToBinding(activeBindingRow) : null,
+    };
   }
 
   function appendLifecycleEvent(input) {
@@ -476,6 +557,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     recordExposure,
     activateBinding,
     listBindings,
+    getReconciliationSnapshot,
     appendLifecycleEvent,
     getLifecycle,
     close() { db.close(); },
@@ -513,8 +595,9 @@ function rowToProviderFile(row) {
   return {
     id: row.id, placementId: row.placement_id, providerFileId: row.provider_file_id,
     path: row.path, name: row.name, size: row.size, selected: fromSqlBoolean(row.selected),
-    mediaHint: row.media_hint, inventoryObservedAt: row.inventory_observed_at,
-    inventoryExpiresAt: row.inventory_expires_at,
+    mediaHint: row.media_hint, corpusFileIndex: row.corpus_file_index,
+    present: row.present === 1, inventoryObservedAt: row.inventory_observed_at,
+    inventoryExpiresAt: row.inventory_expires_at, missingSince: row.missing_since,
     evidence: row.evidence ? JSON.parse(row.evidence) : null,
   };
 }
@@ -555,6 +638,18 @@ function rowToLifecycleEvent(row) {
     evidence: row.evidence ? JSON.parse(row.evidence) : null,
     correlationId: row.correlation_id,
   };
+}
+function queryRowsForIds(db, prefix, ids) {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(', ');
+  return db.prepare(`${prefix} IN (${placeholders})`).all(...ids);
+}
+function normalizeOptionalFileIndex(value) {
+  if (value == null) return null;
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError('corpusFileIndex must be null or a non-negative safe integer');
+  }
+  return value;
 }
 function normalizeIdentifier(value) {
   if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value.trim())) {

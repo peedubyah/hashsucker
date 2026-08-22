@@ -15,6 +15,11 @@ import {
   evaluateObservationFreshness,
   toLegacyCachedState,
 } from '../src/lib/providers/observations.js';
+import {
+  createExposureObservation,
+  createPlacementObservation,
+  createProviderFileInventory,
+} from '../src/lib/providers/resources.js';
 
 const HASH = 'abcdef0123456789abcdef0123456789abcdef01';
 
@@ -188,4 +193,55 @@ test('provider errors carry retry and rate-limit metadata without provider-speci
   });
   assert.equal(auth.category, 'authentication');
   assert.equal(auth.retryable, false);
+});
+
+test('resource observations keep placement, file inventory, and exposure authority separate', () => {
+  const placement = createPlacementObservation({
+    provider: 'TorBox', accountScope: 'Primary', infoHash: HASH,
+    providerResourceId: 'torrent-7', state: 'ready', ownership: 'external',
+    provenance: 'fixture:mylist-v1', observedAt: 10_000, ttlMs: 2_000,
+  });
+  const inventory = createProviderFileInventory({
+    provider: 'torbox', accountScope: 'primary', providerResourceId: 'torrent-7',
+    authoritative: true, complete: true, observedAt: 10_000, expiresAt: 12_000,
+    files: [{
+      providerFileId: 'file-900', path: '/Release/movie.mkv', name: 'movie.mkv',
+      size: 1_000, selected: true, corpusFileIndex: 0,
+    }],
+  });
+  const exposure = createExposureObservation({
+    provider: 'torbox', accountScope: 'primary', providerResourceId: 'torrent-7',
+    providerFileId: 'file-900', transport: 'torbox-webdav-rclone',
+    exposureKey: 'torrent-7:file-900', relativePath: '/Release/movie.mkv',
+    state: 'visible', readOnly: true, observedAt: 10_000, ttlMs: 500,
+  });
+
+  assert.equal(placement.infoHash, HASH);
+  assert.equal(placement.fileIndex, null);
+  assert.equal(inventory.files[0].corpusFileIndex, 0);
+  assert.equal(inventory.files[0].providerFileId, 'file-900');
+  assert.equal(exposure.readOnly, true);
+  assert.equal(Object.hasOwn(placement, 'files'), false);
+  assert.equal(Object.hasOwn(inventory, 'state'), false);
+  assert.equal(Object.hasOwn(exposure, 'ownership'), false);
+});
+
+test('resource observations reject unsafe ownership and ambiguous inventory evidence', () => {
+  assert.throws(() => createPlacementObservation({
+    provider: 'torbox', infoHash: HASH, providerResourceId: 'torrent-7',
+    state: 'ready', ownership: 'owned', provenance: 'fixture', observedAt: 10_000,
+  }), /requires ownerKey/);
+
+  assert.throws(() => createProviderFileInventory({
+    provider: 'torbox', providerResourceId: 'torrent-7', observedAt: 10_000,
+    files: [
+      { providerFileId: 'same', path: '/a', name: 'a' },
+      { providerFileId: 'same', path: '/b', name: 'b' },
+    ],
+  }), /Duplicate providerFileId/);
+
+  assert.throws(() => createProviderFileInventory({
+    provider: 'torbox', providerResourceId: 'torrent-7', observedAt: 10_000,
+    files: [{ providerFileId: 'file', path: '/a', name: 'a', corpusFileIndex: 1.5 }],
+  }), /corpusFileIndex/);
 });
