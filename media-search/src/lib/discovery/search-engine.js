@@ -18,6 +18,7 @@
 import { createReleaseIdentity, createReleaseKey } from '../../api/release-contract.js';
 import { rankHits } from './ranking.js';
 import { isEpisodeCovered } from './episode-coverage.js';
+import { evaluateEligibility, RejectionReason } from './rejection.js';
 import {
   toCanonicalLocal,
   toCanonicalLive,
@@ -574,6 +575,9 @@ export async function combinedSearch(cache, options = {}) {
   // Apply Stage 2 episode-coverage eligibility gate for LOCAL candidates.
   // Live candidates are already scoped by selected-media/live-discovery intent
   // and must NOT be rejected merely for lacking a persisted candidate_media row.
+  //
+  // Produce typed rejection reasons for diagnostics (not part of public results).
+  const rejections = [];
   let eligibleCandidates = deduped;
   if (queryIntent.season != null && queryIntent.episode != null) {
     eligibleCandidates = deduped.filter(candidate => {
@@ -581,7 +585,21 @@ export async function combinedSearch(cache, options = {}) {
       // Requires candidate_media association (enforced by INNER JOIN in
       // searchReleases) AND episode coverage.
       if (candidate.sources.some(s => s.origin === 'corpus')) {
-        return isEpisodeCovered(candidate.releaseAttributes, queryIntent.season, queryIntent.episode);
+        const evaluation = evaluateEligibility(
+          candidate,
+          queryIntent.season,
+          queryIntent.episode
+        );
+        if (!evaluation.eligible) {
+          rejections.push({
+            hash: candidate.hash,
+            fileIndex: candidate.fileIndex,
+            releaseKey: candidate.releaseKey,
+            reason: evaluation.reason,
+            description: evaluation.description,
+          });
+        }
+        return evaluation.eligible;
       }
       // Live: already scoped by selected-media/live-discovery intent.
       // The liveDiscoveryFn was called with mediaId, so these candidates
@@ -608,6 +626,12 @@ export async function combinedSearch(cache, options = {}) {
     total,
     query: corpusResult.query,
     stats: getSearchStats(cache),
+    // Debug/internal: typed rejection reasons for candidates that failed
+    // hard eligibility. Not part of the normal public result list.
+    // Only populated when explicit S/E intent produced rejections.
+    debug: {
+      rejections,
+    },
   };
 }
 

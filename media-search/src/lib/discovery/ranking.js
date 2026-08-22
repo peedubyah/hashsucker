@@ -328,6 +328,161 @@ export function rankHits(hits, queryIntent = {}, mediaId = null) {
 }
 
 /**
+ * Explain a ranked result.
+ *
+ * Derives a deterministic explanation from the SAME component values that
+ * rankHit() used. Does NOT duplicate ranking calculations — it reads the
+ * components already computed by rankHit().
+ *
+ * Provider hints (non-authoritative) are never described as confirmed
+ * provider availability. Only authoritative providerObservations contribute
+ * to the providerAvailability component.
+ *
+ * @param {Object} ranked - Output of rankHit()
+ * @param {number} ranked.score - Composite score
+ * @param {Object} ranked.components - Component scores (relevance, quality, releaseConfidence, identityConfidence, providerAvailability, episodeMatch)
+ * @param {string} ranked.hash - InfoHash
+ * @param {number|null} ranked.fileIndex - File index
+ * @param {string} ranked.filename - Release filename
+ * @param {Object} [ranked.releaseAttributes] - Parsed release attributes
+ * @param {Array<Object>} [ranked.mediaAssociations] - Media associations
+ * @param {Array<Object>} [ranked.providerObservations] - Provider observations
+ * @param {Array<Object>} [ranked.sources] - Provenance sources
+ * @param {string|null} [ranked.selectedMediaId] - Selected media intent provenance
+ * @returns {Object} Deterministic explanation
+ */
+export function explainRank(ranked) {
+  const components = ranked.components || {};
+  const weights = WEIGHTS;
+
+  // Weighted contributions (what actually determined the score)
+  const contributions = {
+    relevance: components.relevance * weights.relevance,
+    quality: components.quality * weights.quality,
+    releaseConfidence: components.releaseConfidence * weights.releaseConfidence,
+    identityConfidence: components.identityConfidence * weights.identityConfidence,
+    providerAvailability: components.providerAvailability * weights.providerAvailability,
+    episodeMatch: components.episodeMatch * weights.episodeMatch,
+  };
+
+  // Build deterministic human-readable reasons
+  const reasons = [];
+
+  // Relevance
+  if (components.relevance >= 0.8) {
+    reasons.push('strong title match');
+  } else if (components.relevance >= 0.5) {
+    reasons.push('moderate title match');
+  } else if (components.relevance > 0) {
+    reasons.push('weak title match');
+  }
+
+  // Quality
+  if (components.quality >= 0.9) {
+    reasons.push('excellent quality (2160p/UHD)');
+  } else if (components.quality >= 0.7) {
+    reasons.push('good quality (1080p)');
+  } else if (components.quality >= 0.4) {
+    reasons.push('acceptable quality (720p)');
+  } else if (components.quality > 0) {
+    reasons.push('low quality');
+  }
+
+  // Release confidence (parser evidence)
+  if (components.releaseConfidence >= 0.8) {
+    reasons.push('high parser confidence');
+  } else if (components.releaseConfidence >= 0.5) {
+    reasons.push('moderate parser confidence');
+  } else if (components.releaseConfidence > 0) {
+    reasons.push('low parser confidence');
+  }
+
+  // Identity confidence
+  if (components.identityConfidence >= 0.8) {
+    reasons.push('strong identity match');
+  } else if (components.identityConfidence >= 0.5) {
+    reasons.push('moderate identity match');
+  } else if (components.identityConfidence > 0) {
+    reasons.push('weak identity match');
+  }
+
+  // Provider availability (authoritative observations only)
+  const hasAuthoritativeProviders = (ranked.providerObservations || []).length > 0;
+  if (hasAuthoritativeProviders) {
+    if (components.providerAvailability >= 0.8) {
+      reasons.push('confirmed provider availability');
+    } else if (components.providerAvailability >= 0.5) {
+      reasons.push('partial provider availability');
+    } else if (components.providerAvailability > 0) {
+      reasons.push('limited provider availability');
+    } else {
+      reasons.push('no provider availability');
+    }
+  }
+  // Provider hints (non-authoritative) are intentionally NOT mentioned
+  // as confirmed availability — they remain evidence only.
+
+  // Episode match
+  if (components.episodeMatch >= 0.9) {
+    reasons.push('exact episode match');
+  } else if (components.episodeMatch >= 0.7) {
+    reasons.push('episode in range');
+  } else if (components.episodeMatch >= 0.5) {
+    reasons.push('season pack match');
+  }
+
+  // Deterministic summary: top contributing factors
+  const sortedContributions = Object.entries(contributions)
+    .sort(([, a], [, b]) => b - a);
+  const topFactors = sortedContributions
+    .filter(([, v]) => v > 0)
+    .slice(0, 3)
+    .map(([k]) => k);
+
+  return {
+    score: ranked.score,
+    components: { ...components },
+    contributions,
+    reasons,
+    summary: topFactors.length > 0
+      ? `Top factors: ${topFactors.join(', ')}`
+      : 'No significant ranking factors',
+  };
+}
+
+/**
+ * Compare two ranked results to explain why one outranks the other.
+ *
+ * Pure function — no mutation. Takes the outputs of rankHit()/explainRank()
+ * and produces a deterministic comparison.
+ *
+ * @param {Object} a - First ranked result (or its explanation)
+ * @param {Object} b - Second ranked result (or its explanation)
+ * @returns {Object} Comparison result
+ */
+export function compareRanked(a, b) {
+  if (!a || !b) return null;
+  const aComponents = a.components || {};
+  const bComponents = b.components || {};
+  const weights = WEIGHTS;
+  const diffs = {};
+  for (const key of Object.keys(weights)) {
+    const aWeighted = (aComponents[key] || 0) * weights[key];
+    const bWeighted = (bComponents[key] || 0) * weights[key];
+    diffs[key] = Math.round((aWeighted - bWeighted) * 1000) / 1000;
+  }
+  const aScore = a.score ?? aComponents.score ?? 0;
+  const bScore = b.score ?? bComponents.score ?? 0;
+  const winner = aScore > bScore ? 'a' : (aScore < bScore ? 'b' : 'tie');
+  return {
+    winner,
+    scoreDiff: Math.round((aScore - bScore) * 1000) / 1000,
+    componentDiffs: diffs,
+    primaryReason: winner === 'tie' ? 'identical scores' : `Higher ${Object.entries(diffs).sort(([, x], [, y]) => y - x)[0]?.[0] || 'score'}`,
+  };
+}
+
+/**
  * Get the default weights (for inspection/tuning).
  *
  * @returns {Object} Weight configuration
