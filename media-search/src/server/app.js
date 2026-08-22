@@ -191,7 +191,9 @@ export function createRequestHandler(dependencies = {}) {
             offset: params.get('offset') ? parseInt(params.get('offset'), 10) : 0,
             includeProviders: true,
             includeLive: true,
+            includeMedia: true,
             mode: 'ui',
+            mediaId,
             liveDiscoveryFn: async () => runLiveDiscovery(mediaId, { season: intent.season, episode: intent.episodes[0] }),
           });
           return sendJson(response, 200, {

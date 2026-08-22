@@ -212,6 +212,9 @@ function providerBonus(cache, infoHash, fileIndex) {
  * @param {number} [options.limit] - Max results (default 50)
  * @param {number} [options.offset] - Pagination offset
  * @param {boolean} [options.includeProviders] - Include provider observations
+ * @param {string} [options.mediaId] - Selected media ID for eligibility scoping
+ *   When provided, only candidates with an explicit candidate_media association
+ *   to this mediaId are eligible. Identity confidence is scoped to this association.
  * @returns {{ results: Array, total: number, query: Object }}
  */
 export function searchReleases(cache, options = {}) {
@@ -233,6 +236,7 @@ export function searchReleases(cache, options = {}) {
     offset = 0,
     includeProviders = false,
     includeMedia = false,
+    mediaId = null,
   } = options;
 
   // Parse query
@@ -254,8 +258,19 @@ export function searchReleases(cache, options = {}) {
   // Build the search query
   // FTS5 BM25: lower score = more relevant
   // We invert so higher = better for composite scoring
+  //
+  // When mediaId is provided (selected-media path), we INNER JOIN with
+  // candidate_media to require an explicit association between the exact
+  // candidate (info_hash, file_index_key) and the selected mediaId.
+  // This is the hard eligibility filter: no association → ineligible.
   let sql, countSql;
   const isWildcard = parsed.match === '*';
+
+  // Media-scoped eligibility: require candidate_media association
+  const mediaJoin = mediaId
+    ? 'INNER JOIN candidate_media cm ON cm.info_hash = ra.info_hash AND cm.file_index_key = ra.file_index_key AND cm.media_id = @mediaId'
+    : '';
+  const mediaParam = mediaId ? { mediaId } : {};
 
   if (isWildcard) {
     // For wildcard/empty queries, don't use MATCH (not supported)
@@ -278,6 +293,7 @@ export function searchReleases(cache, options = {}) {
         ra.evidence,
         0 as bm25_score
       FROM release_attributes ra
+      ${mediaJoin}
       WHERE ${where}
       ORDER BY ra.parsed_at DESC
       LIMIT @limit OFFSET @offset
@@ -285,6 +301,7 @@ export function searchReleases(cache, options = {}) {
     countSql = `
       SELECT COUNT(*) as total
       FROM release_attributes ra
+      ${mediaJoin}
       WHERE ${where}
     `;
   } else {
@@ -308,6 +325,7 @@ export function searchReleases(cache, options = {}) {
         bm25(release_search) as bm25_score
       FROM release_search rs
       JOIN release_attributes ra ON ra.rowid = rs.rowid
+      ${mediaJoin}
       WHERE release_search MATCH @match
         AND ${where}
       ORDER BY bm25_score ASC
@@ -317,6 +335,7 @@ export function searchReleases(cache, options = {}) {
       SELECT COUNT(*) as total
       FROM release_search rs
       JOIN release_attributes ra ON ra.rowid = rs.rowid
+      ${mediaJoin}
       WHERE release_search MATCH @match
         AND ${where}
     `;
@@ -325,12 +344,20 @@ export function searchReleases(cache, options = {}) {
   const stmt = cache.db.prepare(sql);
   const countStmt = cache.db.prepare(countSql);
 
-  const queryParams = isWildcard
-    ? { limit, offset, ...params }
-    : { match: parsed.match, limit, offset, ...params };
+  const queryParams = {
+    ...(isWildcard ? {} : { match: parsed.match }),
+    limit,
+    offset,
+    ...params,
+    ...mediaParam,
+  };
 
   const rows = stmt.all(queryParams);
-  const countRow = countStmt.get(isWildcard ? { ...params } : { match: parsed.match, ...params });
+  const countRow = countStmt.get({
+    ...(isWildcard ? {} : { match: parsed.match }),
+    ...params,
+    ...mediaParam,
+  });
   const total = countRow?.total || 0;
 
   // Score and rank results using the pure ranking module
@@ -342,6 +369,11 @@ export function searchReleases(cache, options = {}) {
     const bm25 = row.bm25_score || 0;
     const relevance = 1.0 / (1.0 + Math.abs(bm25));
     const fileIndexForKey = row.file_index_key === -1 ? null : row.file_index_key;
+
+    // When mediaId is set, always fetch media associations for identity
+    // confidence scoping (even if includeMedia output flag is false).
+    // Identity confidence must come only from the selected-media association.
+    const fetchMedia = includeMedia || mediaId != null;
 
     return {
       hash: row.info_hash,
@@ -361,13 +393,14 @@ export function searchReleases(cache, options = {}) {
         releaseGroup: row.release_group,
       },
       parserConfidence: row.confidence || 0.5,
-      mediaAssociations: includeMedia ? cache.getMediaAssociations(row.info_hash, fileIndexForKey) : [],
+      mediaAssociations: fetchMedia ? cache.getMediaAssociations(row.info_hash, fileIndexForKey) : [],
       // Always fetch provider observations for ranking (even if not included in output)
       providerObservations: cache.getProviderObservations(row.info_hash, fileIndexForKey),
     };
   });
 
-  const ranked = rankHits(hits, queryIntent);
+  // Pass mediaId for identity confidence scoping
+  const ranked = rankHits(hits, queryIntent, mediaId);
 
   // Map back to the expected output format
   const results = ranked.map(r => ({

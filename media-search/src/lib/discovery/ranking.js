@@ -106,6 +106,27 @@ export function identityConfidenceScore(mediaAssociations = []) {
 }
 
 /**
+ * Compute identity confidence scoped to a specific media ID.
+ *
+ * For selected-media retrieval, identity confidence must come only from
+ * the association to the selected media. Associations to other media
+ * are never eligible and must not contribute to confidence.
+ *
+ * @param {Array<Object>} mediaAssociations - From candidate_media
+ * @param {string} mediaId - Selected media ID to scope to
+ * @returns {number} 0.0-1.0 (NEUTRAL if no association to this media)
+ */
+export function identityConfidenceForMedia(mediaAssociations = [], mediaId) {
+  if (!mediaId || mediaAssociations.length === 0) return NEUTRAL;
+
+  const forMedia = mediaAssociations.filter(a => a.mediaId === mediaId);
+  if (forMedia.length === 0) return NEUTRAL;
+
+  const maxConfidence = Math.max(...forMedia.map(a => a.confidence || 0));
+  return Math.min(1.0, maxConfidence);
+}
+
+/**
  * Compute provider availability score from observations.
  *
  * Unknown state (no observations) is NEUTRAL, not a penalty.
@@ -164,9 +185,11 @@ export function episodeMatchScore(releaseAttrs = {}, queryIntent = {}) {
  * @param {Array<Object>} [hit.mediaAssociations] - Media associations
  * @param {Array<Object>} [hit.providerObservations] - Provider observations
  * @param {Object} [queryIntent] - Query intent for episode matching
+ * @param {string} [mediaId] - Selected media ID for identity confidence scoping.
+ *   When provided, identity confidence uses only the association to this media.
  * @returns {Object} Ranked result with component scores
  */
-export function rankHit(hit, queryIntent = {}) {
+export function rankHit(hit, queryIntent = {}, mediaId = null) {
   const {
     hash,
     fileIndex = null,
@@ -181,7 +204,11 @@ export function rankHit(hit, queryIntent = {}) {
   // Compute component scores
   const quality = qualityScore(releaseAttributes);
   const releaseConfidence = Math.min(1.0, Math.max(0.0, parserConfidence));
-  const identityConfidence = identityConfidenceScore(mediaAssociations);
+  // When mediaId is provided, scope identity confidence to that association.
+  // This prevents cross-title identity leakage.
+  const identityConfidence = mediaId
+    ? identityConfidenceForMedia(mediaAssociations, mediaId)
+    : identityConfidenceScore(mediaAssociations);
   const providerAvailability = providerAvailabilityScore(providerObservations);
   const episodeMatch = episodeMatchScore(releaseAttributes, queryIntent);
 
@@ -219,10 +246,11 @@ export function rankHit(hit, queryIntent = {}) {
  *
  * @param {Array<Object>} hits - Search hits
  * @param {Object} [queryIntent] - Query intent
+ * @param {string} [mediaId] - Selected media ID for identity confidence scoping
  * @returns {Array<Object>} Ranked results sorted by score descending
  */
-export function rankHits(hits, queryIntent = {}) {
-  const ranked = hits.map(hit => rankHit(hit, queryIntent));
+export function rankHits(hits, queryIntent = {}, mediaId = null) {
+  const ranked = hits.map(hit => rankHit(hit, queryIntent, mediaId));
   ranked.sort((a, b) => b.score - a.score);
   return ranked;
 }

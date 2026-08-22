@@ -20,10 +20,11 @@ UI/client
 ```mermaid
 flowchart TD
     R["GET /api/search?type=...&mediaId=..."] --> I["Parse explicit intent"]
-    I --> L["Local corpus query\ntext/attributes only"]
+    I --> L["Local corpus query\nFTS/text retrieval"]
     I --> V["Live discovery\nselected media ID"]
-    L --> Q["SQL/FTS limit before ranking"]
-    Q --> S["Six-component local rank"]
+    L --> E["Selected-media eligibility\ncandidate_media join"]
+    E --> Q["Bounded candidate set"]
+    Q --> S["Six-component local rank\nidentity scoped to mediaId"]
     V --> N["Normalize live candidates\nscore = 0"]
     S --> M["Merge corpus first by exact releaseKey"]
     N --> M
@@ -32,11 +33,12 @@ flowchart TD
 
 Current consequences:
 
-- Local retrieval is not filtered by selected `mediaId`; an empty query is a wildcard.
+- Local retrieval is filtered by selected `mediaId` via `candidate_media` join; an empty query returns only candidates explicitly associated with the selected media.
+- Identity confidence is scoped to the selected-media association; associations to other media never contribute.
 - TV local filters require exact season/episode values and exclude many compatible packs/ranges.
-- Identity confidence may use an association for another media item.
 - Only a bounded local set is ranked.
 - Live candidates bypass local ranking and no global rerank occurs.
+- Live candidates are exempt from corpus association requirements (no persisted `candidate_media` row needed).
 - Exact-key merge preserves same-hash file candidates; corpus rows win only exact `releaseKey` collisions.
 - Provider observation age is ignored.
 - Result `total` is the bounded merged count, not a full-corpus total.
