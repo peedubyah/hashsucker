@@ -183,3 +183,37 @@ Exit: A generic intent → execution boundary exists. This slice creates the con
 provider adapters will consume. No provider execution, acquisition mutation, lifecycle
 tracking, polling, fulfillment, or runtime wiring. Future slices will add provider-specific
 execution and lifecycle adapters on top of this boundary.
+
+### Slice 2G — TorBox Execution Adapter Submission Boundary
+
+Implemented the first provider-specific execution adapter consuming the generic Stage 4 execution request contract:
+
+- **TorBox-specific adapter:** `createTorBoxExecutionAdapter()` accepts a generic execution request and provider capability, delegates to existing `createPlacement()` capability. No provider execution logic duplicated.
+- **Ready intent → placement:** A ready execution request with `provider: "torbox"` submits placement via existing TorBox capability.
+- **Magnet resolution:** Adapter requires a `getMagnetForIdentity` resolver — an external data source mapping candidate identities to magnets. The adapter never invents missing acquisition data.
+- **Provider rejection:** Deferred, unavailable, wrong provider, missing identity, or missing account scope requests throw `TypeError`.
+- **Error preservation:** Provider `ProviderOperationError` (authentication, rejection, malformed response, network) propagates unchanged. No conversion to success.
+- **No lifecycle handling:** Result contains only `submitted` status — no download state, progress, files, or completion tracking.
+- **No polling:** Exactly one API call per submission. No status polling or retry loops.
+- **No generic contract mutation:** The execution request is not modified during submission.
+- **Frozen output:** Deeply frozen submission result.
+- **Provider separation:** The adapter is purely TorBox-specific. Future providers (Real-Debrid) implement the same boundary independently.
+
+See: `media-search/src/lib/providers/torbox-execution.js`, `media-search/test/torbox-execution.test.js`.
+
+Exit: A provider-specific TorBox submission adapter exists. The architecture becomes:
+
+```
+Acquisition Intent
+        |
+        v
+Generic Execution Request
+        |
+        v
+TorBox Execution Adapter
+        |
+        v
+TorBox Placement Submission
+```
+
+No lifecycle tracking, polling, completion, exposure, scheduling, or runtime wiring. Future slices will add provider lifecycle observation separately.
