@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { ReleaseResult } from '@/types/api';
 import { ReleaseDetails } from './ReleaseDetails';
 
-const release = {
+const release: ReleaseResult = {
   infoHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   fileIndex: null,
   releaseKey: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:torrent',
@@ -26,10 +26,10 @@ const release = {
   providerObservations: [],
   media: [],
   _source: 'corpus',
-} satisfies ReleaseResult;
+};
 
-describe('ReleaseDetails handling mode', () => {
-  it('renders Download and Stream options', () => {
+describe('ReleaseDetails user mode', () => {
+  it('renders heading', () => {
     render(
       <ReleaseDetails
         release={release}
@@ -40,8 +40,54 @@ describe('ReleaseDetails handling mode', () => {
         requestError={null}
       />
     );
-    expect(screen.getByText('Download')).toBeTruthy();
-    expect(screen.getByText('Stream')).toBeTruthy();
+    expect(screen.getByText('Choose this version')).toBeTruthy();
+  });
+
+  it('renders quality summary with resolution and codec', () => {
+    render(
+      <ReleaseDetails
+        release={release}
+        onClose={() => {}}
+        onSubmit={() => {}}
+        requesting={false}
+        requestResult={null}
+        requestError={null}
+      />
+    );
+    expect(screen.getByText('2160p')).toBeTruthy();
+    expect(screen.getByText('x265')).toBeTruthy();
+    expect(screen.getByText('HDR')).toBeTruthy();
+  });
+
+  it('renders handling mode selection', () => {
+    render(
+      <ReleaseDetails
+        release={release}
+        onClose={() => {}}
+        onSubmit={() => {}}
+        requesting={false}
+        requestResult={null}
+        requestError={null}
+      />
+    );
+    // Radio labels exist
+    expect(screen.getAllByText('Download').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Stream').length).toBeGreaterThan(0);
+    expect(screen.getByText('What would you like to do?')).toBeTruthy();
+  });
+
+  it('does NOT expose system internals in user mode', () => {
+    render(
+      <ReleaseDetails
+        release={release}
+        onClose={() => {}}
+        onSubmit={() => {}}
+        requesting={false}
+        requestResult={null}
+        requestError={null}
+      />
+    );
+    expect(screen.queryByText(/Debug:/)).toBeNull();
   });
 
   it('passes handlingMode "download" by default when submitting', () => {
@@ -56,7 +102,7 @@ describe('ReleaseDetails handling mode', () => {
         requestError={null}
       />
     );
-    fireEvent.click(screen.getByText('Submit request'));
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }));
     expect(submittedMode).toBe('download');
   });
 
@@ -72,12 +118,52 @@ describe('ReleaseDetails handling mode', () => {
         requestError={null}
       />
     );
-    fireEvent.click(screen.getByText('Stream'));
-    fireEvent.click(screen.getByText('Submit request'));
+    // Click the radio label first
+    fireEvent.click(screen.getAllByText('Stream')[0]);
+    // Then click the action button
+    fireEvent.click(screen.getByRole('button', { name: 'Stream' }));
     expect(submittedMode).toBe('stream');
   });
 
-  it('does not expose .strm terminology, provider details, or binding state in user mode', () => {
+  it('shows request result with status', () => {
+    render(
+      <ReleaseDetails
+        release={release}
+        onClose={() => {}}
+        onSubmit={() => {}}
+        requesting={false}
+        requestResult={{
+          requestId: 'test-uuid-1234',
+          status: 'queued',
+          release: {
+            infoHash: release.infoHash,
+            fileIndex: release.fileIndex,
+            releaseKey: release.releaseKey,
+          },
+        }}
+        requestError={null}
+      />
+    );
+    expect(screen.getByText('Added to your library')).toBeTruthy();
+    // Handling options should not be shown after submission
+    expect(screen.queryByText('What would you like to do?')).toBeNull();
+  });
+
+  it('shows request error', () => {
+    render(
+      <ReleaseDetails
+        release={release}
+        onClose={() => {}}
+        onSubmit={() => {}}
+        requesting={false}
+        requestResult={null}
+        requestError="Something went wrong"
+      />
+    );
+    expect(screen.getByText('Something went wrong')).toBeTruthy();
+  });
+
+  it('shows filename in advanced section', () => {
     render(
       <ReleaseDetails
         release={release}
@@ -86,19 +172,30 @@ describe('ReleaseDetails handling mode', () => {
         requesting={false}
         requestResult={null}
         requestError={null}
-        viewMode="user"
       />
     );
-    expect(screen.queryByText(/\.strm/i)).toBeNull();
-    expect(screen.queryByText(/binding/i)).toBeNull();
-    expect(screen.queryByText(/repair/i)).toBeNull();
-    expect(screen.queryByText('Score')).toBeNull();
-    expect(screen.queryByText('Confidence')).toBeNull();
-    expect(screen.queryByText('Release key')).toBeNull();
-    expect(screen.queryByText('Providers')).toBeNull();
+    fireEvent.click(screen.getByText('▸ Show details'));
+    expect(screen.getByText('Test.Release.2160p.mkv')).toBeTruthy();
   });
 
-  it('shows score, confidence, and release key in debug mode', () => {
+  it('shows release group in advanced section', () => {
+    render(
+      <ReleaseDetails
+        release={release}
+        onClose={() => {}}
+        onSubmit={() => {}}
+        requesting={false}
+        requestResult={null}
+        requestError={null}
+      />
+    );
+    fireEvent.click(screen.getByText('▸ Show details'));
+    expect(screen.getByText('TEST')).toBeTruthy();
+  });
+});
+
+describe('ReleaseDetails debug mode', () => {
+  it('exposes system internals in debug mode', () => {
     render(
       <ReleaseDetails
         release={release}
@@ -110,9 +207,9 @@ describe('ReleaseDetails handling mode', () => {
         viewMode="debug"
       />
     );
-    expect(screen.getByText('Score')).toBeTruthy();
-    expect(screen.getByText('Confidence')).toBeTruthy();
-    expect(screen.getByText('Release key')).toBeTruthy();
-    expect(screen.getByText('Providers')).toBeTruthy();
+    expect(screen.getByText('Debug: System Internals')).toBeTruthy();
+    expect(screen.getByText('0.85')).toBeTruthy();
+    expect(screen.getByText('0.92')).toBeTruthy();
+    expect(screen.getByText('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toBeTruthy();
   });
 });

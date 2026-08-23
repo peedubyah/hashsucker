@@ -101,7 +101,7 @@ describe('SearchSuggestions', () => {
         onSelect={() => {}}
       />
     );
-    expect(screen.getByText('No results found')).toBeTruthy();
+    expect(screen.getByText(/No results found/)).toBeTruthy();
   });
 
   it('shows error state when metadata unavailable', () => {

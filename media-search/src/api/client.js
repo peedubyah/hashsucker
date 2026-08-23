@@ -204,3 +204,136 @@ export async function checkHealth() {
   if (!response.ok) throw new Error(`Health check failed: ${response.status}`);
   return response.json();
 }
+
+/**
+ * Operator dashboard — list all requests with optional status filter.
+ * @param {string} [filter='all'] - Filter: 'all' | 'queued' | 'processing' | 'done' | 'failed'
+ * @returns {Promise<OperatorRequestList>}
+ */
+export async function listOperatorRequests(filter = 'all') {
+  const params = new URLSearchParams({ filter });
+  const response = await fetch(`${BASE}/api/operator/requests?${params}`);
+  if (!response.ok) throw new Error(`Operator request list failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Operator dashboard — get request detail with timeline trace.
+ * @param {string} requestId - UUID of the request
+ * @returns {Promise<OperatorRequestDetail>}
+ */
+export async function getOperatorRequest(requestId) {
+  const response = await fetch(`${BASE}/api/operator/requests/${requestId}`);
+  if (!response.ok) throw new Error(`Operator request detail failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Operator dashboard — retry a failed request.
+ * @param {string} requestId - UUID of the request
+ * @returns {Promise<{ requestId: string, status: string, action: string }>}
+ */
+export async function retryOperatorRequest(requestId) {
+  const response = await fetch(`${BASE}/api/operator/requests/${requestId}/retry`, { method: 'POST' });
+  if (!response.ok) throw new Error(`Retry failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Operator dashboard — reset request to queued state.
+ * @param {string} requestId - UUID of the request
+ * @returns {Promise<{ requestId: string, status: string, action: string }>}
+ */
+export async function resetOperatorRequest(requestId) {
+  const response = await fetch(`${BASE}/api/operator/requests/${requestId}/reset`, { method: 'POST' });
+  if (!response.ok) throw new Error(`Reset failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Operator dashboard — delete a request from all queues.
+ * @param {string} requestId - UUID of the request
+ * @returns {Promise<{ requestId: string, action: string }>}
+ */
+export async function deleteOperatorRequest(requestId) {
+  const response = await fetch(`${BASE}/api/operator/requests/${requestId}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error(`Delete failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Operator dashboard — search debug with candidate pipeline info.
+ * @param {string} query - Search query (min 2 chars)
+ * @returns {Promise<OperatorSearchDebug>}
+ */
+export async function operatorSearchDebug(query) {
+  const params = new URLSearchParams({ q: query });
+  const response = await fetch(`${BASE}/api/operator/search-debug?${params}`);
+  if (!response.ok) throw new Error(`Search debug failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Operator dashboard — get recent worker logs.
+ * @param {number} [limit=50] - Max log entries
+ * @returns {Promise<OperatorLogs>}
+ */
+export async function operatorLogs(limit = 50) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const response = await fetch(`${BASE}/api/operator/logs?${params}`);
+  if (!response.ok) throw new Error(`Logs failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Operator dashboard — list available diagnostics.
+ * @returns {Promise<{ available: OperatorDiagnostic[] }>}
+ */
+export async function listOperatorDiagnostics() {
+  const response = await fetch(`${BASE}/api/operator/diagnostics`);
+  if (!response.ok) throw new Error(`Diagnostics list failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Operator dashboard — run a diagnostic.
+ * @param {string} diagId - Diagnostic ID
+ * @returns {Promise<OperatorDiagnosticResult>}
+ */
+export async function runOperatorDiagnostic(diagId) {
+  const response = await fetch(`${BASE}/api/operator/diagnostics/run/${diagId}`, { method: 'POST' });
+  if (!response.ok) throw new Error(`Diagnostic run failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Operator dashboard — system health summary.
+ * @returns {Promise<OperatorHealth>}
+ */
+export async function operatorHealth() {
+  const response = await fetch(`${BASE}/api/operator/health`);
+  return response.json();
+}
+
+/**
+ * Operator dashboard — universal search across requests.
+ * @param {string} query - request ID, infohash, media ID, or title
+ * @returns {Promise<OperatorSearchResult>}
+ */
+export async function operatorUniversalSearch(query) {
+  // Try request ID first
+  if (/^[0-9a-f-]{36}$/i.test(query)) {
+    try {
+      const detail = await getOperatorRequest(query);
+      return { type: 'request', result: detail };
+    } catch { /* not found */ }
+  }
+  // Fall back to listing and searching
+  const all = await listOperatorRequests('all');
+  const matches = all.requests.filter(r =>
+    r.mediaId?.includes(query) ||
+    r.mediaTitle?.toLowerCase().includes(query.toLowerCase()) ||
+    r.releaseTitle?.toLowerCase().includes(query.toLowerCase())
+  );
+  return { type: 'search', matches };
+}

@@ -52,9 +52,30 @@ function parseYear(yearStr) {
 }
 
 /**
+ * Check if a query is an IMDb ID and return the type if so.
+ * @param {string} query
+ * @returns {{ isImdb: boolean, type: 'movie'|'series'|null, id: string|null }}
+ */
+function parseImdbId(query) {
+  const q = String(query || '').trim().toLowerCase();
+  // IMDb IDs start with tt followed by digits
+  const imdbMatch = q.match(/^(tt\d+)$/);
+  if (imdbMatch) {
+    return { isImdb: true, type: null, id: imdbMatch[1] };
+  }
+  // Remove URL prefix if present
+  const urlMatch = q.match(/imdb\.com\/title\/(tt\d+)/);
+  if (urlMatch) {
+    return { isImdb: true, type: null, id: urlMatch[1] };
+  }
+  return { isImdb: false, type: null, id: null };
+}
+
+/**
  * Search Cinemeta for titles matching the query.
+ * If query is an IMDb ID, performs direct lookup.
  *
- * @param {string} query - Search query (2-120 chars)
+ * @param {string} query - Search query (2-120 chars) or IMDb ID
  * @param {function} [fetchImpl] - Injectable fetch for testing
  * @returns {Promise<NormalizedMedia[]>} Normalized results
  */
@@ -64,9 +85,28 @@ async function searchCinemeta(query, fetchImpl = fetch) {
     throw new Error('Search must be 2–120 characters');
   }
 
+  // Check if query is an IMDb ID for direct lookup
+  const imdbCheck = parseImdbId(q);
+  if (imdbCheck.isImdb && imdbCheck.id) {
+    // Try movie first, then series
+    const types = ['movie', 'series'];
+    for (const type of types) {
+      try {
+        const result = await getCinemetaMedia(type, imdbCheck.id, fetchImpl);
+        if (result) {
+          return [result];
+        }
+      } catch {
+        // Continue to next type
+      }
+    }
+    return [];
+  }
+
+  // Text search: use the search catalog endpoint for each type
   const types = ['series', 'movie'];
   const attempts = await Promise.allSettled(types.map((type) =>
-    getJson(`/catalog/${type}/top/search=${encodeURIComponent(q)}.json`, fetchImpl)
+    getJson(`/catalog/${type}/search=${encodeURIComponent(q)}.json`, fetchImpl)
   ));
 
   const payloads = attempts

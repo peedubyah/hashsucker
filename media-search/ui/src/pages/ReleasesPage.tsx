@@ -103,8 +103,7 @@ export function ReleasesPage({
         )}
         {releases && (
           <div className="releases-stats">
-            <span>{releases.total} results</span>
-            <span>{releases.timings.totalMs}ms</span>
+            <span>{releases.total} releases</span>
           </div>
         )}
       </header>
@@ -140,15 +139,15 @@ export function ReleasesPage({
               onClick={() => setViewMode(m => m === 'user' ? 'debug' : 'user')}
               aria-pressed={viewMode === 'debug'}
             >
-              {viewMode === 'user' ? 'Show debug' : 'Hide debug'}
+              {viewMode === 'user' ? 'Debug ▸' : '◂ Simple'}
             </button>
           </div>
           {sorted.length === 0 ? (
-            <EmptyState message="No releases match the current filters." />
+            <EmptyState message="No releases match your filters." hint="Try removing some filters or searching for a different title." />
           ) : (
             <>
               <div className="release-list-header">
-                <h2 className="release-list-title">Recommended releases</h2>
+                <h2 className="release-list-title">Recommended for you</h2>
                 <span className="release-list-count">Top {Math.min(recommended.length, RECOMMENDED_RELEASE_LIMIT)} of {sorted.length}</span>
               </div>
               <div className="release-list">

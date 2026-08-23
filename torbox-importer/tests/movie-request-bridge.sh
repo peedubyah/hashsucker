@@ -79,18 +79,18 @@ mkdir -p "$MOCKS"
 sqlite3 "$DB2" <<'SQL'
 CREATE TABLE jobs (torbox_id INTEGER PRIMARY KEY, info_hash TEXT, state TEXT, media_type TEXT, arr_target TEXT, last_error TEXT, first_seen TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT);
 CREATE TABLE files (torbox_id INTEGER, selected INTEGER, arr_match TEXT, arr_rejection TEXT, updated_at TEXT);
-CREATE TABLE requests (request_id TEXT PRIMARY KEY, state TEXT, media_type TEXT, scope TEXT, media_id TEXT, torbox_id INTEGER, info_hash TEXT, release_key TEXT, last_error TEXT, updated_at TEXT);
+CREATE TABLE requests (request_id TEXT PRIMARY KEY, state TEXT, media_type TEXT, scope TEXT, media_id TEXT, torbox_id INTEGER, info_hash TEXT, release_key TEXT, handling_mode TEXT DEFAULT 'download', last_error TEXT, updated_at TEXT);
 INSERT INTO jobs VALUES (30, '0123456789abcdef0123456789abcdef01234567', 'inspected', 'movie', 'radarr', NULL, CURRENT_TIMESTAMP, NULL);
 INSERT INTO files VALUES (30, 1, 'tmdb:123', NULL, NULL);
-INSERT INTO requests VALUES ('movie-request', 'processing', 'movie', 'movie', 'tmdb:123', 30, '0123456789abcdef0123456789abcdef01234567', '0123456789abcdef0123456789abcdef01234567:torrent', NULL, NULL);
-INSERT INTO requests VALUES ('season-request', 'processing', 'tv', 'season', 'tt1', NULL, NULL, NULL, NULL, NULL);
+INSERT INTO requests VALUES ('movie-request', 'processing', 'movie', 'movie', 'tmdb:123', 30, '0123456789abcdef0123456789abcdef01234567', '0123456789abcdef0123456789abcdef01234567:torrent', 'download', NULL, NULL);
+INSERT INTO requests VALUES ('season-request', 'processing', 'tv', 'season', 'tt1', NULL, NULL, NULL, 'download', NULL, NULL);
 INSERT INTO jobs VALUES (31, '0123456789abcdef0123456789abcdef01234568', 'inspected', 'movie', 'radarr', NULL, CURRENT_TIMESTAMP, NULL);
 INSERT INTO files VALUES (31, 1, 'tmdb:123', NULL, NULL);
-INSERT INTO requests VALUES ('wrong-movie', 'processing', 'movie', 'movie', 'tmdb:999', 31, '0123456789abcdef0123456789abcdef01234568', '0123456789abcdef0123456789abcdef01234568:torrent', NULL, NULL);
-INSERT INTO requests VALUES ('imdb-movie', 'processing', 'movie', 'movie', 'tt0123456', 30, '0123456789abcdef0123456789abcdef01234567', '0123456789abcdef0123456789abcdef01234567:torrent', NULL, NULL);
+INSERT INTO requests VALUES ('wrong-movie', 'processing', 'movie', 'movie', 'tmdb:999', 31, '0123456789abcdef0123456789abcdef01234568', '0123456789abcdef0123456789abcdef01234568:torrent', 'download', NULL, NULL);
+INSERT INTO requests VALUES ('imdb-movie', 'processing', 'movie', 'movie', 'tt0123456', 30, '0123456789abcdef0123456789abcdef01234567', '0123456789abcdef0123456789abcdef01234567:torrent', 'download', NULL, NULL);
 INSERT INTO jobs VALUES (32, '0123456789abcdef0123456789abcdef01234569', 'inspected', 'movie', 'radarr', NULL, CURRENT_TIMESTAMP, NULL);
 INSERT INTO files VALUES (32, 1, 'tmdb:123', NULL, NULL);
-INSERT INTO requests VALUES ('processor-crash', 'processing', 'movie', 'movie', 'tmdb:123', 32, '0123456789abcdef0123456789abcdef01234569', '0123456789abcdef0123456789abcdef01234569:torrent', NULL, NULL);
+INSERT INTO requests VALUES ('processor-crash', 'processing', 'movie', 'movie', 'tmdb:123', 32, '0123456789abcdef0123456789abcdef01234569', '0123456789abcdef0123456789abcdef01234569:torrent', 'download', NULL, NULL);
 SQL
 
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$MOCKS/ingest-request.sh"

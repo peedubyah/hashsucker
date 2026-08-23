@@ -82,6 +82,27 @@ SCOPE="$(
     "
 )"
 
+HANDLING_MODE="$(
+    sqlite3 "$DB" "
+        SELECT handling_mode
+        FROM requests
+        WHERE request_id='$REQUEST_ID';
+    "
+)"
+
+#
+# Stream requests use a separate materialization path.
+#
+if [[ "$HANDLING_MODE" == "stream" ]]; then
+    log "delegating to stream materializer"
+    if "$SCRIPTS_DIR/stream-request.sh" "$REQUEST_ID"; then
+        "$SCRIPTS_DIR/settle-request.sh" "$REQUEST_ID"
+        exit 0
+    else
+        exit 1
+    fi
+fi
+
 #
 # Unattended request modes are deliberately explicit.
 #

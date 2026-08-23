@@ -16,19 +16,37 @@ function publicMeta(meta) {
   return {
     id: meta.id,
     type: meta.type,
-    name: meta.name,
-    poster: meta.poster || null,
+    title: meta.name,
+    posterUrl: meta.poster || null,
     year: meta.year || meta.releaseInfo || null,
-    description: meta.description || null,
+    overview: meta.description || null,
   };
 }
 
 export async function searchCatalog(query, fetchImpl = fetch) {
   const q = String(query || '').trim();
   if (q.length < 2 || q.length > 120) throw new Error('Search must be 2–120 characters');
+
+  // Check if query is an IMDb ID for direct lookup
+  const imdbMatch = q.toLowerCase().match(/^(tt\d+)$/);
+  if (imdbMatch) {
+    const id = imdbMatch[1];
+    // Try movie first, then series
+    for (const type of ['movie', 'series']) {
+      try {
+        const result = await getMedia(type, id, fetchImpl);
+        if (result) return [result];
+      } catch {
+        // Continue to next type
+      }
+    }
+    return [];
+  }
+
+  // Text search: use the search catalog endpoint for each type
   const types = ['series', 'movie'];
   const attempts = await Promise.allSettled(types.map((type) =>
-    getJson(`/catalog/${type}/top/search=${encodeURIComponent(q)}.json`, fetchImpl)
+    getJson(`/catalog/${type}/search=${encodeURIComponent(q)}.json`, fetchImpl)
   ));
   const payloads = attempts.filter((attempt) => attempt.status === 'fulfilled').map((attempt) => attempt.value);
   if (payloads.length === 0) throw attempts[0].reason;

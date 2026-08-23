@@ -54,7 +54,7 @@ describe('ReleasesPage exact identity', () => {
 
   it('renders recommended releases by default', () => {
     render(<ReleasesPage releases={releases} media={{ media }} loading={false} error={null} onBack={() => {}} />);
-    expect(screen.getByText('Recommended releases')).toBeTruthy();
+    expect(screen.getByText('Recommended for you')).toBeTruthy();
     const rows = document.querySelectorAll('.release-row');
     expect(rows.length).toBeLessThanOrEqual(5);
   });
@@ -94,8 +94,8 @@ describe('ReleasesPage exact identity', () => {
 
     render(<ReleasesPage releases={releases} media={{ media }} loading={false} error={null} onBack={() => {}} />);
     fireEvent.click(screen.getByText('File.One.mkv').closest('.release-row-main')!);
-    fireEvent.click(screen.getAllByText('Request this release')[0]);
-    fireEvent.click(screen.getByText('Submit request'));
+    fireEvent.click(screen.getAllByText('Select')[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }));
 
     await waitFor(() => expect(submitted).toBeTruthy());
     expect(submitted).toMatchObject({
@@ -120,8 +120,8 @@ describe('ReleasesPage exact identity', () => {
 
     render(<ReleasesPage releases={releases} media={{ media }} loading={false} error={null} onBack={() => {}} />);
     fireEvent.click(screen.getByText('File.One.mkv').closest('.release-row-main')!);
-    fireEvent.click(screen.getAllByText('Request this release')[0]);
-    fireEvent.click(screen.getByText('Submit request'));
+    fireEvent.click(screen.getAllByText('Select')[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }));
 
     await waitFor(() => expect(submitted).toBeTruthy());
     expect(submitted).toMatchObject({ handlingMode: 'download' });
@@ -142,9 +142,9 @@ describe('ReleasesPage exact identity', () => {
 
     render(<ReleasesPage releases={releases} media={{ media }} loading={false} error={null} onBack={() => {}} />);
     fireEvent.click(screen.getByText('File.One.mkv').closest('.release-row-main')!);
-    fireEvent.click(screen.getAllByText('Request this release')[0]);
+    fireEvent.click(screen.getAllByText('Select')[0]);
     fireEvent.click(screen.getByText('Stream'));
-    fireEvent.click(screen.getByText('Submit request'));
+    fireEvent.click(screen.getByRole('button', { name: 'Stream' }));
 
     await waitFor(() => expect(submitted).toBeTruthy());
     expect(submitted).toMatchObject({ handlingMode: 'stream' });

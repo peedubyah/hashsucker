@@ -6,6 +6,11 @@ import { toControlPlaneItemDetail, toControlPlaneItemSummary } from '../api/cont
 import { createReleaseIdentity, toPublicReleaseDto, validateReleaseIdentity } from '../api/release-contract.js';
 import { getControlPlaneHealth } from '../lib/control-plane/health.js';
 import { planReconciliation } from '../lib/control-plane/reconciler.js';
+import {
+  readRequest, listAllRequests, moveRequest, purgeRequest,
+} from '../lib/operator/index.js';
+import { getTraceLog } from '../lib/operator/trace.js';
+import { runDiagnostic, listDiagnostics, getSystemHealth } from '../lib/operator/diagnostics.js';
 import { projectRdZurgLifecycle } from '../lib/control-plane/rd-zurg-slice.js';
 import { QueueImporterClient } from '../lib/importer/queue-client.js';
 import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
@@ -347,6 +352,7 @@ export function createApp(dependencies = {}) {
 
 export function createRequestHandler(dependencies = {}) {
   const importer = dependencies.importer || new QueueImporterClient();
+  const operatorRoot = dependencies.operatorRoot || process.env.REQUESTS_ROOT || '/requests';
   const catalogSearch = dependencies.searchCatalog || searchCatalog;
   const mediaLookup = dependencies.getMedia || getMedia;
   const combinedSearchFn = dependencies.combinedSearch || combinedSearch;
@@ -571,6 +577,127 @@ export function createRequestHandler(dependencies = {}) {
           }
           throw resolverError;
         }
+      }
+      // Operator dashboard endpoints
+      if (request.method === 'GET' && url.pathname === '/api/operator/requests') {
+        const filter = url.searchParams.get('filter') || 'all';
+        const validFilters = new Set(['all', 'queued', 'processing', 'done', 'failed']);
+        if (!validFilters.has(filter)) {
+          return sendJson(response, 400, { error: 'Invalid filter value' });
+        }
+        const all = await listAllRequests(operatorRoot);
+        const filtered = filter === 'all' ? all : all.filter(r => r.status === filter);
+        filtered.sort((a, b) => {
+          const ta = a.request?.createdAt || a.request?.created_at || '';
+          const tb = b.request?.createdAt || b.request?.created_at || '';
+          return ta < tb ? 1 : ta > tb ? -1 : 0;
+        });
+        return sendJson(response, 200, {
+          requests: filtered.map(r => ({
+            requestId: r.requestId,
+            status: r.status,
+            createdAt: r.request?.createdAt || r.request?.created_at || null,
+            handlingMode: r.request?.handlingMode || r.request?.handling_mode || null,
+            mediaTitle: r.request?.media?.title || r.request?.mediaTitle || null,
+            mediaId: r.request?.mediaId || r.request?.media_id || null,
+            releaseTitle: r.request?.release?.title || r.request?.releaseTitle || null,
+            provider: r.request?.provider || null,
+            lastError: r.request?.lastError || r.request?.last_error || null,
+          })),
+          total: filtered.length,
+        });
+      }
+
+      const operatorRequestDetail = request.method === 'GET'
+        && url.pathname.match(/^\/api\/operator\/requests\/([0-9a-f-]{36})$/i);
+      if (operatorRequestDetail) {
+        const reqId = operatorRequestDetail[1];
+        const found = await readRequest(reqId, operatorRoot);
+        if (!found) return sendJson(response, 404, { error: 'Request not found' });
+        return sendJson(response, 200, {
+          requestId: found.requestId,
+          status: found.status,
+          request: found.request,
+          trace: getTraceLog(found),
+        });
+      }
+      const retryMatch = request.method === 'POST'
+        && url.pathname.match(/^\/api\/operator\/requests\/([0-9a-f-]{36})\/retry$/i);
+      if (retryMatch) {
+        const reqId = retryMatch[1];
+        const found = await readRequest(reqId, operatorRoot);
+        if (!found) return sendJson(response, 404, { error: 'Request not found' });
+        if (found.status !== 'failed' && found.status !== 'done') {
+          return sendJson(response, 409, { error: `Cannot retry request in '${found.status}' state` });
+        }
+        await moveRequest(reqId, found.status, 'processing', operatorRoot);
+        return sendJson(response, 200, { requestId: reqId, status: 'processing', action: 'retry' });
+      }
+      const resetMatch = request.method === 'POST'
+        && url.pathname.match(/^\/api\/operator\/requests\/([0-9a-f-]{36})\/reset$/i);
+      if (resetMatch) {
+        const reqId = resetMatch[1];
+        const found = await readRequest(reqId, operatorRoot);
+        if (!found) return sendJson(response, 404, { error: 'Request not found' });
+        await moveRequest(reqId, found.status, 'queued', operatorRoot);
+        return sendJson(response, 200, { requestId: reqId, status: 'queued', action: 'reset' });
+      }
+      const operatorDeleteMatch = request.method === 'DELETE'
+        && url.pathname.match(/^\/api\/operator\/requests\/([0-9a-f-]{36})$/i);
+      if (operatorDeleteMatch) {
+        const reqId = operatorDeleteMatch[1];
+        await purgeRequest(reqId, operatorRoot);
+        return sendJson(response, 200, { requestId: reqId, action: 'deleted' });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/operator/search-debug') {
+        const query = url.searchParams.get('q') || '';
+        if (!query || query.length < 2) {
+          return sendJson(response, 400, { error: 'Query must be at least 2 characters' });
+        }
+        const limited = searchReleases(searchCache, {
+          query,
+          limit: 50,
+          includeProviders: false,
+          includeMedia: false,
+        });
+        return sendJson(response, 200, {
+          query,
+          total: limited.total,
+          results: limited.results.slice(0, 20).map(r => ({
+            title: r.title,
+            score: r.score,
+            components: r.components,
+            source: r._source,
+          })),
+        });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/operator/logs') {
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
+        const all = await listAllRequests(operatorRoot);
+        const recent = all
+          .filter(r => r.status === 'processing' || r.status === 'failed')
+          .slice(0, limit)
+          .map(r => ({
+            requestId: r.requestId,
+            status: r.status,
+            lastError: r.request?.lastError || r.request?.last_error || null,
+            updatedAt: r.request?.updatedAt || r.request?.updated_at || null,
+          }));
+        return sendJson(response, 200, { logs: recent });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/operator/diagnostics') {
+        return sendJson(response, 200, { available: listDiagnostics() });
+      }
+      const diagRunMatch = request.method === 'POST'
+        && url.pathname.match(/^\/api\/operator\/diagnostics\/run\/(.+)$/);
+      if (diagRunMatch) {
+        const diagId = diagRunMatch[1];
+        const result = await runDiagnostic(diagId, { env });
+        return sendJson(response, 200, result);
+      }
+      if (request.method === 'GET' && url.pathname === '/api/operator/health') {
+        const health = await getSystemHealth({ env });
+        return sendJson(response, health.ok ? 200 : 503, health);
       }
       sendJson(response, 404, { error: 'Not found' });
     } catch (error) {

@@ -55,7 +55,7 @@ export async function enrichWithCinemeta(cache, candidate, options = {}) {
   // Build media matches
   const matches = [];
   for (const result of results) {
-    const titleMtq = titleMatchQuality(parsedTitle, result.name);
+    const titleMtq = titleMatchQuality(parsedTitle, result.title || result.name);
     const yearMt = yearMatch(attrs.year, result.year);
     const { seasonMatch, episodeMatch } = seasonEpisodeMatch(
       attrs.season, attrs.episode,
@@ -88,7 +88,7 @@ export async function enrichWithCinemeta(cache, candidate, options = {}) {
     matches.push({
       mediaId,
       confidence,
-      title: result.name,
+      title: result.title || result.name,
       year: result.year,
       type: result.type,
       evidence,

@@ -2,9 +2,8 @@ import { useState } from 'react';
 import type {
   ControlPlaneItemDetail, ReleaseResult, RequestSubmissionResult, ViewMode,
 } from '@/types/api';
-import { formatSize, formatScore, formatConfidence } from '@/utils/format';
+import { formatSize } from '@/utils/format';
 import { Badge } from './Badge';
-import { ProviderStatus } from './ProviderStatus';
 import { LifecycleStatus } from './LifecycleStatus';
 
 export type HandlingMode = 'download' | 'stream';
@@ -35,122 +34,48 @@ interface Props {
   controlPlaneError?: string | null;
 }
 
+/**
+ * Release confirmation modal — consumer mode by default.
+ * Shows quality, size, and one action button.
+ * Technical details hidden behind "Show details" toggle.
+ */
 export function ReleaseDetails({
   release, onClose, onSubmit, requesting, requestResult, requestError,
   viewMode = 'user', controlPlaneDetail = null, controlPlaneLoading = false, controlPlaneError = null,
 }: Props) {
   const [handlingMode, setHandlingMode] = useState<HandlingMode>('download');
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const isDebug = viewMode === 'debug';
+
+  // Human-readable quality line
+  const qualityParts: string[] = [];
+  if (release.resolution) qualityParts.push(release.resolution);
+  if (release.quality) qualityParts.push(release.quality);
+  if (release.hdr === 'true') qualityParts.push('HDR');
+  if (release.audio) qualityParts.push(release.audio);
+  const qualityLine = qualityParts.join(' · ');
+
   return (
-    <div className="release-details-overlay" onClick={onClose}>
+    <div className="release-details-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label="Release confirmation">
       <div className="release-details-panel" onClick={e => e.stopPropagation()}>
         <div className="release-details-header">
-          <h3>Release Details</h3>
-          <button type="button" className="close-button" onClick={onClose}>×</button>
+          <h3>Choose this version</h3>
+          <button type="button" className="close-button" onClick={onClose} aria-label="Close">×</button>
         </div>
         <div className="release-details-body">
-          <div className="detail-section">
-            <h4>File</h4>
-            <div className="detail-grid">
-              <div className="detail-item">
-                <span className="detail-label">Filename</span>
-                <span className="detail-value mono">{release.filename}</span>
-              </div>
-              {release.size != null && (
-                <div className="detail-item">
-                  <span className="detail-label">Size</span>
-                  <span className="detail-value">{formatSize(release.size)}</span>
-                </div>
-              )}
+          <div className="quality-summary">
+            {qualityLine && <div className="quality-line">{qualityLine}</div>}
+            <div className="summary-badges">
+              {release.resolution && <Badge variant="info">{release.resolution}</Badge>}
+              {release.codec && <Badge>{release.codec}</Badge>}
+              {release.hdr === 'true' && <Badge variant="warning">HDR</Badge>}
+              {release.size != null && <Badge>{formatSize(release.size)}</Badge>}
             </div>
           </div>
-          <div className="detail-section">
-            <h4>Media</h4>
-            <div className="detail-grid">
-              {release.resolution && (
-                <div className="detail-item">
-                  <span className="detail-label">Resolution</span>
-                  <span className="detail-value"><Badge variant="info">{release.resolution}</Badge></span>
-                </div>
-              )}
-              {release.quality && (
-                <div className="detail-item">
-                  <span className="detail-label">Quality</span>
-                  <span className="detail-value"><Badge>{release.quality}</Badge></span>
-                </div>
-              )}
-              {release.codec && (
-                <div className="detail-item">
-                  <span className="detail-label">Codec</span>
-                  <span className="detail-value">{release.codec}</span>
-                </div>
-              )}
-              {release.hdr === 'true' && (
-                <div className="detail-item">
-                  <span className="detail-label">HDR</span>
-                  <span className="detail-value"><Badge variant="warning">Yes</Badge></span>
-                </div>
-              )}
-              {release.audio && (
-                <div className="detail-item">
-                  <span className="detail-label">Audio</span>
-                  <span className="detail-value">{release.audio}</span>
-                </div>
-              )}
-              {release.releaseGroup && (
-                <div className="detail-item">
-                  <span className="detail-label">Group</span>
-                  <span className="detail-value">{release.releaseGroup}</span>
-                </div>
-              )}
-            </div>
-          </div>
-          {isDebug && (
-            <div className="detail-section">
-              <h4>Ranking</h4>
-              <div className="detail-grid">
-                <div className="detail-item">
-                  <span className="detail-label">Score</span>
-                  <span className="detail-value">{formatScore(release.score)}</span>
-                </div>
-                <div className="detail-item">
-                  <span className="detail-label">Confidence</span>
-                  <span className="detail-value">{formatConfidence(release.confidence)}</span>
-                </div>
-              </div>
-            </div>
-          )}
-          {isDebug && (
-            <div className="detail-section">
-              <h4>Providers</h4>
-              <ProviderStatus providers={release.providers} observations={release.providerObservations} />
-            </div>
-          )}
-          {isDebug && (
-            <div className="detail-section">
-              <h4>Exact identity</h4>
-              <div className="detail-item">
-                <span className="detail-label">Release key</span>
-                <span className="detail-value mono">{release.releaseKey}</span>
-              </div>
-            </div>
-          )}
-          {isDebug && controlPlaneLoading && <div className="detail-section">Loading exact lifecycle…</div>}
-          {isDebug && controlPlaneError && <div className="detail-section" role="alert">{controlPlaneError}</div>}
-          {isDebug && controlPlaneDetail && (
-            <div className="detail-section">
-              <LifecycleStatus items={[controlPlaneDetail]} />
-              <div className="detail-grid">
-                <div className="detail-item"><span className="detail-label">Shadow action</span><span className="detail-value">{controlPlaneDetail.shadowPlan?.actions[0]?.action ?? 'none'}</span></div>
-                <div className="detail-item"><span className="detail-label">Placements</span><span className="detail-value">{controlPlaneDetail.resources?.placements.length ?? 0}</span></div>
-                <div className="detail-item"><span className="detail-label">Provider files</span><span className="detail-value">{controlPlaneDetail.resources?.files.length ?? 0}</span></div>
-                <div className="detail-item"><span className="detail-label">Exposures</span><span className="detail-value">{controlPlaneDetail.resources?.exposures.length ?? 0}</span></div>
-              </div>
-            </div>
-          )}
+
           {!requestResult && (
             <div className="detail-section">
-              <h4>Handling</h4>
+              <h4>What would you like to do?</h4>
               <div className="handling-options" role="radiogroup" aria-label="Handling mode">
                 {HANDLING_MODES.map(mode => (
                   <label key={mode.value} className={`handling-option ${handlingMode === mode.value ? 'selected' : ''}`}>
@@ -168,14 +93,106 @@ export function ReleaseDetails({
               </div>
             </div>
           )}
+
           {requestResult ? (
-            <div role="status">Request {requestResult.status}: {requestResult.requestId}</div>
+            <div role="status" className="request-result success">
+              <strong>
+                {handlingMode === 'download' ? 'Added to your library' : 'Ready to stream'}
+              </strong>
+            </div>
           ) : (
-            <button type="button" className="request-button" onClick={() => onSubmit(handlingMode)} disabled={requesting}>
-              {requesting ? 'Submitting request…' : 'Submit request'}
+            <button
+              type="button"
+              className={`request-button ${handlingMode}`}
+              onClick={() => onSubmit(handlingMode)}
+              disabled={requesting}
+            >
+              {requesting
+                ? handlingMode === 'download' ? 'Adding to library…' : 'Setting up playback…'
+                : handlingMode === 'download' ? 'Download' : 'Stream'}
             </button>
           )}
-          {requestError && <div role="alert">{requestError}</div>}
+
+          {requestError && <div role="alert" className="error-message">{requestError}</div>}
+
+          <div className="advanced-section">
+            <button
+              type="button"
+              className="advanced-toggle"
+              onClick={() => setShowAdvanced(s => !s)}
+              aria-expanded={showAdvanced}
+            >
+              {showAdvanced ? '▾ Hide details' : '▸ Show details'}
+            </button>
+            {showAdvanced && (
+              <div className="advanced-content">
+                <div className="detail-grid">
+                  <div className="detail-item">
+                    <span className="detail-label">Filename</span>
+                    <span className="detail-value mono">{release.filename}</span>
+                  </div>
+                  {release.releaseGroup && (
+                    <div className="detail-item">
+                      <span className="detail-label">Release Group</span>
+                      <span className="detail-value">{release.releaseGroup}</span>
+                    </div>
+                  )}
+                  <div className="detail-item">
+                    <span className="detail-label">Size</span>
+                    <span className="detail-value">{formatSize(release.size)}</span>
+                  </div>
+                  {release.quality && (
+                    <div className="detail-item">
+                      <span className="detail-label">Source</span>
+                      <span className="detail-value">{release.quality}</span>
+                    </div>
+                  )}
+                  {release.audio && (
+                    <div className="detail-item">
+                      <span className="detail-label">Audio</span>
+                      <span className="detail-value">{release.audio}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {isDebug && (
+            <div className="debug-section">
+              <h4>Debug: System Internals</h4>
+              <div className="detail-grid">
+                <div className="detail-item">
+                  <span className="detail-label">Score</span>
+                  <span className="detail-value">{release.score?.toFixed(2)}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="detail-label">Confidence</span>
+                  <span className="detail-value">{release.confidence?.toFixed(2)}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="detail-label">Release Key</span>
+                  <span className="detail-value mono">{release.releaseKey}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="detail-label">Source</span>
+                  <span className="detail-value">{release._source}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="detail-label">InfoHash</span>
+                  <span className="detail-value mono">{release.infoHash}</span>
+                </div>
+              </div>
+              {controlPlaneLoading && <div className="detail-section">Loading lifecycle detail…</div>}
+              {controlPlaneError && <div className="detail-section" role="alert">{controlPlaneError}</div>}
+              {controlPlaneDetail && (
+                <div className="detail-section">
+                  <h5>Lifecycle</h5>
+                  <LifecycleStatus items={[controlPlaneDetail]} />
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

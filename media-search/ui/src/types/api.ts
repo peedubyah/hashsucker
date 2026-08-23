@@ -210,3 +210,95 @@ export interface VideoResult {
   released: string | null;
   thumbnail: string | null;
 }
+
+// Operator dashboard types
+export interface OperatorRequestItem {
+  requestId: string;
+  status: 'queued' | 'processing' | 'done' | 'failed';
+  createdAt: string | null;
+  handlingMode: string | null;
+  mediaTitle: string | null;
+  mediaId: string | null;
+  releaseTitle: string | null;
+  provider: string | null;
+  lastError: string | null;
+}
+
+export interface OperatorRequestList {
+  requests: OperatorRequestItem[];
+  total: number;
+}
+
+export interface OperatorTraceEvent {
+  timestamp: string | null;
+  label: string;
+  status: 'complete' | 'error' | 'active' | 'pending';
+}
+
+export interface OperatorTrace {
+  current: {
+    state: string;
+    owner: string | null;
+    nextAction: string;
+  };
+  timeline: OperatorTraceEvent[];
+}
+
+export interface OperatorRequestDetail {
+  requestId: string;
+  status: string;
+  request: Record<string, unknown>;
+  trace: OperatorTrace;
+}
+
+export interface OperatorSearchDebugResult {
+  title: string;
+  score: number;
+  components?: ScoreComponents;
+  source: string;
+}
+
+export interface OperatorSearchDebug {
+  query: string;
+  total: number;
+  results: OperatorSearchDebugResult[];
+}
+
+export interface OperatorLogEntry {
+  requestId: string;
+  status: string;
+  lastError: string | null;
+  updatedAt: string | null;
+}
+
+export interface OperatorLogs {
+  logs: OperatorLogEntry[];
+}
+
+export interface OperatorDiagnostic {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface OperatorDiagnosticResult {
+  id: string;
+  name: string;
+  status: 'pass' | 'fail';
+  exitCode: number;
+  duration: number;
+  stdout: string;
+  stderr: string;
+  ranAt: string;
+}
+
+export interface OperatorHealth {
+  ok: boolean;
+  warning?: boolean;
+  checks: {
+    database: { name: string; status: string; detail: string; byState?: Record<string, number> };
+    worker: { name: string; status: string; detail: string };
+    storage: { name: string; status: string; detail: string };
+  };
+  generatedAt: string;
+}

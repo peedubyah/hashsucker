@@ -205,8 +205,8 @@ export function ReleaseRow({ release, rank, viewMode = 'user', onSelect }: Props
             </div>
           )}
           {onSelect && (
-            <button type="button" className="request-button" onClick={handleSelect}>
-              Request this release
+            <button type="button" className="select-button" onClick={handleSelect}>
+              Select
             </button>
           )}
         </div>

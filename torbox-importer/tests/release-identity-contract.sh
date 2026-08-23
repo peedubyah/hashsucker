@@ -45,6 +45,7 @@ CREATE TABLE requests (
   request_id TEXT PRIMARY KEY,
   created_at TEXT NOT NULL,
   provider TEXT NOT NULL,
+  handling_mode TEXT NOT NULL DEFAULT 'download',
   media_type TEXT NOT NULL,
   scope TEXT NOT NULL,
   media_id TEXT NOT NULL,

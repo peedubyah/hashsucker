@@ -70,7 +70,7 @@ describe('ReleaseRow', () => {
     render(<ReleaseRow release={mockReleases[0]} rank={1} onSelect={onSelect} />);
     const main = screen.getByText('Black.Mirror.S07E03.2160p.WEB-DL.DV.HDR10.mkv').closest('.release-row-main')!;
     fireEvent.click(main);
-    const requestBtn = screen.getByText('Request this release');
+    const requestBtn = screen.getByText('Select');
     fireEvent.click(requestBtn);
     expect(onSelect).toHaveBeenCalledWith(mockReleases[0]);
   });

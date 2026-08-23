@@ -32,7 +32,7 @@ export function SearchSuggestions({ suggestions, loading, error, query, onSelect
   if (query.trim().length >= 2 && suggestions.length === 0 && !loading) {
     return (
       <div className="search-suggestions search-suggestions-empty">
-        <span className="suggestion-empty-text">No results found</span>
+        <span className="suggestion-empty-text">No results found for "{query.trim()}"</span>
       </div>
     );
   }
@@ -54,11 +54,20 @@ export function SearchSuggestions({ suggestions, loading, error, query, onSelect
               {result.posterUrl ? (
                 <img
                   src={result.posterUrl}
-                  alt=""
+                  alt={`${result.title} poster`}
                   className="suggestion-poster-img"
                   loading="lazy"
                   onError={(e) => {
-                    (e.target as HTMLImageElement).style.display = 'none';
+                    const target = e.target as HTMLImageElement;
+                    target.style.display = 'none';
+                    const parent = target.parentElement;
+                    if (parent && !parent.querySelector('.suggestion-poster-placeholder')) {
+                      const placeholder = document.createElement('div');
+                      placeholder.className = 'suggestion-poster-placeholder';
+                      placeholder.setAttribute('aria-hidden', 'true');
+                      placeholder.textContent = result.title.slice(0, 1).toUpperCase();
+                      parent.appendChild(placeholder);
+                    }
                   }}
                 />
               ) : (
@@ -73,6 +82,9 @@ export function SearchSuggestions({ suggestions, loading, error, query, onSelect
                 {result.type === 'movie' ? 'Movie' : 'Series'}
                 {result.year && ` · ${result.year}`}
               </span>
+              {result.overview && (
+                <span className="suggestion-overview">{result.overview.slice(0, 100)}{result.overview.length > 100 ? '…' : ''}</span>
+              )}
             </div>
           </button>
         </li>

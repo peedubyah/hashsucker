@@ -79,7 +79,6 @@ CREATE TABLE IF NOT EXISTS requests (
 
     created_at        TEXT NOT NULL,
     provider          TEXT NOT NULL,
-    handling_mode     TEXT NOT NULL DEFAULT 'download',
 
     media_type        TEXT NOT NULL,
     scope             TEXT NOT NULL,
@@ -115,10 +114,14 @@ CREATE INDEX IF NOT EXISTS idx_requests_state
 ON requests(state);
 SQL
 
+if ! sqlite3 "$DB" "PRAGMA table_info(requests);" | grep -q "handling_mode"; then
+  echo "migration: adding requests.handling_mode"
+  sqlite3 "$DB" \
+    "ALTER TABLE requests ADD COLUMN handling_mode TEXT NOT NULL DEFAULT 'download';"
+fi
 if [ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name='file_index';")" -eq 0 ]; then
     sqlite3 "$DB" "ALTER TABLE requests ADD COLUMN file_index INTEGER;"
 fi
-
 if [ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name='release_key';")" -eq 0 ]; then
     sqlite3 "$DB" "ALTER TABLE requests ADD COLUMN release_key TEXT;"
 fi
