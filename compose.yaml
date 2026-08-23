@@ -1,8 +1,8 @@
 services:
   media-search:
     build:
-      context: .
-      dockerfile: media-search/Dockerfile
+      context: ./media-search
+      dockerfile: Dockerfile
     image: media-search:local
     restart: unless-stopped
     environment:
@@ -18,7 +18,7 @@ services:
     ports:
       - "${MEDIA_SEARCH_BIND_ADDRESS:-127.0.0.1}:${MEDIA_SEARCH_PORT:-3000}:3000"
     volumes:
-      - discovery-data:/data
+      - /home/patrick/hashsucker-data/discovery:/data
       - ${REQUESTS_HOST_PATH:?Set REQUESTS_HOST_PATH in .env}:/requests
     group_add:
       - "${MEDIA_SEARCH_QUEUE_GID:-100}"

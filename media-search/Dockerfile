@@ -1,16 +1,22 @@
 FROM node:24-alpine AS ui-build
 
 WORKDIR /build/ui
+
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci
 
 COPY ui/ ./
-COPY media-search/src/api/ /build/media-search/src/api/
+# @api alias resolves to ../src/api relative to UI root (see ui/vite.config.js).
+# In this stage WORKDIR is /build/ui, so target is /build/src/api.
+COPY src/api/ /build/src/api/
+
 RUN npm run build
+
 
 FROM node:24-alpine
 
 WORKDIR /app
+
 ENV NODE_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0 \
@@ -19,16 +25,23 @@ ENV NODE_ENV=production \
     CONTROL_PLANE_DB=/data/control-plane.db \
     STATIC_ROOT=/app/public
 
-COPY --chown=node:node media-search/package.json media-search/package-lock.json ./
+COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY --chown=node:node media-search/src/ ./src/
-COPY --chown=node:node --from=ui-build /build/ui/dist/ ./public/
+COPY src/ ./src/
+COPY --from=ui-build /build/ui/dist/ ./public/
 
-RUN mkdir -p /data /requests && chown node:node /data /requests
+# Create data dirs and switch to non-root user.
+# /app is owned by root but node only needs read access for serving.
+# /data and /requests must be writable by node for runtime I/O.
+RUN mkdir -p /data /requests \
+ && chown -R node:node /data /requests
 
 USER node
+
 EXPOSE 3000
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- "http://127.0.0.1:${PORT:-3000}/health" >/dev/null || exit 1
+
 CMD ["npm", "start"]
