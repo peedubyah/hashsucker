@@ -820,8 +820,11 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       const active = db.prepare(
         "SELECT * FROM bindings WHERE library_item_id = ? AND status = 'active'",
       ).get(item.id);
+      const newest = db.prepare(
+        "SELECT * FROM bindings WHERE library_item_id = ? ORDER BY version DESC LIMIT 1",
+      ).get(item.id);
       if (input.expectedBindingVersion != null
-        && input.expectedBindingVersion !== (active?.version ?? 0)) {
+        && input.expectedBindingVersion !== (newest?.version ?? 0)) {
         throw new Error('Active binding version changed during reconciliation');
       }
       if (active && active.release_key === identity.releaseKey
@@ -836,6 +839,21 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
           UPDATE bindings SET status = 'superseded', superseded_at = ?, reconciled_at = ?
           WHERE id = ?
         `).run(timestamp, timestamp, active.id);
+      } else {
+        // Supersede any non-active, non-superseded bindings (e.g. degraded)
+        // that would otherwise block version monotonicity.
+        const stale = db.prepare(
+          "SELECT * FROM bindings WHERE library_item_id = ? AND status NOT IN ('superseded')",
+        ).get(item.id);
+        if (stale && stale.release_key === identity.releaseKey
+          && (stale.placement_id !== input.placementId
+            || stale.provider_file_id !== input.providerFileId
+            || stale.exposure_id !== input.exposureId)) {
+          db.prepare(`
+            UPDATE bindings SET status = 'superseded', superseded_at = ?, reconciled_at = ?
+            WHERE id = ?
+          `).run(timestamp, timestamp, stale.id);
+        }
       }
       const version = (db.prepare(
         'SELECT COALESCE(MAX(version), 0) AS version FROM bindings WHERE library_item_id = ?',
@@ -871,6 +889,32 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       WHERE placement_id = ? AND status = 'active'
       ORDER BY library_item_id, version
     `).all(placementId).map(rowToBinding);
+  }
+
+  function markBindingDegraded(input) {
+    const item = requireLibraryItem(input.libraryItemId);
+    const timestamp = now();
+    return transaction(() => {
+      const active = db.prepare(
+        "SELECT * FROM bindings WHERE library_item_id = ? AND status = 'active'",
+      ).get(item.id);
+      if (!active) {
+        throw new Error('No active binding to degrade');
+      }
+      if (input.expectedBindingVersion != null
+        && input.expectedBindingVersion !== active.version) {
+        throw new Error('Active binding version changed during degradation');
+      }
+      const result = db.prepare(`
+        UPDATE bindings
+        SET status = 'degraded', reconciled_at = ?, failure_category = ?
+        WHERE id = ? AND status = 'active'
+      `).run(timestamp, input.failureCategory ?? 'unknown', active.id);
+      if (Number(result.changes) !== 1) {
+        throw new Error('Binding state changed concurrently during degradation');
+      }
+      return rowToBinding(db.prepare('SELECT * FROM bindings WHERE id = ?').get(active.id));
+    });
   }
 
   function createRepairTransaction(input) {
@@ -1264,6 +1308,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     recordZurgMetadataObservation,
     listZurgMetadataObservations,
     activateBinding,
+    markBindingDegraded,
     listBindings,
     listActiveBindingsForPlacement,
     createRepairTransaction,

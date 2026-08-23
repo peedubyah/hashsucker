@@ -192,12 +192,16 @@ export function planReconciliation(input, options = {}) {
       continue;
     }
 
+    // When current binding is degraded, we're recovering - create a new binding
+    const isRecovery = currentBinding && currentBinding.status === 'degraded';
     actions.push({
-      action: currentBinding ? 'rebind' : 'bind',
-      reason: currentBinding ? 'preferred-usable-placement-changed' : 'exact-file-is-usable',
+      action: currentBinding && !isRecovery ? 'rebind' : 'bind',
+      reason: currentBinding && !isRecovery ? 'preferred-usable-placement-changed' : (isRecovery ? 'recovery-from-degraded' : 'exact-file-is-usable'),
       libraryItemId: desired.libraryItemId,
       libraryPathId: desired.libraryPathId,
       releaseKey: desired.releaseKey,
+      infoHash: desired.infoHash,
+      fileIndex: desired.fileIndex,
       placementId: placement.id,
       providerFileId: providerFile.providerFileId,
       exposureId: exposure.id,
@@ -318,6 +322,80 @@ function normalizeDesired(desired) {
     placementIdempotencyKey: desired.placementIdempotencyKey
       ?? `virtual:${desired.libraryItemId}:${identity.infoHash}`,
   };
+}
+
+/**
+ * Apply a reconciliation plan to the store. Pure planning entrypoint is
+ * planReconciliation(); this is the sole materialization entrypoint for
+ * routine bind/rebind/degrade. Returns the resulting binding state.
+ *
+ * Only bind/rebind/mark-degraded/no-op are materialized here; observation and
+ * acquisition actions are emitted by the plan but applied by their respective
+ * layers (observe-again, create-or-reuse-placement, etc.).
+ */
+export function executeReconciliation(plan, store, options = {}) {
+  if (!plan || typeof plan !== 'object') {
+    throw new TypeError('executeReconciliation requires a plan');
+  }
+  if (!store || typeof store !== 'object') {
+    throw new TypeError('executeReconciliation requires a store');
+  }
+  for (const action of plan.actions) {
+    switch (action.action) {
+      case 'no-op':
+        // Active binding is current; nothing to materialize.
+        break;
+      case 'bind': {
+        store.activateBinding({
+          libraryItemId: action.libraryItemId,
+          libraryPathId: action.libraryPathId,
+          releaseKey: action.releaseKey,
+          infoHash: action.infoHash,
+          fileIndex: action.fileIndex,
+          placementId: action.placementId,
+          providerFileId: action.providerFileId,
+          exposureId: action.exposureId,
+          reason: action.reason,
+        });
+        break;
+      }
+      case 'rebind': {
+        store.activateBinding({
+          libraryItemId: action.libraryItemId,
+          libraryPathId: action.libraryPathId,
+          releaseKey: action.releaseKey,
+          infoHash: action.infoHash,
+          fileIndex: action.fileIndex,
+          placementId: action.placementId,
+          providerFileId: action.providerFileId,
+          exposureId: action.exposureId,
+          reason: action.reason,
+          expectedBindingVersion: action.expectedBindingVersion,
+        });
+        break;
+      }
+      case 'mark-degraded': {
+        store.markBindingDegraded({
+          libraryItemId: action.libraryItemId,
+          failureCategory: action.reason,
+          expectedBindingVersion: action.bindingId
+            ? undefined // version check is callers responsibility for explicit binding refs
+            : undefined,
+        });
+        break;
+      }
+      // observe-again, create-or-reuse-placement, wait-provider-readiness,
+      // map-exact-file, observe-exposure, remove-stale-owned-resource
+      // are handled by observation/acquisition layers, not reconciliation.
+      default:
+        break;
+    }
+  }
+  // Return the active binding after applying actions
+  const bindings = store.listBindings(plan.libraryItemId);
+  return bindings.find((b) => b.status === 'active')
+    ?? bindings.find((b) => b.status === 'degraded')
+    ?? null;
 }
 
 function finishPlan(desired, actions, failures) {
