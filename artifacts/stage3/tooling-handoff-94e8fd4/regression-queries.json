@@ -1,0 +1,582 @@
+{
+  "version": "1.0.0",
+  "date": "2026-08-23T02:34:01.368Z",
+  "source": "data/dmm-corpus.db",
+  "generatedFrom": "data/fixtures/stage3-query-vectors.json",
+  "ranking": {
+    "formula": "relevance*0.25 + quality*0.20 + releaseConfidence*0.20 + identityConfidence*0.15 + providerAvailability*0.10 + episodeMatch*0.10",
+    "tieBreakers": [
+      "score desc",
+      "releaseConfidence desc",
+      "quality desc",
+      "relevance desc",
+      "hash asc",
+      "fileIndex asc (null last)"
+    ],
+    "nullFileIndexDistinctFromZero": true,
+    "identity": "(info_hash, file_index_key)"
+  },
+  "queries": [
+    {
+      "query": "Dragon Ball",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "112d2fabbb28050f2032bfcf1e73e0cd770a8bef",
+        "fileIndex": null,
+        "stage1Ordinal": 1702,
+        "rankingScore": 0.599
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "One Piece",
+      "edgeCases": [
+        "deepWinner",
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "4d4d590fba03855c7ffe9fa310f8a2bcfaf8790c",
+        "fileIndex": null,
+        "stage1Ordinal": 4605,
+        "rankingScore": 0.604
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Naruto",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "d4ec57705fcd8389d6f6c97d6d723c1ea39db9d3",
+        "fileIndex": null,
+        "stage1Ordinal": 647,
+        "rankingScore": 0.57
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "My Hero Academia",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "a895e13b521ba3fc3fd871cdbcd9f531114ce4cd",
+        "fileIndex": null,
+        "stage1Ordinal": 644,
+        "rankingScore": 0.54
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Attack on Titan",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "fc62483c98db288d6b4e9f529fdada90575f896a",
+        "fileIndex": null,
+        "stage1Ordinal": 395,
+        "rankingScore": 0.587
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "The Flash",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "a940732b7f9ed263d18b5cc8968e84bf6de9bfb5",
+        "fileIndex": null,
+        "stage1Ordinal": 1286,
+        "rankingScore": 0.61
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Game of Thrones",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "a74ed02a0b5e0d534c3645ad62409b5e90e297b6",
+        "fileIndex": null,
+        "stage1Ordinal": 1595,
+        "rankingScore": 0.595
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Stranger Things",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "6703015067a149e0e5d9f6d891185a13301e8fe1",
+        "fileIndex": null,
+        "stage1Ordinal": 1534,
+        "rankingScore": 0.599
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "The Mandalorian",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "10ab15935a16e4d40d8c843b00c3a9720f28ab6a",
+        "fileIndex": null,
+        "stage1Ordinal": 955,
+        "rankingScore": 0.61
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Breaking Bad",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "6493431f8973d5f186df19d5f3f92c26d00c47da",
+        "fileIndex": null,
+        "stage1Ordinal": 999,
+        "rankingScore": 0.6
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Avatar",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "1879c6f2d37887ea10ff840e89c75db1bc381b85",
+        "fileIndex": null,
+        "stage1Ordinal": 1457,
+        "rankingScore": 0.616
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Avengers",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "9dd4e756d052a2ba6d7ea72b7b12f55848e0f44c",
+        "fileIndex": null,
+        "stage1Ordinal": 1490,
+        "rankingScore": 0.617
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Spider-Man",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "22978b53a791ae5295a89cb80299446342264cc9",
+        "fileIndex": null,
+        "stage1Ordinal": 1936,
+        "rankingScore": 0.621
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Batman",
+      "edgeCases": [
+        "deepWinner",
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "2ef37e1c622cd551a2f6112d3980a33984397dad",
+        "fileIndex": null,
+        "stage1Ordinal": 2458,
+        "rankingScore": 0.619
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Joker",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "5ecf56ec4230c1c5344cec6c74c65f56613f38e7",
+        "fileIndex": null,
+        "stage1Ordinal": 1396,
+        "rankingScore": 0.613
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Horror",
+      "edgeCases": [
+        "deepWinner",
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "4558851de4f0390aa6b942f96614dac46801ea4a",
+        "fileIndex": null,
+        "stage1Ordinal": 2772,
+        "rankingScore": 0.617
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Comedy",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "618a2f4096cbe4058e7efed571e603f030c40239",
+        "fileIndex": null,
+        "stage1Ordinal": 922,
+        "rankingScore": 0.61
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Action",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "3863d9c48cd916f0c50b6443818ba26e8bd9d773",
+        "fileIndex": null,
+        "stage1Ordinal": 609,
+        "rankingScore": 0.611
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Sci-Fi",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "021eb7027fdee954c184d80d1a67942686f51e04",
+        "fileIndex": null,
+        "stage1Ordinal": 130,
+        "rankingScore": 0.55
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Documentary",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "0c9c6d145a86e885d7318068437a0b313b86e083",
+        "fileIndex": null,
+        "stage1Ordinal": 299,
+        "rankingScore": 0.604
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Criterion",
+      "edgeCases": [
+        "deepWinner",
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "f38ebee355e933d3b7c51ea49024f03e25b1a944",
+        "fileIndex": null,
+        "stage1Ordinal": 2637,
+        "rankingScore": 0.619
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Remux",
+      "edgeCases": [
+        "deepWinner",
+        "highCardinality",
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "0f9d608fe378484a2062dbacd9467ab78a8391a1",
+        "fileIndex": null,
+        "stage1Ordinal": 76433,
+        "rankingScore": 0.658
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": true,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Director's Cut",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "00253dd354963e81f14528da5f53cb79bbfe10b3",
+        "fileIndex": null,
+        "stage1Ordinal": 743,
+        "rankingScore": 0.601
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Extended",
+      "edgeCases": [
+        "deepWinner",
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "27c2f9cd4c9cb63ccdf3e9225a388c16d3f6d392",
+        "fileIndex": null,
+        "stage1Ordinal": 5816,
+        "rankingScore": 0.628
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Theatrical",
+      "edgeCases": [
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "60811ae8b3351989597be46d187bff9b81aae378",
+        "fileIndex": null,
+        "stage1Ordinal": 1327,
+        "rankingScore": 0.616
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Dual Audio",
+      "edgeCases": [
+        "deepWinner",
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "4d12f370630c1e6953b83eebca4b791242a1657d",
+        "fileIndex": null,
+        "stage1Ordinal": 9105,
+        "rankingScore": 0.612
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Subs",
+      "edgeCases": [
+        "deepWinner",
+        "highCardinality",
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "50ff682148592d99de005f3dcf4b6fc03729adc0",
+        "fileIndex": null,
+        "stage1Ordinal": 46127,
+        "rankingScore": 0.654
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": true,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "Dubbed",
+      "edgeCases": [
+        "deepWinner",
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "cf9a905fc2af23f86e706c9d9a3279c37e7cee3f",
+        "fileIndex": null,
+        "stage1Ordinal": 11446,
+        "rankingScore": 0.639
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "AAC",
+      "edgeCases": [
+        "deepWinner",
+        "highCardinality",
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "1cc4859914829e13aa327be5d96bf8869d4b3515",
+        "fileIndex": null,
+        "stage1Ordinal": 138256,
+        "rankingScore": 0.67
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": true,
+        "nullFileIndex": true
+      },
+      "description": ""
+    },
+    {
+      "query": "DTS-HD",
+      "edgeCases": [
+        "deepWinner",
+        "highCardinality",
+        "nullFileIndex"
+      ],
+      "expectedWinner": {
+        "infoHash": "970c5fd8e42a002d2fb40f643f30c8f576e347ec",
+        "fileIndex": null,
+        "stage1Ordinal": 52479,
+        "rankingScore": 0.656
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": true,
+        "nullFileIndex": true
+      },
+      "description": ""
+    }
+  ],
+  "regressionChecks": [
+    "winner_identity_preserved_per_query",
+    "fileIndex_matches_expected",
+    "capped_vs_uncapped_agreement_count",
+    "deep_winner_count"
+  ]
+}
