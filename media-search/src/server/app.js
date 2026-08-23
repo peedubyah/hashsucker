@@ -17,6 +17,7 @@ import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
 import { createDiscoveryCache } from '../lib/discovery/cache.js';
 import { runDMMIngestion } from '../lib/discovery/dmm-ingestion-runner.js';
 import { runAttributeWorker } from '../lib/discovery/attribute-worker.js';
+import { resolveProjection, parseIdentityFromParams, ResolverError } from '../lib/resolver/resolver.js';
 
 const CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -171,6 +172,7 @@ export function createRequestHandler(dependencies = {}) {
   const controlPlaneHealth = dependencies.getControlPlaneHealth || getControlPlaneHealth;
   const clock = dependencies.now || (() => Date.now());
   const staticRoot = dependencies.staticRoot === undefined ? process.env.STATIC_ROOT : dependencies.staticRoot;
+  const env = dependencies.env ?? process.env;
 
   return async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
@@ -355,6 +357,26 @@ export function createRequestHandler(dependencies = {}) {
       if (request.method === 'GET' && staticRoot && !url.pathname.startsWith('/api/')) {
         const served = await sendStatic(response, url.pathname, staticRoot);
         if (served) return;
+      }
+      const mediaLookupMatch = request.method === 'GET'
+        && url.pathname.match(/^\/media\/lookup\/([^/]+)\/([^/]+)$/);
+      if (mediaLookupMatch) {
+        requireControlPlaneStore(controlPlaneStore);
+        try {
+          const identity = parseIdentityFromParams(mediaLookupMatch[1], mediaLookupMatch[2]);
+          const projection = resolveProjection({
+            store: controlPlaneStore,
+            infoHash: identity.infoHash,
+            fileIndex: identity.fileIndex,
+            env,
+          });
+          return sendJson(response, 200, projection);
+        } catch (resolverError) {
+          if (resolverError instanceof ResolverError) {
+            return sendJson(response, resolverError.status, { error: resolverError.message });
+          }
+          throw resolverError;
+        }
       }
       sendJson(response, 404, { error: 'Not found' });
     } catch (error) {
