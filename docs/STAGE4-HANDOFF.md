@@ -26,7 +26,7 @@ Candidate rank remains primary. A fresh authoritative `cached` observation selec
 
 ## Invariants
 
-1. Stage 3 ends at a ranked candidate set derived from static evidence. Do not add provider reality to Stage 3 retrieval/ranking or modify `ranking.js`/`search-engine.js` for acquisition selection.
+1. The accepted boundary is that Stage 3 ends at a ranked candidate set derived from static evidence. Do not add new provider reality to Stage 3 retrieval/ranking or modify `ranking.js`/`search-engine.js` for acquisition selection.
 2. Preserve Stage 3 order. Stage 4 may fall through after authoritative unavailability; it must not re-rank or mutate candidates.
 3. Exact identity is `(infoHash,fileIndex)`/`releaseKey`; `null` is distinct from `0`. Never project torrent-level authority onto a file-level candidate without an explicit validated contract.
 4. Keep provider and account scopes isolated. No observation may leak across either boundary.
@@ -34,6 +34,8 @@ Candidate rank remains primary. A fresh authoritative `cached` observation selec
 6. Keep append-only observation history separate from the newest-current projection and keep priors/predictions separate from provider authority.
 7. Decision evaluation stays pure: no provider calls, persistence, placement, request publication, or fulfillment side effects.
 8. Keep provider capabilities independent; do not imply that one supported operation means another is supported.
+
+**Existing divergence:** The unchanged legacy Stage 3 runtime still computes a weighted `providerAvailability` component from fresh authoritative observations in `ranking.js`/`search-engine.js`. Stage 4 did not introduce or modify this coupling. Treat provider-independent ranking as the accepted boundary and separate implementation debt; do not conceal it or redesign Stage 3 while implementing the Stage 4 adapter.
 
 ## Intentionally unimplemented
 
@@ -46,17 +48,11 @@ Candidate rank remains primary. A fresh authoritative `cached` observation selec
 
 The foundation also needs hardening before runtime wiring: require deterministic explicit observation time, preserve separate authoritative/inferred/predicted lanes, reject non-candidate scopes, validate candidate aliases and explicit `fileIndex`, fail closed on future/impossible timestamps, and define empty-candidate semantics.
 
-## First recommended task: provider observation adapter
+## First implementation slice checklist
 
-Build and test a **pure provider-observation adapter** between current provider/storage output and `decideAcquisition()`; do not wire live APIs yet.
+- [ ] **Provider observation adapter:** Normalize current provider/storage observations for configured provider/account targets while preserving scope, subject, authority kind, state, and error metadata.
+- [ ] **Exact candidate projection:** Emit decision-ready evidence only for an exact `(infoHash,fileIndex)`/`releaseKey` match. Never project torrent-scoped evidence onto a file candidate.
+- [ ] **Freshness validation:** Require explicit evaluation, observation, and expiry times; fail closed for stale, future, unbounded, malformed, or internally inconsistent evidence.
+- [ ] **Fixtures:** Cover mixed authority kinds, provider/account isolation, `null` versus `0`, candidate versus torrent scope, stale/future/unbounded evidence, unknown/error preservation, and authoritative-uncached fallback.
 
-Required behavior:
-
-1. Accept current observation rows for configured provider/account targets plus exact ranked candidate identities and an explicit evaluation time.
-2. Preserve the storage identity dimensions: provider, account, scope, subject type/key, and authority kind. Never collapse a newer inferred/predicted row over a current authoritative row.
-3. Emit only exact candidate-scoped observations to the decision evaluator. Torrent-scoped TorBox evidence must remain torrent evidence until an explicit, tested projection rule exists; it must not silently authorize a file candidate.
-4. Require explicit `observedAt` and bounded `expiresAt`; reject or defer future, stale, unbounded, malformed, and internally impossible evidence.
-5. Preserve `unknown` and typed `error` metadata, including authentication, retryability, and backoff. Never convert failures or absent rows to `uncached`.
-6. Add fixtures for mixed authority kinds, provider/account isolation, `null` versus `0`, torrent versus candidate scope, stale/future evidence, and authoritative-uncached fallback.
-
-Exit for this task: the adapter deterministically produces decision-ready exact-candidate observations from fixture/current-row inputs, without I/O, Stage 3 changes, provider integration, or acquisition execution.
+Exit: deterministic fixture coverage for exact-candidate observations, with no I/O, live provider wiring, Stage 3 changes, or acquisition execution.

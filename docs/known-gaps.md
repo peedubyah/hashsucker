@@ -27,6 +27,8 @@
 - The pure decision evaluator combines unchanged Stage 3 order, observations, and policy into explainable `selected`, `deferred`, or `unavailable` results.
 - Contract tests cover exact identity, freshness, authority, unknown/error behavior, provider/account isolation, fallback, and current/history behavior.
 
+**Existing boundary divergence:** The legacy ranker still has a weighted `providerAvailability` component fed by fresh authoritative observations. Stage 4 did not change it. The accepted boundary remains provider-independent Stage 3 ranking, so remove that legacy coupling only as separately authorized Stage 3 debt—not as part of observation-adapter or runtime-wiring work.
+
 **Remaining Stage 4 work:**
 
 - **Provider observation adapters:** Normalize provider responses and current storage rows into deterministic decision-ready observations while preserving provider, account, scope, subject, and authority lanes.
