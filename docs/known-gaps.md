@@ -17,9 +17,31 @@
 
 `POST /api/ingest/dmm` only recognizes a script-call wrapper, while sampled current fragments use iframe/hash. The compatible importer is unwired. Neither path has run checkpoints, locks, resumability, source revision state, bounded transactions, or bounded-memory decoding. Existing corpus/database size claims are unverified and contradictory.
 
-### Incomplete provider observation and repair integration
+### Stage 4 provider reality and acquisition integration
 
-The provider-neutral contract, typed errors, explicit scope/authority/freshness model, append-only history/current projection, pure acquisition policy/decision boundary, TorBox cache/account-inventory capabilities, and injected Real-Debrid observation/file-selection/repair boundaries now exist. Stage 6 also has durable repair plans, explicit authorization, successful-step restart recovery, fail-closed ambiguous-operation handling, and evidence-gated reconciliation over mocks. The Stage 4 decision foundation preserves Stage 3 order, isolates provider/account scope, and defers unknown/error/stale evidence, but it is not wired into the active API, request publication, or a probe scheduler. Only fresh authoritative observations can affect downstream acquisition decisions; static ranking remains provider-independent. The active combined server path does not invoke repair execution, Real-Debrid has no fixture-verified direct HTTP gateway with a durable idempotency guarantee, no authenticated operator principal is wired, no trusted opaque resolver reconstructs Zurg/mount observation operands after restart, no pinned live Zurg/rclone runtime proves repair postconditions, public DTOs are not fully migrated, and runtime TTL/rate-limit policy still requires provider validation.
+**Completed foundation:**
+
+- Provider-neutral observations model provider/account scope, exact subject identity, authority kind, `cached|uncached|unknown|error`, timestamps/expiry, source/evidence, and typed error/retry metadata.
+- SQLite preserves append-only observation history and a newest-current projection without storing provider truth on candidates.
+- Versioned acquisition policy defines ordered provider/account targets.
+- The pure decision evaluator combines unchanged Stage 3 order, observations, and policy into explainable `selected`, `deferred`, or `unavailable` results.
+- Contract tests cover exact identity, freshness, authority, unknown/error behavior, provider/account isolation, fallback, and current/history behavior.
+
+**Remaining Stage 4 work:**
+
+- **Provider observation adapters:** Normalize provider responses and current storage rows into deterministic decision-ready observations while preserving provider, account, scope, subject, and authority lanes.
+- **Exact candidate projection rules:** Define when provider evidence is valid for an exact `(infoHash,fileIndex)`. Torrent-scoped evidence must not silently authorize a file-level candidate.
+- **Live provider integration:** Connect validated TorBox behavior to the active path and add fixture-verified Real-Debrid checks without erasing provider differences.
+- **TTL/freshness policy:** Establish provider-specific expiry, clock-skew, retry, rate-limit, and refresh rules so stale, future, unbounded, unknown, and error evidence fails closed.
+- **Scheduling/orchestration:** Add bounded probing, batching, budgets, stopping rules, retries, and refresh workers while keeping predictions separate from authoritative observations.
+- **Runtime wiring:** Feed current observations and explicit policy into the active API/request flow without moving provider reality into Stage 3 ranking.
+- **Fulfillment execution:** Translate an accepted decision into placement/reuse, provider-file mapping, exposure, or explicit physical fallback. This remains downstream and must retain ownership and safety checks.
+
+The first implementation task is the pure provider-observation adapter described in [`STAGE4-HANDOFF.md`](STAGE4-HANDOFF.md). Do not begin live API or fulfillment wiring until exact projection and freshness behavior are deterministic and tested.
+
+### Incomplete repair integration
+
+Stage 6 has durable repair plans, explicit authorization, successful-step restart recovery, fail-closed ambiguous-operation handling, and evidence-gated reconciliation over mocks. The active server does not invoke repair execution. Real-Debrid has no fixture-verified direct HTTP gateway with a durable idempotency guarantee; no authenticated operator principal, trusted restart resolver, or pinned live Zurg/rclone runtime proves repair postconditions. Public DTO migration also remains incomplete.
 
 ### Weak identity/enrichment correction
 
