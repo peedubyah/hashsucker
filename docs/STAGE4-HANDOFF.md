@@ -299,4 +299,46 @@ Lifecycle Adapter
 Placement Observation
 ```
 
-Future slices implement Real-Debrid lifecycle adapter, TorBox lifecycle adapter, file inventory, and exposure/link acquisition. No provider APIs in this slice.
+Future slices implement TorBox lifecycle adapter, file inventory, and exposure/link acquisition. No provider APIs in this slice.
+
+### Slice 2K — Real-Debrid Placement Adapter (Submit + Observe Only)
+
+Implemented the first provider-specific Stage 4 adapter for Real-Debrid, connecting the generic execution and placement observation boundaries to the Real-Debrid REST API:
+
+- **Provider-specific adapter:** `createRealDebridPlacementAdapter()` accepts an API key, fetch function, timeout, and clock. No provider execution logic duplicated.
+- **Placement submission:** Consumes generic execution request with `locator.locatorValue` (magnet), submits via `POST /rest/1.0/torrents/addMagnet` with form-encoded body and bearer token authentication.
+- **Placement resource creation:** Transforms RD response `{ id, uri }` into generic `createPlacementResource()` with `providerResourceId = RD torrent id` (NOT infoHash).
+- **Placement observation:** Queries `GET /rest/1.0/torrents/info/{id}`, maps RD status to generic status, preserves original RD state in `providerStatus`.
+- **Status mapping:** `downloaded` → `ready`; `magnet_conversion`/`waiting_files_selection`/`queued`/`downloading`/`compressing`/`uploading` → `processing`; `error`/`dead`/`virus` → `failed`; unknown values → `unknown`.
+- **Provider status preservation:** Original RD state (e.g., `waiting_files_selection`, `downloading`) preserved in `providerStatus` without encoding in generic layer.
+- **Error handling:** Maps RD failures through existing `ProviderOperationError` conventions (authentication, invalid-request, rate-limit, temporarily-unavailable, invalid-response). No automatic retries.
+- **No file selection:** Adapter has no `selectFiles` method — file selection is a future slice.
+- **No link retrieval:** Adapter has no `getLinks` method — `/unrestrict/link` is a future slice.
+- **No scheduling/polling:** Adapter has no `schedule` or `poll` methods.
+- **Frozen output:** Deeply frozen placement resources and observations.
+- **Validation:** Rejects deferred/unavailable/wrong provider/missing identity/missing account scope/missing locator/malformed responses.
+
+See: `media-search/src/lib/providers/realdebrid/placement.js`, `media-search/test/realdebrid-placement.test.js`.
+
+Exit: A Real-Debrid adapter exists that can consume the generic acquisition architecture without changing the core. The architecture becomes:
+
+```
+Generic Execution Request
+        |
+        v
+Real-Debrid Adapter
+        |
+        v
+POST /rest/1.0/torrents/addMagnet
+        |
+        v
+Placement Resource
+        |
+        v
+GET /rest/1.0/torrents/info/{id}
+        |
+        v
+Placement Observation
+```
+
+No file selection, file mapping, link acquisition, exposure, streaming, or lifecycle automation. Those are future slices. The purpose of 2K is proving that Real-Debrid can consume the generic acquisition architecture without changing the core.
