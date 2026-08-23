@@ -233,3 +233,70 @@ Created a pure boundary that resolves an acquisition-capable locator from a rank
 See: `media-search/src/lib/acquisition/locator.js`, `media-search/test/locator.test.js`.
 
 Exit: A deterministic candidate → acquisition locator boundary exists. No execution, provider mutation, or lifecycle tracking. Future execution adapters consume resolved locators.
+
+### Slice 2I — Generic Provider Placement Resource Boundary
+
+Created the generic contract representing a provider placement after an execution adapter accepts an execution request:
+
+- **Pure factory:** `createPlacementResource()` accepts provider, accountScope, providerResourceId, candidateIdentity, and createdAt. No provider calls, polling, or lifecycle management.
+- **Submitted status:** Only `submitted` status is supported — the provider has accepted the request. No downloading/complete/failed/expired states.
+- **Identity preservation:** Preserves provider identity, account scope, provider resource identity, candidate identity (infoHash, fileIndex, releaseKey), and timestamp.
+- **Validation:** Rejects missing provider, missing providerResourceId, missing account scope, missing candidate identity, and invalid timestamp.
+- **Frozen output:** Deeply frozen placement resource and candidateIdentity.
+- **No provider knowledge:** No TorBox fields, no RD fields, no provider-specific logic.
+
+See: `media-search/src/lib/acquisition/placement-resource.js`, `media-search/test/placement-resource.test.js`.
+
+Exit: A generic provider placement resource exists. The architecture becomes:
+
+```
+Intent
+ |
+ v
+Execution Request
+ |
+ v
+Provider Adapter
+ |
+ v
+Placement Resource
+ |
+ v
+Future lifecycle observation
+```
+
+Future slices add provider lifecycle adapters.
+
+### Slice 2J — Generic Placement Observation Contract
+
+Created the generic observation boundary for an existing provider placement resource:
+
+- **Pure factory:** `createPlacementObservation()` accepts provider, accountScope, providerResourceId, placementStatus, providerStatus, progress, observedAt, and error. No provider calls, polling, or lifecycle management.
+- **Normalized statuses:** Only `submitted`, `processing`, `ready`, `failed`, `unknown` are supported. Provider-specific states belong in `providerStatus`.
+- **Provider status preservation:** TorBox (`downloading`, `finished`) and Real-Debrid (`waiting_files_selection`, `downloaded`) states preserved in `providerStatus` without encoding in the generic layer.
+- **Progress handling:** Validates progress is null or 0-100 range. Rejects negative, >100, non-finite values.
+- **Error validation:** Requires error object with `category` string when present.
+- **Frozen output:** Deeply frozen observation and error objects.
+- **No provider knowledge:** No `/torrents/info/{id}`, no file IDs, no download URLs, no provider-specific state machines.
+
+See: `media-search/src/lib/acquisition/placement-observation.js`, `media-search/test/placement-observation.test.js`.
+
+Exit: A generic placement observation contract exists. The architecture becomes:
+
+```
+Execution Request
+        |
+        v
+Provider Adapter
+        |
+        v
+Placement Resource
+        |
+        v
+Lifecycle Adapter
+        |
+        v
+Placement Observation
+```
+
+Future slices implement Real-Debrid lifecycle adapter, TorBox lifecycle adapter, file inventory, and exposure/link acquisition. No provider APIs in this slice.
