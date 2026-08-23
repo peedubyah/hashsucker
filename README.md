@@ -1,102 +1,320 @@
 # HashSucker
 
-HashSucker is a media release-intelligence and fulfillment control plane. It is intended to turn a large hash corpus and live discovery evidence into exact, provider-backed media placements and a stable virtual library for Plex or other players.
+**Evidence-driven media discovery and acquisition intelligence.**
 
-## Problem
+HashSucker is a media candidate intelligence layer designed to bridge the gap between torrent discovery, provider reality, and reliable acquisition decisions.
 
-Debrid providers expose cache, placement, file, and transport state in provider-specific ways. Release names and torrent hashes are not themselves stable media identity, and repeatedly probing every plausible hash is expensive. HashSucker aims to own the decisions and durable identity above those systems while delegating byte transport to mature tools.
+It does not treat a torrent index, filename match, or historical availability as truth.
 
-## Current implementation — verified 2026-08-21
+Instead, HashSucker separates:
 
-The repository currently provides a prototype discovery API and a comparatively mature physical-import fallback:
+- what was discovered
+- what was ranked
+- what providers currently report
+- what action is justified
 
-- `media-search/` searches Cinemeta metadata, a local SQLite/FTS5 release corpus, Torrentio/Comet, and Torznab sources.
-- The local corpus stores exact `(infoHash, fileIndex)` candidates, parsed release attributes, media associations, and provider observations.
-- `torbox-importer/` consumes an atomic filesystem queue, acquires through TorBox, and invokes Sonarr/Radarr `ManualImport` for an explicit movie or one TV episode.
-- `ui/` is a React/Vite release-comparison prototype built into and served by the production `media-search` image.
-- Backend, frontend, importer, clean-image, startup, and restart-persistence validation pass, but several correctness defects remain.
+into explicit, testable boundaries.
 
-Important limitations:
+---
 
-- Local corpus retrieval is not constrained by the selected media ID.
-- Local and live candidates are not globally ranked.
-- Exact `(infoHash,fileIndex)` identity now survives result merge, public DTOs, UI row/selection, request handoff/status, and importer persistence/logging; provider inventory remains authoritative for provider file IDs.
-- Provider-observation age is ignored by ranking.
-- The reachable DMM ingestion endpoint does not recognize the current iframe/hash source wrapper; a compatible importer exists but is not wired to runtime.
-- Mutation endpoints have no application authentication. Root Compose binds to loopback by default; use an authenticated trusted reverse proxy before publishing beyond localhost.
-- A TorBox credential formerly committed in local addon configuration remains exposed in Git history and requires owner rotation.
+## The Problem
 
-Treat current discovery recommendations as prototype output. The local importer safeguards are stronger, but that path is the secondary fulfillment mode rather than the target primary product.
+Modern media automation often collapses several different problems into one:
 
-## Target direction
-
-```text
-large hash corpus
-  → release/media intelligence
-  → efficient provider-specific cache probing
-  → provider placement
-  → provider-authoritative file mapping
-  → mature provider transport
-  → stable provider-independent virtual library
-  → Plex / players
+```
+Find a release
+      |
+      v
+Assume it is valid
+      |
+      v
+Assume it is available
+      |
+      v
+Attempt acquisition
 ```
 
-HashSucker is the **control plane**: intent, exact release selection, desirability, cache-probe policy, confirmed provider observations, placement records, canonical bindings, reconciliation, and telemetry.
+This works until it does not.
 
-Zurg, provider WebDAV, and rclone are the **data plane**: remote-file exposure, mounting, seeking, buffering, and byte delivery. A custom HashSucker byte proxy is not a primary goal.
+Real-world media sources contain:
 
-Local download plus Sonarr/Radarr import remains supported as an explicit secondary policy.
+- duplicate releases
+- weak metadata associations
+- stale hashes
+- ambiguous file identities
+- unavailable provider state
+- inconsistent provider APIs
 
-Release desirability, a provider-specific cache prior, fresh confirmed provider state, placement state, and library/playback health are separate concepts. None may silently stand in for another.
+HashSucker treats these as separate concerns.
 
-## Repository map
+---
 
-| Path | Role |
-|---|---|
-| `media-search/` | Node control-plane prototype: metadata, corpus, discovery, ranking, request publication |
-| `torbox-importer/` | Shell/SQLite executor for secondary TorBox download plus Arr import |
-| `ui/` | React/Vite prototype built into the production `media-search` image |
-| `docs/` | Current architecture, model, pipeline, roadmap, risks, decisions, and evidence |
-| `handoff/` | Historical importer bridge artifacts, not current runtime authority |
-| `compose.yaml` | Current two-service topology with same-origin UI/API and persistent discovery storage |
+# Architecture
 
-## Development
+```
+                    Discovery Sources
+                          |
+                          v
 
-Requirements: Node.js 24+, npm, and Bash. Container deployment additionally requires Docker Compose or an equivalent configured container CLI.
+                 Candidate Corpus
+                          |
+                          v
 
-Backend:
+              Identity + Metadata Layer
+                          |
+                          v
 
-```sh
-cd media-search
-npm ci
-npm test
-npm run dev
+                 Stage 3 Ranking
+                          |
+                          v
+
+          Provider Observation Layer
+                          |
+                          v
+
+             Acquisition Decision Layer
+                          |
+                          v
+
+              Provider Execution Layer
 ```
 
-Frontend, in another terminal:
+Each stage has a defined responsibility.
 
-```sh
-cd ui
-npm ci
-npm test
-npm run dev
+---
+
+# Core Principles
+
+## Discovery is not truth
+
+A torrent appearing in a database does not prove:
+
+- it is the correct release
+- it contains the desired file
+- it is available from a provider
+- it should be acquired
+
+Discovery provides candidates.
+
+---
+
+## Ranking and availability are separate
+
+Candidate quality and provider reality are different questions.
+
+HashSucker does not fold provider state into search ranking.
+
+Instead:
+
+```
+Candidate quality
+        +
+Provider evidence
+        |
+        v
+Explainable decision
 ```
 
-Vite proxies `/api` to the backend at `http://localhost:3000`. The backend itself serves API routes only; `/` is not a browser application.
+This prevents provider state from corrupting search quality.
 
-For the current container topology, copy `.env.example` to `.env`, create the three required host directories with ownership compatible with the configured IDs, and run `docker compose up -d --build`. Open `http://127.0.0.1:3000` by default. Discovery state is stored in the Compose-managed `discovery-data` volume; importer state remains under `TORBOX_IMPORTER_HOST_PATH`.
+---
 
-The UI/API is intentionally loopback-only because mutation routes have no application authentication. Put an authenticated trusted reverse proxy in front before changing `MEDIA_SEARCH_BIND_ADDRESS`. Rotate the historically exposed TorBox credential before provider use.
+## Provider observations are evidence
 
-## Read next
+Provider information is modeled explicitly:
 
-1. [`HANDOFF.md`](HANDOFF.md) — durable invariants, boundaries, authority, roadmap intent, and resumption constraints.
-2. [`docs/project-state.md`](docs/project-state.md) — machine-generated current repository/integration facts; update with `node scripts/update-project-state.mjs`.
-3. [`docs/architecture.md`](docs/architecture.md) — current and target architecture.
-4. [`docs/data-model.md`](docs/data-model.md) — implemented storage and target entities.
-5. [`docs/pipeline.md`](docs/pipeline.md) — current and target flows.
-6. [`docs/roadmap.md`](docs/roadmap.md) — staged, reversible implementation order.
-7. [`docs/known-gaps.md`](docs/known-gaps.md) — current defect and risk register.
-8. [`docs/audit/8-21-audit.md`](docs/audit/8-21-audit.md) — canonical evidence baseline for this assessment.
+```
+cached
+uncached
+unknown
+error
+```
 
-`docs/archive/` contains historical or superseded material for archaeology only. It is not authoritative unless a current document explicitly cites a narrow piece of evidence.
+with:
+
+- provider identity
+- account scope
+- observation time
+- expiration
+- authority level
+- evidence source
+
+Unknown is not uncached.
+
+Failure is not absence.
+
+Prediction is not truth.
+
+---
+
+# Identity Model
+
+HashSucker treats exact identity as a first-class concern.
+
+Primary identity:
+
+```
+(infoHash, fileIndex)
+```
+
+or:
+
+```
+releaseKey
+```
+
+Important distinctions:
+
+```
+fileIndex = null
+```
+
+is not:
+
+```
+fileIndex = 0
+```
+
+Torrent-level evidence cannot silently authorize a file-level candidate.
+
+---
+
+# Provider Model
+
+Providers expose independent capabilities.
+
+Examples:
+
+```
+CACHE_OBSERVATION
+PLACEMENT_CREATE
+FILE_INVENTORY
+EXPOSURE
+REPAIR
+```
+
+A provider supporting one capability does not imply support for another.
+
+This avoids pretending providers have identical behavior.
+
+---
+
+# Current Implementation Status
+
+## Completed
+
+### Stage 3 — Candidate Intelligence
+
+- discovery corpus
+- metadata normalization
+- ranked candidate generation
+- deterministic ranking behavior
+
+### Stage 4 Foundation
+
+- provider-neutral observations
+- observation history/current projection
+- exact candidate projection
+- TorBox cache observation
+- TorBox placement creation boundary
+- bounded provider observation collection
+- decision contracts
+
+---
+
+## Intentionally Incomplete
+
+HashSucker does not currently attempt to:
+
+- replace every media automation tool
+- scrape every ecosystem
+- predict provider state as fact
+- maintain a global cache oracle
+- blindly automate destructive actions
+
+The goal is correctness before convenience.
+
+---
+
+# Design Philosophy
+
+HashSucker follows a simple rule:
+
+> Store enough information to make a good decision. Do not pretend incomplete information is certainty.
+
+The system prefers:
+
+```
+deferred
+```
+
+over:
+
+```
+wrong
+```
+
+and:
+
+```
+explainable uncertainty
+```
+
+over:
+
+```
+false confidence
+```
+
+---
+
+# Why Not Just Use Existing Indexers?
+
+Existing systems are excellent at:
+
+- library management
+- monitoring
+- metadata workflows
+- generic indexing
+
+HashSucker focuses on a different problem:
+
+```
+Given these possible candidates,
+what is actually the correct and actionable choice?
+```
+
+It is designed as an intelligence layer, not a replacement for every existing component.
+
+---
+
+# Roadmap Direction
+
+Future work:
+
+- additional provider integrations
+- richer observation sources
+- lifecycle reconciliation
+- cache reputation modeling
+- external compatibility APIs
+- deeper execution workflows
+
+while preserving the core separation:
+
+```
+Evidence
+    |
+    v
+Decision
+    |
+    v
+Action
+```
+
+---
+
+# Status
+
+Early-stage infrastructure project.
+
+Currently focused on building reliable boundaries before expanding automation.
