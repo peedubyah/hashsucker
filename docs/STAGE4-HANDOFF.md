@@ -149,3 +149,37 @@ Created the smallest pure boundary between a completed acquisition decision and 
 See: `media-search/src/lib/acquisition/intent.js`, `media-search/test/intent.test.js`.
 
 Exit: A deterministic decision → intent boundary exists. No provider execution, acquisition mutation, runtime wiring, scheduling, or fulfillment. The output is a command-like object that a future execution slice may consume.
+
+### Slice 2F — Generic Execution Placement Contract (Boundary Only)
+
+Created the first generic execution boundary between a completed acquisition intent
+and future provider-specific execution:
+
+- **Pure generic boundary:** `createExecutionRequest()` accepts a completed acquisition
+  intent and `evaluationTime` and produces a generic execution request. No provider
+  calls, downloads, placements, or provider state mutation.
+- **Ready → ready:** A ready intent with valid candidate identity, provider, and account
+  scope produces `{ executionStatus: "ready", action: "place" }`.
+- **Deferred → deferred:** A deferred intent produces `{ executionStatus: "deferred", action: null }`.
+  No execution request is created.
+- **Unavailable → unavailable:** An unavailable intent remains `{ executionStatus: "unavailable", action: null }`.
+- **Identity preservation:** Preserves `infoHash`, `fileIndex`, `releaseKey`, `provider`,
+  `accountScope`. No conversion to magnet/torrent/download — that belongs to provider adapters.
+- **Provider separation:** The contract does not know about magnets, torrent files, hashes,
+  provider API endpoints, torrent IDs, download IDs, or provider-specific state machines.
+  Future adapters (TorBox, Real-Debrid, etc.) consume this generic contract without
+  changing the core.
+- **Explainability:** Every execution request answers "What would an execution adapter receive?"
+  via execution status, action, candidate identity, provider, account scope, reason codes,
+  evidence, and timestamp.
+- **Explicit rejection:** Ready intents without candidate identity, provider, or account scope
+  throw `TypeError`. Unknown intent statuses throw. Missing/invalid inputs throw.
+- **Frozen output:** Deeply frozen execution request, candidateIdentity, and reasonCodes.
+- **Validation order:** intent → evaluationTime → status-specific rules.
+
+See: `media-search/src/lib/acquisition/execution.js`, `media-search/test/execution.test.js`.
+
+Exit: A generic intent → execution boundary exists. This slice creates the contract future
+provider adapters will consume. No provider execution, acquisition mutation, lifecycle
+tracking, polling, fulfillment, or runtime wiring. Future slices will add provider-specific
+execution and lifecycle adapters on top of this boundary.
