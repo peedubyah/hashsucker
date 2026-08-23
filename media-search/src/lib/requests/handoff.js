@@ -2,10 +2,13 @@ import crypto from 'node:crypto';
 
 import { validateReleaseIdentity } from '../../api/release-contract.js';
 
+export const HANDLING_MODES = ['download', 'stream'];
+
 export function createHandoff({
   intent,
   release,
   provider = 'torbox',
+  handlingMode = 'download',
 }) {
   if (!intent) {
     throw new Error('intent is required');
@@ -17,6 +20,10 @@ export function createHandoff({
     throw new Error(`Invalid provider: ${provider}`);
   }
 
+  if (!HANDLING_MODES.includes(handlingMode)) {
+    throw new Error(`Invalid handling mode: ${handlingMode}`);
+  }
+
   return {
     version: 1,
 
@@ -24,6 +31,7 @@ export function createHandoff({
     createdAt: new Date().toISOString(),
 
     provider,
+    handlingMode,
 
     intent: {
       mediaType: intent.mediaType,

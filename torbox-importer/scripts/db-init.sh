@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS requests (
 
     created_at        TEXT NOT NULL,
     provider          TEXT NOT NULL,
+    handling_mode     TEXT NOT NULL DEFAULT 'download',
 
     media_type        TEXT NOT NULL,
     scope             TEXT NOT NULL,

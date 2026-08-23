@@ -35,6 +35,32 @@ test('movie handoff preserves exact selected release identity', () => {
   );
 });
 
+test('handlingMode defaults to "download" when not specified', () => {
+  const intent = createRequestIntent({ type: 'movie', mediaId: 'tt0082971' });
+  const handoff = createHandoff({ intent, release: { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent` } });
+  assert.equal(handoff.handlingMode, 'download');
+});
+
+test('handlingMode "download" is represented correctly', () => {
+  const intent = createRequestIntent({ type: 'movie', mediaId: 'tt0082971' });
+  const handoff = createHandoff({ intent, release: { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent` }, handlingMode: 'download' });
+  assert.equal(handoff.handlingMode, 'download');
+});
+
+test('handlingMode "stream" is represented correctly', () => {
+  const intent = createRequestIntent({ type: 'movie', mediaId: 'tt0082971' });
+  const handoff = createHandoff({ intent, release: { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent` }, handlingMode: 'stream' });
+  assert.equal(handoff.handlingMode, 'stream');
+});
+
+test('invalid handlingMode is rejected', () => {
+  const intent = createRequestIntent({ type: 'movie', mediaId: 'tt0082971' });
+  assert.throws(
+    () => createHandoff({ intent, release: { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent` }, handlingMode: 'cloud-sync' }),
+    /Invalid handling mode: cloud-sync/
+  );
+});
+
 test('queue importer uses incoming and maps all lifecycle directories', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'media-search-queue-'));
   const client = new QueueImporterClient({ root });

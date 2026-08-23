@@ -22,6 +22,7 @@ sqlq() {
 REQUEST_ID="$(jq -r '.requestId' "$FILE")"
 CREATED_AT="$(jq -r '.createdAt' "$FILE")"
 PROVIDER="$(jq -r '.provider' "$FILE")"
+HANDLING_MODE="$(jq -r '.handlingMode // "download"' "$FILE")"
 
 MEDIA_TYPE="$(jq -r '.intent.mediaType' "$FILE")"
 SCOPE="$(jq -r '.intent.scope' "$FILE")"
@@ -51,6 +52,7 @@ INSERT INTO requests (
     request_id,
     created_at,
     provider,
+    handling_mode,
     media_type,
     scope,
     media_id,
@@ -71,6 +73,7 @@ VALUES (
     $(sqlq "$REQUEST_ID"),
     $(sqlq "$CREATED_AT"),
     $(sqlq "$PROVIDER"),
+    $(sqlq "$HANDLING_MODE"),
     $(sqlq "$MEDIA_TYPE"),
     $(sqlq "$SCOPE"),
     $(sqlq "$MEDIA_ID"),
@@ -110,6 +113,7 @@ STORED="$(
         SELECT
             created_at,
             provider,
+            handling_mode,
             media_type,
             scope,
             media_id,
@@ -125,9 +129,10 @@ STORED="$(
 )"
 
 EXPECTED="$(
-    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s' \
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s' \
         "$CREATED_AT" \
         "$PROVIDER" \
+        "$HANDLING_MODE" \
         "$MEDIA_TYPE" \
         "$SCOPE" \
         "$MEDIA_ID" \

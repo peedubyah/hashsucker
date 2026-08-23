@@ -10,7 +10,7 @@ import { projectRdZurgLifecycle } from '../lib/control-plane/rd-zurg-slice.js';
 import { QueueImporterClient } from '../lib/importer/queue-client.js';
 import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { searchTitles, getMediaById, getCacheMetrics } from '../lib/metadata/unified-search.js';
-import { createHandoff } from '../lib/requests/handoff.js';
+import { createHandoff, HANDLING_MODES } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
 import { searchReleases, combinedSearch, getSearchStats } from '../lib/discovery/search-engine.js';
 import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
@@ -334,7 +334,11 @@ function validateSupportedRequest(body) {
     codec: text(body.release.codec, 30),
     hdr: text(body.release.hdr, 30),
   };
-  return { intent, release };
+  const handlingMode = body.handlingMode ?? 'download';
+  if (!HANDLING_MODES.includes(handlingMode)) {
+    throw new Error(`Invalid handling mode: ${handlingMode}`);
+  }
+  return { intent, release, handlingMode };
 }
 
 export function createApp(dependencies = {}) {
@@ -528,8 +532,8 @@ export function createRequestHandler(dependencies = {}) {
       }
       if (request.method === 'POST' && url.pathname === '/api/requests') {
         const body = await readBody(request);
-        const { intent, release } = validateSupportedRequest(body);
-        const handoff = createHandoff({ intent, release, provider: 'torbox' });
+        const { intent, release, handlingMode } = validateSupportedRequest(body);
+        const handoff = createHandoff({ intent, release, provider: 'torbox', handlingMode });
         return sendJson(response, 202, await importer.submitRequest(handoff));
       }
       const statusMatch = request.method === 'GET' && url.pathname.match(/^\/api\/requests\/([0-9a-f-]{36})$/i);

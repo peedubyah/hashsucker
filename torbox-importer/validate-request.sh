@@ -12,6 +12,7 @@ jq -e '
   .version == 1
   and (.requestId | type == "string" and length > 0)
   and (.provider == "torbox" or .provider == "realdebrid" or .provider == "auto")
+  and ((.handlingMode // "download") | . == "download" or . == "stream")
   and (.intent.mediaType == "movie" or .intent.mediaType == "tv")
   and (.intent.scope == "movie" or .intent.scope == "episode" or .intent.scope == "season" or .intent.scope == "series")
   and (.intent.mediaId | type == "string" and length > 0)
@@ -47,6 +48,7 @@ echo "VALID REQUEST"
 jq -r '
   "request:    \(.requestId)",
   "provider:   \(.provider)",
+  "handling:   \(.handlingMode // "download")",
   "media:      \(.intent.mediaType)",
   "scope:      \(.intent.scope)",
   "mediaId:    \(.intent.mediaId)",

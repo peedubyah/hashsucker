@@ -387,6 +387,51 @@ test('request endpoint accepts explicit movie scope through the same handoff pat
   );
 });
 
+test('request endpoint defaults handlingMode to "download" when not specified', async () => {
+  const { request, submitted } = createHarness();
+  const response = await request('/api/requests', {
+    method: 'POST',
+    body: JSON.stringify({
+      type: 'movie',
+      mediaId: 'tt0082971',
+      release: { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent` },
+    }),
+  });
+  assert.equal(response.status, 202, response.text);
+  assert.equal(submitted[0].handlingMode, 'download');
+});
+
+test('request endpoint preserves handlingMode "stream"', async () => {
+  const { request, submitted } = createHarness();
+  const response = await request('/api/requests', {
+    method: 'POST',
+    body: JSON.stringify({
+      type: 'movie',
+      mediaId: 'tt0082971',
+      handlingMode: 'stream',
+      release: { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent` },
+    }),
+  });
+  assert.equal(response.status, 202, response.text);
+  assert.equal(submitted[0].handlingMode, 'stream');
+});
+
+test('request endpoint rejects invalid handlingMode with 400', async () => {
+  const { request } = createHarness();
+  const response = await request('/api/requests', {
+    method: 'POST',
+    body: JSON.stringify({
+      type: 'movie',
+      mediaId: 'tt0082971',
+      handlingMode: 'cloud-sync',
+      release: { infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent` },
+    }),
+  });
+  assert.equal(response.status, 400);
+  const body = JSON.parse(response.text);
+  assert.match(body.error, /Invalid handling mode/);
+});
+
 test('POST mutation routes reject malformed JSON with 400', async () => {
   const { request } = createHarness();
   for (const path of ['/api/ingest/dmm', '/api/attributes/run', '/api/requests']) {
