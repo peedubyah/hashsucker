@@ -65,6 +65,8 @@ export interface ReleaseResult extends ReleaseIdentity {
   _source: 'corpus' | 'live' | 'merged' | 'unknown';
 }
 
+export type ViewMode = 'user' | 'debug';
+
 export interface ScoreComponents {
   relevance?: number;
   quality?: number;

@@ -77,7 +77,7 @@ describe('ReleaseDetails handling mode', () => {
     expect(submittedMode).toBe('stream');
   });
 
-  it('does not expose .strm terminology, provider details, or binding state', () => {
+  it('does not expose .strm terminology, provider details, or binding state in user mode', () => {
     render(
       <ReleaseDetails
         release={release}
@@ -86,10 +86,33 @@ describe('ReleaseDetails handling mode', () => {
         requesting={false}
         requestResult={null}
         requestError={null}
+        viewMode="user"
       />
     );
     expect(screen.queryByText(/\.strm/i)).toBeNull();
     expect(screen.queryByText(/binding/i)).toBeNull();
     expect(screen.queryByText(/repair/i)).toBeNull();
+    expect(screen.queryByText('Score')).toBeNull();
+    expect(screen.queryByText('Confidence')).toBeNull();
+    expect(screen.queryByText('Release key')).toBeNull();
+    expect(screen.queryByText('Providers')).toBeNull();
+  });
+
+  it('shows score, confidence, and release key in debug mode', () => {
+    render(
+      <ReleaseDetails
+        release={release}
+        onClose={() => {}}
+        onSubmit={() => {}}
+        requesting={false}
+        requestResult={null}
+        requestError={null}
+        viewMode="debug"
+      />
+    );
+    expect(screen.getByText('Score')).toBeTruthy();
+    expect(screen.getByText('Confidence')).toBeTruthy();
+    expect(screen.getByText('Release key')).toBeTruthy();
+    expect(screen.getByText('Providers')).toBeTruthy();
   });
 });

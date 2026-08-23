@@ -42,7 +42,8 @@ export function useSearch() {
     }
   }, []);
 
-  const selectMedia = useCallback(async (type: string, id: string) => {
+  const selectMedia = useCallback(async (result: TitleResult) => {
+    const { id, type } = result;
     setState(s => ({ ...s, loading: true, error: null }));
     try {
       const [releases, media, controlPlaneResult] = await Promise.all([

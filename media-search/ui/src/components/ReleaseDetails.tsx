@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type {
-  ControlPlaneItemDetail, ReleaseResult, RequestSubmissionResult,
+  ControlPlaneItemDetail, ReleaseResult, RequestSubmissionResult, ViewMode,
 } from '@/types/api';
 import { formatSize, formatScore, formatConfidence } from '@/utils/format';
 import { Badge } from './Badge';
@@ -29,6 +29,7 @@ interface Props {
   requesting: boolean;
   requestResult: RequestSubmissionResult | null;
   requestError: string | null;
+  viewMode?: ViewMode;
   controlPlaneDetail?: ControlPlaneItemDetail | null;
   controlPlaneLoading?: boolean;
   controlPlaneError?: string | null;
@@ -36,9 +37,10 @@ interface Props {
 
 export function ReleaseDetails({
   release, onClose, onSubmit, requesting, requestResult, requestError,
-  controlPlaneDetail = null, controlPlaneLoading = false, controlPlaneError = null,
+  viewMode = 'user', controlPlaneDetail = null, controlPlaneLoading = false, controlPlaneError = null,
 }: Props) {
   const [handlingMode, setHandlingMode] = useState<HandlingMode>('download');
+  const isDebug = viewMode === 'debug';
   return (
     <div className="release-details-overlay" onClick={onClose}>
       <div className="release-details-panel" onClick={e => e.stopPropagation()}>
@@ -103,33 +105,39 @@ export function ReleaseDetails({
               )}
             </div>
           </div>
-          <div className="detail-section">
-            <h4>Ranking</h4>
-            <div className="detail-grid">
-              <div className="detail-item">
-                <span className="detail-label">Score</span>
-                <span className="detail-value">{formatScore(release.score)}</span>
-              </div>
-              <div className="detail-item">
-                <span className="detail-label">Confidence</span>
-                <span className="detail-value">{formatConfidence(release.confidence)}</span>
+          {isDebug && (
+            <div className="detail-section">
+              <h4>Ranking</h4>
+              <div className="detail-grid">
+                <div className="detail-item">
+                  <span className="detail-label">Score</span>
+                  <span className="detail-value">{formatScore(release.score)}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="detail-label">Confidence</span>
+                  <span className="detail-value">{formatConfidence(release.confidence)}</span>
+                </div>
               </div>
             </div>
-          </div>
-          <div className="detail-section">
-            <h4>Providers</h4>
-            <ProviderStatus providers={release.providers} observations={release.providerObservations} />
-          </div>
-          <div className="detail-section">
-            <h4>Exact identity</h4>
-            <div className="detail-item">
-              <span className="detail-label">Release key</span>
-              <span className="detail-value mono">{release.releaseKey}</span>
+          )}
+          {isDebug && (
+            <div className="detail-section">
+              <h4>Providers</h4>
+              <ProviderStatus providers={release.providers} observations={release.providerObservations} />
             </div>
-          </div>
-          {controlPlaneLoading && <div className="detail-section">Loading exact lifecycle…</div>}
-          {controlPlaneError && <div className="detail-section" role="alert">{controlPlaneError}</div>}
-          {controlPlaneDetail && (
+          )}
+          {isDebug && (
+            <div className="detail-section">
+              <h4>Exact identity</h4>
+              <div className="detail-item">
+                <span className="detail-label">Release key</span>
+                <span className="detail-value mono">{release.releaseKey}</span>
+              </div>
+            </div>
+          )}
+          {isDebug && controlPlaneLoading && <div className="detail-section">Loading exact lifecycle…</div>}
+          {isDebug && controlPlaneError && <div className="detail-section" role="alert">{controlPlaneError}</div>}
+          {isDebug && controlPlaneDetail && (
             <div className="detail-section">
               <LifecycleStatus items={[controlPlaneDetail]} />
               <div className="detail-grid">

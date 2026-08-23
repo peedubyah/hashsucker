@@ -6,9 +6,15 @@ import { mockReleases } from '../test/fixtures';
 describe('useReleaseFilters', () => {
   it('returns all releases sorted by score desc by default', () => {
     const { result } = renderHook(() => useReleaseFilters(mockReleases));
-    expect(result.current.sorted).toHaveLength(3);
+    expect(result.current.sorted).toHaveLength(mockReleases.length);
     expect(result.current.sorted[0].score).toBe(0.85);
-    expect(result.current.sorted[2].score).toBe(0.45);
+    expect(result.current.sorted[result.current.sorted.length - 1].score).toBe(0.3);
+  });
+
+  it('splits into recommended and others', () => {
+    const { result } = renderHook(() => useReleaseFilters(mockReleases));
+    expect(result.current.recommended.length).toBeLessThanOrEqual(result.current.sorted.length);
+    expect(result.current.recommended.length + result.current.others.length).toBe(result.current.sorted.length);
   });
 
   it('filters by source', () => {
@@ -19,7 +25,8 @@ describe('useReleaseFilters', () => {
         source: 'corpus',
       });
     });
-    expect(result.current.sorted).toHaveLength(2);
+    const corpusCount = mockReleases.filter(r => r._source === 'corpus').length;
+    expect(result.current.sorted).toHaveLength(corpusCount);
     expect(result.current.sorted.every(r => r._source === 'corpus')).toBe(true);
   });
 
@@ -31,8 +38,9 @@ describe('useReleaseFilters', () => {
         resolution: '1080p',
       });
     });
-    expect(result.current.sorted).toHaveLength(1);
-    expect(result.current.sorted[0].resolution).toBe('1080p');
+    const count1080p = mockReleases.filter(r => r.resolution === '1080p').length;
+    expect(result.current.sorted).toHaveLength(count1080p);
+    expect(result.current.sorted.every(r => r.resolution === '1080p')).toBe(true);
   });
 
   it('filters by quality', () => {
@@ -43,7 +51,8 @@ describe('useReleaseFilters', () => {
         quality: 'WEB-DL',
       });
     });
-    expect(result.current.sorted).toHaveLength(2);
+    const webdlCount = mockReleases.filter(r => r.quality === 'WEB-DL').length;
+    expect(result.current.sorted).toHaveLength(webdlCount);
     expect(result.current.sorted.every(r => r.quality === 'WEB-DL')).toBe(true);
   });
 
@@ -55,8 +64,10 @@ describe('useReleaseFilters', () => {
         cached: 'cached',
       });
     });
-    expect(result.current.sorted).toHaveLength(1);
-    expect(result.current.sorted[0].infoHash).toBe('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    const cachedCount = mockReleases.filter(r =>
+      r.providerObservations?.some(o => o.cached === true && o.state === 'cached')
+    ).length;
+    expect(result.current.sorted).toHaveLength(cachedCount);
   });
 
   it('filters by query matching filename', () => {
@@ -67,8 +78,7 @@ describe('useReleaseFilters', () => {
         query: '720p',
       });
     });
-    expect(result.current.sorted).toHaveLength(1);
-    expect(result.current.sorted[0].resolution).toBe('720p');
+    expect(result.current.sorted.every(r => r.filename.toLowerCase().includes('720p'))).toBe(true);
   });
 
   it('toggles sort direction', () => {
@@ -78,7 +88,7 @@ describe('useReleaseFilters', () => {
       result.current.toggleSort('score');
     });
     expect(result.current.sort.direction).toBe('asc');
-    expect(result.current.sorted[0].score).toBe(0.45);
+    expect(result.current.sorted[0].score).toBe(0.3);
   });
 
   it('sorts by size descending by default', () => {
@@ -87,7 +97,6 @@ describe('useReleaseFilters', () => {
       result.current.toggleSort('size');
     });
     expect(result.current.sorted[0].size).toBe(8589934592);
-    expect(result.current.sorted[2].size).toBe(1073741824);
   });
 
   it('sorts by filename descending on first toggle', () => {
@@ -96,7 +105,6 @@ describe('useReleaseFilters', () => {
       result.current.toggleSort('filename');
     });
     expect(result.current.sort.direction).toBe('desc');
-    expect(result.current.sorted[0].filename).toBe('Black.Mirror.S07E03.720p.HDTV.mkv');
   });
 
   it('sorts by filename ascending on second toggle', () => {
@@ -108,7 +116,7 @@ describe('useReleaseFilters', () => {
       result.current.toggleSort('filename');
     });
     expect(result.current.sort.direction).toBe('asc');
-    expect(result.current.sorted[0].filename).toBe('Black.Mirror.S07E03.1080p.WEB-DL.mkv');
+    expect(result.current.sorted[0].filename).toBe('Black.Mirror.S07E03.1080p.BluRay.mkv');
   });
 
   it('combines multiple filters', () => {

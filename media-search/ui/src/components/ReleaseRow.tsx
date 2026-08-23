@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { ReleaseResult } from '@/types/api';
+import type { ReleaseResult, ViewMode } from '@/types/api';
 import { formatSize, formatScore, formatConfidence } from '@/utils/format';
 import { Badge } from './Badge';
 import { ProviderStatus } from './ProviderStatus';
@@ -7,6 +7,7 @@ import { ProviderStatus } from './ProviderStatus';
 interface Props {
   release: ReleaseResult;
   rank: number;
+  viewMode?: ViewMode;
   onSelect?: (release: ReleaseResult) => void;
 }
 
@@ -66,7 +67,7 @@ function RankingDetails({ release }: { release: ReleaseResult }) {
   );
 }
 
-export function ReleaseRow({ release, rank, onSelect }: Props) {
+export function ReleaseRow({ release, rank, viewMode = 'user', onSelect }: Props) {
   const [expanded, setExpanded] = useState(false);
 
   const toggle = () => {
@@ -76,6 +77,8 @@ export function ReleaseRow({ release, rank, onSelect }: Props) {
   const handleSelect = () => {
     onSelect?.(release);
   };
+
+  const isDebug = viewMode === 'debug';
 
   return (
     <div className={`release-row source-${release._source} ${expanded ? 'expanded' : ''}`}>
@@ -98,7 +101,7 @@ export function ReleaseRow({ release, rank, onSelect }: Props) {
         </div>
         <div className="release-meta">
           <span className="release-size">{formatSize(release.size)}</span>
-          <span className="release-score">{formatScore(release.score)}</span>
+          {isDebug && <span className="release-score">{formatScore(release.score)}</span>}
         </div>
         <div className="release-providers-mini">
           <ProviderStatus providers={release.providers} observations={release.providerObservations} />
@@ -187,16 +190,20 @@ export function ReleaseRow({ release, rank, onSelect }: Props) {
                 </Badge>
               </span>
             </div>
-            <div className="detail-item">
-              <span className="detail-label">InfoHash</span>
-              <span className="detail-value mono">{release.infoHash}</span>
+            {isDebug && (
+              <div className="detail-item">
+                <span className="detail-label">InfoHash</span>
+                <span className="detail-value mono">{release.infoHash}</span>
+              </div>
+            )}
+          </div>
+          {isDebug && <RankingDetails release={release} />}
+          {isDebug && (
+            <div className="detail-providers">
+              <span className="detail-label">Provider evidence</span>
+              <ProviderStatus providers={release.providers} observations={release.providerObservations} />
             </div>
-          </div>
-          <RankingDetails release={release} />
-          <div className="detail-providers">
-            <span className="detail-label">Provider evidence</span>
-            <ProviderStatus providers={release.providers} observations={release.providerObservations} />
-          </div>
+          )}
           {onSelect && (
             <button type="button" className="request-button" onClick={handleSelect}>
               Request this release

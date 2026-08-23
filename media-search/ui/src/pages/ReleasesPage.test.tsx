@@ -20,10 +20,14 @@ const releases = {
     { ...mockReleases[0], infoHash: HASH, fileIndex: null, releaseKey: `${HASH}:torrent`, filename: 'Torrent.Level.mkv' },
     { ...mockReleases[1], infoHash: HASH, fileIndex: 0, releaseKey: `${HASH}:0`, filename: 'File.Zero.mkv' },
     { ...mockReleases[2], infoHash: HASH, fileIndex: 1, releaseKey: `${HASH}:1`, filename: 'File.One.mkv' },
+    { ...mockReleases[3], infoHash: HASH, fileIndex: 2, releaseKey: `${HASH}:2`, filename: 'File.Two.mkv' },
+    { ...mockReleases[4], infoHash: HASH, fileIndex: 3, releaseKey: `${HASH}:3`, filename: 'File.Three.mkv' },
+    { ...mockReleases[5], infoHash: HASH, fileIndex: 4, releaseKey: `${HASH}:4`, filename: 'File.Four.mkv' },
+    { ...mockReleases[6], infoHash: HASH, fileIndex: 5, releaseKey: `${HASH}:5`, filename: 'File.Five.mkv' },
   ],
-  total: 3,
+  total: 7,
   timings: { totalMs: 1 },
-  stats: { indexed: 3, total: 3 },
+  stats: { indexed: 7, total: 7 },
 } satisfies ReleaseSearchResult;
 
 const media = {
@@ -46,6 +50,32 @@ describe('ReleasesPage exact identity', () => {
     expect(screen.getByText('Torrent.Level.mkv')).toBeTruthy();
     expect(screen.getByText('File.Zero.mkv')).toBeTruthy();
     expect(screen.getByText('File.One.mkv')).toBeTruthy();
+  });
+
+  it('renders recommended releases by default', () => {
+    render(<ReleasesPage releases={releases} media={{ media }} loading={false} error={null} onBack={() => {}} />);
+    expect(screen.getByText('Recommended releases')).toBeTruthy();
+    const rows = document.querySelectorAll('.release-row');
+    expect(rows.length).toBeLessThanOrEqual(5);
+  });
+
+  it('hides other releases list by default', () => {
+    render(<ReleasesPage releases={releases} media={{ media }} loading={false} error={null} onBack={() => {}} />);
+    expect(document.getElementById('other-releases-list')).toBeNull();
+    expect(screen.getByText(/Other releases/).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('shows other releases when toggled', () => {
+    render(<ReleasesPage releases={releases} media={{ media }} loading={false} error={null} onBack={() => {}} />);
+    const toggle = screen.getByText(/Other releases/);
+    fireEvent.click(toggle);
+    expect(document.getElementById('other-releases-list')).toBeTruthy();
+  });
+
+  it('preserves ranking order in recommended view', () => {
+    render(<ReleasesPage releases={releases} media={{ media }} loading={false} error={null} onBack={() => {}} />);
+    const ranks = Array.from(document.querySelectorAll('.release-rank')).map(el => el.textContent);
+    expect(ranks).toEqual(['#1', '#2', '#3', '#4', '#5']);
   });
 
   it('submits fileIndex and releaseKey for the selected row', async () => {

@@ -19,6 +19,8 @@ const RESOLUTION_ORDER: Record<string, number> = {
   '480p': 1,
 };
 
+export const RECOMMENDED_RELEASE_LIMIT = 5;
+
 export function useReleaseFilters(releases: ReleaseResult[]) {
   const [filters, setFilters] = useState<FilterState>(initialFilters);
   const [sort, setSort] = useState<SortState>({ key: 'score', direction: 'desc' });
@@ -86,6 +88,9 @@ export function useReleaseFilters(releases: ReleaseResult[]) {
     return sorted;
   }, [filtered, sort]);
 
+  const recommended = useMemo(() => sorted.slice(0, RECOMMENDED_RELEASE_LIMIT), [sorted]);
+  const others = useMemo(() => sorted.slice(RECOMMENDED_RELEASE_LIMIT), [sorted]);
+
   const toggleSort = (key: SortKey) => {
     setSort(prev => ({
       key,
@@ -97,6 +102,8 @@ export function useReleaseFilters(releases: ReleaseResult[]) {
     filters,
     setFilters,
     sorted,
+    recommended,
+    others,
     sort,
     toggleSort,
     totalCount: releases.length,

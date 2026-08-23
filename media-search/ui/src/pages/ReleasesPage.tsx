@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { getControlPlaneItem, submitRequest } from '@api/client';
 import type {
   ControlPlaneItemDetail, ReleaseSearchResult, MediaResult, ReleaseResult,
-  RequestSubmissionResult, ControlPlaneItemList,
+  RequestSubmissionResult, ControlPlaneItemList, ViewMode,
 } from '@/types/api';
 import { FilterBar } from '@/components/FilterBar';
 import { ReleaseRow } from '@/components/ReleaseRow';
@@ -12,7 +12,7 @@ import { LoadingState } from '@/components/LoadingState';
 import { ErrorState } from '@/components/ErrorState';
 import { EmptyState } from '@/components/EmptyState';
 import { LifecycleStatus } from '@/components/LifecycleStatus';
-import { useReleaseFilters } from '@/hooks/useReleaseFilters';
+import { useReleaseFilters, RECOMMENDED_RELEASE_LIMIT } from '@/hooks/useReleaseFilters';
 import type { SortKey } from '@/hooks/useReleaseFilters';
 
 interface Props {
@@ -35,11 +35,15 @@ export function ReleasesPage({
   const [controlPlaneDetail, setControlPlaneDetail] = useState<ControlPlaneItemDetail | null>(null);
   const [controlPlaneDetailError, setControlPlaneDetailError] = useState<string | null>(null);
   const [controlPlaneDetailLoading, setControlPlaneDetailLoading] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>('user');
+  const [showOtherReleases, setShowOtherReleases] = useState(false);
 
   const {
     filters,
     setFilters,
     sorted,
+    recommended,
+    others,
     sort,
     toggleSort,
     totalCount,
@@ -130,20 +134,61 @@ export function ReleasesPage({
                 {sort.key === key && (sort.direction === 'asc' ? ' ↑' : ' ↓')}
               </button>
             ))}
+            <button
+              type="button"
+              className="view-mode-toggle"
+              onClick={() => setViewMode(m => m === 'user' ? 'debug' : 'user')}
+              aria-pressed={viewMode === 'debug'}
+            >
+              {viewMode === 'user' ? 'Show debug' : 'Hide debug'}
+            </button>
           </div>
           {sorted.length === 0 ? (
             <EmptyState message="No releases match the current filters." />
           ) : (
-            <div className="release-list">
-              {sorted.map((r, i) => (
-                <ReleaseRow
-                  key={r.releaseKey}
-                  release={r}
-                  rank={i + 1}
-                  onSelect={handleSelectRelease}
-                />
-              ))}
-            </div>
+            <>
+              <div className="release-list-header">
+                <h2 className="release-list-title">Recommended releases</h2>
+                <span className="release-list-count">Top {Math.min(recommended.length, RECOMMENDED_RELEASE_LIMIT)} of {sorted.length}</span>
+              </div>
+              <div className="release-list">
+                {recommended.map((r, i) => (
+                  <ReleaseRow
+                    key={r.releaseKey}
+                    release={r}
+                    rank={i + 1}
+                    viewMode={viewMode}
+                    onSelect={handleSelectRelease}
+                  />
+                ))}
+              </div>
+              {others.length > 0 && (
+                <div className="other-releases-section">
+                  <button
+                    type="button"
+                    className="other-releases-toggle"
+                    onClick={() => setShowOtherReleases(s => !s)}
+                    aria-expanded={showOtherReleases}
+                    aria-controls="other-releases-list"
+                  >
+                    {showOtherReleases ? '▾' : '▸'} Other releases ({others.length})
+                  </button>
+                  {showOtherReleases && (
+                    <div className="release-list" id="other-releases-list">
+                      {others.map((r, i) => (
+                        <ReleaseRow
+                          key={r.releaseKey}
+                          release={r}
+                          rank={recommended.length + i + 1}
+                          viewMode={viewMode}
+                          onSelect={handleSelectRelease}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </>
       )}
@@ -156,6 +201,7 @@ export function ReleasesPage({
           requesting={requesting}
           requestResult={requestResult}
           requestError={requestError}
+          viewMode={viewMode}
           controlPlaneDetail={controlPlaneDetail}
           controlPlaneLoading={controlPlaneDetailLoading}
           controlPlaneError={controlPlaneDetailError}
