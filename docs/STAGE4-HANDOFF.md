@@ -123,7 +123,7 @@ Created the smallest pure boundary that combines Stage 3 ranked candidates, deci
 - **Identity preservation:** Exact `(infoHash, fileIndex)`/`releaseKey`. `null` distinct from `0`. Torrent-level evidence cannot authorize file-level candidates.
 - **Provider/account isolation:** Observations never leak across provider, account, scope, or identity boundaries.
 - **Projection validation:** The decisive observation is explicitly validated against the selected candidate via `projectExactCandidateObservation()`. Rejection fails closed as deferred.
-- **Decision-ready observation filter:** Filters to `scope: 'candidate'` observations before evaluation, preventing `decideAcquisition` from throwing on non-candidate scopes (torrent, exposure, mount).
+- **Observation admission boundary:** `currentObservationProjection` in `decision.js` admits only `torrent` and `candidate` scopes — all other scopes (`provider-resource`, `exposure`, `mount`, `provider-file`) are rejected with `TypeError` at the admission boundary. `projectExactCandidateObservation()` remains the identity/scope authority gate.
 - **Explainability:** Result includes selected candidate identity, rank, decisive observation, reason codes, and per-candidate evaluation results.
 - **Frozen output:** Deeply frozen result prevents downstream mutation.
 - **Input validation:** `evaluationTime` is required (no wall-clock fallback); explicit rejection of missing/invalid inputs.
@@ -131,3 +131,21 @@ Created the smallest pure boundary that combines Stage 3 ranked candidates, deci
 See: `media-search/src/lib/acquisition/decision-composition.js`, `media-search/test/decision-composition.test.js`.
 
 Exit: A deterministic pure Stage 4 decision boundary exists. No acquisition execution, placement creation, provider mutation, runtime wiring, or fulfillment. The next slice may consume this decision result and perform provider execution. This slice stops before that boundary.
+
+### Slice 2E — Acquisition Intent Boundary
+
+Created the smallest pure boundary between a completed acquisition decision and future provider execution:
+
+- **Pure intent factory:** `createAcquisitionIntent()` accepts a completed decision, `evaluationTime`, and `executionPolicy` and produces a command-like intent object. No provider calls, downloads, placements, or provider state mutation.
+- **Selected → ready:** A selected decision with valid candidate, decisive evidence, identity, and provider/account scope produces `{ intentStatus: "ready", action: "place" }`.
+- **Deferred → deferred:** A deferred decision produces `{ intentStatus: "deferred", action: null }` preserving reason codes and evaluations. No fallback action invented.
+- **Unavailable → unavailable:** An unavailable decision remains `{ intentStatus: "unavailable", action: null }`. No automatic recovery.
+- **Identity preservation:** Preserves `infoHash`, `fileIndex`, `releaseKey`, `provider`, `accountScope`. No conversion to magnet/torrent/download — that belongs to execution.
+- **Explainability:** Every intent answers "Why would the system do this?" via decision status, decisive observation, reason codes, and evaluation timestamp. No guessed confidence, predicted cache state, or inferred provider success.
+- **Explicit rejection:** Selected decisions without candidate/evidence/provider/accountScope throw `TypeError`. Unknown decision statuses throw.
+- **Frozen output:** Deeply frozen intent, candidateIdentity, evidence, and reasonCodes.
+- **Validation order:** decision → evaluationTime → executionPolicy → status-specific rules.
+
+See: `media-search/src/lib/acquisition/intent.js`, `media-search/test/intent.test.js`.
+
+Exit: A deterministic decision → intent boundary exists. No provider execution, acquisition mutation, runtime wiring, scheduling, or fulfillment. The output is a command-like object that a future execution slice may consume.
