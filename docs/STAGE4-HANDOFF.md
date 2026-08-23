@@ -217,3 +217,19 @@ TorBox Placement Submission
 ```
 
 No lifecycle tracking, polling, completion, exposure, scheduling, or runtime wiring. Future slices will add provider lifecycle observation separately.
+
+### Slice 2H — Acquisition Locator Resolution Boundary
+
+Created a pure boundary that resolves an acquisition-capable locator from a ranked candidate before provider execution:
+
+- **Pure locator resolver:** `resolveAcquisitionLocator()` accepts a candidate and produces a frozen locator object. No provider calls, downloads, or network calls.
+- **Magnet support:** Only `magnet` locator type is supported. Uses `candidate.magnet` as the source — does not construct fake magnets from hashes.
+- **Validation:** Rejects missing candidate, missing magnet, malformed magnet (missing `magnet:?` prefix or `xt=urn:btih`), and infoHash/magnet mismatch.
+- **Identity preservation:** Preserves candidate identity, infoHash, and fileIndex context through the locator.
+- **Frozen output:** Deeply frozen locator result.
+- **No mutation:** Candidate input is not modified.
+- **No provider knowledge:** Pure function with no TorBox/RD-specific logic.
+
+See: `media-search/src/lib/acquisition/locator.js`, `media-search/test/locator.test.js`.
+
+Exit: A deterministic candidate → acquisition locator boundary exists. No execution, provider mutation, or lifecycle tracking. Future execution adapters consume resolved locators.
