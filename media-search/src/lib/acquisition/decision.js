@@ -156,9 +156,24 @@ function currentObservationProjection(observations) {
       throw new TypeError(`Invalid observations[${index}]: ${error.message}`, { cause: error });
     }
 
+    // Key the observation by its own (infoHash, fileIndex) identity.
+    // A torrent-scoped observation is keyed by `hash:torrent` and matches a
+    // torrent-level candidate (fileIndex=null). A candidate-scoped observation
+    // is keyed by `hash:N` and matches a file-level candidate. Only these two
+    // scopes are admissible — all other scopes (provider-resource, exposure,
+    // mount, etc.) are rejected here. This is the observation admission
+    // boundary; projectExactCandidateObservation() remains the authority gate.
     const identity = createReleaseIdentity(observation.infoHash, observation.fileIndex);
-    if (observation.subjectKey !== identity.releaseKey || observation.subjectType !== 'candidate') {
-      throw new TypeError(`observations[${index}] must identify the exact candidate subject`);
+    const expectedSubjectKey = observation.scope === 'torrent'
+      ? identity.infoHash
+      : observation.scope === 'candidate'
+        ? identity.releaseKey
+        : null;
+    if (expectedSubjectKey === null) {
+      throw new TypeError(`observations[${index}] has unsupported scope: ${observation.scope}`);
+    }
+    if (observation.subjectKey !== expectedSubjectKey) {
+      throw new TypeError(`observations[${index}] subjectKey must match its own identity`);
     }
 
     const key = observationKey(observation.provider, observation.accountScope, identity.releaseKey);

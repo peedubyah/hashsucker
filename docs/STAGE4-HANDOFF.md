@@ -112,3 +112,22 @@ Created the smallest orchestration boundary between Stage 3 ranked candidates an
 See: `media-search/src/lib/acquisition/observation-collection.js`, `media-search/test/observation-collection.test.js`.
 
 Exit: A deterministic bounded Stage 3 → provider observation collection boundary exists. No acquisition execution, provider mutation, runtime wiring, or scheduling.
+
+### Slice 2D — Pure observation-backed decision composition
+
+Created the smallest pure boundary that combines Stage 3 ranked candidates, decision-ready provider observations, and explicit acquisition policy to produce an explainable acquisition decision:
+
+- **Pure composition:** Wraps `decideAcquisition()` with explicit projection validation via `projectExactCandidateObservation()`. No provider calls, persistence, fulfillment, or scheduling.
+- **Candidate authority:** Preserves Stage 3 order, never re-ranks or mutates scores. Lower-ranked candidates selected only when all policy targets for higher-ranked candidates have fresh authoritative `uncached` evidence.
+- **Evidence semantics:** `cached` → selected; `uncached` → fall through to next rank; `unknown`/`error`/`stale`/`expired`/`future`/`non-authoritative` → deferred.
+- **Identity preservation:** Exact `(infoHash, fileIndex)`/`releaseKey`. `null` distinct from `0`. Torrent-level evidence cannot authorize file-level candidates.
+- **Provider/account isolation:** Observations never leak across provider, account, scope, or identity boundaries.
+- **Projection validation:** The decisive observation is explicitly validated against the selected candidate via `projectExactCandidateObservation()`. Rejection fails closed as deferred.
+- **Decision-ready observation filter:** Filters to `scope: 'candidate'` observations before evaluation, preventing `decideAcquisition` from throwing on non-candidate scopes (torrent, exposure, mount).
+- **Explainability:** Result includes selected candidate identity, rank, decisive observation, reason codes, and per-candidate evaluation results.
+- **Frozen output:** Deeply frozen result prevents downstream mutation.
+- **Input validation:** `evaluationTime` is required (no wall-clock fallback); explicit rejection of missing/invalid inputs.
+
+See: `media-search/src/lib/acquisition/decision-composition.js`, `media-search/test/decision-composition.test.js`.
+
+Exit: A deterministic pure Stage 4 decision boundary exists. No acquisition execution, placement creation, provider mutation, runtime wiring, or fulfillment. The next slice may consume this decision result and perform provider execution. This slice stops before that boundary.
