@@ -1,0 +1,54 @@
+# Edge Proxy — HashSucker
+# Routes HTTP traffic to internal services.
+# See docs/architecture/EDGE-PROXY-CONTRACT.md
+
+{
+    # Disable TLS automation — deferred per contract §5.3
+    auto_https off
+    # Bind to all interfaces on the configured port
+    http_port {$EDGE_PORT}
+}
+
+# Single site block — all routing in one place
+:{$EDGE_PORT} {
+    # -----------------------------------------------------------------------
+    # /media/*  →  Media Gateway
+    # Bytes must stream without buffering. Range headers preserved.
+    # -----------------------------------------------------------------------
+    @media path /media/*
+    reverse_proxy @media media-search:3000 {
+        # Do not buffer response bodies for media streaming
+        flush_interval -1
+        # Forward Range and conditional headers unchanged
+        header_up Range {http.request.header.Range}
+        header_up If-Range {http.request.header.If-Range}
+        header_up If-Modified-Since {http.request.header.If-Modified-Since}
+        # Strip internal headers from upstream responses
+        header_down -X-Resolver-*
+        header_down -X-Internal-*
+    }
+
+    # -----------------------------------------------------------------------
+    # /api/*  →  Control Plane
+    # -----------------------------------------------------------------------
+    @api path /api/*
+    reverse_proxy @api media-search:3000 {
+        header_up Range {http.request.header.Range}
+        header_down -X-Resolver-*
+        header_down -X-Internal-*
+    }
+
+    # -----------------------------------------------------------------------
+    # /*  →  UI / Static
+    # -----------------------------------------------------------------------
+    reverse_proxy media-search:3000 {
+        header_down -X-Resolver-*
+        header_down -X-Internal-*
+    }
+
+    # Access logging to stdout (JSON for container log aggregation)
+    log {
+        output stdout
+        format json
+    }
+}

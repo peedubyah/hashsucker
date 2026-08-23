@@ -51,5 +51,19 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  edge:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      EDGE_PORT: "${EDGE_PORT:-8080}"
+    ports:
+      - "${EDGE_BIND_ADDRESS:-0.0.0.0}:${EDGE_PORT:-8080}:${EDGE_PORT:-8080}"
+    volumes:
+      - ./edge/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - media-search
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   discovery-data:
