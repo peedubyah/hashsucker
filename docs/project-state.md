@@ -4,11 +4,11 @@
 
 This is the machine-maintained companion to [`HANDOFF.md`](../HANDOFF.md). It reports only reproducible repository facts and explicit unknowns. It does not prove live runtime, provider, deployment, or test health.
 
-- Generated at (UTC): `2026-08-23T01:33:26.365Z`
+- Generated at (UTC): `2026-08-23T04:01:44.616Z`
 - Generator: [`scripts/update-project-state.mjs`](../scripts/update-project-state.mjs)
 - Repository root: `.` (the Git top-level containing this file)
-- State input fingerprint: `sha256:e26daaa7de69527f142226831dc1dda72d1b5c98579f1110a9525aacedcc5457`
-- Fingerprinted repository paths: `226`
+- State input fingerprint: `sha256:b657156e9e27ab5cbc7b8b3b17926cf7266e1a611d05f585cfe78e6852866d28`
+- Fingerprinted repository paths: `235`
 
 ## Authority and ownership
 
@@ -34,10 +34,12 @@ Worker branches/worktrees do not routinely regenerate or commit this file. The c
 ## Roadmap state
 
 - Authority: [`docs/audit/8-21-audit.md`](../docs/audit/8-21-audit.md), verified `2026-08-21` by [`docs/roadmap.md`](roadmap.md).
-- Current stage: **Stage 3 — Canonical normalization and global ranking (empirical retrieval-policy selection remaining)**.
-- Stage status: **not recorded**.
+- Current stage: **Stage 4 — Provider reality and acquisition decisions**.
+- Stage 3 output boundary: **Ranked candidate set from static evidence; cache/provider reality and fulfillment policy belong to downstream acquisition**.
+- Stage 3 retrieval decision: **Complete — pre-rank truncation is rejected for the measured workload; the current runtime's provisional 2000-row window remains implementation debt**.
+- Stage status beyond these explicit roadmap statements: **not recorded**.
 - Defined stages: `0` through `12` (`13` headings).
-- Recently completed stages/milestones: **not recorded**.
+- Recently completed stages/milestones beyond Stage 3: **not recorded**.
 
 ## Tests and checks
 

@@ -1,7 +1,9 @@
 # Roadmap
 
 **Source:** [`audit/8-21-audit.md`](audit/8-21-audit.md), verified 2026-08-21.
-**Current stage:** Stage 3 — Canonical normalization and global ranking (empirical retrieval-policy selection remaining).
+**Current stage:** Stage 4 — Provider reality and acquisition decisions.
+**Stage 3 output boundary:** Ranked candidate set from static evidence; cache/provider reality and fulfillment policy belong to downstream acquisition.
+**Stage 3 retrieval decision:** Complete — pre-rank truncation is rejected for the measured workload; the current runtime's provisional 2000-row window remains implementation debt.
 
 Stage 0 deployability and the first Stage 1 exact-release-identity slice are implemented; owner credential rotation remains operationally required. This roadmap is staged to be reversible. Target behavior below is not implemented unless explicitly stated elsewhere.
 
@@ -55,32 +57,39 @@ Closed correctness slice:
 - Make bounded retrieval behavior explicit and measured.
 
 **Implemented:**
+- Stage 3 produces ranked candidate sets from static evidence; it does not make acquisition decisions.
 - Source order does not determine final order; live and corpus versions of an exact candidate merge without losing evidence.
-- Retrieval pagination separation is implemented: fixed retrieval window (default 2000 rows, env `RETRIEVAL_WINDOW`) is independent of public `limit`/`offset`.
-- Canonical normalization, global ranking, explanation/rejection behavior are all implemented and tested.
+- Retrieval pagination is separate from public `limit`/`offset`.
+- Canonical normalization, global ranking, explanation/rejection behavior are implemented and tested.
+- An immutable fixture harness validates retrieval behavior and regression boundaries by measuring current native retrieval separately from a frozen production-reference ranker.
+- Exact `(infoHash,fileIndex)` identity, deterministic tie ordering, and `null` file-index behavior are covered by the Stage 3 regression contract.
 
-**NOT yet met — empirical retrieval-policy selection:**
-- The fixed window 2000 is **provisional**, not validated against a real corpus.
-- The corrected synthetic fixture showed same-title documents receiving effectively identical BM25 scores, leaving rowid/insertion order as the effective ordering for that fixture. Therefore that synthetic setup cannot establish the production retrieval boundary.
-- A synthetic adversarial case cannot prove the retrieval boundary for production queries.
+**Empirical retrieval-policy decision:**
+- Finalization evidence is recorded in [`evaluation/RIGHTMON-STAGE3-FINALIZATION-2026-08-23.md`](evaluation/RIGHTMON-STAGE3-FINALIZATION-2026-08-23.md).
+- The transferred 314,662-row fixture reproduces candidate cardinality for 30/30 vectors and the production Stage 1 ordinal for 29/30 vectors.
+- A 2000-row pre-rank cap changes the winner for 11/30 queries. Affected production winners occur beyond the cap, from at least ordinal 2458 through 138256 in the frozen vectors.
+- Accepted conceptual ordering for the measured workload is FTS retrieve → exact-identity deduplicate → static-evidence rank → paginate.
+- Pre-rank truncation is rejected unless a future representative measurement establishes a safe policy.
+- Current production code still defaults `RETRIEVAL_WINDOW` to 2000. Stage 3 finalization deliberately did not change runtime semantics to satisfy fixtures; removing or replacing that provisional window is explicit implementation debt.
 
-**Deferred measurement criterion (with real DMM corpus):**
-1. Measure real query match cardinality distribution.
-2. Measure exhaustive Stage-3 winner position in production Stage-1 order.
-3. Measure cost of exhaustive ranking versus bounded windows.
-4. Answer FIRST whether a retrieval cap is needed at all.
-5. Only if a cap is needed, choose it from the real recall/latency curve.
+**Output boundary:**
+- Stage 3 returns a ranked candidate set based on static evidence. It does not make a final acquisition decision.
+- Provider/cache state is fresh downstream evidence, not Stage 3 static ranking input.
+- Ranked candidate set + cache/provider state + fulfillment policy = final acquisition decision.
+- No provider probing, control-plane wiring, placement, or fulfillment is authorized by Stage 3 acceptance.
 
-Do not assume 2000.
+**Exit:** Met for empirical research and the deterministic regression contract. Native/reference differences remain visible rather than being hidden by runtime changes. The unsafe native 2000-row window remains a separately tracked implementation correction.
 
-## Stage 4 — Provider capability and fresh observations
+## Stage 4 — Provider reality and acquisition decisions
 
+- Consume Stage 3 ranked candidate sets without folding provider state into their static-evidence ranking.
 - Define provider-neutral cache, placement, resource, file-inventory, exposure, and removal capabilities without erasing provider differences.
-- Add observation state, scope, TTL, error category, retry/rate-limit/auth semantics, and current/history separation.
+- Add authoritative cache/provider observations with explicit state, scope, TTL, error category, retry/rate-limit/auth semantics, and current/history separation.
 - Connect TorBox batching/failure behavior to the active path; add Real-Debrid checks.
 - Keep priors separate from authoritative observations.
+- Apply explicit acquisition policy to ranked candidates and current provider reality to produce the final acquisition decision; fulfillment execution remains downstream.
 
-**Exit:** The same exact candidate can be checked against either provider with no cross-provider leakage and with unknown/error behavior visible.
+**Exit:** A Stage 3 ranked candidate set can be combined with current cache/provider observations and explicit acquisition policy to make an explainable acquisition decision, with no cross-provider leakage and with unknown/error behavior visible.
 
 ## Stage 5 — Canonical library contract and shadow reconciliation
 

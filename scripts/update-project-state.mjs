@@ -251,6 +251,16 @@ async function renderState(root, generatedAt) {
     /^\*\*Current stage:\*\* (Stage (\d+)) (?:—|-) (.+)\.\s*$/gm,
     'current roadmap stage header',
   );
+  const stage3OutputBoundary = oneMatch(
+    roadmap,
+    /^\*\*Stage 3 output boundary:\*\* (.+)\.\s*$/gm,
+    'Stage 3 output boundary',
+  );
+  const stage3RetrievalDecision = oneMatch(
+    roadmap,
+    /^\*\*Stage 3 retrieval decision:\*\* (.+)\.\s*$/gm,
+    'Stage 3 retrieval decision',
+  );
   const stageNumbers = [...roadmap.matchAll(/^## Stage (\d+) (?:—|-) .+$/gm)]
     .map((match) => Number(match[1]));
   if (stageNumbers.length === 0) fail('no roadmap stage headings found');
@@ -349,9 +359,11 @@ Worker branches/worktrees do not routinely regenerate or commit this file. The c
 
 - Authority: [\`${roadmapSourcePath}\`](../${roadmapSourcePath}), verified \`${roadmapSource[2]}\` by [\`docs/roadmap.md\`](roadmap.md).
 - Current stage: **${currentStage[1]} — ${currentStage[3]}**.
-- Stage status: **not recorded**.
+- Stage 3 output boundary: **${stage3OutputBoundary[1]}**.
+- Stage 3 retrieval decision: **${stage3RetrievalDecision[1]}**.
+- Stage status beyond these explicit roadmap statements: **not recorded**.
 - Defined stages: \`${Math.min(...stageNumbers)}\` through \`${Math.max(...stageNumbers)}\` (\`${stageNumbers.length}\` headings).
-- Recently completed stages/milestones: **not recorded**.
+- Recently completed stages/milestones beyond Stage 3: **not recorded**.
 
 ## Tests and checks
 

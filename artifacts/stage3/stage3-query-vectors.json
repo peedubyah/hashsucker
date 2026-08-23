@@ -1,0 +1,702 @@
+{
+  "version": "1.0.0",
+  "generatedAt": "2026-08-23T01:33:38.984Z",
+  "source": "data/dmm-corpus.db",
+  "ranking": {
+    "formula": "relevance*0.25 + quality*0.20 + releaseConfidence*0.20 + identityConfidence*0.15 + providerAvailability*0.10 + episodeMatch*0.10",
+    "tieBreakers": [
+      "score desc",
+      "releaseConfidence desc",
+      "quality desc",
+      "relevance desc",
+      "hash asc",
+      "fileIndex asc (null last)"
+    ],
+    "nullFileIndexDistinctFromZero": true,
+    "identity": "(info_hash, file_index_key)"
+  },
+  "queries": [
+    {
+      "query": "Dragon Ball",
+      "candidateCount": 1712,
+      "expectedWinner": {
+        "infoHash": "112d2fabbb28050f2032bfcf1e73e0cd770a8bef",
+        "fileIndex": null,
+        "stage1Ordinal": 1702,
+        "rankingScore": 0.599
+      },
+      "cappedWinner": {
+        "infoHash": "112d2fabbb28050f2032bfcf1e73e0cd770a8bef",
+        "fileIndex": null,
+        "rankingScore": 0.599,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "One Piece",
+      "candidateCount": 4617,
+      "expectedWinner": {
+        "infoHash": "4d4d590fba03855c7ffe9fa310f8a2bcfaf8790c",
+        "fileIndex": null,
+        "stage1Ordinal": 4605,
+        "rankingScore": 0.604
+      },
+      "cappedWinner": {
+        "infoHash": "3b7dd6c917f297cf0529ba94a67179b545699406",
+        "fileIndex": null,
+        "rankingScore": 0.594,
+        "sameAsUncapped": false
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Naruto",
+      "candidateCount": 1275,
+      "expectedWinner": {
+        "infoHash": "d4ec57705fcd8389d6f6c97d6d723c1ea39db9d3",
+        "fileIndex": null,
+        "stage1Ordinal": 647,
+        "rankingScore": 0.57
+      },
+      "cappedWinner": {
+        "infoHash": "d4ec57705fcd8389d6f6c97d6d723c1ea39db9d3",
+        "fileIndex": null,
+        "rankingScore": 0.57,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "My Hero Academia",
+      "candidateCount": 1605,
+      "expectedWinner": {
+        "infoHash": "a895e13b521ba3fc3fd871cdbcd9f531114ce4cd",
+        "fileIndex": null,
+        "stage1Ordinal": 644,
+        "rankingScore": 0.54
+      },
+      "cappedWinner": {
+        "infoHash": "a895e13b521ba3fc3fd871cdbcd9f531114ce4cd",
+        "fileIndex": null,
+        "rankingScore": 0.54,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Attack on Titan",
+      "candidateCount": 621,
+      "expectedWinner": {
+        "infoHash": "fc62483c98db288d6b4e9f529fdada90575f896a",
+        "fileIndex": null,
+        "stage1Ordinal": 395,
+        "rankingScore": 0.587
+      },
+      "cappedWinner": {
+        "infoHash": "fc62483c98db288d6b4e9f529fdada90575f896a",
+        "fileIndex": null,
+        "rankingScore": 0.587,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "The Flash",
+      "candidateCount": 1286,
+      "expectedWinner": {
+        "infoHash": "a940732b7f9ed263d18b5cc8968e84bf6de9bfb5",
+        "fileIndex": null,
+        "stage1Ordinal": 1286,
+        "rankingScore": 0.61
+      },
+      "cappedWinner": {
+        "infoHash": "a940732b7f9ed263d18b5cc8968e84bf6de9bfb5",
+        "fileIndex": null,
+        "rankingScore": 0.61,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Game of Thrones",
+      "candidateCount": 1596,
+      "expectedWinner": {
+        "infoHash": "a74ed02a0b5e0d534c3645ad62409b5e90e297b6",
+        "fileIndex": null,
+        "stage1Ordinal": 1595,
+        "rankingScore": 0.595
+      },
+      "cappedWinner": {
+        "infoHash": "a74ed02a0b5e0d534c3645ad62409b5e90e297b6",
+        "fileIndex": null,
+        "rankingScore": 0.595,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Stranger Things",
+      "candidateCount": 1541,
+      "expectedWinner": {
+        "infoHash": "6703015067a149e0e5d9f6d891185a13301e8fe1",
+        "fileIndex": null,
+        "stage1Ordinal": 1534,
+        "rankingScore": 0.599
+      },
+      "cappedWinner": {
+        "infoHash": "6703015067a149e0e5d9f6d891185a13301e8fe1",
+        "fileIndex": null,
+        "rankingScore": 0.599,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "The Mandalorian",
+      "candidateCount": 955,
+      "expectedWinner": {
+        "infoHash": "10ab15935a16e4d40d8c843b00c3a9720f28ab6a",
+        "fileIndex": null,
+        "stage1Ordinal": 955,
+        "rankingScore": 0.61
+      },
+      "cappedWinner": {
+        "infoHash": "10ab15935a16e4d40d8c843b00c3a9720f28ab6a",
+        "fileIndex": null,
+        "rankingScore": 0.61,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Breaking Bad",
+      "candidateCount": 1001,
+      "expectedWinner": {
+        "infoHash": "6493431f8973d5f186df19d5f3f92c26d00c47da",
+        "fileIndex": null,
+        "stage1Ordinal": 999,
+        "rankingScore": 0.6
+      },
+      "cappedWinner": {
+        "infoHash": "6493431f8973d5f186df19d5f3f92c26d00c47da",
+        "fileIndex": null,
+        "rankingScore": 0.6,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Avatar",
+      "candidateCount": 1459,
+      "expectedWinner": {
+        "infoHash": "1879c6f2d37887ea10ff840e89c75db1bc381b85",
+        "fileIndex": null,
+        "stage1Ordinal": 1457,
+        "rankingScore": 0.616
+      },
+      "cappedWinner": {
+        "infoHash": "1879c6f2d37887ea10ff840e89c75db1bc381b85",
+        "fileIndex": null,
+        "rankingScore": 0.616,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Avengers",
+      "candidateCount": 1491,
+      "expectedWinner": {
+        "infoHash": "9dd4e756d052a2ba6d7ea72b7b12f55848e0f44c",
+        "fileIndex": null,
+        "stage1Ordinal": 1490,
+        "rankingScore": 0.617
+      },
+      "cappedWinner": {
+        "infoHash": "9dd4e756d052a2ba6d7ea72b7b12f55848e0f44c",
+        "fileIndex": null,
+        "rankingScore": 0.617,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Spider-Man",
+      "candidateCount": 1936,
+      "expectedWinner": {
+        "infoHash": "22978b53a791ae5295a89cb80299446342264cc9",
+        "fileIndex": null,
+        "stage1Ordinal": 1936,
+        "rankingScore": 0.621
+      },
+      "cappedWinner": {
+        "infoHash": "22978b53a791ae5295a89cb80299446342264cc9",
+        "fileIndex": null,
+        "rankingScore": 0.621,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Batman",
+      "candidateCount": 2458,
+      "expectedWinner": {
+        "infoHash": "2ef37e1c622cd551a2f6112d3980a33984397dad",
+        "fileIndex": null,
+        "stage1Ordinal": 2458,
+        "rankingScore": 0.619
+      },
+      "cappedWinner": {
+        "infoHash": "086afc0de4ac3bcac413741f771bb60f01c6caee",
+        "fileIndex": null,
+        "rankingScore": 0.603,
+        "sameAsUncapped": false
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Joker",
+      "candidateCount": 1401,
+      "expectedWinner": {
+        "infoHash": "5ecf56ec4230c1c5344cec6c74c65f56613f38e7",
+        "fileIndex": null,
+        "stage1Ordinal": 1396,
+        "rankingScore": 0.613
+      },
+      "cappedWinner": {
+        "infoHash": "5ecf56ec4230c1c5344cec6c74c65f56613f38e7",
+        "fileIndex": null,
+        "rankingScore": 0.613,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Horror",
+      "candidateCount": 2785,
+      "expectedWinner": {
+        "infoHash": "4558851de4f0390aa6b942f96614dac46801ea4a",
+        "fileIndex": null,
+        "stage1Ordinal": 2772,
+        "rankingScore": 0.617
+      },
+      "cappedWinner": {
+        "infoHash": "70abc1024b542884572d34083b1b3dede260bdfc",
+        "fileIndex": null,
+        "rankingScore": 0.603,
+        "sameAsUncapped": false
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Comedy",
+      "candidateCount": 942,
+      "expectedWinner": {
+        "infoHash": "618a2f4096cbe4058e7efed571e603f030c40239",
+        "fileIndex": null,
+        "stage1Ordinal": 922,
+        "rankingScore": 0.61
+      },
+      "cappedWinner": {
+        "infoHash": "618a2f4096cbe4058e7efed571e603f030c40239",
+        "fileIndex": null,
+        "rankingScore": 0.61,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Action",
+      "candidateCount": 615,
+      "expectedWinner": {
+        "infoHash": "3863d9c48cd916f0c50b6443818ba26e8bd9d773",
+        "fileIndex": null,
+        "stage1Ordinal": 609,
+        "rankingScore": 0.611
+      },
+      "cappedWinner": {
+        "infoHash": "3863d9c48cd916f0c50b6443818ba26e8bd9d773",
+        "fileIndex": null,
+        "rankingScore": 0.611,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Sci-Fi",
+      "candidateCount": 203,
+      "expectedWinner": {
+        "infoHash": "021eb7027fdee954c184d80d1a67942686f51e04",
+        "fileIndex": null,
+        "stage1Ordinal": 130,
+        "rankingScore": 0.55
+      },
+      "cappedWinner": {
+        "infoHash": "021eb7027fdee954c184d80d1a67942686f51e04",
+        "fileIndex": null,
+        "rankingScore": 0.55,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Documentary",
+      "candidateCount": 328,
+      "expectedWinner": {
+        "infoHash": "0c9c6d145a86e885d7318068437a0b313b86e083",
+        "fileIndex": null,
+        "stage1Ordinal": 299,
+        "rankingScore": 0.604
+      },
+      "cappedWinner": {
+        "infoHash": "0c9c6d145a86e885d7318068437a0b313b86e083",
+        "fileIndex": null,
+        "rankingScore": 0.604,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Criterion",
+      "candidateCount": 2637,
+      "expectedWinner": {
+        "infoHash": "f38ebee355e933d3b7c51ea49024f03e25b1a944",
+        "fileIndex": null,
+        "stage1Ordinal": 2637,
+        "rankingScore": 0.619
+      },
+      "cappedWinner": {
+        "infoHash": "54ff2b4715b6e844b19a14805613945b69c386ce",
+        "fileIndex": null,
+        "rankingScore": 0.612,
+        "sameAsUncapped": false
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Remux",
+      "candidateCount": 76437,
+      "expectedWinner": {
+        "infoHash": "0f9d608fe378484a2062dbacd9467ab78a8391a1",
+        "fileIndex": null,
+        "stage1Ordinal": 76433,
+        "rankingScore": 0.658
+      },
+      "cappedWinner": {
+        "infoHash": "0489282f3d48c98067ff88b31ce560134b3ecb09",
+        "fileIndex": null,
+        "rankingScore": 0.602,
+        "sameAsUncapped": false
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": true,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Director's Cut",
+      "candidateCount": 743,
+      "expectedWinner": {
+        "infoHash": "00253dd354963e81f14528da5f53cb79bbfe10b3",
+        "fileIndex": null,
+        "stage1Ordinal": 743,
+        "rankingScore": 0.601
+      },
+      "cappedWinner": {
+        "infoHash": "00253dd354963e81f14528da5f53cb79bbfe10b3",
+        "fileIndex": null,
+        "rankingScore": 0.601,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Extended",
+      "candidateCount": 5820,
+      "expectedWinner": {
+        "infoHash": "27c2f9cd4c9cb63ccdf3e9225a388c16d3f6d392",
+        "fileIndex": null,
+        "stage1Ordinal": 5816,
+        "rankingScore": 0.628
+      },
+      "cappedWinner": {
+        "infoHash": "016d5a664a232f3284f697d1e7beac4183413b61",
+        "fileIndex": null,
+        "rankingScore": 0.613,
+        "sameAsUncapped": false
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Theatrical",
+      "candidateCount": 1331,
+      "expectedWinner": {
+        "infoHash": "60811ae8b3351989597be46d187bff9b81aae378",
+        "fileIndex": null,
+        "stage1Ordinal": 1327,
+        "rankingScore": 0.616
+      },
+      "cappedWinner": {
+        "infoHash": "60811ae8b3351989597be46d187bff9b81aae378",
+        "fileIndex": null,
+        "rankingScore": 0.616,
+        "sameAsUncapped": true
+      },
+      "specialCases": {
+        "deepWinner": false,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Dual Audio",
+      "candidateCount": 9111,
+      "expectedWinner": {
+        "infoHash": "4d12f370630c1e6953b83eebca4b791242a1657d",
+        "fileIndex": null,
+        "stage1Ordinal": 9105,
+        "rankingScore": 0.612
+      },
+      "cappedWinner": {
+        "infoHash": "d1874a4207f7617cfaa40035559ad07a8a88eacd",
+        "fileIndex": null,
+        "rankingScore": 0.6,
+        "sameAsUncapped": false
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Subs",
+      "candidateCount": 46132,
+      "expectedWinner": {
+        "infoHash": "50ff682148592d99de005f3dcf4b6fc03729adc0",
+        "fileIndex": null,
+        "stage1Ordinal": 46127,
+        "rankingScore": 0.654
+      },
+      "cappedWinner": {
+        "infoHash": "41fb904ef74e290c61a11f8465a903d617d851c3",
+        "fileIndex": null,
+        "rankingScore": 0.602,
+        "sameAsUncapped": false
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": true,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "Dubbed",
+      "candidateCount": 11446,
+      "expectedWinner": {
+        "infoHash": "cf9a905fc2af23f86e706c9d9a3279c37e7cee3f",
+        "fileIndex": null,
+        "stage1Ordinal": 11446,
+        "rankingScore": 0.639
+      },
+      "cappedWinner": {
+        "infoHash": "a5f5763128ab1392996268175574e48146f6c1e1",
+        "fileIndex": null,
+        "rankingScore": 0.614,
+        "sameAsUncapped": false
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": false,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "AAC",
+      "candidateCount": 138264,
+      "expectedWinner": {
+        "infoHash": "1cc4859914829e13aa327be5d96bf8869d4b3515",
+        "fileIndex": null,
+        "stage1Ordinal": 138256,
+        "rankingScore": 0.67
+      },
+      "cappedWinner": {
+        "infoHash": "45e647a10182698a12206ed8aa6307327f7945f4",
+        "fileIndex": null,
+        "rankingScore": 0.596,
+        "sameAsUncapped": false
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": true,
+        "nullFileIndex": true
+      }
+    },
+    {
+      "query": "DTS-HD",
+      "candidateCount": 52479,
+      "expectedWinner": {
+        "infoHash": "970c5fd8e42a002d2fb40f643f30c8f576e347ec",
+        "fileIndex": null,
+        "stage1Ordinal": 52479,
+        "rankingScore": 0.656
+      },
+      "cappedWinner": {
+        "infoHash": "08822977fc5d26e5acf7fd5160b58c2725ec33d5",
+        "fileIndex": null,
+        "rankingScore": 0.614,
+        "sameAsUncapped": false
+      },
+      "specialCases": {
+        "deepWinner": true,
+        "highCardinality": true,
+        "nullFileIndex": true
+      }
+    }
+  ],
+  "summary": {
+    "totalQueries": 30,
+    "deepWinnerQueries": 11,
+    "deepWinnerOrdinals": [
+      {
+        "query": "One Piece",
+        "ordinal": 4605
+      },
+      {
+        "query": "Batman",
+        "ordinal": 2458
+      },
+      {
+        "query": "Horror",
+        "ordinal": 2772
+      },
+      {
+        "query": "Criterion",
+        "ordinal": 2637
+      },
+      {
+        "query": "Remux",
+        "ordinal": 76433
+      },
+      {
+        "query": "Extended",
+        "ordinal": 5816
+      },
+      {
+        "query": "Dual Audio",
+        "ordinal": 9105
+      },
+      {
+        "query": "Subs",
+        "ordinal": 46127
+      },
+      {
+        "query": "Dubbed",
+        "ordinal": 11446
+      },
+      {
+        "query": "AAC",
+        "ordinal": 138256
+      },
+      {
+        "query": "DTS-HD",
+        "ordinal": 52479
+      }
+    ],
+    "highCardinalityQueries": 4,
+    "cappedChangesWinnerCount": 11
+  }
+}

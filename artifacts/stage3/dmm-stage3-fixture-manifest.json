@@ -1,0 +1,404 @@
+{
+  "version": "1.0.0",
+  "date": "2026-08-23T01:09:56.282Z",
+  "source": "data/dmm-corpus.db",
+  "schema": "HashSucker-compatible + production_rowid + production_bm25",
+  "artifacts": {
+    "functional": {
+      "file": "data/fixtures/dmm-stage3-functional.db",
+      "size": 573440
+    },
+    "ranking": {
+      "file": "data/fixtures/dmm-stage3-ranking.db",
+      "size": 317947904
+    }
+  },
+  "stats": {
+    "prod": 1480357,
+    "func": 529,
+    "rank": 314662,
+    "queries": 30,
+    "matching": 28
+  },
+  "ranking": {
+    "formula": "relevance*0.25+quality*0.20+releaseConfidence*0.20+identityConfidence*0.15+providerAvailability*0.10+episodeMatch*0.10",
+    "tieBreakers": [
+      "score",
+      "releaseConfidence",
+      "quality",
+      "relevance",
+      "hash",
+      "fileIndex"
+    ],
+    "nullDistinct": true,
+    "identity": "(info_hash,file_index_key)"
+  },
+  "queries": [
+    {
+      "query": "Dragon Ball",
+      "totalProd": 1712,
+      "totalFix": 1712,
+      "winner": {
+        "hash": "112d2fabbb28050f2032bfcf1e73e0cd770a8bef",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.599
+      },
+      "matches": true
+    },
+    {
+      "query": "One Piece",
+      "totalProd": 4617,
+      "totalFix": 4617,
+      "winner": {
+        "hash": "4d4d590fba03855c7ffe9fa310f8a2bcfaf8790c",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.604
+      },
+      "matches": true
+    },
+    {
+      "query": "Naruto",
+      "totalProd": 1275,
+      "totalFix": 1275,
+      "winner": {
+        "hash": "d4ec57705fcd8389d6f6c97d6d723c1ea39db9d3",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.57
+      },
+      "matches": true
+    },
+    {
+      "query": "My Hero Academia",
+      "totalProd": 1605,
+      "totalFix": 1605,
+      "winner": {
+        "hash": "a895e13b521ba3fc3fd871cdbcd9f531114ce4cd",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.54
+      },
+      "matches": true
+    },
+    {
+      "query": "Attack on Titan",
+      "totalProd": 621,
+      "totalFix": 621,
+      "winner": {
+        "hash": "fc62483c98db288d6b4e9f529fdada90575f896a",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.587
+      },
+      "matches": true
+    },
+    {
+      "query": "The Flash",
+      "totalProd": 1286,
+      "totalFix": 1286,
+      "winner": {
+        "hash": "a940732b7f9ed263d18b5cc8968e84bf6de9bfb5",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.61
+      },
+      "matches": true
+    },
+    {
+      "query": "Game of Thrones",
+      "totalProd": 1596,
+      "totalFix": 1596,
+      "winner": {
+        "hash": "a74ed02a0b5e0d534c3645ad62409b5e90e297b6",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.595
+      },
+      "matches": true
+    },
+    {
+      "query": "Stranger Things",
+      "totalProd": 1541,
+      "totalFix": 1541,
+      "winner": {
+        "hash": "6703015067a149e0e5d9f6d891185a13301e8fe1",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.599
+      },
+      "matches": true
+    },
+    {
+      "query": "The Mandalorian",
+      "totalProd": 955,
+      "totalFix": 955,
+      "winner": {
+        "hash": "10ab15935a16e4d40d8c843b00c3a9720f28ab6a",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.61
+      },
+      "matches": true
+    },
+    {
+      "query": "Breaking Bad",
+      "totalProd": 1001,
+      "totalFix": 1001,
+      "winner": {
+        "hash": "6493431f8973d5f186df19d5f3f92c26d00c47da",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.6
+      },
+      "matches": true
+    },
+    {
+      "query": "Avatar",
+      "totalProd": 1459,
+      "totalFix": 1459,
+      "winner": {
+        "hash": "1879c6f2d37887ea10ff840e89c75db1bc381b85",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.616
+      },
+      "matches": true
+    },
+    {
+      "query": "Avengers",
+      "totalProd": 1491,
+      "totalFix": 1491,
+      "winner": {
+        "hash": "9dd4e756d052a2ba6d7ea72b7b12f55848e0f44c",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.617
+      },
+      "matches": true
+    },
+    {
+      "query": "Spider-Man",
+      "totalProd": 1936,
+      "totalFix": 1936,
+      "winner": {
+        "hash": "22978b53a791ae5295a89cb80299446342264cc9",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.621
+      },
+      "matches": true
+    },
+    {
+      "query": "Batman",
+      "totalProd": 2458,
+      "totalFix": 2458,
+      "winner": {
+        "hash": "2ef37e1c622cd551a2f6112d3980a33984397dad",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.619
+      },
+      "matches": true
+    },
+    {
+      "query": "Joker",
+      "totalProd": 1401,
+      "totalFix": 1401,
+      "winner": {
+        "hash": "5ecf56ec4230c1c5344cec6c74c65f56613f38e7",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.613
+      },
+      "matches": true
+    },
+    {
+      "query": "Horror",
+      "totalProd": 2785,
+      "totalFix": 2785,
+      "winner": {
+        "hash": "4558851de4f0390aa6b942f96614dac46801ea4a",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.617
+      },
+      "matches": true
+    },
+    {
+      "query": "Comedy",
+      "totalProd": 942,
+      "totalFix": 942,
+      "winner": {
+        "hash": "618a2f4096cbe4058e7efed571e603f030c40239",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.61
+      },
+      "matches": true
+    },
+    {
+      "query": "Action",
+      "totalProd": 615,
+      "totalFix": 615,
+      "winner": {
+        "hash": "3863d9c48cd916f0c50b6443818ba26e8bd9d773",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.611
+      },
+      "matches": true
+    },
+    {
+      "query": "Sci-Fi",
+      "totalProd": 203,
+      "totalFix": 203,
+      "winner": {
+        "hash": "021eb7027fdee954c184d80d1a67942686f51e04",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.55
+      },
+      "matches": true
+    },
+    {
+      "query": "Documentary",
+      "totalProd": 328,
+      "totalFix": 328,
+      "winner": {
+        "hash": "0c9c6d145a86e885d7318068437a0b313b86e083",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.604
+      },
+      "matches": true
+    },
+    {
+      "query": "Criterion",
+      "totalProd": 2637,
+      "totalFix": 2637,
+      "winner": {
+        "hash": "f38ebee355e933d3b7c51ea49024f03e25b1a944",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.619
+      },
+      "matches": true
+    },
+    {
+      "query": "Remux",
+      "totalProd": 76437,
+      "totalFix": 76437,
+      "winner": {
+        "hash": "970c5fd8e42a002d2fb40f643f30c8f576e347ec",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.664
+      },
+      "matches": false
+    },
+    {
+      "query": "Director's Cut",
+      "totalProd": 743,
+      "totalFix": 743,
+      "winner": {
+        "hash": "00253dd354963e81f14528da5f53cb79bbfe10b3",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.601
+      },
+      "matches": true
+    },
+    {
+      "query": "Extended",
+      "totalProd": 5820,
+      "totalFix": 5820,
+      "winner": {
+        "hash": "27c2f9cd4c9cb63ccdf3e9225a388c16d3f6d392",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.628
+      },
+      "matches": true
+    },
+    {
+      "query": "Theatrical",
+      "totalProd": 1331,
+      "totalFix": 1331,
+      "winner": {
+        "hash": "60811ae8b3351989597be46d187bff9b81aae378",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.616
+      },
+      "matches": true
+    },
+    {
+      "query": "Dual Audio",
+      "totalProd": 9111,
+      "totalFix": 9111,
+      "winner": {
+        "hash": "4d12f370630c1e6953b83eebca4b791242a1657d",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.612
+      },
+      "matches": true
+    },
+    {
+      "query": "Subs",
+      "totalProd": 46132,
+      "totalFix": 46132,
+      "winner": {
+        "hash": "cf9a905fc2af23f86e706c9d9a3279c37e7cee3f",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.656
+      },
+      "matches": false
+    },
+    {
+      "query": "Dubbed",
+      "totalProd": 11446,
+      "totalFix": 11446,
+      "winner": {
+        "hash": "cf9a905fc2af23f86e706c9d9a3279c37e7cee3f",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.639
+      },
+      "matches": true
+    },
+    {
+      "query": "AAC",
+      "totalProd": 138264,
+      "totalFix": 138264,
+      "winner": {
+        "hash": "1cc4859914829e13aa327be5d96bf8869d4b3515",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.67
+      },
+      "matches": true
+    },
+    {
+      "query": "DTS-HD",
+      "totalProd": 52479,
+      "totalFix": 52479,
+      "winner": {
+        "hash": "970c5fd8e42a002d2fb40f643f30c8f576e347ec",
+        "fileIndex": null,
+        "ordinal": 1,
+        "rank": 0.656
+      },
+      "matches": true
+    }
+  ],
+  "validation": {
+    "ftsRanking": "100%",
+    "ftsFunc": "100%",
+    "orphans": 0,
+    "dups": 0
+  }
+}

@@ -5,3 +5,6 @@ data/
 !**/.env.example
 *.local.*
 media-search/test/ENRICHMENT-EVALUATION.md
+
+# External 303 MiB Stage 3 regression corpus; verify with artifacts/stage3/Checksums.txt.
+artifacts/stage3/dmm-stage3-ranking.db
