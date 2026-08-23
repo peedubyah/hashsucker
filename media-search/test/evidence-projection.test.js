@@ -92,7 +92,94 @@ test('appendCorpusObservation records an observation with required fields', () =
   assert.equal(result.observedAt, 10_000);
   assert.equal(result.source, 'dmm-hashlist');
   assert.equal(result.fileIndexKey, -1, 'null fileIndex normalizes to -1');
-  assert.ok(result.recordedAt, 'should have recordedAt timestamp');
+  assert.ok(result.ingestedAt, 'should have ingestedAt timestamp');
+  assert.notEqual(result.ingestedAt, result.observedAt, 'ingestedAt and observedAt must be distinct');
+
+  cache.close();
+});
+
+test('observedAt is source-side evidence time, ingestedAt is local audit time', () => {
+  const cache = createDiscoveryCache();
+  const evidence = createEvidenceProjection(cache);
+
+  // observedAt = source-side (when DMM had the hash)
+  const sourceTimestamp = 1_700_000_000_000; // Nov 2023
+  const before = Date.now();
+
+  const result = evidence.appendCorpusObservation({
+    infoHash: HASH,
+    fileIndex: null,
+    observedAt: sourceTimestamp,
+    source: 'dmm-hashlist',
+  });
+
+  const after = Date.now();
+
+  // observedAt is exactly what the caller provided (source-side)
+  assert.equal(result.observedAt, sourceTimestamp, 'observedAt must be source-side evidence time');
+
+  // ingestedAt is auto-generated between before and after (local-side)
+  assert.ok(result.ingestedAt >= before, 'ingestedAt must be >= before');
+  assert.ok(result.ingestedAt <= after, 'ingestedAt must be <= after');
+
+  // They MUST be distinct
+  assert.notEqual(result.observedAt, result.ingestedAt, 'observedAt and ingestedAt must differ');
+
+  // Verify persisted correctly
+  const history = evidence.getCorpusObservationHistory(HASH, null);
+  assert.equal(history[0].observedAt, sourceTimestamp);
+  assert.notEqual(history[0].observedAt, history[0].ingestedAt);
+
+  cache.close();
+});
+
+test('observedAt and ingestedAt remain distinct across multiple observations', () => {
+  const cache = createDiscoveryCache();
+  const evidence = createEvidenceProjection(cache);
+
+  // Simulate: DMM had hashes at specific source times, we ingest them later
+  const sourceTimes = [1_700_000_000_000, 1_700_000_100_000, 1_700_000_200_000];
+
+  for (const sourceTime of sourceTimes) {
+    evidence.appendCorpusObservation({
+      infoHash: HASH,
+      fileIndex: null,
+      observedAt: sourceTime,
+      source: 'dmm-hashlist',
+    });
+  }
+
+  const history = evidence.getCorpusObservationHistory(HASH, null);
+  assert.equal(history.length, 3);
+
+  for (const obs of history) {
+    // observedAt should be one of our source times
+    assert.ok(sourceTimes.includes(obs.observedAt), 'observedAt must be source-side time');
+    // ingestedAt should be a real local timestamp
+    assert.ok(obs.ingestedAt > 0, 'ingestedAt must be a real timestamp');
+    // They must differ
+    assert.notEqual(obs.observedAt, obs.ingestedAt, 'timestamps must remain distinct');
+  }
+
+  cache.close();
+});
+
+test('observedAt can be in the future relative to ingestedAt (future-dated evidence)', () => {
+  const cache = createDiscoveryCache();
+  const evidence = createEvidenceProjection(cache);
+
+  // Edge case: source timestamp is in the future (clock skew or future-dated)
+  const futureTime = Date.now() + 86_400_000; // +1 day
+
+  const result = evidence.appendCorpusObservation({
+    infoHash: HASH,
+    fileIndex: null,
+    observedAt: futureTime,
+    source: 'dmm-hashlist',
+  });
+
+  assert.equal(result.observedAt, futureTime, 'observedAt preserved as-is');
+  assert.ok(result.ingestedAt < futureTime, 'ingestedAt is before the future observedAt');
 
   cache.close();
 });
@@ -857,6 +944,8 @@ test('corpus observations persist across cache reopen', (t) => {
   const history = evidence2.getCorpusObservationHistory(HASH, null);
   assert.equal(history[0].observedAt, 10_000);
   assert.equal(history[0].ingestionId, 'run-1');
+  assert.ok(history[0].ingestedAt, 'ingestedAt should persist');
+  assert.notEqual(history[0].observedAt, history[0].ingestedAt, 'timestamps remain distinct after reopen');
 
   cache2.close();
 });

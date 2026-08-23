@@ -10,6 +10,19 @@
  * - Does NOT duplicate candidate metadata — references candidates by PK.
  * - Does NOT modify acquisition decisions or provider observations.
  *
+ * Temporal contract (two distinct clocks):
+ * - `observed_at` (source-side): when the SOURCE recorded/held the hash.
+ *   This is evidence time — e.g., the DMM git commit timestamp for the
+ *   fragment containing this hash. It tells you when the corpus knew
+ *   about the candidate.
+ * - `ingested_at` (local-side): when OUR system ingested/recorded the
+ *   observation. Auto-generated at insert time. This is audit time —
+ *   tells you when we learned about it.
+ *
+ * These MUST remain distinct. If you set observed_at = Date.now(),
+ * you collapse source evidence into ingestion time and destroy the
+ * ability to detect corpus deltas (new/removed hashes across runs).
+ *
  * Contract:
  * - Append-only writes to corpus_observations (no UPDATE/DELETE).
  * - All reads are derived from existing tables or the append-only log.
@@ -112,22 +125,29 @@ export function createEvidenceProjection(cache) {
       ingestionId: row.ingestion_id,
       fragmentId: row.fragment_id,
       evidence: row.evidence ? JSON.parse(row.evidence) : null,
-      recordedAt: row.recorded_at,
+      ingestedAt: row.recorded_at,
     };
   }
 
   /**
    * Append a corpus observation. Append-only — cannot update or delete.
    *
+   * CRITICAL: `observedAt` MUST be source-side evidence time (when the
+   * source recorded the hash), NOT when you are calling this function.
+   * Setting observedAt = Date.now() collapses source evidence into
+   * ingestion time and destroys delta detection.
+   *
    * @param {Object} observation
    * @param {string} observation.infoHash - Candidate infoHash
    * @param {number|null} observation.fileIndex - Candidate fileIndex
-   * @param {number} observedAt - When the observation was made (ms epoch)
+   * @param {number} observedAt - SOURCE-SIDE evidence time (ms epoch).
+   *   When the source recorded/held the hash — e.g., DMM fragment git
+   *   commit timestamp. NOT ingestion time.
    * @param {string} source - Source identifier (e.g., 'dmm-hashlist', 'scraper')
    * @param {string} [ingestionId] - Optional batch ingestion run identifier
    * @param {string} [fragmentId] - Optional source-specific fragment identifier
    * @param {Object} [evidence] - Optional JSON-serializable evidence blob
-   * @returns {Object} The recorded observation with id
+   * @returns {Object} The recorded observation with id and ingestedAt
    */
   function appendCorpusObservation({
     infoHash,
@@ -142,7 +162,7 @@ export function createEvidenceProjection(cache) {
     if (observedAt == null) throw new Error('Corpus observation requires observedAt');
     if (!source) throw new Error('Corpus observation requires source');
 
-    const recordedAt = Date.now();
+    const ingestedAt = Date.now();
     const evidenceJson = evidence != null ? JSON.stringify(evidence) : null;
 
     const result = insertCorpusObservationStmt.run({
@@ -153,7 +173,7 @@ export function createEvidenceProjection(cache) {
       ingestion_id: ingestionId,
       fragment_id: fragmentId,
       evidence: evidenceJson,
-      recorded_at: recordedAt,
+      recorded_at: ingestedAt,
     });
 
     return {
@@ -165,7 +185,7 @@ export function createEvidenceProjection(cache) {
       ingestionId,
       fragmentId,
       evidence,
-      recordedAt,
+      ingestedAt,
     };
   }
 
