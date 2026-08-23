@@ -100,6 +100,19 @@ Current semantics and defects:
 - The worker repeatedly chooses the first `processing` file. A blocked/manual request can starve later work.
 - Physical acquisition is TorBox-only and downloads bytes locally before Arr import.
 
+## Current Stage 4 decision foundation
+
+`media-search/src/lib/acquisition/decision.js` provides a pure, unwired decision boundary:
+
+```text
+unchanged Stage 3 ranked candidates
+  + exact current provider observations
+  + ordered provider/account policy targets
+  → selected | deferred | unavailable
+```
+
+Candidate rank remains primary. A lower-ranked candidate is considered only after every configured target authoritatively reports the higher-ranked candidate `uncached`. Provider preference applies only among fresh authoritative cache hits for the same candidate. Unknown, provider error, stale, unbounded, inferred, predicted, and missing observations defer the decision rather than masquerading as unavailability. Provider and account scopes are isolated. This foundation performs no provider I/O, probing, placement, queue publication, or fulfillment.
+
 ## Target discovery and decision pipeline
 
 1. Accept canonical selected media ID, media type, and explicit episode intent.

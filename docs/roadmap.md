@@ -89,6 +89,8 @@ Closed correctness slice:
 - Keep priors separate from authoritative observations.
 - Apply explicit acquisition policy to ranked candidates and current provider reality to produce the final acquisition decision; fulfillment execution remains downstream.
 
+**Current foundation:** Pure versioned policy and decision contracts now combine unchanged ranked candidates with exact current observations. They preserve candidate order, isolate provider/account scopes, select only fresh authoritative cache hits, require authoritative uncached evidence before fallback, and keep unknown/error/stale/non-authoritative evidence visible as deferred. No live provider, API/request, placement, or fulfillment wiring is included.
+
 **Exit:** A Stage 3 ranked candidate set can be combined with current cache/provider observations and explicit acquisition policy to make an explainable acquisition decision, with no cross-provider leakage and with unknown/error behavior visible.
 
 ## Stage 5 — Canonical library contract and shadow reconciliation

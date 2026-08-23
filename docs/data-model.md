@@ -92,7 +92,7 @@ erDiagram
 - Local retrieval does not require an association to the selected media ID.
 - Additive associations can make weak false positives sticky.
 - Episode associations can be constructed without validating actual episode existence.
-- Provider observations have no freshness/error lifecycle and no append-only history.
+- Provider observation lifecycle exists, but the pure acquisition decision contract is not wired into the active API/request path or a provider-probing scheduler.
 - There are no schema versions, migration runner, ingestion run lock, checkpoint lifecycle, or transaction API. The importer has only a narrow idempotent additive migration for exact request identity.
 
 ## Current physical-import state
