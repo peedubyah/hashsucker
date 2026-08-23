@@ -113,6 +113,60 @@ export function createRealDebridProvider(options = {}) {
     };
   }
 
+  if (typeof gateway.selectKnownFiles === 'function') {
+    capabilities[PROVIDER_CAPABILITIES.FILE_SELECTION] = {
+      async selectKnownFiles(resource, providerFileIds, context = {}) {
+        const identity = normalizeTorrentSubject(resource);
+        const providerResourceId = requireString(resource.providerResourceId, 'providerResourceId');
+        const normalizedIds = normalizeProviderFileIds(providerFileIds);
+        const result = await callGateway('select-known-files', () => gateway.selectKnownFiles({
+          ...identity, providerResourceId, providerFileIds: normalizedIds,
+          accountScope, idempotencyKey: requireString(context.idempotencyKey, 'idempotencyKey'),
+          signal: context.signal,
+        }));
+        if (!result || result.accepted !== true || result.idempotencyGuaranteed !== true) {
+          throw invalidResponse(
+            'Real-Debrid selection gateway must explicitly accept the request with durable idempotency',
+            'select-known-files',
+          );
+        }
+        return Object.freeze({
+          accepted: true,
+          idempotencyGuaranteed: true,
+          providerResourceId,
+          providerFileIds: Object.freeze(normalizedIds),
+          operationId: result.operationId == null ? null : requireString(result.operationId, 'operationId'),
+        });
+      },
+    };
+  }
+
+  if (typeof gateway.requestRepair === 'function') {
+    capabilities[PROVIDER_CAPABILITIES.REPAIR_REQUEST] = {
+      async requestRepair(resource, context = {}) {
+        const identity = normalizeTorrentSubject(resource);
+        const providerResourceId = requireString(resource.providerResourceId, 'providerResourceId');
+        const result = await callGateway('request-repair', () => gateway.requestRepair({
+          ...identity, providerResourceId, accountScope,
+          idempotencyKey: requireString(context.idempotencyKey, 'idempotencyKey'),
+          reason: requireString(context.reason, 'reason'), signal: context.signal,
+        }));
+        if (!result || result.accepted !== true || result.idempotencyGuaranteed !== true) {
+          throw invalidResponse(
+            'Real-Debrid repair gateway must explicitly accept the request with durable idempotency',
+            'request-repair',
+          );
+        }
+        return Object.freeze({
+          accepted: true,
+          idempotencyGuaranteed: true,
+          providerResourceId,
+          operationId: result.operationId == null ? null : requireString(result.operationId, 'operationId'),
+        });
+      },
+    };
+  }
+
   return createProviderAdapter({ provider: 'realdebrid', accountScope, capabilities });
 }
 
@@ -151,6 +205,17 @@ async function callGateway(operation, callback) {
 function normalizeTorrentSubject(subject) {
   if (!subject || typeof subject !== 'object') throw new TypeError('Real-Debrid subject must be an object');
   return createReleaseIdentity(subject.infoHash, null);
+}
+
+function normalizeProviderFileIds(values) {
+  if (!Array.isArray(values) || values.length === 0) {
+    throw new TypeError('providerFileIds must be a non-empty array');
+  }
+  const normalized = values.map((value) => requireString(value, 'providerFileId'));
+  if (new Set(normalized).size !== normalized.length) {
+    throw new TypeError('providerFileIds must be unique');
+  }
+  return normalized;
 }
 
 function invalidResponse(message, operation) {

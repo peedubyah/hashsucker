@@ -146,6 +146,14 @@ A placement or mount failure never rewrites an authoritative cache result to `un
 
 A canonical path is a logical projection, not proof that bytes, mount, catalog entry, or playback are healthy.
 
+### Stage 6 repair transactions
+
+- `repair_transactions` persist one deterministic degraded-binding plan, ordered action sequence, exact desired identity, provider/Zurg/mount scope, expected binding version, explicit authorized action set, asserted operator/controller identity, status, timestamps, and typed failure. The asserted identity is audit metadata until an authenticated operator API exists.
+- `repair_steps` persist each authorized attempt before execution, sanitized request/result receipts, retryability, and completion state. Restart skips successful operations and treats a still-running attempt as an ambiguous outcome requiring manual resolution; it never silently replays that operation.
+- Plans and steps contain no credentials, signed URLs, raw provider responses, `.zurgtorrent` bodies, or mount paths.
+- Repair rows never replace observations. Successful execution must produce new scoped observations and pass reconciliation postconditions before transaction completion.
+- Provider resource IDs, provider file IDs, Zurg IDs, metadata filenames, and mount paths remain evidence fields. `info_hash`, nullable `file_index`, and `release_key` remain canonical identity.
+
 ### Outcomes and evaluation
 
 - `fulfillment_outcomes`: request/library item, exact `releaseKey`, family/policy/model versions, provider, placement/binding versions, stages reached, typed terminal outcome, bytes/files, catalog/Arr result, and timestamps.

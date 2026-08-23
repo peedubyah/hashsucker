@@ -210,6 +210,56 @@ CREATE TABLE IF NOT EXISTS bindings (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_bindings_one_active
   ON bindings(library_item_id) WHERE status = 'active';
 
+CREATE TABLE IF NOT EXISTS repair_transactions (
+  id TEXT PRIMARY KEY,
+  plan_key TEXT NOT NULL,
+  library_item_id TEXT NOT NULL,
+  info_hash TEXT NOT NULL CHECK (length(info_hash) = 40 AND info_hash NOT GLOB '*[^0-9a-f]*'),
+  file_index INTEGER CHECK (file_index IS NULL OR file_index >= 0),
+  file_index_key INTEGER NOT NULL CHECK (file_index_key = COALESCE(file_index, -1)),
+  release_key TEXT NOT NULL,
+  account_scope TEXT NOT NULL,
+  instance_scope TEXT NOT NULL,
+  mount_scope TEXT NOT NULL,
+  expected_binding_version INTEGER NOT NULL CHECK (expected_binding_version > 0),
+  status TEXT NOT NULL CHECK (status IN ('planned', 'authorized', 'executing', 'failed', 'succeeded')),
+  plan TEXT NOT NULL CHECK (json_valid(plan)),
+  authorized_actions TEXT CHECK (authorized_actions IS NULL OR json_valid(authorized_actions)),
+  authorized_by TEXT,
+  created_at INTEGER NOT NULL,
+  authorized_at INTEGER,
+  started_at INTEGER,
+  completed_at INTEGER,
+  updated_at INTEGER NOT NULL,
+  failure_category TEXT,
+  CHECK (release_key = info_hash || ':' || CASE WHEN file_index IS NULL THEN 'torrent' ELSE CAST(file_index AS TEXT) END),
+  UNIQUE (plan_key, expected_binding_version),
+  FOREIGN KEY (library_item_id) REFERENCES library_items(id)
+);
+CREATE INDEX IF NOT EXISTS idx_repair_transactions_item
+  ON repair_transactions(library_item_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS repair_steps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repair_transaction_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+  attempt INTEGER NOT NULL CHECK (attempt > 0),
+  request TEXT CHECK (request IS NULL OR json_valid(request)),
+  result TEXT CHECK (result IS NULL OR json_valid(result)),
+  failure_category TEXT,
+  retryable INTEGER CHECK (retryable IS NULL OR retryable IN (0, 1)),
+  started_at INTEGER NOT NULL,
+  completed_at INTEGER,
+  CHECK ((status = 'running' AND completed_at IS NULL) OR (status != 'running' AND completed_at IS NOT NULL)),
+  UNIQUE (repair_transaction_id, action, attempt),
+  FOREIGN KEY (repair_transaction_id) REFERENCES repair_transactions(id)
+);
+CREATE INDEX IF NOT EXISTS idx_repair_steps_transaction
+  ON repair_steps(repair_transaction_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_repair_steps_one_running
+  ON repair_steps(repair_transaction_id, action) WHERE status = 'running';
+
 CREATE TABLE IF NOT EXISTS lifecycle_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   library_item_id TEXT NOT NULL,
@@ -814,6 +864,284 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     ).all(libraryItemId).map(rowToBinding);
   }
 
+  function listActiveBindingsForPlacement(placementId) {
+    requirePlacement(placementId);
+    return db.prepare(`
+      SELECT * FROM bindings
+      WHERE placement_id = ? AND status = 'active'
+      ORDER BY library_item_id, version
+    `).all(placementId).map(rowToBinding);
+  }
+
+  function createRepairTransaction(input) {
+    const item = requireLibraryItem(input.libraryItemId);
+    const identity = validateReleaseIdentity(input.desiredIdentity);
+    const planIdentity = validateReleaseIdentity(input.plan?.desiredIdentity);
+    if (input.plan?.status !== 'repair-required' || input.plan?.planKey !== input.planKey
+      || input.plan?.binding?.version !== input.expectedBindingVersion
+      || planIdentity.releaseKey !== identity.releaseKey
+      || !sameRepairScope(input.plan?.scope, input.scope)
+      || !sameStringSet(input.plan?.permittedActions, input.plan?.actionSequence)) {
+      throw new TypeError('Repair transaction requires a consistent executable repair plan');
+    }
+    const binding = db.prepare(
+      "SELECT * FROM bindings WHERE library_item_id = ? AND status = 'active'",
+    ).get(item.id);
+    if (!binding || binding.release_key !== identity.releaseKey
+      || binding.version !== input.expectedBindingVersion
+      || binding.id !== input.plan.binding.id
+      || binding.placement_id !== input.plan.binding.placementId
+      || binding.provider_file_id !== input.plan.binding.providerFileId
+      || binding.exposure_id !== input.plan.binding.exposureId) {
+      throw new Error('Repair plan binding version is no longer current');
+    }
+    const timestamp = now();
+    const id = input.id ?? `rp_${randomUUID()}`;
+    db.prepare(`
+      INSERT INTO repair_transactions (
+        id, plan_key, library_item_id, info_hash, file_index, file_index_key,
+        release_key, account_scope, instance_scope, mount_scope,
+        expected_binding_version, status, plan, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?)
+      ON CONFLICT(plan_key, expected_binding_version) DO NOTHING
+    `).run(
+      id, requireString(input.planKey, 'planKey', 1000), item.id,
+      identity.infoHash, identity.fileIndex, identity.fileIndex ?? -1, identity.releaseKey,
+      normalizeIdentifier(input.scope.accountScope),
+      normalizeIdentifier(input.scope.instanceScope),
+      normalizeIdentifier(input.scope.mountScope),
+      input.expectedBindingVersion, JSON.stringify(input.plan), timestamp, timestamp,
+    );
+    const row = db.prepare(`
+      SELECT * FROM repair_transactions
+      WHERE plan_key = ? AND expected_binding_version = ?
+    `).get(input.planKey, input.expectedBindingVersion);
+    return repairTransactionWithSteps(row);
+  }
+
+  function authorizeRepairTransaction(id, input) {
+    const transactionId = requireString(id, 'repairTransactionId');
+    const row = db.prepare('SELECT * FROM repair_transactions WHERE id = ?').get(transactionId);
+    if (!row) throw new Error(`Unknown repair transaction: ${transactionId}`);
+    if (row.status !== 'planned' && row.status !== 'authorized') {
+      throw new Error(`Repair transaction cannot be authorized from ${row.status}`);
+    }
+    const binding = db.prepare(
+      "SELECT * FROM bindings WHERE library_item_id = ? AND status = 'active'",
+    ).get(row.library_item_id);
+    if (!binding || binding.version !== row.expected_binding_version
+      || binding.release_key !== row.release_key) {
+      throw new Error('Repair authorization binding version is no longer current');
+    }
+    const plan = JSON.parse(row.plan);
+    const requested = requireStringArray(input.actions, 'actions');
+    const sequence = plan.actionSequence ?? [];
+    const permitted = new Set(plan.permittedActions ?? []);
+    if (requested.some((action) => !permitted.has(action))) {
+      throw new Error('Repair authorization includes an action not permitted by the plan');
+    }
+    const ordered = sequence.filter((action) => requested.includes(action));
+    if (ordered.length !== requested.length || ordered.some((action, index) => action !== requested[index])) {
+      throw new Error('Repair authorization actions must preserve the plan action order');
+    }
+    const timestamp = now();
+    const result = db.prepare(`
+      UPDATE repair_transactions
+      SET status = 'authorized', authorized_actions = ?, authorized_by = ?,
+        authorized_at = COALESCE(authorized_at, ?), updated_at = ?, failure_category = NULL
+      WHERE id = ? AND status = ?
+    `).run(
+      JSON.stringify(requested), requireString(input.authorizedBy, 'authorizedBy'),
+      timestamp, timestamp, transactionId, row.status,
+    );
+    if (Number(result.changes) !== 1) throw new Error('Repair authorization state changed concurrently');
+    return getRepairTransaction(transactionId);
+  }
+
+  function startRepairStep(id, action, request = null) {
+    const transactionId = requireString(id, 'repairTransactionId');
+    return transaction(() => {
+      const row = db.prepare('SELECT * FROM repair_transactions WHERE id = ?').get(transactionId);
+      if (!row) throw new Error(`Unknown repair transaction: ${transactionId}`);
+      if (!['authorized', 'executing'].includes(row.status)) {
+        throw new Error(`Repair transaction cannot execute from ${row.status}`);
+      }
+      const authorized = new Set(JSON.parse(row.authorized_actions ?? '[]'));
+      if (!authorized.has(action)) throw new Error(`Repair action is not authorized: ${action}`);
+      const prior = db.prepare(`
+        SELECT * FROM repair_steps
+        WHERE repair_transaction_id = ? AND action = ? AND status = 'succeeded'
+        ORDER BY attempt DESC LIMIT 1
+      `).get(transactionId, action);
+      if (prior) return rowToRepairStep(prior);
+      const running = db.prepare(`
+        SELECT * FROM repair_steps
+        WHERE repair_transaction_id = ? AND action = ? AND status = 'running'
+        ORDER BY attempt DESC LIMIT 1
+      `).get(transactionId, action);
+      if (running) return rowToRepairStep(running);
+      const timestamp = now();
+      const transition = db.prepare(`
+        UPDATE repair_transactions SET status = 'executing',
+          started_at = COALESCE(started_at, ?), updated_at = ?
+        WHERE id = ? AND status IN ('authorized', 'executing')
+      `).run(timestamp, timestamp, transactionId);
+      if (Number(transition.changes) !== 1) throw new Error('Repair transaction state changed concurrently');
+      const attempt = Number(db.prepare(`
+        SELECT COALESCE(MAX(attempt), 0) AS value FROM repair_steps
+        WHERE repair_transaction_id = ? AND action = ?
+      `).get(transactionId, action).value) + 1;
+      const result = db.prepare(`
+        INSERT INTO repair_steps (
+          repair_transaction_id, action, status, attempt, request, started_at
+        ) VALUES (?, ?, 'running', ?, ?, ?)
+      `).run(
+        transactionId, requireString(action, 'action'), attempt,
+        request == null ? null : JSON.stringify(request), timestamp,
+      );
+      return rowToRepairStep(
+        db.prepare('SELECT * FROM repair_steps WHERE id = ?').get(result.lastInsertRowid),
+      );
+    });
+  }
+
+  function completeRepairStep(stepId, result = null) {
+    const step = db.prepare('SELECT * FROM repair_steps WHERE id = ?').get(stepId);
+    if (!step) throw new Error(`Unknown repair step: ${stepId}`);
+    if (step.status === 'succeeded') return rowToRepairStep(step);
+    if (step.status !== 'running') throw new Error(`Repair step cannot succeed from ${step.status}`);
+    const timestamp = now();
+    transaction(() => {
+      const stepResult = db.prepare(`
+        UPDATE repair_steps SET status = 'succeeded', result = ?, completed_at = ?
+        WHERE id = ? AND status = 'running'
+      `).run(result == null ? null : JSON.stringify(result), timestamp, stepId);
+      if (Number(stepResult.changes) !== 1) throw new Error('Repair step state changed concurrently');
+      const transactionResult = db.prepare(`
+        UPDATE repair_transactions SET updated_at = ?
+        WHERE id = ? AND status = 'executing'
+      `).run(timestamp, step.repair_transaction_id);
+      if (Number(transactionResult.changes) !== 1) {
+        throw new Error('Repair transaction state changed concurrently');
+      }
+    });
+    return rowToRepairStep(db.prepare('SELECT * FROM repair_steps WHERE id = ?').get(stepId));
+  }
+
+  function failRepairStep(stepId, error = {}) {
+    const step = db.prepare('SELECT * FROM repair_steps WHERE id = ?').get(stepId);
+    if (!step) throw new Error(`Unknown repair step: ${stepId}`);
+    if (step.status !== 'running') throw new Error(`Repair step cannot fail from ${step.status}`);
+    const timestamp = now();
+    const category = requireString(error.failureCategory ?? 'repair-operation-failed', 'failureCategory');
+    transaction(() => {
+      const stepResult = db.prepare(`
+        UPDATE repair_steps SET status = 'failed', result = ?, failure_category = ?,
+          retryable = ?, completed_at = ? WHERE id = ? AND status = 'running'
+      `).run(
+        error.result == null ? null : JSON.stringify(error.result), category,
+        booleanOrNull(error.retryable), timestamp, stepId,
+      );
+      if (Number(stepResult.changes) !== 1) throw new Error('Repair step state changed concurrently');
+      const transactionResult = db.prepare(`
+        UPDATE repair_transactions SET status = 'failed', failure_category = ?,
+          completed_at = ?, updated_at = ? WHERE id = ? AND status = 'executing'
+      `).run(category, timestamp, timestamp, step.repair_transaction_id);
+      if (Number(transactionResult.changes) !== 1) {
+        throw new Error('Repair transaction state changed concurrently');
+      }
+    });
+    return rowToRepairStep(db.prepare('SELECT * FROM repair_steps WHERE id = ?').get(stepId));
+  }
+
+  function failRepairTransaction(id, error = {}) {
+    const transactionId = requireString(id, 'repairTransactionId');
+    const row = db.prepare('SELECT * FROM repair_transactions WHERE id = ?').get(transactionId);
+    if (!row) throw new Error(`Unknown repair transaction: ${transactionId}`);
+    if (!['authorized', 'executing'].includes(row.status)) {
+      throw new Error(`Repair transaction cannot fail from ${row.status}`);
+    }
+    const category = requireString(error.failureCategory ?? 'repair-operation-failed', 'failureCategory');
+    const timestamp = now();
+    const result = db.prepare(`
+      UPDATE repair_transactions SET status = 'failed', failure_category = ?,
+        completed_at = ?, updated_at = ? WHERE id = ? AND status = ?
+    `).run(category, timestamp, timestamp, transactionId, row.status);
+    if (Number(result.changes) !== 1) throw new Error('Repair transaction state changed concurrently');
+    return getRepairTransaction(transactionId);
+  }
+
+  function resumeRepairTransaction(id) {
+    const transactionId = requireString(id, 'repairTransactionId');
+    const row = db.prepare('SELECT * FROM repair_transactions WHERE id = ?').get(transactionId);
+    if (!row) throw new Error(`Unknown repair transaction: ${transactionId}`);
+    if (row.status !== 'failed') throw new Error(`Repair transaction cannot resume from ${row.status}`);
+    const ambiguous = db.prepare(`
+      SELECT COUNT(*) AS count FROM repair_steps
+      WHERE repair_transaction_id = ? AND status = 'running'
+    `).get(transactionId).count;
+    if (ambiguous > 0) {
+      throw new Error('Repair transaction has an ambiguous running operation requiring manual resolution');
+    }
+    const timestamp = now();
+    const result = db.prepare(`
+      UPDATE repair_transactions SET status = 'authorized', failure_category = NULL,
+        completed_at = NULL, updated_at = ? WHERE id = ? AND status = 'failed'
+    `).run(timestamp, transactionId);
+    if (Number(result.changes) !== 1) throw new Error('Repair transaction state changed concurrently');
+    return getRepairTransaction(transactionId);
+  }
+
+  function completeRepairTransaction(id) {
+    const transactionId = requireString(id, 'repairTransactionId');
+    const row = db.prepare('SELECT * FROM repair_transactions WHERE id = ?').get(transactionId);
+    if (!row) throw new Error(`Unknown repair transaction: ${transactionId}`);
+    if (row.status === 'succeeded') return getRepairTransaction(transactionId);
+    if (row.status !== 'executing') throw new Error(`Repair transaction cannot succeed from ${row.status}`);
+    const incomplete = db.prepare(`
+      SELECT COUNT(*) AS count FROM repair_steps
+      WHERE repair_transaction_id = ? AND status = 'running'
+    `).get(transactionId).count;
+    if (incomplete > 0) throw new Error('Repair transaction has incomplete steps');
+    const authorized = JSON.parse(row.authorized_actions ?? '[]');
+    const succeeded = new Set(db.prepare(`
+      SELECT action FROM repair_steps
+      WHERE repair_transaction_id = ? AND status = 'succeeded'
+    `).all(transactionId).map((step) => step.action));
+    if (authorized.some((action) => !succeeded.has(action))) {
+      throw new Error('Repair transaction has actions without successful attempts');
+    }
+    const timestamp = now();
+    const result = db.prepare(`
+      UPDATE repair_transactions SET status = 'succeeded', completed_at = ?,
+        updated_at = ?, failure_category = NULL WHERE id = ? AND status = 'executing'
+    `).run(timestamp, timestamp, transactionId);
+    if (Number(result.changes) !== 1) throw new Error('Repair transaction state changed concurrently');
+    return getRepairTransaction(transactionId);
+  }
+
+  function getRepairTransaction(id) {
+    const row = db.prepare('SELECT * FROM repair_transactions WHERE id = ?')
+      .get(requireString(id, 'repairTransactionId'));
+    return row ? repairTransactionWithSteps(row) : null;
+  }
+
+  function listRepairTransactions(libraryItemId) {
+    requireLibraryItem(libraryItemId);
+    return db.prepare(`
+      SELECT * FROM repair_transactions WHERE library_item_id = ? ORDER BY created_at, id
+    `).all(libraryItemId).map(repairTransactionWithSteps);
+  }
+
+  function repairTransactionWithSteps(row) {
+    return {
+      ...rowToRepairTransaction(row),
+      steps: db.prepare(`
+        SELECT * FROM repair_steps WHERE repair_transaction_id = ? ORDER BY id
+      `).all(row.id).map(rowToRepairStep),
+    };
+  }
+
   function getReconciliationSnapshot(libraryItemId, identityInput) {
     const item = requireLibraryItem(libraryItemId);
     const identity = validateReleaseIdentity(identityInput);
@@ -937,6 +1265,17 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     listZurgMetadataObservations,
     activateBinding,
     listBindings,
+    listActiveBindingsForPlacement,
+    createRepairTransaction,
+    authorizeRepairTransaction,
+    startRepairStep,
+    completeRepairStep,
+    failRepairStep,
+    failRepairTransaction,
+    resumeRepairTransaction,
+    completeRepairTransaction,
+    getRepairTransaction,
+    listRepairTransactions,
     getReconciliationSnapshot,
     appendLifecycleEvent,
     getLifecycle,
@@ -1053,6 +1392,39 @@ function rowToBinding(row) {
     reconciledAt: row.reconciled_at, failureCategory: row.failure_category,
   };
 }
+function rowToRepairTransaction(row) {
+  const desiredIdentity = createReleaseIdentity(row.info_hash, row.file_index);
+  if (desiredIdentity.releaseKey !== row.release_key
+    || row.file_index_key !== (desiredIdentity.fileIndex ?? -1)) {
+    throw new Error('Persisted repair transaction canonical identity is inconsistent');
+  }
+  return {
+    id: row.id, planKey: row.plan_key, libraryItemId: row.library_item_id,
+    desiredIdentity,
+    scope: {
+      accountScope: row.account_scope,
+      instanceScope: row.instance_scope,
+      mountScope: row.mount_scope,
+    },
+    expectedBindingVersion: row.expected_binding_version,
+    status: row.status, plan: JSON.parse(row.plan),
+    authorizedActions: row.authorized_actions ? JSON.parse(row.authorized_actions) : [],
+    authorizedBy: row.authorized_by, createdAt: row.created_at,
+    authorizedAt: row.authorized_at, startedAt: row.started_at,
+    completedAt: row.completed_at, updatedAt: row.updated_at,
+    failureCategory: row.failure_category,
+  };
+}
+function rowToRepairStep(row) {
+  return {
+    id: Number(row.id), repairTransactionId: row.repair_transaction_id,
+    action: row.action, status: row.status, attempt: row.attempt,
+    request: row.request ? JSON.parse(row.request) : null,
+    result: row.result ? JSON.parse(row.result) : null,
+    failureCategory: row.failure_category, retryable: fromSqlBoolean(row.retryable),
+    startedAt: row.started_at, completedAt: row.completed_at,
+  };
+}
 function rowToLifecycleEvent(row) {
   return {
     id: Number(row.id), libraryItemId: row.library_item_id, milestone: row.milestone,
@@ -1162,6 +1534,27 @@ function requireString(value, field, max = 256) {
     throw new TypeError(`${field} must be a non-empty string up to ${max} characters`);
   }
   return value.trim();
+}
+function requireStringArray(value, field) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new TypeError(`${field} must be a non-empty array`);
+  }
+  const normalized = value.map((entry) => requireString(entry, field));
+  if (new Set(normalized).size !== normalized.length) {
+    throw new TypeError(`${field} must contain unique values`);
+  }
+  return normalized;
+}
+function sameRepairScope(left, right) {
+  if (!left || !right) return false;
+  return ['accountScope', 'instanceScope', 'mountScope']
+    .every((key) => left[key] === right[key]);
+}
+function sameStringSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right)
+    || left.length === 0 || left.length !== right.length) return false;
+  const leftSet = new Set(left);
+  return leftSet.size === left.length && right.every((entry) => leftSet.has(entry));
 }
 function booleanOrNull(value) {
   return value == null ? null : Number(Boolean(value));

@@ -39,8 +39,9 @@ flowchart LR
 
 - **`media-search`** owns metadata lookup, discovery storage, local retrieval/ranking, live-source normalization, request publication, operator-triggered ingestion/attribute work, and same-origin static UI serving in production.
 - **Discovery SQLite** separates exact candidates, parsed release evidence, media associations, append-only provider observation history/current projection, and FTS data. Root deployment persists it at `/data/discovery-cache.db` on the `discovery-data` volume.
-- **Provider capability foundation** exposes cache observation, placement lookup/create, readiness, file inventory, exposure, and removal as independent optional capabilities with typed errors. TorBox currently implements authoritative cache observation plus a fixture-verified account inventory boundary; Real-Debrid has an injected placement/readiness/inventory boundary but no fabricated direct HTTP implementation.
+- **Provider capability foundation** exposes cache observation, placement lookup/create, readiness, file inventory, explicit known-file selection, explicit repair requests, exposure, and removal as independent optional capabilities with typed errors. TorBox currently implements authoritative cache observation plus a fixture-verified account inventory boundary; Real-Debrid has injected observation and controlled-mutation boundaries but no fabricated direct HTTP implementation.
 - **Read-only transport observation foundations** include exact filesystem-path observers for externally managed Zurg/rclone and TorBox WebDAV/rclone mounts. A separate explicit-path Zurg `.zurgtorrent` observer exposes sanitized torrent/file repair metadata without claiming Real-Debrid placement authority or mount visibility. Neither observer is wired to a live deployment.
+- **Stage 6 repair control plane** detects degraded exact bindings from scoped evidence, creates durable deterministic ordered repair plans, requires separate action authorization, records durable step attempts/results, and invokes only injected mockable capabilities. Successful steps resume after restart; an in-flight operation with unknown outcome fails closed for manual resolution rather than being replayed. It does not automatically delete provider resources, mutate catalog/playback state, or construct a live credentialed gateway.
 - **`ui`** is a React/Vite prototype built into the production `media-search` image; Vite remains separate for local development.
 - **`torbox-importer`** starts its worker by default and owns physical TorBox acquisition, staging, provider/hash reconciliation, file selection, Arr validation/import, settlement, and conservative cleanup.
 - **Filesystem queue** is the authority for physical-acquisition ownership and terminal movement.
@@ -131,6 +132,15 @@ requested → checked → placed → provider-ready → exposed
 ```
 
 Each state needs its own status, timestamp, and failure category. Temporary provider or mount absence triggers bounded re-observation, not immediate deletion or an `uncached` label.
+
+### Observation, repair, and reconciliation boundaries
+
+1. **Observation** records scoped, expiring facts without side effects: placement lookup/readiness, authoritative file inventory, sanitized Zurg metadata, and exact read-only exposure.
+2. **Repair planning** deterministically explains which evidence degraded an existing exact binding, which action types are permitted, and the required postconditions. Producing or persisting a plan performs no provider mutation.
+3. **Repair execution** is a separate durable transaction. An operator/controller explicitly authorizes an order-preserving subset of permitted actions; each injected provider mutation must return a durable-idempotency guarantee and is followed by a separately ordered re-observation action. Failed attempts retain prior evidence and binding history; unknown in-flight outcomes require manual resolution.
+4. **Reconciliation** validates fresh authoritative postconditions and may version the logical exact binding. It cannot rewrite `(infoHash,fileIndex)`, infer provider deletion from mount absence, or mutate catalog/playback milestones.
+
+The Stage 6 executor is a controlled dependency-injected boundary, not active automation. No current server route or startup worker invokes it, and no live credentials are consumed by it.
 
 ## Stable boundaries
 

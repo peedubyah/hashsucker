@@ -8,8 +8,10 @@ import { chooseExactProviderFile } from './reconciler.js';
  * This coordinator never infers one fact from another. Callers choose which
  * observations to collect, provide explicit account/instance paths, and decide
  * whether an exact provider-file mapping is justified by authoritative corpus
- * evidence. No placement, repair, deletion, rebinding, catalog, or playback
- * operation is performed here.
+ * evidence. Observation methods are passive; exact mapping and binding methods
+ * are explicit reconciliation operations. Provider repair execution is kept in
+ * a separately authorized executor. No deletion, catalog, or playback operation
+ * is performed here.
  */
 export function createRdZurgControlPlaneSlice({
   store,
@@ -372,6 +374,16 @@ function projectBinding(binding, identity, filtered) {
       validFrom: binding.validFrom,
       reconciledAt: binding.reconciledAt,
       failureCategory: 'exposure-target-changed',
+    });
+  }
+  const currentPlacement = newest(filtered.placementObservations);
+  if (currentPlacement?.observationState === 'present'
+    && currentPlacement.placementId !== binding.placementId) {
+    return fact('degraded', binding, {
+      version: binding.version,
+      validFrom: binding.validFrom,
+      reconciledAt: binding.reconciledAt,
+      failureCategory: 'provider-placement-target-changed',
     });
   }
   return fact(binding.status, binding, {

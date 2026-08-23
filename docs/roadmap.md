@@ -97,7 +97,11 @@ Do not assume 2000.
 - Inventory provider files authoritatively.
 - Expose through Zurg and a hidden read-only rclone mount.
 - Atomically project one exact movie/episode to a stable canonical path.
+- Distinguish passive observation, deterministic repair planning, separately authorized repair execution, and evidence-gated reconciliation.
+- Persist restart-safe repair plans/attempts and exercise explicit mock boundaries for re-observation, known-file reselection, provider repair request, and placement-observation replacement.
 - Trigger catalog refresh and observe visibility/playability separately.
+
+**Current checkpoint:** durable repair planning/execution primitives and mocked lifecycle tests exist, but no server route/worker, direct credentialed Real-Debrid gateway, pinned live Zurg/rclone runtime, canonical filesystem publisher, or catalog/playback mutation is enabled.
 
 **Exit:** One item reaches a stable provider-independent path without routing bytes through HashSucker.
 

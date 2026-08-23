@@ -74,6 +74,16 @@ test('provider adapter rejects malformed or invented capability contracts', () =
     provider: 'fake',
     capabilities: { [PROVIDER_CAPABILITIES.FILE_INVENTORY]: {} },
   }), /requires getFileInventory/);
+
+  assert.throws(() => createProviderAdapter({
+    provider: 'fake',
+    capabilities: { [PROVIDER_CAPABILITIES.FILE_SELECTION]: {} },
+  }), /requires selectKnownFiles/);
+
+  assert.throws(() => createProviderAdapter({
+    provider: 'fake',
+    capabilities: { [PROVIDER_CAPABILITIES.REPAIR_REQUEST]: {} },
+  }), /requires requestRepair/);
 });
 
 test('cache observations preserve exact candidate identity including null versus zero', () => {

@@ -144,6 +144,21 @@ requested → checked → placed → provider-ready → exposed
 
 Reconciliation compares desired library state with provider resources, file inventories, WebDAV/mount state, canonical targets, and catalog visibility. It must tolerate eventual consistency: refresh/re-observe before re-place, rebind before duplicate placement, and never delete an unowned resource because a mount is stale.
 
+The Stage 6 repair loop is explicitly phased:
+
+```text
+observe scoped evidence
+  → plan repair without side effects
+  → persist plan
+  → explicitly authorize permitted actions
+  → execute injected operation(s) in the plan's dependency order
+  → require durable gateway idempotency for provider mutation
+  → re-observe provider/Zurg/exposure evidence
+  → reconcile exact mapping and binding postconditions
+```
+
+An operation left `running` across restart has an unknown outcome and is not replayed automatically. Missing exposure permits another mount observation but does not prove provider deletion. Provider resource/file/Zurg IDs and paths remain replaceable observations; the desired `(infoHash,fileIndex)` does not change. Catalog and playback state are outside repair execution and require their own later observations.
+
 ## Target physical fallback
 
 The existing queue/importer remains an explicit secondary policy. It receives exact candidate provenance, continues to map against provider-authoritative files, and retains Sonarr/Radarr final import authority. Virtual reconciliation must not be generalized from the importer’s staging/`aria2c`/`ManualImport` lifecycle.

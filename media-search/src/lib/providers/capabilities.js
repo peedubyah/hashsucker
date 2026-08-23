@@ -4,6 +4,8 @@ export const PROVIDER_CAPABILITIES = Object.freeze({
   PLACEMENT_CREATE: 'placement-create',
   RESOURCE_READINESS: 'resource-readiness',
   FILE_INVENTORY: 'file-inventory',
+  FILE_SELECTION: 'file-selection',
+  REPAIR_REQUEST: 'repair-request',
   EXPOSURE: 'exposure',
   REMOVAL: 'removal',
 });
@@ -65,6 +67,8 @@ function validateCapability(name, implementation) {
     [PROVIDER_CAPABILITIES.PLACEMENT_CREATE]: ['createPlacement'],
     [PROVIDER_CAPABILITIES.RESOURCE_READINESS]: ['observeReadiness'],
     [PROVIDER_CAPABILITIES.FILE_INVENTORY]: ['getFileInventory'],
+    [PROVIDER_CAPABILITIES.FILE_SELECTION]: ['selectKnownFiles'],
+    [PROVIDER_CAPABILITIES.REPAIR_REQUEST]: ['requestRepair'],
     [PROVIDER_CAPABILITIES.EXPOSURE]: ['observeExposure'],
     [PROVIDER_CAPABILITIES.REMOVAL]: ['removeOwnedResource'],
   }[name];

@@ -28,6 +28,12 @@ function fullGateway(overrides = {}) {
         }],
       };
     },
+    async selectKnownFiles() {
+      return { accepted: true, idempotencyGuaranteed: true, operationId: 'selection-1' };
+    },
+    async requestRepair() {
+      return { accepted: true, idempotencyGuaranteed: true, operationId: 'repair-1' };
+    },
     ...overrides,
   };
 }
@@ -137,6 +143,44 @@ test('Real-Debrid readiness and inventory preserve opaque provider identities', 
   assert.equal(inventory.complete, true);
   assert.equal(inventory.files[0].providerFileId, 'rd-file-9');
   assert.equal(inventory.files[0].corpusFileIndex, 0);
+});
+
+test('Real-Debrid controlled mutations require explicit accepted idempotent gateway receipts', async () => {
+  const requests = [];
+  const adapter = createRealDebridProvider({
+    accountScope: 'primary',
+    gateway: fullGateway({
+      async selectKnownFiles(input) {
+        requests.push(input);
+        return { accepted: true, idempotencyGuaranteed: true, operationId: 'select-op' };
+      },
+      async requestRepair(input) {
+        requests.push(input);
+        return { accepted: true, idempotencyGuaranteed: true, operationId: 'repair-op' };
+      },
+    }),
+  });
+
+  const selection = await adapter.require(PROVIDER_CAPABILITIES.FILE_SELECTION).selectKnownFiles(
+    { infoHash: HASH, providerResourceId: 'rd-resource-1' },
+    ['opaque-file-id'],
+    { idempotencyKey: 'repair-1:select' },
+  );
+  const repair = await adapter.require(PROVIDER_CAPABILITIES.REPAIR_REQUEST).requestRepair(
+    { infoHash: HASH, providerResourceId: 'rd-resource-1' },
+    { idempotencyKey: 'repair-1:request', reason: 'broken-provider-observation' },
+  );
+
+  assert.equal(selection.operationId, 'select-op');
+  assert.equal(repair.operationId, 'repair-op');
+  assert.deepEqual(requests[0].providerFileIds, ['opaque-file-id']);
+  assert.equal(requests[0].idempotencyKey, 'repair-1:select');
+  assert.equal(requests[1].reason, 'broken-provider-observation');
+  assert.equal(requests[1].accountScope, 'primary');
+
+  await assert.rejects(() => adapter.require(PROVIDER_CAPABILITIES.FILE_SELECTION).selectKnownFiles(
+    { infoHash: HASH, providerResourceId: 'rd-resource-1' }, [], { idempotencyKey: 'bad' },
+  ), /non-empty array/);
 });
 
 test('Real-Debrid gateway errors are typed and malformed results fail closed', async () => {

@@ -17,9 +17,9 @@
 
 `POST /api/ingest/dmm` only recognizes a script-call wrapper, while sampled current fragments use iframe/hash. The compatible importer is unwired. Neither path has run checkpoints, locks, resumability, source revision state, bounded transactions, or bounded-memory decoding. Existing corpus/database size claims are unverified and contradictory.
 
-### Incomplete provider observation integration
+### Incomplete provider observation and repair integration
 
-The provider-neutral contract, typed errors, explicit scope/authority/freshness model, append-only history/current projection, TorBox cache/account-inventory capabilities, and an injected Real-Debrid placement/readiness/inventory boundary now exist. Only fresh authoritative observations can affect the legacy ranking component. The active combined server path does not yet use these capability adapters, Real-Debrid has no fixture-verified direct HTTP gateway, public DTOs are not fully migrated, and runtime TTL/rate-limit policy still requires provider validation.
+The provider-neutral contract, typed errors, explicit scope/authority/freshness model, append-only history/current projection, TorBox cache/account-inventory capabilities, and injected Real-Debrid observation/file-selection/repair boundaries now exist. Stage 6 also has durable repair plans, explicit authorization, successful-step restart recovery, fail-closed ambiguous-operation handling, and evidence-gated reconciliation over mocks. Only fresh authoritative observations can affect the legacy ranking component. The active combined server path does not invoke repair execution, Real-Debrid has no fixture-verified direct HTTP gateway with a durable idempotency guarantee, no authenticated operator principal is wired, no trusted opaque resolver reconstructs Zurg/mount observation operands after restart, no pinned live Zurg/rclone runtime proves repair postconditions, public DTOs are not fully migrated, and runtime TTL/rate-limit policy still requires provider validation.
 
 ### Weak identity/enrichment correction
 
@@ -37,13 +37,14 @@ A no-request legacy movie path may choose `delete-legacy`. Default cleanup shoul
 
 These are absent, not partially implemented:
 
-- Fixture-verified direct Real-Debrid cache/placement/file HTTP gateway and active-path wiring.
+- Fixture-verified direct Real-Debrid cache/placement/file/repair HTTP gateway and active-path wiring.
+- Authenticated operator control/API and scheduled worker for the durable repair transaction primitives.
 - Validated TorBox native WebDAV contract.
 - Pinned Zurg/provider WebDAV/rclone deployment, health inventory, and controlled repair/restart experiment. Static evidence and read-only observation seams are documented in [`evaluation/ZURG-REPAIR-EVIDENCE-2026-08-22.md`](evaluation/ZURG-REPAIR-EVIDENCE-2026-08-22.md).
-- Provider-authoritative file mapping persisted end to end.
-- Canonical library item/path/binding model and binding history.
-- Shadow/active reconciler for provider, mount, projection, and catalog state.
-- Provider failover without canonical path or media-identity churn.
+- Atomic canonical filesystem publisher above hidden mounts.
+- Active catalog/playback observation and separately authorized mutation.
+- Ownership-proven destructive repair/removal execution; no automatic deletion exists.
+- Provider failover proven against a live runtime without canonical path or media-identity churn.
 - Distinct catalog/playback health and user-visible lifecycle states.
 - Append-only observation/library/fulfillment telemetry.
 - Conservative release-family graph and family-level reputation evidence.
