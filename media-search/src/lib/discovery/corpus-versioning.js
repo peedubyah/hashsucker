@@ -457,5 +457,7 @@ export function createCorpusVersionRegistry(evidence) {
     getCandidateLastVersion,
     getCandidateVersionPersistence,
     getVersionedObservationHistory,
+    // Exposed for derived projection layers (e.g., corpus-persistence-features)
+    get db() { return db; },
   };
 }
