@@ -90,6 +90,25 @@ export function evaluateReadiness({ binding, exposure, mount }) {
 }
 
 /**
+ * Look up provider file by placement_id and provider_file_id.
+ */
+function findProviderFile(store, placementId, providerFileId) {
+  const row = store.db.prepare(`
+    SELECT * FROM provider_files
+    WHERE placement_id = ? AND provider_file_id = ? AND present = 1
+  `).get(placementId, providerFileId);
+  return row ? {
+    id: row.id,
+    placementId: row.placement_id,
+    providerFileId: row.provider_file_id,
+    path: row.path,
+    name: row.name,
+    size: row.size,
+    selected: row.selected === 1,
+  } : null;
+}
+
+/**
  * Build the full resolver projection for a content identity.
  *
  * @param {Object} options
@@ -108,6 +127,9 @@ export function resolveProjection({ store, infoHash, fileIndex, env = process.en
   const mount = exposure
     ? resolveMountRoot(exposure.mount_scope, env)
     : resolveMountRoot('default', env);
+  const providerFile = binding
+    ? findProviderFile(store, binding.placement_id, binding.provider_file_id)
+    : null;
 
   const readiness = evaluateReadiness({ binding, exposure, mount });
 
@@ -142,6 +164,7 @@ export function resolveProjection({ store, infoHash, fileIndex, env = process.en
       envVar: mount.envVar,
       root: mount.root,
     },
+    providerFile,
     readiness,
   };
 }
