@@ -50,9 +50,65 @@ The foundation also needs hardening before runtime wiring: require deterministic
 
 ## First implementation slice checklist
 
-- [ ] **Provider observation adapter:** Normalize current provider/storage observations for configured provider/account targets while preserving scope, subject, authority kind, state, and error metadata.
-- [ ] **Exact candidate projection:** Emit decision-ready evidence only for an exact `(infoHash,fileIndex)`/`releaseKey` match. Never project torrent-scoped evidence onto a file candidate.
-- [ ] **Freshness validation:** Require explicit evaluation, observation, and expiry times; fail closed for stale, future, unbounded, malformed, or internally inconsistent evidence.
-- [ ] **Fixtures:** Cover mixed authority kinds, provider/account isolation, `null` versus `0`, candidate versus torrent scope, stale/future/unbounded evidence, unknown/error preservation, and authoritative-uncached fallback.
+- [x] **Exact candidate projection:** Pure function validating identity, scope, and freshness. See `media-search/src/lib/acquisition/exact-candidate-projection.js`.
+- [x] **Freshness validation:** Explicit `now` required (no wall-clock fallback); stale/future/unbounded/malformed evidence fails closed.
+- [x] **Fixtures:** 30 projection tests covering identity, scope, freshness, provider/account preservation.
+- [x] **TorBox observation mapping:** Documented in `docs/evaluation/TORBOX-OBSERVATION-MAPPING.md` with fixtures in `media-search/test/fixtures/torbox-response-fixtures.js`.
+- [x] **Candidate granularity policy:** Documented in `docs/evaluation/CANDIDATE-GRANULARITY-POLICY.md`.
+- [x] **TorBox adapter alignment:** Existing `createTorBoxProvider` and `createTorBoxInventoryProvider` already satisfy the adapter boundary. Verified by `media-search/test/torbox-adapter-contract.test.js` — no new adapter code required.
+- [x] **TorBox cache observation hardening:** Transport evaluation (GET retained), bounded batching, partial failure isolation, latency measurement. See `media-search/test/torbox-cache-hardening.test.js`.
+- [x] **TorBox placement creation:** `PLACEMENT_CREATE` capability with magnet/cached-only creation, typed errors, provider/account scope preservation. See `media-search/test/torbox-placement-create.test.js`.
+- [x] **Observation collection boundary:** Pure orchestration helper with candidate windowing, hash batching, exact projection mapping. See `media-search/test/observation-collection.test.js`.
 
-Exit: deterministic fixture coverage for exact-candidate observations, with no I/O, live provider wiring, Stage 3 changes, or acquisition execution.
+### Adapter alignment note (Slice 1D)
+
+The existing TorBox capability modules already produce Stage 4-compatible observations:
+
+- `createTorBoxProvider.observeCache` maps `checkcached` responses to `createCacheObservation({ scope: 'torrent', fileIndex: null, kind: 'authoritative' })` — never file-level candidate observations.
+- `createTorBoxInventoryProvider.getFileInventory` maps `mylist` responses to `createProviderFileInventory({ ..., corpusFileIndex: null })` — opaque provider file IDs preserved, no mapping to `(infoHash, fileIndex)`.
+
+No parallel adapter, no duplicated response handling, no identity guessing was introduced. The adapter boundary is satisfied by existing code; only contract tests and documentation were added.
+
+### Slice 2A — TorBox cache observation capability hardening
+
+The existing TorBox adapter is hardened to support future acquisition decisions without changing Stage 4 boundaries:
+
+- **Transport evaluation (GET kept):** `checkcached` is documented as GET with repeated `hash` query params. GET is retained over POST batch semantics because: (1) GET is the documented method; (2) GET is idempotent/cacheable/proxy-friendly; (3) `BATCH_SIZE = 10` keeps each URL ~600 chars, well under the ~2000 char proxy limit.
+- **Bounded batching:** Hashes are chunked into batches of `BATCH_SIZE`. Each batch is an independent HTTP request.
+- **Partial failure isolation:** A batch-level failure marks only that batch's hashes as failed (`→ unknown`, `retryable: true`) rather than failing the entire observation.
+- **Global auth failures:** 401/403/BAD_TOKEN abort the entire observation since retrying without new credentials is futile.
+- **Latency measurement:** Per-batch round-trip time is measured and attached to each observation as `latencyMs` for Stage 4 decision diagnostics.
+- **No file-level observations:** Every emitted observation remains `scope: 'torrent'`, `fileIndex: null`. No projection or identity expansion is added.
+
+See: `media-search/src/lib/providers/torbox.js`, `media-search/test/torbox-cache-hardening.test.js`.
+
+Exit: TorBox cache observation capability is a clean provider implementation boundary capable of feeding Stage 4 decisions. No acquisition execution, no provider workflow expansion, no API client redesign.
+
+### Slice 2B — TorBox placement creation capability
+
+Added the smallest provider capability required to turn an accepted acquisition decision into a TorBox-owned resource:
+
+- **Capability:** `PLACEMENT_CREATE` backed by `POST /v1/api/torrents/createtorrent`.
+- **Input:** Magnet link or torrent file (base64), with optional `add_only_if_cached` safety option.
+- **Output:** Provider placement result with `provider`, `accountScope`, `providerResourceId` (torrent ID), `infoHash`, and evidence.
+- **Authentication:** Reuses existing TorBox bearer token handling.
+- **Error behavior:** Typed errors for authentication, rate limit, provider rejection, network failure, malformed response. Failures are NOT converted to cache observations.
+- **No status polling, file inventory, file selection, exposure, or fulfillment.**
+
+See: `media-search/src/lib/providers/torbox.js`, `media-search/test/torbox-placement-create.test.js`.
+
+Exit: A deterministic TorBox placement creation capability exists. No acquisition execution, no provider workflow expansion, no API client redesign.
+
+### Slice 2C — Batched provider cache observation collection
+
+Created the smallest orchestration boundary between Stage 3 ranked candidates and Stage 4 acquisition decisions:
+
+- **Pure orchestration:** Consumes provider capability, produces evidence. No persistence, fulfillment, scheduling, or provider mutation.
+- **Candidate windowing:** Preserves Stage 3 order, bounded by `maxCandidates`, never re-ranks or mutates scores.
+- **Hash batching:** Extracts unique `infoHashes`, deduplicates, preserves all candidate identities sharing the same hash.
+- **Observation mapping:** Uses `projectExactCandidateObservation()` to maintain torrent-level vs file-level distinction. Torrent-level evidence does not authorize file-level candidates.
+- **Failure behavior:** Provider errors become observation states. Missing evidence does not become `uncached`. Empty candidate lists are deterministic.
+
+See: `media-search/src/lib/acquisition/observation-collection.js`, `media-search/test/observation-collection.test.js`.
+
+Exit: A deterministic bounded Stage 3 → provider observation collection boundary exists. No acquisition execution, provider mutation, runtime wiring, or scheduling.

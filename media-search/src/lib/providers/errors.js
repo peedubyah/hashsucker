@@ -66,13 +66,14 @@ export function classifyProviderError(error, context = {}) {
   if (status === 401 || code === 'BAD_TOKEN' || code === 'AUTH_ERROR') category = 'authentication';
   else if (status === 403) category = 'authorization';
   else if (status === 429 || code === 'RATE_LIMITED') category = 'rate-limit';
-  else if (status === 404) category = 'not-found';
+  else if (status === 404 || code === 'NOT_CACHED') category = 'not-found';
   else if (status === 409) category = 'conflict';
   else if (status >= 400 && status < 500) category = 'invalid-request';
   else if (status >= 500) category = 'temporarily-unavailable';
   else if (name === 'TimeoutError' || name === 'AbortError' || code === 'ETIMEDOUT') category = 'timeout';
   else if (['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'].includes(code)) category = 'network';
   else if (error instanceof SyntaxError) category = 'invalid-response';
+  else if (code === 'MALFORMED_RESPONSE') category = 'invalid-response';
 
   return new ProviderOperationError(message, {
     ...context,

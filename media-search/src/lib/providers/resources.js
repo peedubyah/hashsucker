@@ -79,6 +79,26 @@ export function createProviderFileInventory(input) {
   });
 }
 
+/** Normalize a provider placement creation result. */
+export function createPlacementResult(input) {
+  return Object.freeze({
+    provider: normalizeIdentifier(input.provider, 'provider'),
+    accountScope: normalizeIdentifier(input.accountScope ?? 'default', 'accountScope'),
+    providerResourceId: requireString(input.providerResourceId, 'providerResourceId'),
+    infoHash: normalizeInfoHash(input.infoHash),
+    evidence: input.evidence ?? null,
+  });
+}
+
+function normalizeInfoHash(value) {
+  if (value == null) return null;
+  const hash = String(value).trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(hash)) {
+    throw new TypeError('infoHash must be a valid 40-character hex string');
+  }
+  return hash;
+}
+
 /** Normalize a transport/mount observation without claiming provider authority. */
 export function createExposureObservation(input) {
   const observedAt = requireTimestamp(input.observedAt, 'observedAt');
