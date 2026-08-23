@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS corpus_observations (
   source TEXT NOT NULL,
   ingestion_id TEXT,
   fragment_id TEXT,
+  corpus_version_id INTEGER,
   evidence TEXT,
   recorded_at INTEGER NOT NULL
 );
@@ -47,6 +48,8 @@ CREATE INDEX IF NOT EXISTS idx_corpus_observations_candidate
   ON corpus_observations(info_hash, file_index_key, observed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_corpus_observations_source
   ON corpus_observations(source, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_corpus_observations_version
+  ON corpus_observations(corpus_version_id);
 `;
 
 /**
@@ -66,10 +69,10 @@ export function createEvidenceProjection(cache) {
   const insertCorpusObservationStmt = db.prepare(`
     INSERT INTO corpus_observations (
       info_hash, file_index_key, observed_at, source,
-      ingestion_id, fragment_id, evidence, recorded_at
+      ingestion_id, fragment_id, corpus_version_id, evidence, recorded_at
     ) VALUES (
       @info_hash, @file_index_key, @observed_at, @source,
-      @ingestion_id, @fragment_id, @evidence, @recorded_at
+      @ingestion_id, @fragment_id, @corpus_version_id, @evidence, @recorded_at
     );
   `);
 
@@ -124,6 +127,7 @@ export function createEvidenceProjection(cache) {
       source: row.source,
       ingestionId: row.ingestion_id,
       fragmentId: row.fragment_id,
+      corpusVersionId: row.corpus_version_id ?? null,
       evidence: row.evidence ? JSON.parse(row.evidence) : null,
       ingestedAt: row.recorded_at,
     };
@@ -146,6 +150,7 @@ export function createEvidenceProjection(cache) {
    * @param {string} source - Source identifier (e.g., 'dmm-hashlist', 'scraper')
    * @param {string} [ingestionId] - Optional batch ingestion run identifier
    * @param {string} [fragmentId] - Optional source-specific fragment identifier
+   * @param {number} [corpusVersionId] - Optional corpus version ID (from registerCorpusVersion)
    * @param {Object} [evidence] - Optional JSON-serializable evidence blob
    * @returns {Object} The recorded observation with id and ingestedAt
    */
@@ -156,6 +161,7 @@ export function createEvidenceProjection(cache) {
     source,
     ingestionId = null,
     fragmentId = null,
+    corpusVersionId = null,
     evidence = null,
   }) {
     if (!infoHash) throw new Error('Corpus observation requires infoHash');
@@ -172,6 +178,7 @@ export function createEvidenceProjection(cache) {
       source,
       ingestion_id: ingestionId,
       fragment_id: fragmentId,
+      corpus_version_id: corpusVersionId,
       evidence: evidenceJson,
       recorded_at: ingestedAt,
     });
@@ -184,6 +191,7 @@ export function createEvidenceProjection(cache) {
       source,
       ingestionId,
       fragmentId,
+      corpusVersionId,
       evidence,
       ingestedAt,
     };
@@ -418,5 +426,7 @@ export function createEvidenceProjection(cache) {
     listCorpusSources,
     getCandidateTimeline,
     queryEvidence,
+    // Exposed for corpus-versioning.js and testing
+    get db() { return db; },
   };
 }
