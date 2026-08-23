@@ -273,6 +273,39 @@ test('Proxy runs as separate container in compose', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Test: Transitional topology — /media/* targets media-search:3000
+// ---------------------------------------------------------------------------
+
+test('Transitional topology: /media/* routes to media-search:3000 (EP-TOPO-1)', () => {
+  const caddyfile = readCaddyfile();
+  const contract = readContract();
+  // Contract must document the transitional topology
+  assert.match(contract, /EP-TOPO-1/);
+  assert.match(contract, /media gateway.*logical endpoint/i);
+  assert.match(contract, /media-search:3000/);
+  // Caddyfile must route /media/* to media-search:3000
+  const mediaBlock = caddyfile.match(/@media[\s\S]*?reverse_proxy @media media-search:3000/);
+  assert.ok(mediaBlock, '/media/* should route to media-search:3000');
+});
+
+test('Transitional topology: proxy does not assume co-location (EP-TOPO-2)', () => {
+  const caddyfile = readCaddyfile();
+  // No hardcoded IP addresses — must use Docker service name
+  assert.doesNotMatch(caddyfile, /192\.168\./);
+  assert.doesNotMatch(caddyfile, /127\.0\.0\.1/);
+  // Must reference media-search by service name
+  assert.match(caddyfile, /media-search:3000/);
+});
+
+test('Transitional topology: extraction readiness (EP-TOPO-3)', () => {
+  const contract = readContract();
+  // Contract must allow for future extraction
+  assert.match(contract, /EP-TOPO-3/);
+  assert.match(contract, /MAY.*retarget/);
+  assert.match(contract, /media-gateway/);
+});
+
+// ---------------------------------------------------------------------------
 // Test: Routing order is correct (media first, then api, then catch-all)
 // ---------------------------------------------------------------------------
 

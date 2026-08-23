@@ -34,7 +34,17 @@ The edge proxy is a **transport/router layer only**. It owns no business logic, 
 | **EP-ROUTE-3** | `/*` (all other paths) **MUST** be routed to the media-search UI/static backend. |
 | **EP-ROUTE-4** | Routing **MUST** be prefix-based and order-sensitive: `/media/*` first, then `/api/*`, then `/*`. |
 
-### 2.3 Process Identity
+### 2.4 Transitional Topology
+
+In the current phase, the media gateway is a **logical endpoint** (`GET /media/{info_hash}/{file_index}`) implemented inside the existing `media-search` server (`media-search/src/server/app.js`). The edge proxy routes `/media/*` to `media-search:3000`, the same backend that serves `/api/*` and `/*`. This is an intentional transitional topology.
+
+| ID | Constraint |
+|----|------------|
+| **EP-TOPO-1** | The proxy **MUST** route `/media/*` to `media-search:3000`. This is the only valid target until the media gateway is extracted into its own process. |
+| **EP-TOPO-2** | The proxy **MUST NOT** introduce coupling to the co-location assumption. The proxy **MUST** address the media gateway by Docker service name (`media-search`) and port (`3000`). No assumption about process topology or internal routing is permitted. |
+| **EP-TOPO-3** | If the media gateway is later extracted into a separate service (e.g., `media-gateway:3000`), the proxy Caddyfile **MAY** be updated to retarget `/media/*` to the new service address. No other proxy changes are required. |
+
+### 2.5 Process Identity
 
 | ID | Constraint |
 |----|------------|
