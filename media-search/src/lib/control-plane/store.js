@@ -929,7 +929,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       throw new TypeError('Repair transaction requires a consistent executable repair plan');
     }
     const binding = db.prepare(
-      "SELECT * FROM bindings WHERE library_item_id = ? AND status = 'active'",
+      "SELECT * FROM bindings WHERE library_item_id = ? ORDER BY version DESC LIMIT 1",
     ).get(item.id);
     if (!binding || binding.release_key !== identity.releaseKey
       || binding.version !== input.expectedBindingVersion
@@ -971,7 +971,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       throw new Error(`Repair transaction cannot be authorized from ${row.status}`);
     }
     const binding = db.prepare(
-      "SELECT * FROM bindings WHERE library_item_id = ? AND status = 'active'",
+      "SELECT * FROM bindings WHERE library_item_id = ? ORDER BY version DESC LIMIT 1",
     ).get(row.library_item_id);
     if (!binding || binding.version !== row.expected_binding_version
       || binding.release_key !== row.release_key) {
@@ -1222,8 +1222,8 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       db, 'SELECT * FROM exposures WHERE placement_id', placementIds,
     ).map(rowToExposure);
     const zurgMetadata = listZurgMetadataObservations(identity);
-    const activeBindingRow = db.prepare(
-      "SELECT * FROM bindings WHERE library_item_id = ? AND status = 'active'",
+    const newestBindingRow = db.prepare(
+      "SELECT * FROM bindings WHERE library_item_id = ? ORDER BY version DESC LIMIT 1",
     ).get(item.id);
     return {
       desired: {
@@ -1242,7 +1242,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       mappings,
       exposures,
       zurgMetadata,
-      currentBinding: activeBindingRow ? rowToBinding(activeBindingRow) : null,
+      currentBinding: newestBindingRow ? rowToBinding(newestBindingRow) : null,
     };
   }
 
