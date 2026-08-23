@@ -173,7 +173,25 @@ test('read-only control-plane endpoints expose redacted lifecycle, evidence, and
   assert.equal(detailBody.shadowPlan.mode, 'shadow');
   assert.equal(detailBody.shadowPlan.executed, false);
   assert.equal(detailBody.shadowPlan.destructiveActionCount, 0);
+  assert.equal(detailBody.stage6, null);
   assert.doesNotMatch(detail.text, /secretProviderPath|private\/movie|providerResourceId|exposureKey/);
+
+  const stage6Detail = await request(
+    `/api/control-plane/items/${item.id}?infoHash=${HASH}&fileIndex=0&accountScope=primary&zurgInstanceScope=zurg-a&mountScope=mount-a`,
+  );
+  assert.equal(stage6Detail.status, 200);
+  const stage6Body = JSON.parse(stage6Detail.text);
+  assert.equal(stage6Body.stage6.release.releaseKey, `${HASH}:0`);
+  assert.equal(stage6Body.stage6.scope.accountScope, 'primary');
+  assert.equal(stage6Body.stage6.scope.instanceScope, 'zurg-a');
+  assert.equal(stage6Body.stage6.scope.mountScope, 'mount-a');
+  assert.equal(stage6Body.stage6.facts.placement.state, 'unknown');
+  assert.equal(stage6Body.stage6.facts.zurgMetadata.state, 'unobserved');
+  assert.equal(stage6Body.stage6.facts.exposure.state, 'unobserved');
+  assert.equal(stage6Body.stage6.facts.cataloging.state, 'unknown');
+  assert.equal(stage6Body.stage6.facts.cataloging.scope, 'library-item');
+  assert.equal(stage6Body.stage6.facts.playback.state, 'unknown');
+  assert.doesNotMatch(stage6Detail.text, /sourceId|metadataPath/);
 
   const health = await request('/api/control-plane/health');
   assert.deepEqual(JSON.parse(health.text), { ok: true, mode: 'read-only-shadow', errors: [] });
@@ -198,6 +216,8 @@ test('control-plane routes reject unbounded and partial reads without adding mut
   assert.equal((await request('/api/control-plane/items?mediaId=tt0133093&limit=101')).status, 400);
   assert.equal((await request(`/api/control-plane/items/${item.id}?infoHash=${HASH}`)).status, 400);
   assert.equal((await request(`/api/control-plane/items/${item.id}?infoHash=${HASH}&fileIndex=-1`)).status, 400);
+  assert.equal((await request(`/api/control-plane/items/${item.id}?infoHash=${HASH}&fileIndex=0&accountScope=primary`)).status, 400);
+  assert.equal((await request(`/api/control-plane/items/${item.id}?accountScope=primary&zurgInstanceScope=zurg-a&mountScope=mount-a`)).status, 400);
   assert.equal((await request('/api/control-plane/items/li_missing')).status, 404);
   assert.equal((await request('/api/control-plane/items', { method: 'POST' })).status, 404);
 });

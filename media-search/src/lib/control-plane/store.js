@@ -67,6 +67,33 @@ CREATE TABLE IF NOT EXISTS provider_placements (
 CREATE INDEX IF NOT EXISTS idx_provider_placements_hash
   ON provider_placements(provider, account_scope, info_hash);
 
+CREATE TABLE IF NOT EXISTS provider_placement_observations (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  account_scope TEXT NOT NULL,
+  info_hash TEXT NOT NULL,
+  observation_state TEXT NOT NULL CHECK (observation_state IN ('present', 'missing', 'error')),
+  placement_id TEXT,
+  observed_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  failure_category TEXT,
+  retryable INTEGER,
+  UNIQUE (provider, account_scope, info_hash),
+  FOREIGN KEY (placement_id) REFERENCES provider_placements(id)
+);
+
+CREATE TABLE IF NOT EXISTS provider_readiness_observations (
+  placement_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'ready', 'degraded', 'error', 'removed', 'unknown')),
+  observed_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  failure_category TEXT,
+  retryable INTEGER,
+  FOREIGN KEY (placement_id) REFERENCES provider_placements(id)
+);
+
 CREATE TABLE IF NOT EXISTS provider_files (
   id TEXT PRIMARY KEY,
   placement_id TEXT NOT NULL,
@@ -83,6 +110,17 @@ CREATE TABLE IF NOT EXISTS provider_files (
   missing_since INTEGER,
   evidence TEXT,
   UNIQUE (placement_id, provider_file_id),
+  FOREIGN KEY (placement_id) REFERENCES provider_placements(id)
+);
+
+CREATE TABLE IF NOT EXISTS provider_inventory_snapshots (
+  placement_id TEXT PRIMARY KEY,
+  authoritative INTEGER NOT NULL CHECK (authoritative IN (0, 1)),
+  complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
+  observed_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  file_count INTEGER NOT NULL,
+  evidence TEXT,
   FOREIGN KEY (placement_id) REFERENCES provider_placements(id)
 );
 
@@ -109,6 +147,8 @@ CREATE TABLE IF NOT EXISTS exposures (
   id TEXT PRIMARY KEY,
   placement_id TEXT NOT NULL,
   provider_file_id TEXT NOT NULL,
+  account_scope TEXT NOT NULL DEFAULT 'default',
+  mount_scope TEXT NOT NULL DEFAULT 'default',
   transport TEXT NOT NULL,
   exposure_key TEXT NOT NULL,
   relative_path TEXT,
@@ -118,9 +158,30 @@ CREATE TABLE IF NOT EXISTS exposures (
   expires_at INTEGER,
   failure_category TEXT,
   retryable INTEGER,
-  UNIQUE (transport, exposure_key),
+  UNIQUE (transport, exposure_key, placement_id, provider_file_id),
   FOREIGN KEY (placement_id, provider_file_id) REFERENCES provider_files(placement_id, provider_file_id)
 );
+
+CREATE TABLE IF NOT EXISTS zurg_metadata_observations (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  account_scope TEXT NOT NULL,
+  instance_scope TEXT NOT NULL,
+  info_hash TEXT NOT NULL,
+  metadata_path TEXT NOT NULL,
+  observation_state TEXT NOT NULL CHECK (observation_state IN ('present', 'missing', 'error')),
+  zurg_state TEXT,
+  zurg_state_when INTEGER,
+  observed_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  source TEXT NOT NULL,
+  failure_category TEXT,
+  retryable INTEGER,
+  evidence TEXT,
+  UNIQUE (provider, account_scope, instance_scope, info_hash, metadata_path)
+);
+CREATE INDEX IF NOT EXISTS idx_zurg_metadata_hash
+  ON zurg_metadata_observations(provider, account_scope, instance_scope, info_hash);
 
 CREATE TABLE IF NOT EXISTS bindings (
   id TEXT PRIMARY KEY,
@@ -175,6 +236,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   db.exec('PRAGMA foreign_keys = ON');
   db.exec('PRAGMA busy_timeout = 5000');
   db.exec(CONTROL_PLANE_SCHEMA);
+  migrateExposureSchema(db);
   let closed = false;
 
   function transaction(work) {
@@ -268,7 +330,21 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
 
   function recordPlacement(input) {
     const identity = createReleaseIdentity(input.infoHash, null);
+    const provider = normalizeIdentifier(input.provider);
+    const accountScope = normalizeIdentifier(input.accountScope ?? 'default');
+    const providerResourceId = requireString(input.providerResourceId, 'providerResourceId');
+    const ownership = input.ownership ?? 'unknown';
+    const observedAt = input.observedAt ?? now();
     const timestamp = now();
+    const existing = db.prepare(`
+      SELECT * FROM provider_placements
+      WHERE provider = ? AND account_scope = ? AND provider_resource_id = ?
+    `).get(provider, accountScope, providerResourceId);
+    if (existing && existing.info_hash !== identity.infoHash) {
+      throw new Error('Provider resource observation cannot change its torrent hash');
+    }
+    if (existing && observedAt < existing.observed_at) return rowToPlacement(existing);
+
     const id = input.id ?? `pl_${randomUUID()}`;
     db.prepare(`
       INSERT INTO provider_placements (
@@ -278,29 +354,133 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(provider, account_scope, provider_resource_id) DO UPDATE SET
         state = EXCLUDED.state,
+        ownership = EXCLUDED.ownership,
+        owner_key = EXCLUDED.owner_key,
+        provenance = EXCLUDED.provenance,
+        idempotency_key = COALESCE(EXCLUDED.idempotency_key, provider_placements.idempotency_key),
         observed_at = EXCLUDED.observed_at,
         expires_at = EXCLUDED.expires_at,
         updated_at = EXCLUDED.updated_at,
         failure_category = EXCLUDED.failure_category,
         retryable = EXCLUDED.retryable
+      WHERE EXCLUDED.observed_at >= provider_placements.observed_at
     `).run(
-      id, normalizeIdentifier(input.provider), normalizeIdentifier(input.accountScope ?? 'default'),
-      identity.infoHash, requireString(input.providerResourceId, 'providerResourceId'),
-      input.state ?? 'unknown', input.ownership ?? 'unknown', input.ownerKey ?? null,
+      id, provider, accountScope, identity.infoHash, providerResourceId,
+      input.state ?? 'unknown', ownership, input.ownerKey ?? null,
       requireString(input.provenance, 'provenance'), input.idempotencyKey ?? null,
-      input.observedAt ?? timestamp, input.expiresAt ?? null, timestamp, timestamp,
+      observedAt, input.expiresAt ?? null, timestamp, timestamp,
       input.failureCategory ?? null, booleanOrNull(input.retryable),
     );
     return rowToPlacement(db.prepare(`
       SELECT * FROM provider_placements
       WHERE provider = ? AND account_scope = ? AND provider_resource_id = ?
-    `).get(normalizeIdentifier(input.provider), normalizeIdentifier(input.accountScope ?? 'default'), input.providerResourceId));
+    `).get(provider, accountScope, providerResourceId));
+  }
+
+  function findPlacement(provider, accountScope, providerResourceId) {
+    const row = db.prepare(`
+      SELECT * FROM provider_placements
+      WHERE provider = ? AND account_scope = ? AND provider_resource_id = ?
+    `).get(
+      normalizeIdentifier(provider), normalizeIdentifier(accountScope ?? 'default'),
+      requireString(providerResourceId, 'providerResourceId'),
+    );
+    return row ? rowToPlacement(row) : null;
+  }
+
+  function recordPlacementLookupObservation(input) {
+    const identity = createReleaseIdentity(input.infoHash, null);
+    const provider = normalizeIdentifier(input.provider);
+    const accountScope = normalizeIdentifier(input.accountScope ?? 'default');
+    const observationState = requireEnum(
+      input.observationState, ['present', 'missing', 'error'], 'observationState',
+    );
+    const observedAt = requireTimestamp(input.observedAt, 'observedAt');
+    const expiresAt = requireBoundedExpiry(input.expiresAt, observedAt, 'placement lookup');
+    let placementId = null;
+    if (input.placementId != null) {
+      const placement = requirePlacement(input.placementId);
+      if (placement.provider !== provider || placement.accountScope !== accountScope
+        || placement.infoHash !== identity.infoHash) {
+        throw new Error('Placement lookup observation scope does not match placement');
+      }
+      placementId = placement.id;
+    }
+    if (observationState === 'present' && !placementId) {
+      throw new TypeError('Present placement lookup observation requires placementId');
+    }
+    const existing = db.prepare(`
+      SELECT * FROM provider_placement_observations
+      WHERE provider = ? AND account_scope = ? AND info_hash = ?
+    `).get(provider, accountScope, identity.infoHash);
+    if (existing && observedAt < existing.observed_at) return rowToPlacementLookupObservation(existing);
+
+    const id = input.id ?? `po_${randomUUID()}`;
+    db.prepare(`
+      INSERT INTO provider_placement_observations (
+        id, provider, account_scope, info_hash, observation_state, placement_id,
+        observed_at, expires_at, source, failure_category, retryable
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(provider, account_scope, info_hash) DO UPDATE SET
+        observation_state = EXCLUDED.observation_state,
+        placement_id = EXCLUDED.placement_id,
+        observed_at = EXCLUDED.observed_at,
+        expires_at = EXCLUDED.expires_at,
+        source = EXCLUDED.source,
+        failure_category = EXCLUDED.failure_category,
+        retryable = EXCLUDED.retryable
+      WHERE EXCLUDED.observed_at >= provider_placement_observations.observed_at
+    `).run(
+      id, provider, accountScope, identity.infoHash, observationState, placementId,
+      observedAt, expiresAt, requireString(input.source, 'source'),
+      input.failureCategory ?? null, booleanOrNull(input.retryable),
+    );
+    return rowToPlacementLookupObservation(db.prepare(`
+      SELECT * FROM provider_placement_observations
+      WHERE provider = ? AND account_scope = ? AND info_hash = ?
+    `).get(provider, accountScope, identity.infoHash));
+  }
+
+  function recordReadinessObservation(input) {
+    const placement = requirePlacement(input.placementId);
+    const observedAt = requireTimestamp(input.observedAt, 'observedAt');
+    const expiresAt = requireBoundedExpiry(input.expiresAt, observedAt, 'readiness');
+    const state = requireEnum(
+      input.state, ['pending', 'ready', 'degraded', 'error', 'removed', 'unknown'], 'readiness state',
+    );
+    const existing = db.prepare(
+      'SELECT * FROM provider_readiness_observations WHERE placement_id = ?',
+    ).get(placement.id);
+    if (existing && observedAt < existing.observed_at) return rowToReadinessObservation(existing);
+    db.prepare(`
+      INSERT INTO provider_readiness_observations (
+        placement_id, state, observed_at, expires_at, source, failure_category, retryable
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(placement_id) DO UPDATE SET
+        state = EXCLUDED.state,
+        observed_at = EXCLUDED.observed_at,
+        expires_at = EXCLUDED.expires_at,
+        source = EXCLUDED.source,
+        failure_category = EXCLUDED.failure_category,
+        retryable = EXCLUDED.retryable
+      WHERE EXCLUDED.observed_at >= provider_readiness_observations.observed_at
+    `).run(
+      placement.id, state, observedAt, expiresAt, requireString(input.source, 'source'),
+      input.failureCategory ?? null, booleanOrNull(input.retryable),
+    );
+    return rowToReadinessObservation(db.prepare(
+      'SELECT * FROM provider_readiness_observations WHERE placement_id = ?',
+    ).get(placement.id));
   }
 
   function replaceProviderFileInventory(placementId, files, options = {}) {
     requirePlacement(placementId);
     if (!Array.isArray(files)) throw new TypeError('files must be an array');
     const observedAt = options.observedAt ?? now();
+    const current = getProviderInventorySnapshot(placementId);
+    if (current && options.enforceObservationOrder === true && observedAt < current.observedAt) {
+      return listProviderFiles(placementId);
+    }
     const seen = new Set();
     return transaction(() => {
       const upsert = db.prepare(`
@@ -352,6 +532,22 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
             AND provider_file_id NOT IN (${placeholders})
         `).run(observedAt, options.expiresAt ?? null, observedAt, placementId, ...seen);
       }
+      db.prepare(`
+        INSERT INTO provider_inventory_snapshots (
+          placement_id, authoritative, complete, observed_at, expires_at, file_count, evidence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(placement_id) DO UPDATE SET
+          authoritative = EXCLUDED.authoritative,
+          complete = EXCLUDED.complete,
+          observed_at = EXCLUDED.observed_at,
+          expires_at = EXCLUDED.expires_at,
+          file_count = EXCLUDED.file_count,
+          evidence = EXCLUDED.evidence
+      `).run(
+        placementId, Number(options.authoritative === true), Number(options.complete === true),
+        observedAt, options.expiresAt ?? null, files.length,
+        options.evidence == null ? null : JSON.stringify(options.evidence),
+      );
       return listProviderFiles(placementId);
     });
   }
@@ -364,8 +560,19 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     `).all(placementId).map(rowToProviderFile);
   }
 
+  function getProviderInventorySnapshot(placementId) {
+    const row = db.prepare(
+      'SELECT * FROM provider_inventory_snapshots WHERE placement_id = ?',
+    ).get(placementId);
+    return row ? rowToProviderInventorySnapshot(row) : null;
+  }
+
   function recordFileMapping(input) {
     const identity = validateReleaseIdentity(input);
+    const placement = requirePlacement(input.placementId);
+    if (placement.infoHash !== identity.infoHash) {
+      throw new Error('Candidate mapping hash must match provider placement hash');
+    }
     const file = requireProviderFile(input.placementId, input.providerFileId);
     const id = input.id ?? `fm_${randomUUID()}`;
     db.prepare(`
@@ -385,7 +592,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       id, identity.infoHash, identity.fileIndex, identity.fileIndex ?? -1, identity.releaseKey,
       input.placementId, file.providerFileId, input.state ?? 'mapped',
       requireString(input.method, 'method'), Number(input.authoritative === true),
-      input.evidence == null ? null : JSON.stringify(input.evidence), now(),
+      input.evidence == null ? null : JSON.stringify(input.evidence), input.mappedAt ?? now(),
       input.failureCategory ?? null,
     );
     return rowToFileMapping(db.prepare(`
@@ -394,14 +601,32 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   }
 
   function recordExposure(input) {
+    const placement = requirePlacement(input.placementId);
     requireProviderFile(input.placementId, input.providerFileId);
+    const accountScope = normalizeIdentifier(input.accountScope ?? placement.accountScope);
+    if (accountScope !== placement.accountScope) {
+      throw new Error('Exposure account scope must match provider placement account scope');
+    }
+    const mountScope = normalizeIdentifier(input.mountScope ?? 'default');
+    const transport = normalizeIdentifier(input.transport);
+    const exposureKey = requireString(input.exposureKey, 'exposureKey', 1000);
+    const observedAt = input.observedAt ?? now();
+    const existing = db.prepare(`
+      SELECT * FROM exposures
+      WHERE transport = ? AND exposure_key = ? AND placement_id = ? AND provider_file_id = ?
+    `).get(transport, exposureKey, input.placementId, input.providerFileId);
+    if (existing && observedAt < existing.observed_at) return rowToExposure(existing);
+
     const id = input.id ?? `ex_${randomUUID()}`;
     db.prepare(`
       INSERT INTO exposures (
-        id, placement_id, provider_file_id, transport, exposure_key, relative_path,
-        state, read_only, observed_at, expires_at, failure_category, retryable
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(transport, exposure_key) DO UPDATE SET
+        id, placement_id, provider_file_id, account_scope, mount_scope, transport,
+        exposure_key, relative_path, state, read_only, observed_at, expires_at,
+        failure_category, retryable
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(transport, exposure_key, placement_id, provider_file_id) DO UPDATE SET
+        account_scope = EXCLUDED.account_scope,
+        mount_scope = EXCLUDED.mount_scope,
         state = EXCLUDED.state,
         relative_path = EXCLUDED.relative_path,
         read_only = EXCLUDED.read_only,
@@ -409,15 +634,82 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
         expires_at = EXCLUDED.expires_at,
         failure_category = EXCLUDED.failure_category,
         retryable = EXCLUDED.retryable
+      WHERE EXCLUDED.observed_at >= exposures.observed_at
     `).run(
-      id, input.placementId, input.providerFileId, normalizeIdentifier(input.transport),
-      requireString(input.exposureKey, 'exposureKey', 1000), input.relativePath ?? null,
-      input.state ?? 'unknown', Number(input.readOnly === true), input.observedAt ?? now(),
-      input.expiresAt ?? null, input.failureCategory ?? null, booleanOrNull(input.retryable),
+      id, input.placementId, input.providerFileId, accountScope, mountScope, transport,
+      exposureKey, input.relativePath ?? null, input.state ?? 'unknown',
+      Number(input.readOnly === true), observedAt, input.expiresAt ?? null,
+      input.failureCategory ?? null, booleanOrNull(input.retryable),
     );
-    return rowToExposure(db.prepare(
-      'SELECT * FROM exposures WHERE transport = ? AND exposure_key = ?',
-    ).get(normalizeIdentifier(input.transport), input.exposureKey));
+    return rowToExposure(db.prepare(`
+      SELECT * FROM exposures
+      WHERE transport = ? AND exposure_key = ? AND placement_id = ? AND provider_file_id = ?
+    `).get(transport, exposureKey, input.placementId, input.providerFileId));
+  }
+
+  function recordZurgMetadataObservation(input) {
+    const identity = createReleaseIdentity(input.infoHash, null);
+    const provider = normalizeIdentifier(input.provider);
+    const accountScope = normalizeIdentifier(input.accountScope ?? 'default');
+    const instanceScope = normalizeIdentifier(input.instanceScope ?? 'default');
+    const metadataPath = requireString(input.metadataPath, 'metadataPath', 4000);
+    const observedAt = requireTimestamp(input.observedAt, 'observedAt');
+    const existing = db.prepare(`
+      SELECT * FROM zurg_metadata_observations
+      WHERE provider = ? AND account_scope = ? AND instance_scope = ?
+        AND info_hash = ? AND metadata_path = ?
+    `).get(provider, accountScope, instanceScope, identity.infoHash, metadataPath);
+    if (existing && observedAt < existing.observed_at) return rowToZurgMetadataObservation(existing);
+
+    const id = input.id ?? `zm_${randomUUID()}`;
+    db.prepare(`
+      INSERT INTO zurg_metadata_observations (
+        id, provider, account_scope, instance_scope, info_hash, metadata_path,
+        observation_state, zurg_state, zurg_state_when, observed_at, expires_at,
+        source, failure_category, retryable, evidence
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(provider, account_scope, instance_scope, info_hash, metadata_path) DO UPDATE SET
+        observation_state = EXCLUDED.observation_state,
+        zurg_state = EXCLUDED.zurg_state,
+        zurg_state_when = EXCLUDED.zurg_state_when,
+        observed_at = EXCLUDED.observed_at,
+        expires_at = EXCLUDED.expires_at,
+        source = EXCLUDED.source,
+        failure_category = EXCLUDED.failure_category,
+        retryable = EXCLUDED.retryable,
+        evidence = EXCLUDED.evidence
+      WHERE EXCLUDED.observed_at >= zurg_metadata_observations.observed_at
+    `).run(
+      id, provider, accountScope, instanceScope, identity.infoHash, metadataPath,
+      requireEnum(input.observationState, ['present', 'missing', 'error'], 'observationState'),
+      input.zurgState ?? null, input.zurgStateWhen ?? null, observedAt, input.expiresAt ?? null,
+      requireString(input.source, 'source'), input.failureCategory ?? null,
+      booleanOrNull(input.retryable), input.evidence == null ? null : JSON.stringify(input.evidence),
+    );
+    return rowToZurgMetadataObservation(db.prepare(`
+      SELECT * FROM zurg_metadata_observations
+      WHERE provider = ? AND account_scope = ? AND instance_scope = ?
+        AND info_hash = ? AND metadata_path = ?
+    `).get(provider, accountScope, instanceScope, identity.infoHash, metadataPath));
+  }
+
+  function listZurgMetadataObservations(identityInput, scope = {}) {
+    const identity = createReleaseIdentity(identityInput.infoHash, null);
+    const clauses = ['info_hash = ?'];
+    const params = [identity.infoHash];
+    for (const [field, column] of [
+      ['provider', 'provider'], ['accountScope', 'account_scope'], ['instanceScope', 'instance_scope'],
+    ]) {
+      if (scope[field] != null) {
+        clauses.push(`${column} = ?`);
+        params.push(normalizeIdentifier(scope[field]));
+      }
+    }
+    return db.prepare(`
+      SELECT * FROM zurg_metadata_observations
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY provider, account_scope, instance_scope, metadata_path
+    `).all(...params).map(rowToZurgMetadataObservation);
   }
 
   function activateBinding(input) {
@@ -427,19 +719,61 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       'SELECT * FROM library_paths WHERE id = ? AND library_item_id = ? AND active = 1',
     ).get(input.libraryPathId, item.id);
     if (!libraryPath) throw new Error('Active canonical path does not belong to library item');
+    const placement = requirePlacement(input.placementId);
+    if (placement.infoHash !== identity.infoHash) {
+      throw new Error('Binding hash must match provider placement hash');
+    }
+    const readiness = db.prepare(
+      'SELECT * FROM provider_readiness_observations WHERE placement_id = ?',
+    ).get(placement.id);
     const file = requireProviderFile(input.placementId, input.providerFileId);
+    const inventorySnapshot = db.prepare(
+      'SELECT * FROM provider_inventory_snapshots WHERE placement_id = ?',
+    ).get(placement.id);
+    const mapping = db.prepare(`
+      SELECT * FROM candidate_file_mappings
+      WHERE release_key = ? AND placement_id = ? AND provider_file_id = ?
+        AND state = 'mapped' AND authoritative = 1
+    `).get(identity.releaseKey, input.placementId, file.providerFileId);
     const exposure = db.prepare(`
       SELECT * FROM exposures
       WHERE id = ? AND placement_id = ? AND provider_file_id = ?
     `).get(input.exposureId, input.placementId, file.providerFileId);
     if (!exposure) throw new Error('Exposure does not identify the mapped provider file');
+    if (exposure.account_scope !== placement.accountScope) {
+      throw new Error('Exposure account scope must match provider placement account scope');
+    }
     if (exposure.state !== 'visible') throw new Error('Cannot bind a provider file without visible exposure');
     if (exposure.read_only !== 1) throw new Error('Cannot bind a provider file through writable exposure');
+    if (!mapping) throw new Error('Binding requires an authoritative exact file mapping');
+    const timestamp = now();
+    if (readiness) {
+      if (readiness.state !== 'ready') throw new Error('Cannot bind before provider readiness');
+      if (readiness.expires_at <= timestamp) {
+        throw new Error('Cannot bind through a stale provider readiness observation');
+      }
+    } else if (placement.state !== 'ready') {
+      throw new Error('Cannot bind before provider readiness');
+    }
+    if (!inventorySnapshot || inventorySnapshot.authoritative !== 1 || inventorySnapshot.complete !== 1) {
+      throw new Error('Binding requires an authoritative complete inventory snapshot');
+    }
+    if (inventorySnapshot.expires_at == null || inventorySnapshot.expires_at <= timestamp
+      || file.inventoryExpiresAt == null || file.inventoryExpiresAt <= timestamp) {
+      throw new Error('Cannot bind through a stale or unbounded provider inventory observation');
+    }
+    if (exposure.expires_at == null || exposure.expires_at <= timestamp) {
+      throw new Error('Cannot bind through a stale or unbounded exposure observation');
+    }
 
     return transaction(() => {
       const active = db.prepare(
         "SELECT * FROM bindings WHERE library_item_id = ? AND status = 'active'",
       ).get(item.id);
+      if (input.expectedBindingVersion != null
+        && input.expectedBindingVersion !== (active?.version ?? 0)) {
+        throw new Error('Active binding version changed during reconciliation');
+      }
       if (active && active.release_key === identity.releaseKey
         && active.placement_id === input.placementId
         && active.provider_file_id === input.providerFileId
@@ -447,7 +781,6 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
         return rowToBinding(active);
       }
 
-      const timestamp = now();
       if (active) {
         db.prepare(`
           UPDATE bindings SET status = 'superseded', superseded_at = ?, reconciled_at = ?
@@ -497,15 +830,26 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       dependentBindingCount: Number(row.dependent_binding_count),
     }));
     const placementIds = placements.map((placement) => placement.id);
+    const placementObservations = db.prepare(`
+      SELECT * FROM provider_placement_observations WHERE info_hash = ?
+      ORDER BY provider, account_scope
+    `).all(identity.infoHash).map(rowToPlacementLookupObservation);
+    const readinessObservations = queryRowsForIds(
+      db, 'SELECT * FROM provider_readiness_observations WHERE placement_id', placementIds,
+    ).map(rowToReadinessObservation);
     const providerFiles = queryRowsForIds(
       db, 'SELECT * FROM provider_files WHERE present = 1 AND placement_id', placementIds,
     ).map(rowToProviderFile);
+    const inventorySnapshots = queryRowsForIds(
+      db, 'SELECT * FROM provider_inventory_snapshots WHERE placement_id', placementIds,
+    ).map(rowToProviderInventorySnapshot);
     const mappings = queryRowsForIds(
       db, 'SELECT * FROM candidate_file_mappings WHERE placement_id', placementIds,
     ).filter((row) => row.release_key === identity.releaseKey).map(rowToFileMapping);
     const exposures = queryRowsForIds(
       db, 'SELECT * FROM exposures WHERE placement_id', placementIds,
     ).map(rowToExposure);
+    const zurgMetadata = listZurgMetadataObservations(identity);
     const activeBindingRow = db.prepare(
       "SELECT * FROM bindings WHERE library_item_id = ? AND status = 'active'",
     ).get(item.id);
@@ -519,9 +863,13 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
         ...identity,
       },
       placements,
+      placementObservations,
+      readinessObservations,
+      inventorySnapshots,
       providerFiles,
       mappings,
       exposures,
+      zurgMetadata,
       currentBinding: activeBindingRow ? rowToBinding(activeBindingRow) : null,
     };
   }
@@ -563,7 +911,8 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   }
   function requireProviderFile(placementId, providerFileId) {
     const row = db.prepare(`
-      SELECT * FROM provider_files WHERE placement_id = ? AND provider_file_id = ?
+      SELECT * FROM provider_files
+      WHERE placement_id = ? AND provider_file_id = ? AND present = 1
     `).get(placementId, providerFileId);
     if (!row) throw new Error('Provider file is not present in authoritative placement inventory');
     return rowToProviderFile(row);
@@ -576,10 +925,16 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     getActiveCanonicalPath,
     ensureCanonicalPath,
     recordPlacement,
+    findPlacement,
+    recordPlacementLookupObservation,
+    recordReadinessObservation,
     replaceProviderFileInventory,
     listProviderFiles,
+    getProviderInventorySnapshot,
     recordFileMapping,
     recordExposure,
+    recordZurgMetadataObservation,
+    listZurgMetadataObservations,
     activateBinding,
     listBindings,
     getReconciliationSnapshot,
@@ -620,6 +975,22 @@ function rowToPlacement(row) {
     failureCategory: row.failure_category, retryable: fromSqlBoolean(row.retryable),
   };
 }
+function rowToPlacementLookupObservation(row) {
+  return {
+    id: row.id, provider: row.provider, accountScope: row.account_scope,
+    infoHash: row.info_hash, fileIndex: null, releaseKey: `${row.info_hash}:torrent`,
+    observationState: row.observation_state, placementId: row.placement_id,
+    observedAt: row.observed_at, expiresAt: row.expires_at, source: row.source,
+    failureCategory: row.failure_category, retryable: fromSqlBoolean(row.retryable),
+  };
+}
+function rowToReadinessObservation(row) {
+  return {
+    placementId: row.placement_id, state: row.state,
+    observedAt: row.observed_at, expiresAt: row.expires_at, source: row.source,
+    failureCategory: row.failure_category, retryable: fromSqlBoolean(row.retryable),
+  };
+}
 function rowToProviderFile(row) {
   return {
     id: row.id, placementId: row.placement_id, providerFileId: row.provider_file_id,
@@ -627,6 +998,17 @@ function rowToProviderFile(row) {
     mediaHint: row.media_hint, corpusFileIndex: row.corpus_file_index,
     present: row.present === 1, inventoryObservedAt: row.inventory_observed_at,
     inventoryExpiresAt: row.inventory_expires_at, missingSince: row.missing_since,
+    evidence: row.evidence ? JSON.parse(row.evidence) : null,
+  };
+}
+function rowToProviderInventorySnapshot(row) {
+  return {
+    placementId: row.placement_id,
+    authoritative: row.authoritative === 1,
+    complete: row.complete === 1,
+    observedAt: row.observed_at,
+    expiresAt: row.expires_at,
+    fileCount: row.file_count,
     evidence: row.evidence ? JSON.parse(row.evidence) : null,
   };
 }
@@ -642,10 +1024,23 @@ function rowToFileMapping(row) {
 function rowToExposure(row) {
   return {
     id: row.id, placementId: row.placement_id, providerFileId: row.provider_file_id,
+    accountScope: row.account_scope, mountScope: row.mount_scope,
     transport: row.transport, exposureKey: row.exposure_key, relativePath: row.relative_path,
     state: row.state, readOnly: row.read_only === 1, observedAt: row.observed_at,
     expiresAt: row.expires_at, failureCategory: row.failure_category,
     retryable: fromSqlBoolean(row.retryable),
+  };
+}
+function rowToZurgMetadataObservation(row) {
+  return {
+    id: row.id, provider: row.provider, accountScope: row.account_scope,
+    instanceScope: row.instance_scope, infoHash: row.info_hash, fileIndex: null,
+    releaseKey: `${row.info_hash}:torrent`, metadataPath: row.metadata_path,
+    observationState: row.observation_state, zurgState: row.zurg_state,
+    zurgStateWhen: row.zurg_state_when, observedAt: row.observed_at,
+    expiresAt: row.expires_at, source: row.source,
+    failureCategory: row.failure_category, retryable: fromSqlBoolean(row.retryable),
+    evidence: row.evidence ? JSON.parse(row.evidence) : null,
   };
 }
 function rowToBinding(row) {
@@ -673,6 +1068,65 @@ function queryRowsForIds(db, prefix, ids) {
   const placeholders = ids.map(() => '?').join(', ');
   return db.prepare(`${prefix} IN (${placeholders})`).all(...ids);
 }
+function migrateExposureSchema(db) {
+  const columns = db.prepare('PRAGMA table_info(exposures)').all();
+  if (columns.length === 0) return;
+  const hasAccountScope = columns.some((row) => row.name === 'account_scope');
+  const hasMountScope = columns.some((row) => row.name === 'mount_scope');
+  const uniqueColumns = db.prepare('PRAGMA index_list(exposures)').all()
+    .filter((row) => row.unique === 1)
+    .map((row) => db.prepare(`PRAGMA index_info(${row.name})`).all().map((entry) => entry.name));
+  const hasVersionedTargetKey = uniqueColumns.some((names) =>
+    names.join(',') === 'transport,exposure_key,placement_id,provider_file_id');
+  if (hasAccountScope && hasMountScope && hasVersionedTargetKey) return;
+
+  db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    db.exec(`
+      CREATE TABLE exposures_stage6 (
+        id TEXT PRIMARY KEY,
+        placement_id TEXT NOT NULL,
+        provider_file_id TEXT NOT NULL,
+        account_scope TEXT NOT NULL,
+        mount_scope TEXT NOT NULL,
+        transport TEXT NOT NULL,
+        exposure_key TEXT NOT NULL,
+        relative_path TEXT,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'visible', 'missing', 'degraded', 'error', 'unknown')),
+        read_only INTEGER NOT NULL CHECK (read_only IN (0, 1)),
+        observed_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        failure_category TEXT,
+        retryable INTEGER,
+        UNIQUE (transport, exposure_key, placement_id, provider_file_id),
+        FOREIGN KEY (placement_id, provider_file_id) REFERENCES provider_files(placement_id, provider_file_id)
+      );
+    `);
+    const accountExpression = hasAccountScope ? 'e.account_scope' : 'p.account_scope';
+    const mountExpression = hasMountScope ? 'e.mount_scope' : "'legacy-unverified'";
+    db.exec(`
+      INSERT INTO exposures_stage6 (
+        id, placement_id, provider_file_id, account_scope, mount_scope, transport,
+        exposure_key, relative_path, state, read_only, observed_at, expires_at,
+        failure_category, retryable
+      )
+      SELECT e.id, e.placement_id, e.provider_file_id, ${accountExpression}, ${mountExpression},
+        e.transport, e.exposure_key, e.relative_path, e.state, e.read_only,
+        e.observed_at, e.expires_at, e.failure_category, e.retryable
+      FROM exposures e
+      JOIN provider_placements p ON p.id = e.placement_id;
+      DROP TABLE exposures;
+      ALTER TABLE exposures_stage6 RENAME TO exposures;
+    `);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+}
 function normalizeOptionalFileIndex(value) {
   if (value == null) return null;
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -685,6 +1139,23 @@ function normalizeIdentifier(value) {
     throw new TypeError('Provider identifier is invalid');
   }
   return value.trim().toLowerCase();
+}
+function requireTimestamp(value, field) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${field} must be a non-negative safe integer`);
+  }
+  return value;
+}
+function requireBoundedExpiry(value, observedAt, subject) {
+  const expiresAt = requireTimestamp(value, 'expiresAt');
+  if (expiresAt <= observedAt) {
+    throw new TypeError(`${subject} observation requires a future expiresAt`);
+  }
+  return expiresAt;
+}
+function requireEnum(value, allowed, field) {
+  if (!allowed.includes(value)) throw new TypeError(`Invalid ${field}: ${value}`);
+  return value;
 }
 function requireString(value, field, max = 256) {
   if (typeof value !== 'string' || value.trim().length === 0 || value.length > max) {

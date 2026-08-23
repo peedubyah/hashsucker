@@ -74,6 +74,7 @@ export function createFilesystemExposureProvider(options = {}) {
           return createExposureObservation({
             provider: normalizedProvider,
             accountScope: normalizedAccountScope,
+            mountScope: normalizedMountScope,
             providerResourceId,
             providerFileId,
             transport: normalizedTransport,

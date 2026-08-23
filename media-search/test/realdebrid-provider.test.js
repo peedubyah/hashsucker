@@ -91,7 +91,10 @@ test('Real-Debrid reused placement never claims ownership', async () => {
   const adapter = createRealDebridProvider({
     gateway: fullGateway({
       async createPlacement() {
-        return { providerResourceId: 'rd-existing', state: 'ready', created: false };
+        return {
+          providerResourceId: 'rd-existing', state: 'ready', created: false,
+          ownership: 'owned', ownerKey: 'spoofed', provenance: 'spoofed',
+        };
       },
     }),
   });
@@ -100,6 +103,25 @@ test('Real-Debrid reused placement never claims ownership', async () => {
     .createPlacement({ infoHash: HASH, ownerKey: 'owner', idempotencyKey: 'key' });
   assert.equal(placement.ownership, 'reused');
   assert.equal(placement.ownerKey, null);
+  assert.equal(placement.provenance, 'realdebrid-gateway:create-placement');
+});
+
+test('Real-Debrid lookup gateway cannot spoof owned placement evidence', async () => {
+  const adapter = createRealDebridProvider({
+    gateway: {
+      async lookupPlacement() {
+        return {
+          providerResourceId: 'rd-existing', state: 'ready',
+          ownership: 'owned', ownerKey: 'spoofed', provenance: 'spoofed',
+        };
+      },
+    },
+  });
+  const placement = await adapter.require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
+    .lookupPlacement({ infoHash: HASH });
+  assert.equal(placement.ownership, 'external');
+  assert.equal(placement.ownerKey, null);
+  assert.equal(placement.provenance, 'realdebrid-gateway:lookup-placement');
 });
 
 test('Real-Debrid readiness and inventory preserve opaque provider identities', async () => {

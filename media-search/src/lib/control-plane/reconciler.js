@@ -21,7 +21,9 @@ export function planReconciliation(input, options = {}) {
   const reobserveAfterMs = options.reobserveAfterMs ?? 30_000;
   const destructive = options.destructive === true;
   const desired = normalizeDesired(input.desired);
-  const placements = [...(input.placements ?? [])].sort(comparePlacements);
+  const placements = filterPlacementsByScope(
+    [...(input.placements ?? [])], desired,
+  ).sort(comparePlacements);
   const currentBinding = input.currentBinding ?? null;
   const actions = [];
   const failures = [];
@@ -76,29 +78,47 @@ export function planReconciliation(input, options = {}) {
       continue;
     }
 
-    if (placement.state !== 'ready') {
-      if (['pending', 'unknown', 'degraded'].includes(placement.state)) {
+    const readiness = findReadinessObservation(input.readinessObservations, placement.id);
+    const readinessState = readiness?.state ?? placement.state;
+    const readinessFreshness = readiness
+      ? evaluateExpiry(readiness.observedAt, readiness.expiresAt, now)
+      : 'legacy';
+    if (readinessFreshness !== 'legacy' && readinessFreshness !== 'fresh') {
+      actions.push({
+        action: 'observe-again', target: 'readiness',
+        reason: readinessFreshness === 'stale' ? 'readiness-observation-stale' : 'readiness-freshness-unbounded',
+        placementId: placement.id,
+      });
+      continue;
+    }
+    if (readinessState !== 'ready') {
+      if (['pending', 'unknown', 'degraded'].includes(readinessState)) {
         actions.push({
           action: 'wait-provider-readiness',
-          reason: `placement-${placement.state}`,
+          reason: `placement-${readinessState}`,
           placementId: placement.id,
           retryable: true,
         });
       } else {
-        failures.push(failure('placement-not-ready', placement.retryable === true, placement.id));
+        failures.push(failure('placement-not-ready', readiness?.retryable === true, placement.id));
       }
       continue;
     }
 
     const inventory = inventoryForPlacement(input.providerFiles, placement.id);
-    const inventoryFreshness = evaluateInventoryFreshness(inventory, now);
+    const inventorySnapshot = findInventorySnapshot(input.inventorySnapshots, placement.id);
+    const inventoryFreshness = evaluateInventoryFreshness(inventory, inventorySnapshot, now);
     if (inventory.length === 0 || inventoryFreshness !== 'fresh') {
       const retry = boundedRetry(placement.inventoryAttempts ?? 0, maxObservationAttempts, reobserveAfterMs);
       if (retry.allowed) {
         actions.push({
           action: 'observe-again',
           target: 'provider-file-inventory',
-          reason: inventory.length === 0 ? 'provider-inventory-missing' : 'provider-inventory-stale',
+          reason: inventory.length === 0
+            ? 'provider-inventory-missing'
+            : inventoryFreshness === 'untrusted'
+              ? 'provider-inventory-not-authoritative-complete'
+              : 'provider-inventory-stale',
           placementId: placement.id,
           attempt: retry.attempt,
           notBefore: now + retry.delayMs,
@@ -145,7 +165,9 @@ export function planReconciliation(input, options = {}) {
       continue;
     }
 
-    const exposure = findExposureForFile(input.exposures, placement.id, providerFile.providerFileId);
+    const exposure = findExposureForFile(
+      input.exposures, placement.id, providerFile.providerFileId, desired,
+    );
     if (!exposure || evaluateExpiry(exposure.observedAt, exposure.expiresAt, now) !== 'fresh') {
       actions.push({
         action: 'observe-exposure',
@@ -291,6 +313,8 @@ function normalizeDesired(desired) {
     ...identity,
     desiredState: desired.desiredState ?? 'present',
     providerPreferences: [...(desired.providerPreferences ?? [])],
+    providerScope: normalizeOptionalScope(desired.providerScope, ['provider', 'accountScope']),
+    exposureScope: normalizeOptionalScope(desired.exposureScope, ['transport', 'mountScope']),
     placementIdempotencyKey: desired.placementIdempotencyKey
       ?? `virtual:${desired.libraryItemId}:${identity.infoHash}`,
   };
@@ -353,8 +377,10 @@ function evaluateExpiry(observedAt, expiresAt, now) {
   if (!Number.isSafeInteger(expiresAt)) return 'unbounded';
   return expiresAt > now ? 'fresh' : 'stale';
 }
-function evaluateInventoryFreshness(inventory, now) {
+function evaluateInventoryFreshness(inventory, snapshot, now) {
   if (inventory.length === 0) return 'missing';
+  if (snapshot && (snapshot.authoritative !== true || snapshot.complete !== true)) return 'untrusted';
+  if (snapshot && evaluateExpiry(snapshot.observedAt, snapshot.expiresAt, now) !== 'fresh') return 'stale';
   return inventory.every((file) => Number.isSafeInteger(file.inventoryExpiresAt) && file.inventoryExpiresAt > now)
     ? 'fresh' : 'stale';
 }
@@ -362,16 +388,49 @@ function inventoryForPlacement(files = [], placementId) {
   return files.filter((file) => file.placementId === placementId)
     .sort((a, b) => a.providerFileId.localeCompare(b.providerFileId));
 }
+function findInventorySnapshot(snapshots = [], placementId) {
+  return snapshots.find((snapshot) => snapshot.placementId === placementId) ?? null;
+}
+function findReadinessObservation(observations = [], placementId) {
+  return observations.find((observation) => observation.placementId === placementId) ?? null;
+}
 function findMapping(mappings = [], releaseKey, placementId) {
   return mappings.find((mapping) => mapping.releaseKey === releaseKey && mapping.placementId === placementId) ?? null;
 }
 function findExposure(exposures = [], exposureId) {
   return exposures.find((exposure) => exposure.id === exposureId) ?? null;
 }
-function findExposureForFile(exposures = [], placementId, providerFileId) {
-  return exposures.find((exposure) =>
-    exposure.placementId === placementId && exposure.providerFileId === providerFileId,
-  ) ?? null;
+function findExposureForFile(exposures = [], placementId, providerFileId, desired = {}) {
+  return exposures.filter((exposure) =>
+    exposure.placementId === placementId
+      && exposure.providerFileId === providerFileId
+      && (!desired.exposureScope?.transport || exposure.transport === desired.exposureScope.transport)
+      && (!desired.exposureScope?.mountScope || exposure.mountScope === desired.exposureScope.mountScope),
+  ).sort((left, right) =>
+    `${left.transport ?? ''}:${left.mountScope ?? ''}:${left.id ?? ''}`
+      .localeCompare(`${right.transport ?? ''}:${right.mountScope ?? ''}:${right.id ?? ''}`),
+  )[0] ?? null;
+}
+function filterPlacementsByScope(placements, desired) {
+  if (!desired.providerScope) return placements;
+  return placements.filter((placement) =>
+    (!desired.providerScope.provider || placement.provider === desired.providerScope.provider)
+      && (!desired.providerScope.accountScope || placement.accountScope === desired.providerScope.accountScope));
+}
+function normalizeOptionalScope(value, fields) {
+  if (value == null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('scope must be an object');
+  }
+  const normalized = {};
+  for (const field of fields) {
+    if (value[field] == null) continue;
+    if (typeof value[field] !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value[field].trim())) {
+      throw new TypeError(`${field} scope is invalid`);
+    }
+    normalized[field] = value[field].trim().toLowerCase();
+  }
+  return normalized;
 }
 function boundedRetry(attempts, maxAttempts, baseDelayMs) {
   const attempt = attempts + 1;

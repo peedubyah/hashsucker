@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { evaluateObservationFreshness } from '../lib/providers/observations.js';
 
 export function toControlPlaneItemSummary({ item, canonicalPath, bindings, lifecycle }) {
@@ -22,6 +24,7 @@ export function toControlPlaneItemDetail({
   release = null,
   providerObservations = [],
   snapshot = null,
+  stage6 = null,
   shadowPlan = null,
 }) {
   return {
@@ -31,6 +34,7 @@ export function toControlPlaneItemDetail({
     release,
     providerObservations: providerObservations.map((observation) => publicObservation(observation, generatedAt)),
     resources: snapshot ? publicResources(snapshot) : null,
+    stage6: stage6 ? publicStage6(stage6) : null,
     shadowPlan: shadowPlan ? publicShadowPlan(shadowPlan) : null,
   };
 }
@@ -112,6 +116,31 @@ function publicResources(snapshot) {
       retryable: placement.retryable,
       dependentBindingCount: placement.dependentBindingCount,
     })),
+    placementObservations: (snapshot.placementObservations ?? []).map((observation) => ({
+      provider: observation.provider,
+      accountScope: observation.accountScope,
+      observationState: observation.observationState,
+      observedAt: observation.observedAt,
+      expiresAt: observation.expiresAt,
+      failureCategory: observation.failureCategory,
+      retryable: observation.retryable,
+    })),
+    readiness: (snapshot.readinessObservations ?? []).map((observation) => ({
+      placementRef: opaqueRef(observation.placementId, 'readiness'),
+      state: observation.state,
+      observedAt: observation.observedAt,
+      expiresAt: observation.expiresAt,
+      failureCategory: observation.failureCategory,
+      retryable: observation.retryable,
+    })),
+    inventories: (snapshot.inventorySnapshots ?? []).map((inventory) => ({
+      placementRef: opaqueRef(inventory.placementId, 'inventory'),
+      authoritative: inventory.authoritative,
+      complete: inventory.complete,
+      fileCount: inventory.fileCount,
+      observedAt: inventory.observedAt,
+      expiresAt: inventory.expiresAt,
+    })),
     files: snapshot.providerFiles.map((file) => ({
       providerFileRef: opaqueRef(file.placementId, file.providerFileId),
       corpusFileIndex: file.corpusFileIndex,
@@ -132,6 +161,8 @@ function publicResources(snapshot) {
     })),
     exposures: snapshot.exposures.map((exposure) => ({
       providerFileRef: opaqueRef(exposure.placementId, exposure.providerFileId),
+      accountScope: exposure.accountScope,
+      mountScope: exposure.mountScope,
       transport: exposure.transport,
       state: exposure.state,
       readOnly: exposure.readOnly,
@@ -140,6 +171,37 @@ function publicResources(snapshot) {
       failureCategory: exposure.failureCategory,
       retryable: exposure.retryable,
     })),
+    zurgMetadata: (snapshot.zurgMetadata ?? []).map((observation) => ({
+      provider: observation.provider,
+      accountScope: observation.accountScope,
+      instanceScope: observation.instanceScope,
+      observationState: observation.observationState,
+      zurgState: observation.zurgState,
+      zurgStateWhen: observation.zurgStateWhen,
+      observedAt: observation.observedAt,
+      expiresAt: observation.expiresAt,
+      failureCategory: observation.failureCategory,
+      retryable: observation.retryable,
+    })),
+  };
+}
+function publicStage6(stage6) {
+  const allowedFactFields = [
+    'state', 'observedState', 'freshness', 'providerState', 'authoritative', 'complete',
+    'fileCount', 'instanceScope', 'zurgState', 'zurgStateWhen', 'accountScope',
+    'mountScope', 'transport', 'readOnly', 'observedAt', 'expiresAt', 'mappedAt',
+    'version', 'validFrom', 'reconciledAt', 'occurredAt', 'failureCategory',
+    'retryable', 'reason', 'scope',
+  ];
+  return {
+    release: stage6.release,
+    scope: stage6.scope,
+    facts: Object.fromEntries(Object.entries(stage6.facts).map(([name, fact]) => [
+      name,
+      Object.fromEntries(allowedFactFields
+        .filter((field) => Object.hasOwn(fact, field))
+        .map((field) => [field, fact[field]])),
+    ])),
   };
 }
 function publicShadowPlan(plan) {
@@ -164,5 +226,7 @@ function publicShadowPlan(plan) {
   };
 }
 function opaqueRef(placementId, providerFileId) {
-  return Buffer.from(`${placementId}\0${providerFileId}`).toString('base64url');
+  return `resource-sha256:${createHash('sha256')
+    .update(JSON.stringify([placementId, providerFileId]))
+    .digest('hex')}`;
 }

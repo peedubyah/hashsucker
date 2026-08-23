@@ -86,6 +86,7 @@ export function createExposureObservation(input) {
   return Object.freeze({
     provider: normalizeIdentifier(input.provider, 'provider'),
     accountScope: normalizeIdentifier(input.accountScope ?? 'default', 'accountScope'),
+    mountScope: normalizeIdentifier(input.mountScope ?? 'default', 'mountScope'),
     providerResourceId: requireString(input.providerResourceId, 'providerResourceId'),
     providerFileId: requireString(input.providerFileId, 'providerFileId'),
     transport: normalizeIdentifier(input.transport, 'transport'),

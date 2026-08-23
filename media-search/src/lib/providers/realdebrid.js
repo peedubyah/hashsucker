@@ -32,7 +32,7 @@ export function createRealDebridProvider(options = {}) {
         }));
         if (result == null) return null;
         return placementFromGateway(result, identity, {
-          accountScope, now, observationTtlMs, defaultOwnership: 'external',
+          accountScope, now, observationTtlMs, ownership: 'external', ownerKey: null,
           provenance: 'realdebrid-gateway:lookup-placement',
         });
       },
@@ -60,7 +60,7 @@ export function createRealDebridProvider(options = {}) {
           accountScope,
           now,
           observationTtlMs,
-          defaultOwnership: result.created ? 'owned' : 'reused',
+          ownership: result.created ? 'owned' : 'reused',
           ownerKey: result.created ? ownerKey : null,
           idempotencyKey,
           provenance: 'realdebrid-gateway:create-placement',
@@ -79,7 +79,7 @@ export function createRealDebridProvider(options = {}) {
         }));
         return placementFromGateway({ ...result, providerResourceId }, identity, {
           accountScope, now, observationTtlMs,
-          defaultOwnership: resource.ownership ?? 'unknown',
+          ownership: resource.ownership ?? 'unknown',
           ownerKey: resource.ownerKey ?? null,
           provenance: 'realdebrid-gateway:observe-readiness',
         });
@@ -127,10 +127,10 @@ function placementFromGateway(result, identity, options) {
     infoHash: identity.infoHash,
     providerResourceId: result.providerResourceId,
     state: result.state ?? 'unknown',
-    ownership: result.ownership ?? options.defaultOwnership,
-    ownerKey: result.ownerKey ?? options.ownerKey ?? null,
-    provenance: result.provenance ?? options.provenance,
-    idempotencyKey: result.idempotencyKey ?? options.idempotencyKey ?? null,
+    ownership: options.ownership,
+    ownerKey: options.ownerKey ?? null,
+    provenance: options.provenance,
+    idempotencyKey: options.idempotencyKey ?? null,
     observedAt,
     expiresAt: result.expiresAt,
     ttlMs: result.expiresAt == null ? (result.ttlMs ?? options.observationTtlMs) : undefined,

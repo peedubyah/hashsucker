@@ -210,10 +210,11 @@ test('resource observations keep placement, file inventory, and exposure authori
     }],
   });
   const exposure = createExposureObservation({
-    provider: 'torbox', accountScope: 'primary', providerResourceId: 'torrent-7',
-    providerFileId: 'file-900', transport: 'torbox-webdav-rclone',
-    exposureKey: 'torrent-7:file-900', relativePath: '/Release/movie.mkv',
-    state: 'visible', readOnly: true, observedAt: 10_000, ttlMs: 500,
+    provider: 'torbox', accountScope: 'primary', mountScope: 'living-room',
+    providerResourceId: 'torrent-7', providerFileId: 'file-900',
+    transport: 'torbox-webdav-rclone', exposureKey: 'torrent-7:file-900',
+    relativePath: '/Release/movie.mkv', state: 'visible', readOnly: true,
+    observedAt: 10_000, ttlMs: 500,
   });
 
   assert.equal(placement.infoHash, HASH);
@@ -221,6 +222,7 @@ test('resource observations keep placement, file inventory, and exposure authori
   assert.equal(inventory.files[0].corpusFileIndex, 0);
   assert.equal(inventory.files[0].providerFileId, 'file-900');
   assert.equal(exposure.readOnly, true);
+  assert.equal(exposure.mountScope, 'living-room');
   assert.equal(Object.hasOwn(placement, 'files'), false);
   assert.equal(Object.hasOwn(inventory, 'state'), false);
   assert.equal(Object.hasOwn(exposure, 'ownership'), false);

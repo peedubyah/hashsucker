@@ -29,6 +29,8 @@ test('Zurg seam observes only an explicit file mapping under a read-only mount',
 
   assert.equal(observedPath, '/mnt/realdebrid/Release/movie.mkv');
   assert.equal(exposure.provider, 'realdebrid');
+  assert.equal(exposure.accountScope, 'primary');
+  assert.equal(exposure.mountScope, 'default');
   assert.equal(exposure.transport, 'zurg-rclone');
   assert.equal(exposure.state, 'visible');
   assert.equal(exposure.readOnly, true);

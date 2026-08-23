@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+
+import { DatabaseSync } from 'node:sqlite';
 
 import { createReleaseIdentity } from '../src/api/release-contract.js';
 import {
@@ -42,7 +47,7 @@ function setupBindable(store, item, identity, options = {}) {
     name: 'The.Matrix.1999.mkv',
     size: 1_000,
     selected: true,
-  }]);
+  }], { authoritative: true, complete: true, observedAt: 0, expiresAt: 9_999_999_999_999 });
   const fileId = options.providerFileId ?? 'file-1';
   store.recordFileMapping({
     ...identity,
@@ -60,6 +65,8 @@ function setupBindable(store, item, identity, options = {}) {
     relativePath: options.providerPath ?? '/provider/The.Matrix.1999.mkv',
     state: 'visible',
     readOnly: true,
+    observedAt: 0,
+    expiresAt: 9_999_999_999_999,
   });
   return { path, placement, exposure, providerFileId: fileId };
 }
@@ -308,4 +315,96 @@ test('lifecycle milestones are orthogonal and binding does not imply catalog or 
   assert.equal(lifecycle.milestones.playable, null);
   assert.equal(lifecycle.events.length, 3);
   store.close();
+});
+
+test('legacy exposure schema migrates in place without retargeting evidence', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'hashsucker-stage6-'));
+  const dbPath = join(directory, 'control-plane.sqlite');
+  try {
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE provider_placements (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        account_scope TEXT NOT NULL,
+        info_hash TEXT NOT NULL,
+        provider_resource_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        ownership TEXT NOT NULL,
+        provenance TEXT NOT NULL,
+        observed_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE provider_files (
+        id TEXT PRIMARY KEY,
+        placement_id TEXT NOT NULL,
+        provider_file_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        name TEXT NOT NULL,
+        present INTEGER NOT NULL,
+        inventory_observed_at INTEGER NOT NULL,
+        UNIQUE (placement_id, provider_file_id)
+      );
+      CREATE TABLE exposures (
+        id TEXT PRIMARY KEY,
+        placement_id TEXT NOT NULL,
+        provider_file_id TEXT NOT NULL,
+        transport TEXT NOT NULL,
+        exposure_key TEXT NOT NULL,
+        relative_path TEXT,
+        state TEXT NOT NULL,
+        read_only INTEGER NOT NULL,
+        observed_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        failure_category TEXT,
+        retryable INTEGER,
+        UNIQUE (transport, exposure_key),
+        FOREIGN KEY (placement_id, provider_file_id)
+          REFERENCES provider_files(placement_id, provider_file_id)
+      );
+      INSERT INTO provider_placements (
+        id, provider, account_scope, info_hash, provider_resource_id, state,
+        ownership, provenance, observed_at, created_at, updated_at
+      ) VALUES (
+        'legacy-placement', 'realdebrid', 'primary', '${HASH}', 'rd-legacy',
+        'ready', 'external', 'legacy', 1000, 1000, 1000
+      );
+      INSERT INTO provider_files (
+        id, placement_id, provider_file_id, path, name, present, inventory_observed_at
+      ) VALUES (
+        'legacy-file', 'legacy-placement', 'rd-file', '/movie.mkv', 'movie.mkv', 1, 1000
+      );
+      INSERT INTO exposures (
+        id, placement_id, provider_file_id, transport, exposure_key, relative_path,
+        state, read_only, observed_at, expires_at
+      ) VALUES (
+        'legacy-exposure', 'legacy-placement', 'rd-file', 'zurg-rclone',
+        'Release/movie.mkv', 'Release/movie.mkv', 'visible', 1, 1000, 2000
+      );
+    `);
+    legacy.close();
+
+    const store = createControlPlaneStore({ dbPath, now: () => 1_500 });
+    const migrated = store.db.prepare(
+      'SELECT * FROM exposures WHERE id = ?'
+    ).get('legacy-exposure');
+    const uniqueTargets = store.db.prepare('PRAGMA index_list(exposures)').all()
+      .filter((row) => row.unique === 1)
+      .map((row) => store.db.prepare(`PRAGMA index_info(${row.name})`).all()
+        .map((entry) => entry.name).join(','));
+    assert.equal(migrated.account_scope, 'primary');
+    assert.equal(migrated.mount_scope, 'legacy-unverified');
+    assert.equal(migrated.placement_id, 'legacy-placement');
+    assert.equal(migrated.provider_file_id, 'rd-file');
+    assert(uniqueTargets.includes('transport,exposure_key,placement_id,provider_file_id'));
+    store.close();
+
+    const reopened = createControlPlaneStore({ dbPath, now: () => 1_500 });
+    assert.equal(reopened.db.prepare('SELECT COUNT(*) AS count FROM exposures').get().count, 1);
+    reopened.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

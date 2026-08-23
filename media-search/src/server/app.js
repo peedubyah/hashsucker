@@ -6,6 +6,7 @@ import { toControlPlaneItemDetail, toControlPlaneItemSummary } from '../api/cont
 import { createReleaseIdentity, toPublicReleaseDto, validateReleaseIdentity } from '../api/release-contract.js';
 import { getControlPlaneHealth } from '../lib/control-plane/health.js';
 import { planReconciliation } from '../lib/control-plane/reconciler.js';
+import { projectRdZurgLifecycle } from '../lib/control-plane/rd-zurg-slice.js';
 import { QueueImporterClient } from '../lib/importer/queue-client.js';
 import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { searchTitles, getMediaById, getCacheMetrics } from '../lib/metadata/unified-search.js';
@@ -109,6 +110,26 @@ function parseOptionalReleaseIdentity(params) {
   return createReleaseIdentity(infoHash, fileIndex);
 }
 
+function parseOptionalStage6Scope(params) {
+  const fields = ['accountScope', 'zurgInstanceScope', 'mountScope'];
+  const values = fields.map((field) => params.get(field));
+  if (values.every((value) => value == null)) return null;
+  if (values.some((value) => value == null)) {
+    throw new Error('accountScope, zurgInstanceScope, and mountScope are required together');
+  }
+  for (const [index, value] of values.entries()) {
+    if (!/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value)) {
+      throw new Error(`${fields[index]} must be a provider-safe identifier`);
+    }
+  }
+  return {
+    provider: 'realdebrid',
+    accountScope: values[0].toLowerCase(),
+    instanceScope: values[1].toLowerCase(),
+    mountScope: values[2].toLowerCase(),
+  };
+}
+
 function validateSupportedRequest(body) {
   const intent = createRequestIntent({ type: body.type || 'series', mediaId: body.mediaId });
   const singleEpisode = intent.mediaType === 'tv' && intent.scope === 'episode' && intent.episodes.length === 1;
@@ -183,7 +204,13 @@ export function createRequestHandler(dependencies = {}) {
         if (!item) return sendJson(response, 404, { error: 'Library item not found' });
         const generatedAt = clock();
         const release = parseOptionalReleaseIdentity(url.searchParams);
+        const stage6Scope = parseOptionalStage6Scope(url.searchParams);
+        if (stage6Scope && !release) {
+          throw new Error('Stage 6 scope requires infoHash and fileIndex');
+        }
+        const lifecycle = controlPlaneStore.getLifecycle(item.id);
         let snapshot = null;
+        let stage6 = null;
         let shadowPlan = null;
         let providerObservations = [];
         if (release) {
@@ -192,16 +219,22 @@ export function createRequestHandler(dependencies = {}) {
           providerObservations = searchCache.getProviderObservations(
             release.infoHash, release.fileIndex, { now: generatedAt },
           );
+          if (stage6Scope) {
+            stage6 = projectRdZurgLifecycle({
+              snapshot, lifecycle, scope: stage6Scope, now: generatedAt,
+            });
+          }
         }
         return sendJson(response, 200, toControlPlaneItemDetail({
           generatedAt,
           item,
           canonicalPath: controlPlaneStore.getActiveCanonicalPath(item.id),
           bindings: controlPlaneStore.listBindings(item.id),
-          lifecycle: controlPlaneStore.getLifecycle(item.id),
+          lifecycle,
           release,
           providerObservations,
           snapshot,
+          stage6,
           shadowPlan,
         }));
       }
