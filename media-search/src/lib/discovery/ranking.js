@@ -297,6 +297,7 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     providerEvidence,
     sources,
     selectedMediaId,
+    provenance: hit.provenance || null,
   };
 }
 

@@ -37,50 +37,72 @@ async function runPool(tasks, limit) {
   return results;
 }
 
+/**
+ * Load configured live discovery sources.
+ * Env vars take precedence; falls back to local config file.
+ * @returns {Array<{id, provider, debridProvider, manifestUrl, enabled}>}
+ */
 export async function loadDiscoveryAddons() {
-  const addons = [];
+  const sources = [];
 
-  // Torrentio/TorBox — generated from TORBOX_API_KEY
+  // Torrentio + TorBox (auto-generated from TORBOX_API_KEY)
   if (process.env.TORBOX_API_KEY) {
-    addons.push({
-      addon_id: 'torrentio.torbox',
-      name: 'Torrentio (TorBox)',
-      manifest_url: buildTorrentioUrl('torbox', process.env.TORBOX_API_KEY),
-      provider: 'torbox',
-      role: 'discovery',
+    sources.push({
+      id: 'torrentio-torbox',
+      provider: 'torrentio',
+      debridProvider: 'torbox',
+      manifestUrl: buildTorrentioUrl('torbox', process.env.TORBOX_API_KEY),
       enabled: true,
-      sort_order: 0,
     });
   }
 
-  // Torrentio/Real-Debrid — generated from REALDEBRID_API_KEY
+  // Torrentio + Real-Debrid (auto-generated from REALDEBRID_API_KEY)
   if (process.env.REALDEBRID_API_KEY) {
-    addons.push({
-      addon_id: 'torrentio.realdebrid',
-      name: 'Torrentio (Real-Debrid)',
-      manifest_url: buildTorrentioUrl('realdebrid', process.env.REALDEBRID_API_KEY),
-      provider: 'realdebrid',
-      role: 'discovery',
+    sources.push({
+      id: 'torrentio-realdebrid',
+      provider: 'torrentio',
+      debridProvider: 'realdebrid',
+      manifestUrl: buildTorrentioUrl('realdebrid', process.env.REALDEBRID_API_KEY),
       enabled: true,
-      sort_order: 1,
     });
   }
 
-  // Comet manual manifest — optional, user-provided URL
-  if (process.env.COMET_MANIFEST_URL) {
-    addons.push({
-      addon_id: 'comet.manual',
-      name: 'Comet (manual)',
-      manifest_url: process.env.COMET_MANIFEST_URL,
+  // Comet + TorBox
+  if (process.env.COMET_TORBOX_MANIFEST_URL) {
+    sources.push({
+      id: 'comet-torbox',
       provider: 'comet',
-      role: 'discovery',
+      debridProvider: 'torbox',
+      manifestUrl: process.env.COMET_TORBOX_MANIFEST_URL,
       enabled: true,
-      sort_order: 2,
     });
   }
 
-  if (addons.length > 0) {
-    return addons;
+  // Comet + Real-Debrid
+  if (process.env.COMET_REALDEBRID_MANIFEST_URL) {
+    sources.push({
+      id: 'comet-realdebrid',
+      provider: 'comet',
+      debridProvider: 'realdebrid',
+      manifestUrl: process.env.COMET_REALDEBRID_MANIFEST_URL,
+      enabled: true,
+    });
+  }
+
+  // Legacy single manifest (kept for backward compat)
+  if (process.env.COMET_MANIFEST_URL) {
+    sources.push({
+      id: 'comet-manual',
+      provider: 'comet',
+      debridProvider: null,
+      manifestUrl: process.env.COMET_MANIFEST_URL,
+      enabled: true,
+    });
+  }
+
+  if (sources.length > 0) {
+    logDiscoverySources(sources);
+    return sources;
   }
 
   const configUrl = new URL(
@@ -93,6 +115,41 @@ export async function loadDiscoveryAddons() {
   );
 
   return localAddons.filter((addon) => Boolean(addon.enabled));
+}
+
+/**
+ * Map a source object to the shape expected by searchStremio/normalizeStream.
+ * The internal source model uses camelCase ({id, provider, debridProvider, manifestUrl})
+ * but the Stremio pipeline expects snake_case ({addon_id, name, manifest_url, sort_order}).
+ */
+function toStremioAddon(source, index) {
+  return {
+    addon_id: source.id,
+    name: source.debridProvider
+      ? `${capitalize(source.provider)} (${capitalize(source.debridProvider)})`
+      : capitalize(source.provider),
+    manifest_url: source.manifestUrl,
+    enabled: source.enabled,
+    sort_order: index,
+    provider: source.provider,
+    debridProvider: source.debridProvider,
+  };
+}
+
+function capitalize(s) {
+  if (!s) return s;
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function logDiscoverySources(sources) {
+  console.log('Live discovery sources:');
+  for (const source of sources) {
+    console.log(`✓ ${source.id}`);
+    console.log(`  provider: ${source.provider}`);
+    if (source.debridProvider) {
+      console.log(`  debrid: ${source.debridProvider}`);
+    }
+  }
 }
 
 export async function searchStremio({
@@ -109,9 +166,13 @@ export async function searchStremio({
     throw new Error('mediaId is required');
   }
 
-  const enabledAddons =
-    addons?.filter((addon) => Boolean(addon.enabled)) ??
-    await loadDiscoveryAddons();
+  const rawAddons = addons ?? (await loadDiscoveryAddons());
+  // Map camelCase source model → snake_case addon shape expected downstream
+  const enabledAddons = rawAddons
+    .filter((addon) => Boolean(addon.enabled))
+    .map((addon) =>
+      addon.manifest_url ? addon : toStremioAddon(addon, rawAddons.indexOf(addon))
+    );
 
   const tasks = enabledAddons.map((addon, index) => async () => {
     const streamUrl = buildStreamUrl(

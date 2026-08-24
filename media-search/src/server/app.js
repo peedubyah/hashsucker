@@ -11,6 +11,13 @@ import {
 } from '../lib/operator/index.js';
 import { getTraceLog } from '../lib/operator/trace.js';
 import { runDiagnostic, listDiagnostics, getSystemHealth } from '../lib/operator/diagnostics.js';
+import { checkRequestLifecycleHealth } from '../lib/operator/request-health.js';
+import {
+  retryFailedRequest,
+  resetStuckRequest,
+  deleteOrphanedRequest,
+} from '../lib/operator/request-actions.js';
+import { inspectRequests } from '../lib/operator/request-inspector.js';
 import { projectRdZurgLifecycle } from '../lib/control-plane/rd-zurg-slice.js';
 import { QueueImporterClient } from '../lib/importer/queue-client.js';
 import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
@@ -25,6 +32,9 @@ import { runAttributeWorker } from '../lib/discovery/attribute-worker.js';
 import { resolveProjection, parseIdentityFromParams, ResolverError } from '../lib/resolver/resolver.js';
 import { buildMediaSource, SourceError } from '../lib/resolver/source.js';
 import { createMediaStream, canTransport, TransportError } from '../lib/resolver/transport.js';
+import { liveness, readiness } from '../lib/health.js';
+import { getMetrics } from '../lib/metrics.js';
+import { getRequestDebug } from '../lib/debug.js';
 
 const CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -371,7 +381,19 @@ export function createRequestHandler(dependencies = {}) {
     const url = new URL(request.url, 'http://localhost');
     try {
       if (request.method === 'GET' && url.pathname === '/health') {
-        return sendJson(response, 200, { ok: true });
+        return sendJson(response, 200, liveness());
+      }
+      if (request.method === 'GET' && url.pathname === '/health/ready') {
+        const ready = readiness({ env });
+        return sendJson(response, ready.status === 'healthy' ? 200 : 503, ready);
+      }
+      if (request.method === 'GET' && url.pathname === '/api/metrics') {
+        return sendJson(response, 200, getMetrics());
+      }
+      const debugMatch = request.method === 'GET' && url.pathname.match(/^\/api\/debug\/request\/([0-9a-f-]{36})$/i);
+      if (debugMatch) {
+        const debug = await getRequestDebug(debugMatch[1], { env });
+        return sendJson(response, debug.found ? 200 : 404, debug);
       }
       if (request.method === 'GET' && url.pathname === '/api/control-plane/health') {
         return sendJson(response, 200, controlPlaneHealth({ now: clock }));
@@ -538,9 +560,48 @@ export function createRequestHandler(dependencies = {}) {
       }
       if (request.method === 'POST' && url.pathname === '/api/requests') {
         const body = await readBody(request);
-        const { intent, release, handlingMode } = validateSupportedRequest(body);
+        
+        emitEvent(EVENTS.REQUEST_RECEIVED, {
+          mediaId: body.mediaId,
+          handlingMode: body.handlingMode,
+        });
+        
+        let intent, release, handlingMode;
+        try {
+          ({ intent, release, handlingMode } = validateSupportedRequest(body));
+        } catch (err) {
+          emitEvent(EVENTS.REQUEST_INVALID, {
+            mediaId: body.mediaId,
+            error: err.message,
+          });
+          throw err;
+        }
+        
+        emitEvent(EVENTS.REQUEST_VALIDATED, {
+          mediaId: intent.mediaId,
+          releaseKey: `${release.infoHash}:${release.fileIndex ?? 'torrent'}`,
+          handlingMode,
+        });
+        
         const handoff = createHandoff({ intent, release, provider: 'torbox', handlingMode });
-        return sendJson(response, 202, await importer.submitRequest(handoff));
+        
+        emitEvent(EVENTS.HANDOFF_CREATED, {
+          requestId: handoff.requestId,
+          mediaId: intent.mediaId,
+          releaseKey: handoff.release.releaseKey,
+          handlingMode,
+          provider: 'torbox',
+        });
+        
+        const result = await importer.submitRequest(handoff);
+        
+        emitEvent(EVENTS.QUEUE_WRITE, {
+          requestId: handoff.requestId,
+          status: result.status,
+          path: result.path,
+        });
+        
+        return sendJson(response, 202, result);
       }
       const statusMatch = request.method === 'GET' && url.pathname.match(/^\/api\/requests\/([0-9a-f-]{36})$/i);
       if (statusMatch) {
@@ -695,9 +756,67 @@ export function createRequestHandler(dependencies = {}) {
         const result = await runDiagnostic(diagId, { env });
         return sendJson(response, 200, result);
       }
+      if (request.method === 'GET' && url.pathname === '/api/operator/requests/health') {
+        const result = await checkRequestLifecycleHealth({
+          requestsRoot: operatorRoot,
+          controlPlaneStore,
+          now: clock,
+        });
+        return sendJson(response, 200, result);
+      }
       if (request.method === 'GET' && url.pathname === '/api/operator/health') {
         const health = await getSystemHealth({ env });
         return sendJson(response, health.ok ? 200 : 503, health);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/operator/requests/retry') {
+        const body = await readBody(request);
+        const requestId = body?.requestId;
+        if (!requestId) {
+          return sendJson(response, 400, { error: 'requestId is required' });
+        }
+        const result = await retryFailedRequest({ requestId, requestsRoot: operatorRoot });
+        return sendJson(response, 200, result);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/operator/requests/reset') {
+        const body = await readBody(request);
+        const requestId = body?.requestId;
+        if (!requestId) {
+          return sendJson(response, 400, { error: 'requestId is required' });
+        }
+        const result = await resetStuckRequest({ requestId, requestsRoot: operatorRoot });
+        return sendJson(response, 200, result);
+      }
+      if (request.method === 'GET' && url.pathname === '/api/operator/requests/inspect') {
+        const result = await inspectRequests({
+          requestsRoot: operatorRoot,
+          controlPlaneStore,
+          now: clock,
+        });
+        return sendJson(response, 200, result);
+      }
+      const inspectMatch = request.method === 'GET'
+        && url.pathname.match(/^\/api\/operator\/requests\/([0-9a-f-]{36})\/inspect$/i);
+      if (inspectMatch) {
+        const reqId = inspectMatch[1];
+        const result = await inspectRequests({
+          requestsRoot: operatorRoot,
+          controlPlaneStore,
+          now: clock,
+        });
+        const request = result.requests.find(r => r.requestId === reqId);
+        if (!request) {
+          return sendJson(response, 404, { error: 'Request not found' });
+        }
+        return sendJson(response, 200, { request });
+      }
+      if (request.method === 'POST' && url.pathname === '/api/operator/requests/delete-orphan') {
+        const body = await readBody(request);
+        const requestId = body?.requestId;
+        if (!requestId) {
+          return sendJson(response, 400, { error: 'requestId is required' });
+        }
+        const result = await deleteOrphanedRequest({ requestId, requestsRoot: operatorRoot });
+        return sendJson(response, 200, result);
       }
       sendJson(response, 404, { error: 'Not found' });
     } catch (error) {

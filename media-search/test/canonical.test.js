@@ -764,3 +764,138 @@ test('deduplicateByReleaseKey: deterministic output for same input', () => {
 
   assert.deepEqual(run1, run2);
 });
+
+// =============================================================================
+// Candidate Provenance (Flight Recorder) Tests
+// =============================================================================
+
+test('PROVENANCE: toCanonicalLocal attaches source=stored', () => {
+  const row = {
+    hash: HASH_A, fileIndex: 0, filename: 'a.mkv',
+    relevance: 0.5, parsed: {}, confidence: 0.9,
+    components: {}, media: [], providers: [],
+  };
+
+  const canonical = toCanonicalLocal(row);
+  assert.ok(canonical.provenance, 'provenance must exist on local candidate');
+  assert.equal(canonical.provenance.source, 'dmm-corpus');
+  assert.equal(canonical.provenance.sourceType, 'stored');
+  assert.equal(canonical.provenance.releaseKey, `${HASH_A}:0`);
+  assert.equal(canonical.provenance.hash, HASH_A);
+  assert.equal(canonical.provenance.metadataConfidence, 0.9);
+  assert.equal(typeof canonical.provenance.discoveredAt, 'string');
+  assert.ok(canonical.provenance.discoveredAt.length > 0);
+});
+
+test('PROVENANCE: toCanonicalLive attaches source=live', () => {
+  const raw = {
+    infoHash: HASH_B, fileIndex: null, filename: 'b.mkv',
+    providers: { torrentio: { cached: true } }, confidence: 0.7,
+    sources: [{ addonId: 'torrentio', addonName: 'torrentio', role: 'discovery' }],
+  };
+
+  const canonical = toCanonicalLive(raw);
+  assert.ok(canonical.provenance, 'provenance must exist on live candidate');
+  assert.equal(canonical.provenance.source, 'torrentio');
+  assert.equal(canonical.provenance.sourceType, 'live');
+  assert.equal(canonical.provenance.releaseKey, `${HASH_B}:torrent`);
+  assert.equal(canonical.provenance.metadataConfidence, 0.7);
+});
+
+test('PROVENANCE: mergeExactDuplicates combines source names', () => {
+  const localRow = {
+    hash: HASH_A, fileIndex: 0, filename: 'local.mkv',
+    relevance: 0.85, parsed: {}, confidence: 0.9,
+    components: { relevance: 0.85, releaseConfidence: 0.9 },
+    media: [], providers: [{ provider: 'torbox', state: 'cached', observedAt: 10_000 }],
+  };
+  const liveRaw = {
+    infoHash: HASH_A, fileIndex: 0, filename: 'live.mkv',
+    providers: { torrentio: { cached: true } }, confidence: 0.7,
+    sources: [{ addonId: 'torrentio', addonName: 'torrentio', role: 'discovery' }],
+  };
+
+  const local = toCanonicalLocal(localRow);
+  const live = toCanonicalLive(liveRaw);
+  const merged = mergeExactDuplicates(local, live);
+
+  assert.ok(merged.provenance, 'merged provenance must exist');
+  assert.ok(merged.provenance.source.includes('dmm-corpus'), 'merged source includes corpus');
+  assert.ok(merged.provenance.source.includes('torrentio'), 'merged source includes live');
+  assert.equal(merged.provenance.sourceType, 'live', 'merged sourceType is live when either is live');
+  assert.equal(merged.provenance.metadataConfidence, 0.9, 'stronger confidence wins');
+});
+
+test('PROVENANCE: cacheState reflects provider observations', () => {
+  const row = {
+    hash: HASH_A, fileIndex: 0, filename: 'a.mkv',
+    relevance: 0.5, parsed: {}, confidence: 0.9,
+    components: {}, media: [],
+    providers: [{ provider: 'torbox', state: 'cached', observedAt: 10_000 }],
+  };
+
+  const canonical = toCanonicalLocal(row);
+  assert.equal(canonical.provenance.cacheState, 'cached');
+});
+
+test('PROVENANCE: cacheState=unknown when no provider data', () => {
+  const row = {
+    hash: HASH_A, fileIndex: 0, filename: 'a.mkv',
+    relevance: 0.5, parsed: {}, confidence: 0.9,
+    components: {}, media: [], providers: [],
+  };
+
+  const canonical = toCanonicalLocal(row);
+  assert.equal(canonical.provenance.cacheState, 'unknown');
+});
+
+test('PROVENANCE: toRankingInput preserves provenance', () => {
+  const row = {
+    hash: HASH_A, fileIndex: 0, filename: 'a.mkv',
+    relevance: 0.5, parsed: {}, confidence: 0.9,
+    components: {}, media: [], providers: [],
+  };
+
+  const canonical = toCanonicalLocal(row);
+  const rankingInput = toRankingInput(canonical);
+  assert.ok(rankingInput.provenance, 'provenance must survive toRankingInput');
+  assert.equal(rankingInput.provenance.source, 'dmm-corpus');
+});
+
+test('PROVENANCE: rankHit preserves provenance in output', () => {
+  const row = {
+    hash: HASH_A, fileIndex: 0, filename: 'a.mkv',
+    relevance: 0.5, parsed: {}, confidence: 0.9,
+    components: {}, media: [], providers: [],
+  };
+
+  const canonical = toCanonicalLocal(row);
+  const rankingInput = toRankingInput(canonical);
+  const ranked = rankHit(rankingInput);
+  assert.ok(ranked.provenance, 'provenance must survive rankHit');
+  assert.equal(ranked.provenance.source, 'dmm-corpus');
+  assert.equal(ranked.provenance.sourceType, 'stored');
+});
+
+test('PROVENANCE: deduplicateByReleaseKey preserves provenance', () => {
+  const localRow = {
+    hash: HASH_A, fileIndex: 0, filename: 'local.mkv',
+    relevance: 0.85, parsed: {}, confidence: 0.9,
+    components: { relevance: 0.85, releaseConfidence: 0.9 },
+    media: [], providers: [{ provider: 'torbox', state: 'cached', observedAt: 10_000 }],
+  };
+  const liveRaw = {
+    infoHash: HASH_A, fileIndex: 0, filename: 'live.mkv',
+    providers: { torrentio: { cached: true } }, confidence: 0.7,
+    sources: [{ addonId: 'torrentio', addonName: 'torrentio', role: 'discovery' }],
+  };
+
+  const local = toCanonicalLocal(localRow);
+  const live = toCanonicalLive(liveRaw);
+  const deduped = deduplicateByReleaseKey([local, live]);
+
+  assert.equal(deduped.length, 1);
+  assert.ok(deduped[0].provenance, 'provenance must survive dedup');
+  assert.ok(deduped[0].provenance.source.includes('dmm-corpus'));
+  assert.ok(deduped[0].provenance.source.includes('torrentio'));
+});

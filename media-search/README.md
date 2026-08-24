@@ -45,7 +45,8 @@ For frontend development, run `npm run dev` separately in `../ui`; Vite proxies 
 | `METADATA_CACHE_TTL_MS`, `METADATA_CACHE_MAX_ENTRIES` | Metadata cache limits |
 | `TORBOX_API_KEY` | Torrentio/TorBox live discovery; direct checks only on the legacy CLI path |
 | `REALDEBRID_API_KEY` | Torrentio/Real-Debrid live discovery only; not a direct provider adapter |
-| `COMET_MANIFEST_URL` | Optional Comet discovery source |
+| `COMET_TORBOX_MANIFEST_URL` | Comet + TorBox discovery manifest |
+| `COMET_REALDEBRID_MANIFEST_URL` | Comet + Real-Debrid discovery manifest |
 | `TORZNAB_URLS` | JSON array of Torznab endpoint definitions |
 
 `STREMIO_ADDON_MANIFEST_URL` is not read by current source. `DISCOVERY_CACHE_PATH` belongs to a legacy search path; the server uses `DISCOVERY_DB`.

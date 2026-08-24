@@ -11,7 +11,8 @@
     "test": "node --test",
     "test:stage3": "node --test test/stage3-fixture-harness.test.js",
     "test:stage3:ranking": "STAGE3_RANKING_FIXTURE=1 node --test test/stage3-fixture-harness.test.js",
-    "dmm:ingest": "node src/scripts/dmm-ingest.js"
+    "dmm:ingest": "node src/scripts/dmm-ingest.js",
+    "canary": "node scripts/canary.mjs"
   },
   "allowScripts": {
     "better-sqlite3@11.10.0": true

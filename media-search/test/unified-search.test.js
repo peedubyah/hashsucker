@@ -58,7 +58,7 @@ test('searchTitles returns empty results for invalid query', async () => {
 test('searchTitles returns results for valid query', async () => {
   _resetForTests();
 
-  const result = await searchTitles('matrix');
+  const result = await searchTitles('Reacher');
   assert.ok(result.results.length > 0);
   assert.equal(result.fromCache, false);
   assert.ok(result.requestId);
@@ -70,11 +70,11 @@ test('searchTitles caches results', async () => {
   clearCache();
 
   // First search — cache miss
-  const result1 = await searchTitles('matrix');
+  const result1 = await searchTitles('Reacher');
   assert.equal(result1.fromCache, false);
 
   // Second search — cache hit
-  const result2 = await searchTitles('matrix');
+  const result2 = await searchTitles('Reacher');
   assert.equal(result2.fromCache, true);
   assert.deepEqual(result2.results, result1.results);
 });
@@ -85,8 +85,8 @@ test('searchTitles deduplicates concurrent identical requests', async () => {
 
   // Fire two identical requests simultaneously
   const [result1, result2] = await Promise.all([
-    searchTitles('matrix'),
-    searchTitles('matrix'),
+    searchTitles('Reacher'),
+    searchTitles('Reacher'),
   ]);
 
   // Both should get the same results
@@ -98,8 +98,8 @@ test('searchTitles deduplicates concurrent identical requests', async () => {
 test('searchTitles generates unique requestIds', async () => {
   _resetForTests();
 
-  const result1 = await searchTitles('matrix');
-  const result2 = await searchTitles('inception');
+  const result1 = await searchTitles('Reacher');
+  const result2 = await searchTitles('Inception');
 
   assert.notEqual(result1.requestId, result2.requestId);
 });
@@ -107,7 +107,7 @@ test('searchTitles generates unique requestIds', async () => {
 test('searchTitles accepts client-provided requestId', async () => {
   _resetForTests();
 
-  const result = await searchTitles('matrix', { requestId: 'client-req-123' });
+  const result = await searchTitles('Reacher', { requestId: 'client-req-123' });
   assert.equal(result.requestId, 'client-req-123');
 });
 
@@ -116,10 +116,10 @@ test('searchTitles skipCache bypasses cache', async () => {
   clearCache();
 
   // Prime cache
-  await searchTitles('matrix');
+  await searchTitles('Reacher');
 
   // Skip cache
-  const result = await searchTitles('matrix', { skipCache: true });
+  const result = await searchTitles('Reacher', { skipCache: true });
   assert.equal(result.fromCache, false);
 });
 
@@ -133,8 +133,8 @@ test('getCacheMetrics returns metrics after searches', async () => {
   _resetForTests();
   clearCache();
 
-  await searchTitles('matrix');
-  await searchTitles('matrix'); // cache hit
+  await searchTitles('Reacher');
+  await searchTitles('Reacher'); // cache hit
 
   const metrics = getCacheMetrics();
   assert.ok(metrics);
@@ -147,10 +147,10 @@ test('invalidateCache removes cached entry', async () => {
   _resetForTests();
   clearCache();
 
-  await searchTitles('matrix');
+  await searchTitles('Reacher');
   assert.equal(getCacheMetrics().size, 1);
 
-  const invalidated = invalidateCache('matrix');
+  const invalidated = invalidateCache('Reacher');
   assert.equal(invalidated, true);
   assert.equal(getCacheMetrics().size, 0);
 });
@@ -159,8 +159,8 @@ test('clearCache removes all entries', async () => {
   _resetForTests();
   clearCache();
 
-  await searchTitles('matrix');
-  await searchTitles('inception');
+  await searchTitles('Reacher');
+  await searchTitles('Inception');
   assert.ok(getCacheMetrics().size >= 2);
 
   clearCache();
@@ -180,7 +180,7 @@ test('searchTitles handles provider errors gracefully', async () => {
 
   // This test verifies the search doesn't throw even if a provider fails
   // The actual provider behavior is tested in cinemeta-adapter.test.js
-  const result = await searchTitles('matrix');
+  const result = await searchTitles('Reacher');
   assert.ok(Array.isArray(result.results));
 });
 
@@ -188,7 +188,7 @@ test('searchTitles results are deduplicated by ID', async () => {
   _resetForTests();
   clearCache();
 
-  const result = await searchTitles('matrix');
+  const result = await searchTitles('Reacher');
   const ids = result.results.map((r) => r.id);
   const uniqueIds = [...new Set(ids)];
   assert.deepEqual(ids, uniqueIds, 'Results should have unique IDs');
@@ -198,7 +198,7 @@ test('searchTitles results have normalized shape', async () => {
   _resetForTests();
   clearCache();
 
-  const result = await searchTitles('matrix');
+  const result = await searchTitles('Reacher');
   for (const media of result.results) {
     assert.ok(media.id, 'media should have id');
     assert.ok(['movie', 'series'].includes(media.type), 'media should have valid type');

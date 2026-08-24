@@ -40,6 +40,22 @@ const REGISTRY = [
     args: ['torbox-importer/tests/release-identity-contract.sh'],
     cwd: process.env.PROJECT_ROOT || '/home/patrick/src/hashsucker',
   },
+  {
+    id: 'canary',
+    name: 'Canary',
+    description: 'End-to-end pipeline test — proves one release survives the full pipeline',
+    command: 'node',
+    args: [path.join(import.meta.dirname, '..', '..', '..', 'scripts', 'canary.mjs')],
+    cwd: process.env.PROJECT_ROOT || '/home/patrick/src/hashsucker',
+  },
+  {
+    id: 'request-inspector',
+    name: 'Request Inspector',
+    description: 'Recommendations for stuck, failed, and orphaned requests (no automatic deletion)',
+    command: 'node',
+    args: [path.join(import.meta.dirname, 'request-inspector-runner.mjs')],
+    cwd: process.env.PROJECT_ROOT || '/home/patrick/src/hashsucker',
+  },
 ];
 
 export function listDiagnostics() {

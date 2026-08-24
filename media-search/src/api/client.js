@@ -195,87 +195,40 @@ export async function triggerAttributeRun({ limit } = {}) {
 }
 
 /**
- * Check backend health.
- * @returns {Promise<HealthStatus>}
- * @throws {Error} On network failure
+ * Debug trace for a specific request.
+ * GET /api/debug/request/:id
+ * @param {string} requestId - UUID of the request
+ * @returns {Promise<RequestDebugTrace>}
  */
-export async function checkHealth() {
+export async function getRequestDebug(requestId) {
+  const response = await fetch(`${BASE}/api/debug/request/${requestId}`);
+  if (!response.ok) throw new Error(`Debug trace failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Liveness probe.
+ * @returns {Promise<{ status: string, uptime: number }>}
+ */
+export async function livenessCheck() {
   const response = await fetch(`${BASE}/health`);
-  if (!response.ok) throw new Error(`Health check failed: ${response.status}`);
+  if (!response.ok) throw new Error(`Liveness check failed: ${response.status}`);
   return response.json();
 }
 
 /**
- * Operator dashboard — list all requests with optional status filter.
- * @param {string} [filter='all'] - Filter: 'all' | 'queued' | 'processing' | 'done' | 'failed'
- * @returns {Promise<OperatorRequestList>}
+ * Readiness probe.
+ * @returns {Promise<{ status: string, checks: Record<string, unknown> }>}
  */
-export async function listOperatorRequests(filter = 'all') {
-  const params = new URLSearchParams({ filter });
-  const response = await fetch(`${BASE}/api/operator/requests?${params}`);
-  if (!response.ok) throw new Error(`Operator request list failed: ${response.status}`);
+export async function readinessCheck() {
+  const response = await fetch(`${BASE}/health/ready`);
+  if (!response.ok) throw new Error(`Readiness check failed: ${response.status}`);
   return response.json();
 }
 
 /**
- * Operator dashboard — get request detail with timeline trace.
- * @param {string} requestId - UUID of the request
- * @returns {Promise<OperatorRequestDetail>}
- */
-export async function getOperatorRequest(requestId) {
-  const response = await fetch(`${BASE}/api/operator/requests/${requestId}`);
-  if (!response.ok) throw new Error(`Operator request detail failed: ${response.status}`);
-  return response.json();
-}
-
-/**
- * Operator dashboard — retry a failed request.
- * @param {string} requestId - UUID of the request
- * @returns {Promise<{ requestId: string, status: string, action: string }>}
- */
-export async function retryOperatorRequest(requestId) {
-  const response = await fetch(`${BASE}/api/operator/requests/${requestId}/retry`, { method: 'POST' });
-  if (!response.ok) throw new Error(`Retry failed: ${response.status}`);
-  return response.json();
-}
-
-/**
- * Operator dashboard — reset request to queued state.
- * @param {string} requestId - UUID of the request
- * @returns {Promise<{ requestId: string, status: string, action: string }>}
- */
-export async function resetOperatorRequest(requestId) {
-  const response = await fetch(`${BASE}/api/operator/requests/${requestId}/reset`, { method: 'POST' });
-  if (!response.ok) throw new Error(`Reset failed: ${response.status}`);
-  return response.json();
-}
-
-/**
- * Operator dashboard — delete a request from all queues.
- * @param {string} requestId - UUID of the request
- * @returns {Promise<{ requestId: string, action: string }>}
- */
-export async function deleteOperatorRequest(requestId) {
-  const response = await fetch(`${BASE}/api/operator/requests/${requestId}`, { method: 'DELETE' });
-  if (!response.ok) throw new Error(`Delete failed: ${response.status}`);
-  return response.json();
-}
-
-/**
- * Operator dashboard — search debug with candidate pipeline info.
- * @param {string} query - Search query (min 2 chars)
- * @returns {Promise<OperatorSearchDebug>}
- */
-export async function operatorSearchDebug(query) {
-  const params = new URLSearchParams({ q: query });
-  const response = await fetch(`${BASE}/api/operator/search-debug?${params}`);
-  if (!response.ok) throw new Error(`Search debug failed: ${response.status}`);
-  return response.json();
-}
-
-/**
- * Operator dashboard — get recent worker logs.
- * @param {number} [limit=50] - Max log entries
+ * Operator logs — recent worker activity.
+ * @param {number} [limit=50] - Max entries
  * @returns {Promise<OperatorLogs>}
  */
 export async function operatorLogs(limit = 50) {
@@ -286,8 +239,8 @@ export async function operatorLogs(limit = 50) {
 }
 
 /**
- * Operator dashboard — list available diagnostics.
- * @returns {Promise<{ available: OperatorDiagnostic[] }>}
+ * List available diagnostics.
+ * @returns {Promise<{ available: Array<{ id: string; name: string; description: string }> }>}
  */
 export async function listOperatorDiagnostics() {
   const response = await fetch(`${BASE}/api/operator/diagnostics`);
@@ -296,8 +249,8 @@ export async function listOperatorDiagnostics() {
 }
 
 /**
- * Operator dashboard — run a diagnostic.
- * @param {string} diagId - Diagnostic ID
+ * Run a diagnostic by ID.
+ * @param {string} diagId - Diagnostic identifier
  * @returns {Promise<OperatorDiagnosticResult>}
  */
 export async function runOperatorDiagnostic(diagId) {
@@ -307,33 +260,97 @@ export async function runOperatorDiagnostic(diagId) {
 }
 
 /**
- * Operator dashboard — system health summary.
- * @returns {Promise<OperatorHealth>}
+ * Retry a failed request by moving it back to incoming queue.
+ * @param {string} requestId - UUID of the request
+ * @returns {Promise<{ requestId: string, previousState: string, newState: string }>}
+ * @throws {Error} On network failure, 400, 404, or 409 response
  */
-export async function operatorHealth() {
-  const response = await fetch(`${BASE}/api/operator/health`);
+export async function retryFailedRequest(requestId) {
+  const response = await fetch(`${BASE}/api/operator/requests/retry`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ requestId }),
+  });
+  if (!response.ok) throw new Error(`Retry failed: ${response.status}`);
   return response.json();
 }
 
 /**
- * Operator dashboard — universal search across requests.
- * @param {string} query - request ID, infohash, media ID, or title
- * @returns {Promise<OperatorSearchResult>}
+ * Reset a stuck processing request back to incoming queue.
+ * @param {string} requestId - UUID of the request
+ * @returns {Promise<{ requestId: string, previousState: string, newState: string }>}
+ * @throws {Error} On network failure, 400, 404, or 409 response
  */
-export async function operatorUniversalSearch(query) {
-  // Try request ID first
-  if (/^[0-9a-f-]{36}$/i.test(query)) {
-    try {
-      const detail = await getOperatorRequest(query);
-      return { type: 'request', result: detail };
-    } catch { /* not found */ }
-  }
-  // Fall back to listing and searching
-  const all = await listOperatorRequests('all');
-  const matches = all.requests.filter(r =>
-    r.mediaId?.includes(query) ||
-    r.mediaTitle?.toLowerCase().includes(query.toLowerCase()) ||
-    r.releaseTitle?.toLowerCase().includes(query.toLowerCase())
-  );
-  return { type: 'search', matches };
+export async function resetStuckRequest(requestId) {
+  const response = await fetch(`${BASE}/api/operator/requests/reset`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ requestId }),
+  });
+  if (!response.ok) throw new Error(`Reset failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Delete an orphaned request from all queue directories.
+ * @param {string} requestId - UUID of the request
+ * @returns {Promise<{ requestId: string, previousState: string, newState: string }>}
+ * @throws {Error} On network failure, 400, or 404 response
+ */
+export async function deleteOrphanedRequest(requestId) {
+  const response = await fetch(`${BASE}/api/operator/requests/delete-orphan`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ requestId }),
+  });
+  if (!response.ok) throw new Error(`Delete orphan failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Get request lifecycle health — identifies stuck, orphaned, and invalid requests.
+ * @returns {Promise<{ orphaned: Array, stuck: Array, invalid: Array, healthyCount: number }>}
+ * @throws {Error} On network failure
+ */
+export async function getRequestHealth() {
+  const response = await fetch(`${BASE}/api/operator/requests/health`);
+  if (!response.ok) throw new Error(`Request health check failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Inspect all requests — returns structured data model with recommendations.
+ * @returns {Promise<{ requests: Array, recommendations: Array, summary: Object }>}
+ * @throws {Error} On network failure
+ */
+export async function inspectAllRequests() {
+  const response = await fetch(`${BASE}/api/operator/requests/inspect`);
+  if (!response.ok) throw new Error(`Request inspection failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Inspect a single request by ID.
+ * @param {string} requestId - UUID of the request
+ * @returns {Promise<{ request: Object }>}
+ * @throws {Error} On network failure or 404
+ */
+export async function inspectRequest(requestId) {
+  const response = await fetch(`${BASE}/api/operator/requests/${requestId}/inspect`);
+  if (!response.ok) throw new Error(`Request inspection failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Internal search via FTS5 (DMM corpus).
+ * @param {string} query - Search query
+ * @param {number} [limit=50] - Max results
+ * @param {number} [offset=0] - Pagination offset
+ * @returns {Promise<InternalSearchResult>}
+ */
+export async function searchDmmCorpus(query, limit = 50, offset = 0) {
+  const params = new URLSearchParams({ q: query, limit: String(limit), offset: String(offset) });
+  const response = await fetch(`${BASE}/api/search/internal?${params}`);
+  if (!response.ok) throw new Error(`Internal search failed: ${response.status}`);
+  return response.json();
 }

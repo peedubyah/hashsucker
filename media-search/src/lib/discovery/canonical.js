@@ -39,6 +39,22 @@ import { createReleaseIdentity, createReleaseKey } from '../../api/release-contr
  * @property {Array<Object>} providerEvidence - Complete current typed provider evidence
  * @property {Array<Object>} sources - Provenance sources for evidence
  *   Each source: { origin, evidence, confidence, evidenceType }
+ * @property {CandidateProvenance} provenance - Flight recorder for explainability
+ */
+
+/**
+ * Candidate provenance — flight recorder for explainability.
+ * Attached to every candidate entering the pipeline.
+ * Immutable once created.
+ *
+ * @typedef {Object} CandidateProvenance
+ * @property {string} source - Human-readable source name: 'dmm-corpus', 'torrentio', 'comet', 'torznab'
+ * @property {'stored'|'live'} sourceType - 'stored' (persisted in DMM corpus) or 'live' (real-time discovery)
+ * @property {string} releaseKey - Exact release identity at discovery time
+ * @property {string} hash - infoHash (redundant with releaseKey but explicit for flight recorder)
+ * @property {string} discoveredAt - ISO 8601 timestamp when this candidate entered the pipeline
+ * @property {number} metadataConfidence - Confidence in parsed metadata (0.0-1.0)
+ * @property {'cached'|'uncached'|'unknown'} cacheState - Provider cache state at discovery time
  */
 
 /**
@@ -59,6 +75,10 @@ export function toCanonicalLocal(row) {
   const hash = row.hash;
   const fileIndex = row.fileIndex ?? null;
   const releaseKey = row.releaseKey || createReleaseKey(hash, fileIndex);
+  const parserConfidence = row.confidence ?? row.components?.releaseConfidence ?? 0.5;
+  const providerObservations = normalizeProviderObservations(row.providerObservations ?? row.providers)
+    .filter(isRankEligibleProviderObservation);
+  const providerEvidence = normalizeProviderObservations(row.providerEvidence ?? row.providers);
 
   return {
     hash,
@@ -67,19 +87,26 @@ export function toCanonicalLocal(row) {
     filename: row.filename,
     relevance: row.relevance ?? row.components?.relevance ?? 0,
     releaseAttributes: normalizeReleaseAttributes(row.parsed || row.releaseAttributes || {}),
-    parserConfidence: row.confidence ?? row.components?.releaseConfidence ?? 0.5,
+    parserConfidence,
     mediaAssociations: normalizeMediaAssociations(row.media),
-    providerObservations: normalizeProviderObservations(row.providerObservations ?? row.providers)
-      .filter(isRankEligibleProviderObservation),
-    providerEvidence: normalizeProviderObservations(row.providerEvidence ?? row.providers),
+    providerObservations,
+    providerEvidence,
     sources: [
       {
         origin: 'corpus',
         evidence: row.evidence || [],
-        confidence: row.confidence ?? 0.5,
+        confidence: parserConfidence,
         evidenceType: 'fts5-ranked',
       },
     ],
+    provenance: buildProvenance({
+      source: 'dmm-corpus',
+      sourceType: 'stored',
+      releaseKey,
+      hash,
+      metadataConfidence: parserConfidence,
+      providerObservations: providerEvidence,
+    }),
   };
 }
 
@@ -172,6 +199,17 @@ export function toCanonicalLive(raw, options = {}) {
     });
   }
 
+  // Determine source name from preserved addon sources or provider hints
+  let sourceName = 'live-discovery';
+  if (raw.sources && Array.isArray(raw.sources) && raw.sources.length > 0) {
+    sourceName = raw.sources[0].addonName || raw.sources[0].addonId || sourceName;
+  } else if (raw.providers && typeof raw.providers === 'object') {
+    const providerKeys = Object.keys(raw.providers);
+    if (providerKeys.length > 0) {
+      sourceName = providerKeys[0];
+    }
+  }
+
   return {
     hash,
     fileIndex,
@@ -195,6 +233,14 @@ export function toCanonicalLive(raw, options = {}) {
     // identity confidence. It simply records that the live source was already
     // filtered to the selected media before reaching the global ranker.
     selectedMediaId,
+    provenance: buildProvenance({
+      source: sourceName,
+      sourceType: 'live',
+      releaseKey,
+      hash,
+      metadataConfidence: raw.confidence ?? 0.5,
+      providerHints: raw.providers || null,
+    }),
   };
 }
 
@@ -315,6 +361,7 @@ export function mergeExactDuplicates(existing, incoming) {
     providerEvidence: mergedProviderEvidence,
     sources: mergedSources,
     selectedMediaId: mergedSelectedMediaId,
+    provenance: mergeProvenance(existing.provenance, incoming.provenance),
   };
 }
 
@@ -382,8 +429,87 @@ function normalizeMediaAssociations(media) {
   }));
 }
 
+/** * Build immutable candidate provenance.
+ *
+ * @param {Object} params
+ * @param {string} params.source - Human-readable source name
+ * @param {'stored'|'live'} params.sourceType - Stored or live
+ * @param {string} params.releaseKey - Exact release identity
+ * @param {string} params.hash - infoHash
+ * @param {number} params.metadataConfidence - Metadata confidence (0.0-1.0)
+ * @param {Array<Object>} [params.providerObservations] - Provider observations (for stored)
+ * @param {Object} [params.providerHints] - Provider hints (for live)
+ * @returns {CandidateProvenance}
+ */
+function buildProvenance({ source, sourceType, releaseKey, hash, metadataConfidence, providerObservations = [], providerHints = null }) {
+  let cacheState = 'unknown';
+
+  if (providerHints && typeof providerHints === 'object' && Object.keys(providerHints).length > 0) {
+    const hints = Object.values(providerHints).filter(h => h && typeof h === 'object');
+    const cached = hints.filter(h => h.cached === true);
+    const uncached = hints.filter(h => h.cached === false);
+    if (cached.length > 0) cacheState = 'cached';
+    else if (uncached.length > 0) cacheState = 'uncached';
+  } else if (providerObservations.length > 0) {
+    const cached = providerObservations.filter(o => o.state === 'cached');
+    const uncached = providerObservations.filter(o => o.state === 'uncached');
+    if (cached.length > 0) cacheState = 'cached';
+    else if (uncached.length > 0) cacheState = 'uncached';
+  }
+
+  return Object.freeze({
+    source,
+    sourceType,
+    releaseKey,
+    hash,
+    discoveredAt: new Date().toISOString(),
+    metadataConfidence: Math.min(1.0, Math.max(0.0, metadataConfidence ?? 0.5)),
+    cacheState,
+  });
+}
+
 /**
- * Normalize provider observations to consistent shape.
+ * Merge provenance from two candidates with the same releaseKey.
+ *
+ * @param {CandidateProvenance} existing - First-seen provenance
+ * @param {CandidateProvenance} incoming - Duplicate provenance from other source
+ * @returns {CandidateProvenance} Merged provenance
+ */
+function mergeProvenance(existing, incoming) {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+
+  if (existing.source === incoming.source) {
+    return existing.metadataConfidence >= incoming.metadataConfidence ? existing : incoming;
+  }
+
+  const existingConf = existing.metadataConfidence ?? 0;
+  const incomingConf = incoming.metadataConfidence ?? 0;
+  const stronger = existingConf >= incomingConf ? existing : incoming;
+  const weaker = stronger === existing ? incoming : existing;
+
+  const cacheState = (existing.cacheState === 'cached' || incoming.cacheState === 'cached')
+    ? 'cached'
+    : (existing.cacheState === 'uncached' && incoming.cacheState === 'uncached')
+      ? 'uncached'
+      : 'unknown';
+
+  const discoveredAt = stronger.discoveredAt <= weaker.discoveredAt
+    ? stronger.discoveredAt
+    : weaker.discoveredAt;
+
+  return Object.freeze({
+    source: `${stronger.source}+${weaker.source}`,
+    sourceType: stronger.sourceType === 'live' || weaker.sourceType === 'live' ? 'live' : 'stored',
+    releaseKey: existing.releaseKey,
+    hash: existing.hash,
+    discoveredAt,
+    metadataConfidence: Math.max(existingConf, incomingConf),
+    cacheState,
+  });
+}
+
+/** * Normalize provider observations to consistent shape.
  *
  * @param {Array<Object>|Object|undefined} providers - Raw provider observations
  * @returns {Array<Object>} Normalized observations
@@ -467,5 +593,6 @@ export function toRankingInput(candidate) {
     providerEvidence: candidate.providerEvidence ?? candidate.providerObservations,
     sources: candidate.sources || [],
     selectedMediaId: candidate.selectedMediaId || null,
+    provenance: candidate.provenance || null,
   };
 }

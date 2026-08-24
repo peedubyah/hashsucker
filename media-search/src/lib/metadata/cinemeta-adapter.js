@@ -126,13 +126,36 @@ async function searchCinemeta(query, fetchImpl = fetch) {
     return 3;
   };
 
-  return payloads
+  // Confidence gate: reject unrelated fuzzy matches
+  // Cinemeta's search endpoint returns static popular results for all queries,
+  // so we must verify the result actually matches the query tokens.
+  const queryTokens = new Set(needle.split(/\s+/).filter(t => t.length > 2));
+  const confidenceThreshold = 0.5;
+
+  const hasOverlap = (resultTitle) => {
+    const resultTokens = new Set(String(resultTitle || '').toLowerCase().split(/\s+/).filter(t => t.length > 2));
+    const overlap = [...queryTokens].filter(t => resultTokens.has(t)).length;
+    const confidence = overlap / Math.max(queryTokens.size, 1);
+    return confidence >= confidenceThreshold;
+  };
+
+  const allResults = payloads
     .flatMap((payload) => payload.metas || [])
     .map(cinemetaToNormalized)
     .map((meta, index) => ({ meta, index }))
     .sort((a, b) => relevance({ name: a.meta.title }) - relevance({ name: b.meta.title }) || a.index - b.index)
-    .map(({ meta }) => meta)
-    .slice(0, 40);
+    .map(({ meta }) => meta);
+
+  // Filter to results that actually match the query
+  const confidentResults = allResults.filter(r => hasOverlap(r.title));
+
+  // If no results pass confidence gate, return unresolved (empty)
+  // Do not accept unrelated fuzzy matches — metadata is optional enrichment
+  if (confidentResults.length === 0) {
+    return [];
+  }
+
+  return confidentResults.slice(0, 40);
 }
 
 /**

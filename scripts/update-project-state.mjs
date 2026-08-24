@@ -306,9 +306,9 @@ async function renderState(root, generatedAt) {
 
   const integrationRows = [
     ['Cinemeta metadata', metadataWired ? 'implemented and wired to active title/media lookup' : 'not detected on active lookup path', 'optional `CINEMETA_BASE_URL`', 'unknown'],
-    ['Torrentio / TorBox discovery', stremioWired && stremioSearch.includes("addon_id: 'torrentio.torbox'") ? 'implemented on live discovery path' : 'not detected', 'required `TORBOX_API_KEY` in root Compose', 'unknown'],
-    ['Torrentio / Real-Debrid discovery', stremioWired && stremioSearch.includes("addon_id: 'torrentio.realdebrid'") ? 'discovery-only implementation' : 'not detected', 'optional `REALDEBRID_API_KEY`', 'unknown'],
-    ['Comet discovery', stremioWired && stremioSearch.includes("addon_id: 'comet.manual'") ? 'implemented on Stremio discovery path' : 'not detected', 'optional `COMET_MANIFEST_URL`', 'unknown'],
+    ['Torrentio / TorBox discovery', stremioWired && stremioSearch.includes("id: 'torrentio-torbox'") ? 'implemented on live discovery path' : 'not detected', 'required `TORBOX_API_KEY` in root Compose', 'unknown'],
+    ['Torrentio / Real-Debrid discovery', stremioWired && stremioSearch.includes("id: 'torrentio-realdebrid'") ? 'discovery-only implementation' : 'not detected', 'optional `REALDEBRID_API_KEY`', 'unknown'],
+    ['Comet discovery', stremioWired && stremioSearch.includes("id: 'comet-") ? 'implemented on Stremio discovery path' : 'not detected', 'optional `COMET_TORBOX_MANIFEST_URL`', 'unknown'],
     ['Torznab discovery', torznabWired ? 'implemented on live discovery path' : 'not detected', 'optional `TORZNAB_URLS`', 'unknown'],
     ['Direct TorBox cache adapter', providerModules.includes('torbox.js') ? (directTorboxImportedByActiveBridge ? 'implemented and imported by active server/live bridge' : 'implemented; not imported by active server/live bridge') : 'not detected', '`TORBOX_API_KEY`', 'unknown'],
     ['TorBox physical fulfillment', rootHasImporter ? 'implemented by `torbox-importer`' : 'not detected in root Compose', 'required TorBox/importer paths in root Compose', 'unknown'],

@@ -38,6 +38,8 @@
  */
 
 import { createReleaseIdentity, createReleaseKey } from '../../api/release-contract.js';
+import { emit, EVENTS } from '../../lib/trace/events.js';
+import { inc, recordScore, recordTopNCacheState } from '../../lib/metrics.js';
 import { rankHits } from './ranking.js';
 import { isEpisodeCovered } from './episode-coverage.js';
 import { evaluateEligibility, RejectionReason } from './rejection.js';
@@ -259,8 +261,24 @@ function providerBonus(cache, infoHash, fileIndex) {
  */
 export function searchReleases(cache, options = {}) {
   if (!cache) {
+    emit(EVENTS.DISCOVERY_SEARCH, { query: options.query, mediaId: options.mediaId, cache: false });
     return { results: [], total: 0, query: {} };
   }
+
+  emit(EVENTS.DISCOVERY_SEARCH, {
+    query: options.query,
+    mediaId: options.mediaId,
+    filters: {
+      year: options.year,
+      season: options.season,
+      episode: options.episode,
+      resolution: options.resolution,
+      source: options.source,
+      codec: options.codec,
+      hdr: options.hdr,
+      audio: options.audio,
+    },
+  });
 
   const {
     query = '',
@@ -609,7 +627,7 @@ export async function combinedSearch(cache, options = {}) {
       }
     } catch (error) {
       // Live discovery failure must not break corpus results
-      console.error(`Live discovery failed: ${error.message}`);
+      emit(EVENTS.DISCOVERY_ERROR, { scope: 'live', error: error.message });
     }
   }
 
@@ -674,6 +692,68 @@ export async function combinedSearch(cache, options = {}) {
 
   // Map to UI-compatible shape if requested
   const mappedResults = mode === 'ui' ? results.map(mapToUIShape) : results;
+
+  // Record metrics for each candidate
+  for (const [index, result] of mappedResults.entries()) {
+    const position = index + 1;
+
+    // Source tracking
+    inc('candidate_sources_total');
+    const source = result._source || determineSourceOrigin(result);
+    if (source === 'corpus' || source === 'merged') {
+      inc('torrentio_candidates'); // Legacy name for corpus candidates
+    }
+    if (source === 'live' || source === 'merged') {
+      inc('comet_candidates'); // Live candidates
+    }
+
+    // Score distribution
+    if (result.score != null) {
+      recordScore(result.score);
+    }
+
+    // Cache state tracking
+    const cacheState = result.providers?.torbox?.cached;
+    if (cacheState === true) {
+      inc('cached_candidates');
+    } else if (cacheState === false) {
+      inc('uncached_candidates');
+    } else {
+      inc('unknown_cache_state');
+    }
+
+    // Top-N cache state
+    recordTopNCacheState(position, cacheState === true);
+  }
+
+  // Track winner (first result)
+  if (mappedResults.length > 0) {
+    const winner = mappedResults[0];
+    const winnerSource = winner._source || determineSourceOrigin(winner);
+    if (winnerSource === 'corpus') {
+      inc('winner_source_corpus');
+    } else if (winnerSource === 'live') {
+      inc('winner_source_live');
+    } else if (winnerSource === 'merged') {
+      inc('winner_source_merged');
+    }
+
+    const winnerCache = winner.providers?.torbox?.cached;
+    if (winnerCache === true) {
+      inc('winner_cache_cached');
+    } else if (winnerCache === false) {
+      inc('winner_cache_uncached');
+    } else {
+      inc('winner_cache_unknown');
+    }
+  }
+
+  emit(EVENTS.DISCOVERY_RESULT, {
+    query: corpusResult.query,
+    mediaId: options.mediaId,
+    results: mappedResults.length,
+    total,
+  });
 
   return {
     results: mappedResults,
@@ -754,6 +834,7 @@ function mapToUIShape(r) {
     // Preserve provenance through to the UI/public shape
     _sources: r.sources || [],
     _selectedMediaId: r.selectedMediaId || null,
+    _provenance: r.provenance || null,
   };
 }
 

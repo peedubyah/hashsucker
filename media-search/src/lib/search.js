@@ -1,4 +1,5 @@
 import { createReleaseIdentity } from '../api/release-contract.js';
+import { emit, EVENTS } from '../lib/trace/events.js';
 import { searchStremio, loadDiscoveryAddons } from './stremio/search.js';
 import { mergeStreams } from './stremio/normalize.js';
 import { searchTorznab } from './torznab/torznab.js';
@@ -17,7 +18,7 @@ function getCache() {
     cacheInstance = createDiscoveryCache({ dbPath });
   } catch (error) {
     cacheInitError = error;
-    console.error(`Discovery cache initialization failed: ${error.message}`);
+    emit(EVENTS.DISCOVERY_ERROR, { scope: 'cache_init', error: error.message });
   }
   return cacheInstance;
 }
@@ -51,9 +52,7 @@ async function writeToCache(results, providerStatus, searchKey = null) {
 
   const safe = withCacheFailureIsolation(cache, (error) => {
     if (!cache.isClosed()) {
-      console.error(`Discovery cache write failed: ${error.message}`);
-    }
-  });
+        emit(EVENTS.DISCOVERY_ERROR, { scope: 'cache_write', error: error.message });
 
   for (const item of results) {
     const candidate = {
@@ -161,7 +160,7 @@ async function enrichAndFinalize(results, intent, dependencies) {
 
   const startedAt = performance.now();
   const addons = await loadAddons();
-  const configuredProviders = new Set(addons?.map((a) => a.provider) || []);
+  const configuredProviders = new Set(addons?.map((a) => a.debridProvider).filter(Boolean) || []);
 
   const hasTorboxKey = configuredProviders.has('torbox');
   const hashes = results.map((item) => item.infoHash).filter(Boolean);
