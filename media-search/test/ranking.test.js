@@ -424,6 +424,131 @@ test('getWeights: returns weight configuration', () => {
   assert.ok(Math.abs(sum - 1.0) < 0.001);
 });
 
+// =============================================================================
+// Ranking Justification Tests
+// =============================================================================
+
+test('rankHit: attaches justification with score breakdown', () => {
+  const result = rankHit({
+    hash: HASH1,
+    fileIndex: 0,
+    releaseKey: `${HASH1}:0`,
+    filename: 'Movie.2024.1080p.BluRay.x265.mkv',
+    relevance: 0.85,
+    releaseAttributes: { resolution: '1080p', sourceType: 'BluRay', codec: 'x265' },
+    parserConfidence: 0.9,
+    mediaAssociations: [{ mediaId: 'tt123', confidence: 0.95 }],
+    providerObservations: [{ provider: 'torbox', cached: true, state: 'cached', observedAt: 10_000, kind: 'authoritative', freshness: 'fresh', fresh: true }],
+  });
+
+  assert.ok(result.justification, 'justification must exist');
+  assert.equal(result.justification.candidate.hash, HASH1);
+  assert.equal(result.justification.candidate.fileIndex, 0);
+  assert.equal(result.justification.candidate.releaseKey, `${HASH1}:0`);
+  assert.equal(result.justification.candidate.filename, 'Movie.2024.1080p.BluRay.x265.mkv');
+  assert.equal(result.justification.finalScore, result.score);
+  assert.ok(result.justification.scoreBreakdown, 'scoreBreakdown must exist');
+  assert.ok(typeof result.justification.scoreBreakdown.cacheScore === 'number');
+  assert.ok(typeof result.justification.scoreBreakdown.qualityScore === 'number');
+  assert.ok(typeof result.justification.scoreBreakdown.sourceScore === 'number');
+  assert.ok(typeof result.justification.scoreBreakdown.metadataScore === 'number');
+  assert.ok(typeof result.justification.scoreBreakdown.popularityScore === 'number');
+  assert.ok(result.justification.weights, 'weights must exist');
+});
+
+test('rankHit: justification does not change score', () => {
+  const hit = {
+    hash: HASH1,
+    fileIndex: null,
+    filename: 'test.mkv',
+    relevance: 0.7,
+    releaseAttributes: { resolution: '1080p', sourceType: 'BluRay' },
+    parserConfidence: 0.8,
+    mediaAssociations: [],
+    providerObservations: [],
+  };
+
+  const result = rankHit(hit);
+  // Score is computed from components, not affected by justification
+  const expectedScore = (
+    0.7 * 0.25 +  // relevance
+    result.components.quality * 0.20 +
+    0.8 * 0.20 +  // releaseConfidence
+    0.5 * 0.15 +  // identityConfidence (neutral)
+    0.5 * 0.10 +  // providerAvailability (neutral)
+    0.5 * 0.10    // episodeMatch (neutral)
+  );
+  assert.ok(Math.abs(result.score - expectedScore) < 0.01, 'score unchanged by justification');
+});
+
+test('rankHits: assigns rank starting from 1', () => {
+  const hits = [
+    { hash: HASH1, filename: 'low.mkv', relevance: 0.3, releaseAttributes: { resolution: '480p' }, parserConfidence: 0.5 },
+    { hash: HASH2, filename: 'high.mkv', relevance: 0.9, releaseAttributes: { resolution: '2160p' }, parserConfidence: 0.9 },
+    { hash: HASH3, filename: 'mid.mkv', relevance: 0.6, releaseAttributes: { resolution: '1080p' }, parserConfidence: 0.8 },
+  ];
+
+  const ranked = rankHits(hits);
+
+  assert.equal(ranked.length, 3);
+  assert.equal(ranked[0].justification.rank, 1);
+  assert.equal(ranked[1].justification.rank, 2);
+  assert.equal(ranked[2].justification.rank, 3);
+});
+
+test('rankHits: rank matches sorted position', () => {
+  const hits = [
+    { hash: HASH1, filename: 'a.mkv', relevance: 0.5, releaseAttributes: {}, parserConfidence: 0.5 },
+    { hash: HASH2, filename: 'b.mkv', relevance: 0.9, releaseAttributes: { resolution: '2160p' }, parserConfidence: 0.9 },
+    { hash: HASH3, filename: 'c.mkv', relevance: 0.7, releaseAttributes: { resolution: '1080p' }, parserConfidence: 0.7 },
+  ];
+
+  const ranked = rankHits(hits);
+
+  // Highest score should be rank 1
+  const maxScore = Math.max(...ranked.map(r => r.score));
+  const topRanked = ranked.find(r => r.score === maxScore);
+  assert.equal(topRanked.justification.rank, 1);
+});
+
+test('rankHit: justification scoreBreakdown maps to components', () => {
+  const result = rankHit({
+    hash: HASH1,
+    fileIndex: null,
+    filename: 'test.mkv',
+    relevance: 0.8,
+    releaseAttributes: { resolution: '1080p', sourceType: 'BluRay' },
+    parserConfidence: 0.85,
+    mediaAssociations: [{ mediaId: 'tt123', confidence: 0.9 }],
+    providerObservations: [{ provider: 'torbox', cached: true, state: 'cached', observedAt: 10_000, kind: 'authoritative', freshness: 'fresh', fresh: true }],
+  });
+
+  // scoreBreakdown maps to component scores (possibly renamed for clarity)
+  assert.equal(result.justification.scoreBreakdown.cacheScore, result.components.providerAvailability);
+  assert.equal(result.justification.scoreBreakdown.qualityScore, result.components.quality);
+  assert.equal(result.justification.scoreBreakdown.sourceScore, result.components.releaseConfidence);
+  assert.equal(result.justification.scoreBreakdown.metadataScore, result.components.identityConfidence);
+  assert.equal(result.justification.scoreBreakdown.popularityScore, result.components.relevance);
+});
+
+test('rankHit: justification is immutable', () => {
+  const result = rankHit({
+    hash: HASH1,
+    fileIndex: null,
+    filename: 'test.mkv',
+    relevance: 0.5,
+    releaseAttributes: {},
+    parserConfidence: 0.5,
+    mediaAssociations: [],
+    providerObservations: [],
+  });
+
+  // Should not be able to modify justification
+  assert.throws(() => {
+    result.justification.finalScore = 999;
+  }, /Cannot assign to read only property|Cannot set property/);
+});
+
 test('rankHit: does not mutate input', () => {
   const hit = {
     hash: HASH1,

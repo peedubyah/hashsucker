@@ -6,6 +6,18 @@ import { inc } from '../../lib/metrics.js';
 
 const LEGACY_REQUEST_DIR = path.resolve('data/requests');
 
+/**
+ * Queue a handoff for processing.
+ *
+ * Attaches timing metadata to the handoff so the full lifecycle
+ * can be reconstructed from the persisted request file.
+ *
+ * @param {Object} handoff - Handoff object from createHandoff()
+ * @param {Object} options
+ * @param {string} options.requestDir - Directory to write to
+ * @param {Object} [options.timing] - RequestTiming summary to persist
+ * @returns {Promise<string>} Path to the written file
+ */
 export async function queueHandoff(handoff, options = {}) {
   if (!handoff?.requestId) {
     throw new Error('handoff requestId is required');
@@ -22,7 +34,12 @@ export async function queueHandoff(handoff, options = {}) {
   const finalPath = path.join(requestDir, filename);
   const tempPath = `${finalPath}.tmp`;
 
-  const body = `${JSON.stringify(handoff, null, 2)}\n`;
+  // Attach timing metadata to the handoff for lifecycle tracking
+  const handoffWithTiming = options.timing
+    ? { ...handoff, timing: options.timing }
+    : handoff;
+
+  const body = `${JSON.stringify(handoffWithTiming, null, 2)}\n`;
 
   try {
     // Write-then-rename means consumers never see half-written JSON.

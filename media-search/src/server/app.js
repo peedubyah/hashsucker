@@ -24,10 +24,13 @@ import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { searchTitles, getMediaById, getCacheMetrics } from '../lib/metadata/unified-search.js';
 import { createHandoff, HANDLING_MODES } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
-import { searchReleases, combinedSearch, getSearchStats } from '../lib/discovery/search-engine.js';
-import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
+import { searchReleases, combinedSearch, searchTrace, getSearchStats } from '../lib/discovery/search-engine.js';
+import { runLiveDiscovery, runLiveDiscoveryWithCounts } from '../lib/discovery/live-bridge.js';
+import { formatSearchTrace } from '../lib/discovery/search-trace-formatter.js';
 import { createDiscoveryCache } from '../lib/discovery/cache.js';
+import { createSearchDecisionStore, decisionFromTrace } from '../lib/discovery/search-decisions.js';
 import { runDMMIngestion } from '../lib/discovery/dmm-ingestion-runner.js';
+import { emit, EVENTS } from '../lib/trace/events.js';
 import { runAttributeWorker } from '../lib/discovery/attribute-worker.js';
 import { resolveProjection, parseIdentityFromParams, ResolverError } from '../lib/resolver/resolver.js';
 import { buildMediaSource, SourceError } from '../lib/resolver/source.js';
@@ -35,6 +38,12 @@ import { createMediaStream, canTransport, TransportError } from '../lib/resolver
 import { liveness, readiness } from '../lib/health.js';
 import { getMetrics } from '../lib/metrics.js';
 import { getRequestDebug } from '../lib/debug.js';
+import { createRequestTiming } from '../lib/requests/timing.js';
+import { formatRequestTiming, formatSearchTiming, formatTimingComparison, formatFailedRequest } from '../lib/requests/timing-formatter.js';
+import { createWorkerVisibility } from '../lib/operator/worker-visibility.js';
+import { formatWorkerStatus } from '../lib/operator/worker-formatter.js';
+import { createLifecycleEventStore } from '../lib/operator/event-store.js';
+import { formatRequestTimeline, formatRecentRuns, formatFailedRuns } from '../lib/operator/event-formatter.js';
 
 const CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -371,6 +380,10 @@ export function createRequestHandler(dependencies = {}) {
   // Defaults to in-memory for testing (when no dbPath provided).
   const dbPath = dependencies.dbPath || process.env.DISCOVERY_DB;
   const searchCache = dependencies.searchCache || dependencies.discoveryCache || createDiscoveryCache(dbPath ? { dbPath } : {});
+  const searchDecisionDbPath = dependencies.searchDecisionDbPath || process.env.SEARCH_DECISIONS_DB;
+  const searchDecisionStore = dependencies.searchDecisionStore || createSearchDecisionStore(searchDecisionDbPath ? { dbPath: searchDecisionDbPath } : {});
+  const eventStoreDbPath = dependencies.eventStoreDbPath || process.env.EVENT_STORE_DB;
+  const eventStore = dependencies.eventStore || createLifecycleEventStore(eventStoreDbPath ? { dbPath: eventStoreDbPath } : {});
   const controlPlaneStore = dependencies.controlPlaneStore ?? null;
   const controlPlaneHealth = dependencies.getControlPlaneHealth || getControlPlaneHealth;
   const clock = dependencies.now || (() => Date.now());
@@ -393,7 +406,102 @@ export function createRequestHandler(dependencies = {}) {
       const debugMatch = request.method === 'GET' && url.pathname.match(/^\/api\/debug\/request\/([0-9a-f-]{36})$/i);
       if (debugMatch) {
         const debug = await getRequestDebug(debugMatch[1], { env });
+        // Support text output for terminal/console consumption
+        const format = url.searchParams.get('format');
+        if (format === 'text') {
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+          if (!debug.found) {
+            response.end(`REQUEST NOT FOUND\n\nRequest ID: ${debugMatch[1]}`);
+            return;
+          }
+          // Check if this is a failed request - use failed formatter
+          const timing = debug.timing || debug.request?.timing;
+          if (timing?.failure || debug.finalState?.status === 'failed') {
+            response.end(formatFailedRequest(debug));
+            return;
+          }
+          response.end(formatRequestTiming(timing));
+          return;
+        }
         return sendJson(response, debug.found ? 200 : 404, debug);
+      }
+      if (request.method === 'GET' && url.pathname === '/api/debug/search-trace') {
+        const startedAt = performance.now();
+        const params = url.searchParams;
+        const query = params.get('q') || '';
+        if (!query || query.length < 2) {
+          return sendJson(response, 400, { error: 'Query must be at least 2 characters' });
+        }
+        const mediaId = params.get('mediaId');
+        const type = params.get('type');
+        const intent = mediaId && type ? createRequestIntent({ type, mediaId }) : null;
+        const trace = await searchTrace(searchCache, {
+          query,
+          year: params.get('year') ? parseInt(params.get('year'), 10) : undefined,
+          season: intent?.season,
+          episode: intent?.episodes?.[0],
+          resolution: params.get('resolution') || undefined,
+          source: params.get('source') || undefined,
+          codec: params.get('codec') || undefined,
+          hdr: params.get('hdr') === 'true' ? 1 : params.get('hdr') === 'false' ? 0 : undefined,
+          audio: params.get('audio') || undefined,
+          limit: params.get('limit') ? Math.min(parseInt(params.get('limit'), 10), 100) : 50,
+          offset: params.get('offset') ? parseInt(params.get('offset'), 10) : 0,
+          includeLive: true,
+          mode: 'ui',
+          mediaId: mediaId || null,
+          liveDiscoveryFnWithCounts: mediaId
+            ? async () => runLiveDiscoveryWithCounts(mediaId, {
+                season: intent?.season,
+                episode: intent?.episodes?.[0],
+              })
+            : null,
+        });
+        const output = {
+          ...trace,
+          timings: { totalMs: Math.round(performance.now() - startedAt) },
+        };
+        // Persist decision record (fire-and-forget, non-blocking)
+        if (params.get('record') !== 'false') {
+          try {
+            const decision = decisionFromTrace(trace, mediaId);
+            searchDecisionStore.recordDecision(decision);
+          } catch (e) {
+            // Decision storage failure must not break search
+            emit(EVENTS.DISCOVERY_ERROR, { scope: 'search-decision', error: e.message });
+          }
+        }
+        // Support text output for terminal/console consumption
+        if (params.get('format') === 'text') {
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+          response.end(formatSearchTrace(output));
+          return;
+        }
+        // Support timing-only output
+        if (params.get('format') === 'timing') {
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+          response.end(formatSearchTiming(output.timing));
+          return;
+        }
+        return sendJson(response, 200, output);
+      }
+      // Stored search decisions — for cache confidence model training
+      if (request.method === 'GET' && url.pathname === '/api/debug/search-decisions') {
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
+        const query = url.searchParams.get('q');
+        const decisions = query
+          ? searchDecisionStore.getDecisionsByQuery(query, limit)
+          : searchDecisionStore.getRecentDecisions(limit);
+        // Support timing comparison output
+        if (url.searchParams.get('format') === 'timing') {
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+          response.end(formatTimingComparison(decisions.map(d => d.timing || {})));
+          return;
+        }
+        return sendJson(response, 200, {
+          total: searchDecisionStore.countDecisions(),
+          decisions,
+        });
       }
       if (request.method === 'GET' && url.pathname === '/api/control-plane/health') {
         return sendJson(response, 200, controlPlaneHealth({ now: clock }));
@@ -560,48 +668,73 @@ export function createRequestHandler(dependencies = {}) {
       }
       if (request.method === 'POST' && url.pathname === '/api/requests') {
         const body = await readBody(request);
-        
-        emitEvent(EVENTS.REQUEST_RECEIVED, {
-          mediaId: body.mediaId,
-          handlingMode: body.handlingMode,
-        });
-        
-        let intent, release, handlingMode;
+        const timing = createRequestTiming('pending');
+
         try {
-          ({ intent, release, handlingMode } = validateSupportedRequest(body));
-        } catch (err) {
-          emitEvent(EVENTS.REQUEST_INVALID, {
-            mediaId: body.mediaId,
-            error: err.message,
+          timing.start('request.received', { mediaId: body.mediaId });
+          timing.end('request.received');
+
+          timing.start('identity.resolved');
+          let intent, release, handlingMode;
+          try {
+            ({ intent, release, handlingMode } = validateSupportedRequest(body));
+          } catch (err) {
+            timing.fail('identity.resolved', err.message);
+            throw err;
+          }
+          timing.end('identity.resolved', 'completed', {
+            mediaId: intent.mediaId,
+            releaseKey: `${release.infoHash}:${release.fileIndex ?? 'torrent'}`,
           });
+
+          timing.start('handoff.created');
+          const handoff = createHandoff({ intent, release, provider: 'torbox', handlingMode });
+          // Update timing with actual requestId now that we have one
+          timing.requestId = handoff.requestId;
+          timing.end('handoff.created', 'completed', {
+            requestId: handoff.requestId,
+            provider: 'torbox',
+            handlingMode,
+          });
+
+          timing.start('request.queued');
+          const result = await importer.submitRequest(handoff, { timing: timing.summary() });
+          timing.end('request.queued', 'completed', {
+            status: result.status,
+            path: result.path,
+          });
+
+          timing.complete();
+
+          // Persist to event store
+          try {
+            eventStore.recordRequestRun({
+              requestId: handoff.requestId,
+              mediaId: intent.mediaId,
+              releaseKey: handoff.release.releaseKey,
+              provider: 'torbox',
+              finalStatus: 'queued',
+              timingJson: timing.summary(),
+            });
+            eventStore.recordEvents(timing.getStages().map(s => ({
+              requestId: handoff.requestId,
+              stage: s.stage,
+              status: s.status === 'failed' ? 'failed' : 'completed',
+              durationMs: s.durationMs,
+              timestamp: s.startedAt,
+            })));
+          } catch (e) {
+            emit(EVENTS.DISCOVERY_ERROR, { scope: 'event-store', error: e.message });
+          }
+
+          return sendJson(response, 202, {
+            ...result,
+            timing: timing.summary(),
+          });
+        } catch (err) {
+          timing.complete();
           throw err;
         }
-        
-        emitEvent(EVENTS.REQUEST_VALIDATED, {
-          mediaId: intent.mediaId,
-          releaseKey: `${release.infoHash}:${release.fileIndex ?? 'torrent'}`,
-          handlingMode,
-        });
-        
-        const handoff = createHandoff({ intent, release, provider: 'torbox', handlingMode });
-        
-        emitEvent(EVENTS.HANDOFF_CREATED, {
-          requestId: handoff.requestId,
-          mediaId: intent.mediaId,
-          releaseKey: handoff.release.releaseKey,
-          handlingMode,
-          provider: 'torbox',
-        });
-        
-        const result = await importer.submitRequest(handoff);
-        
-        emitEvent(EVENTS.QUEUE_WRITE, {
-          requestId: handoff.requestId,
-          status: result.status,
-          path: result.path,
-        });
-        
-        return sendJson(response, 202, result);
       }
       const statusMatch = request.method === 'GET' && url.pathname.match(/^\/api\/requests\/([0-9a-f-]{36})$/i);
       if (statusMatch) {
@@ -745,6 +878,58 @@ export function createRequestHandler(dependencies = {}) {
             updatedAt: r.request?.updatedAt || r.request?.updated_at || null,
           }));
         return sendJson(response, 200, { logs: recent });
+      }
+      // Worker visibility endpoint
+      if (request.method === 'GET' && url.pathname === '/api/operator/workers') {
+        const workerVisibility = createWorkerVisibility({ requestsRoot: operatorRoot, now: clock });
+        const status = await workerVisibility.getStatus();
+        // Support text output for terminal/console consumption
+        if (url.searchParams.get('format') === 'text') {
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+          response.end(formatWorkerStatus(status));
+          return;
+        }
+        return sendJson(response, 200, status);
+      }
+      // Event store endpoints — persistent lifecycle history
+      if (request.method === 'GET' && url.pathname === '/api/operator/events/recent') {
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
+        const runs = eventStore.getRecentRuns(limit);
+        if (url.searchParams.get('format') === 'text') {
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+          response.end(formatRecentRuns(runs));
+          return;
+        }
+        return sendJson(response, 200, { runs, total: eventStore.countRequestRuns() });
+      }
+      const eventRequestMatch = request.method === 'GET'
+        && url.pathname.match(/^\/api\/operator\/events\/request\/([0-9a-f-]{36})$/i);
+      if (eventRequestMatch) {
+        const reqId = eventRequestMatch[1];
+        const timeline = eventStore.getRequestTimeline(reqId);
+        if (url.searchParams.get('format') === 'text') {
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+          response.end(formatRequestTimeline(timeline));
+          return;
+        }
+        return sendJson(response, timeline ? 200 : 404, timeline || { error: 'Request not found' });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/operator/events/failed') {
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
+        const runs = eventStore.getFailedRuns(limit);
+        if (url.searchParams.get('format') === 'text') {
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+          response.end(formatFailedRuns(runs));
+          return;
+        }
+        return sendJson(response, 200, { runs, total: runs.length });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/operator/events/stats') {
+        return sendJson(response, 200, {
+          totalRuns: eventStore.countRequestRuns(),
+          totalEvents: eventStore.countLifecycleEvents(),
+          byStatus: eventStore.countRunsByStatus(),
+        });
       }
       if (request.method === 'GET' && url.pathname === '/api/operator/diagnostics') {
         return sendJson(response, 200, { available: listDiagnostics() });

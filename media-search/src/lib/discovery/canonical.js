@@ -371,15 +371,25 @@ export function mergeExactDuplicates(existing, incoming) {
  * For each releaseKey, keeps the first occurrence and merges subsequent
  * duplicates using mergeExactDuplicates().
  *
+ * Tracks duplicate rejections so no candidate is silently discarded.
+ *
  * @param {CanonicalCandidate[]} candidates - Mixed local + live candidates
+ * @param {Object} [options] - Options
+ * @param {Function} [options.onDuplicate] - Callback(duplicateKey, survivingKey) for each dedup
  * @returns {CanonicalCandidate[]} Deduplicated candidates
  */
-export function deduplicateByReleaseKey(candidates) {
+export function deduplicateByReleaseKey(candidates, options = {}) {
+  const { onDuplicate } = options;
   const byKey = new Map();
   for (const candidate of candidates) {
     const key = candidate.releaseKey;
     if (byKey.has(key)) {
-      byKey.set(key, mergeExactDuplicates(byKey.get(key), candidate));
+      const existing = byKey.get(key);
+      const merged = mergeExactDuplicates(existing, candidate);
+      byKey.set(key, merged);
+      if (onDuplicate) {
+        onDuplicate(candidate, merged);
+      }
     } else {
       byKey.set(key, candidate);
     }

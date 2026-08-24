@@ -100,6 +100,11 @@ export async function getRequestDebug(requestId, options = {}) {
       failedAt: req.failedAt || req.failed_at || null,
       lastError: req.lastError || req.last_error || null,
     };
+
+    // Timing summary — expose lifecycle timing for operator console
+    if (req.timing) {
+      result.timing = req.timing;
+    }
   }
 
   return result;

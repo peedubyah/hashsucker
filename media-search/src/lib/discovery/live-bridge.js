@@ -62,3 +62,71 @@ export async function runLiveDiscovery(mediaId, options = {}) {
       confidence: r.confidence ?? 0.5,
     }));
 }
+
+/**
+ * Run live discovery with per-source counts.
+ *
+ * Like runLiveDiscovery but returns a breakdown of counts per source
+ * for diagnostic trace output. Source failures do not fail the whole
+ * trace — they are reported with count 0 and an error field.
+ *
+ * @param {string} mediaId - Media identifier
+ * @param {Object} options
+ * @param {number} [options.season]
+ * @param {number} [options.episode]
+ * @returns {Promise<{ releases: Array, sources: Object }>}
+ */
+export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
+  const { season, episode } = options;
+  const mediaType = episode != null ? 'series' : 'movie';
+
+  const results = await Promise.allSettled([
+    searchStremio({ type: mediaType, mediaId }),
+    searchTorznab({ type: mediaType, mediaId }),
+  ]);
+
+  const sources = {
+    torrentio: { count: 0, error: null },
+    torznab: { count: 0, error: null },
+  };
+
+  const allReleases = [];
+
+  const [stremioResult, torznabResult] = results;
+
+  if (stremioResult.status === 'fulfilled' && Array.isArray(stremioResult.value)) {
+    const valid = stremioResult.value.filter(r => r.infoHash);
+    sources.torrentio.count = valid.length;
+    allReleases.push(...valid);
+  } else if (stremioResult.status === 'rejected') {
+    sources.torrentio.error = stremioResult.reason?.message || 'unknown error';
+  }
+
+  if (torznabResult.status === 'fulfilled' && Array.isArray(torznabResult.value)) {
+    const valid = torznabResult.value.filter(r => r.infoHash);
+    sources.torznab.count = valid.length;
+    allReleases.push(...valid);
+  } else if (torznabResult.status === 'rejected') {
+    sources.torznab.error = torznabResult.reason?.message || 'unknown error';
+  }
+
+  // Normalize (same as runLiveDiscovery)
+  const releases = allReleases.map(r => ({
+    ...createReleaseIdentity(r.infoHash, r.fileIndex),
+    filename: r.filename || r.title,
+    title: r.title || r.filename,
+    year: r.year,
+    season: r.season,
+    episode: r.episode,
+    resolution: r.resolution,
+    source: r.source || r.quality,
+    codec: r.codec,
+    hdr: r.hdr,
+    audio: r.audio,
+    releaseGroup: r.releaseGroup,
+    providers: r.providers || {},
+    confidence: r.confidence ?? 0.5,
+  }));
+
+  return { releases, sources };
+}

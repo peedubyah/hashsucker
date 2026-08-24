@@ -24,11 +24,14 @@ export class QueueImporterClient extends ImporterClient {
     this.root = path.resolve(root);
   }
 
-  async submitRequest(handoff) {
+  async submitRequest(handoff, options = {}) {
     await Promise.all(LOCATIONS.map(([directory]) =>
       fs.mkdir(path.join(this.root, directory), { recursive: true })
     ));
-    await queueHandoff(handoff, { requestDir: path.join(this.root, 'incoming') });
+    await queueHandoff(handoff, {
+      requestDir: path.join(this.root, 'incoming'),
+      timing: options.timing || handoff.timing,
+    });
     return {
       requestId: handoff.requestId,
       status: 'queued',

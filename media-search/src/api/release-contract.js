@@ -23,6 +23,7 @@ const PUBLIC_RELEASE_FIELDS = [
   '_sources',
   '_selectedMediaId',
   '_provenance',
+  '_justification',
 ];
 
 function requireReleaseObject(release) {
@@ -99,7 +100,7 @@ export function toPublicReleaseDto(release) {
 
   // Required fields (excluding optional provenance/evidence added after v1)
   const requiredFields = PUBLIC_RELEASE_FIELDS.filter(
-    f => f !== '_sources' && f !== '_selectedMediaId' && f !== 'providerObservations' && f !== '_provenance'
+    f => f !== '_sources' && f !== '_selectedMediaId' && f !== 'providerObservations' && f !== '_provenance' && f !== '_justification'
   );
   for (const field of requiredFields) {
     if (!Object.hasOwn(value, field)) {
@@ -116,6 +117,9 @@ export function toPublicReleaseDto(release) {
     const provenance = value._provenance && typeof value._provenance === 'object'
       ? value._provenance
       : null;
+    const justification = value._justification && typeof value._justification === 'object'
+      ? value._justification
+      : null;
 
   return Object.fromEntries([
     ...Object.entries(identity),
@@ -124,6 +128,7 @@ export function toPublicReleaseDto(release) {
       if (field === '_selectedMediaId') return [field, selectedMediaId];
       if (field === 'providerObservations') return [field, providerObservations];
       if (field === '_provenance') return [field, provenance];
+      if (field === '_justification') return [field, justification];
       return [field, value[field]];
     }),
   ]);

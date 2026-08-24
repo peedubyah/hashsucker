@@ -277,11 +277,29 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     contributions.episodeMatch
   );
 
+  const roundedScore = Math.round(score * 1000) / 1000;
+
+  // Ranking justification — flight recorder for explainability.
+  // Does NOT change the score. Exposes the breakdown so operators can
+  // understand why a candidate won or lost.
+  const justification = Object.freeze({
+    candidate: { hash, fileIndex, releaseKey: hit.releaseKey || `${hash}:${fileIndex ?? 'torrent'}`, filename },
+    finalScore: roundedScore,
+    scoreBreakdown: Object.freeze({
+      cacheScore: Math.round(providerAvailability * 1000) / 1000,
+      qualityScore: Math.round(quality * 1000) / 1000,
+      sourceScore: Math.round(releaseConfidence * 1000) / 1000,
+      metadataScore: Math.round(identityConfidence * 1000) / 1000,
+      popularityScore: Math.round(relevance * 1000) / 1000,
+    }),
+    weights: Object.freeze({ ...WEIGHTS }),
+  });
+
   return {
     hash,
     fileIndex,
     filename,
-    score: Math.round(score * 1000) / 1000,
+    score: roundedScore,
     components: {
       relevance: Math.round(relevance * 1000) / 1000,
       quality: Math.round(quality * 1000) / 1000,
@@ -298,6 +316,7 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     sources,
     selectedMediaId,
     provenance: hit.provenance || null,
+    justification,
   };
 }
 
@@ -471,6 +490,13 @@ export function explainOrder(a, b) {
 export function rankHits(hits, queryIntent = {}, mediaId = null) {
   const ranked = hits.map(hit => rankHit(hit, queryIntent, mediaId));
   ranked.sort(compareHits);
+  // Assign rank (1-based position in sorted results)
+  for (let i = 0; i < ranked.length; i++) {
+    ranked[i].justification = Object.freeze({
+      ...ranked[i].justification,
+      rank: i + 1,
+    });
+  }
   return ranked;
 }
 

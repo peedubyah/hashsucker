@@ -42,7 +42,9 @@ import { emit, EVENTS } from '../../lib/trace/events.js';
 import { inc, recordScore, recordTopNCacheState } from '../../lib/metrics.js';
 import { rankHits } from './ranking.js';
 import { isEpisodeCovered } from './episode-coverage.js';
-import { evaluateEligibility, RejectionReason } from './rejection.js';
+import { evaluateEligibility } from './rejection.js';
+import { RejectionReason, RejectionTracker, createRejection } from './rejection-tracker.js';
+import { RequestTiming } from '../requests/timing.js';
 import {
   toCanonicalLocal,
   toCanonicalLive,
@@ -583,190 +585,422 @@ export async function combinedSearch(cache, options = {}) {
     ...searchOptions
   } = options;
 
-  // Stage 1 retrieval window: FIXED, independent of public page size.
-  //
-  // The 2000 default is PROVISIONAL. Empirical measurement against the real
-  // DMM corpus is required to validate or replace it. See roadmap Stage 3
-  // deferred measurement criterion.
-  //
-  // Public `limit` only controls post-rank pagination size — it never
-  // determines which candidates can win.
-  const effectiveRetrievalWindow = retrievalWindow
-    || parseInt(process.env.RETRIEVAL_WINDOW, 10)
-    || 2000;
+  // Timing instrumentation — non-blocking, fail-safe
+  const timing = new RequestTiming('combined-search');
 
-  // Always search DMM corpus (returns locally-ranked results)
-  const corpusResult = searchReleases(cache, {
-    ...searchOptions,
-    limit: effectiveRetrievalWindow,
-    offset: 0,  // Stage 1 retrieval always starts at 0 — pagination happens AFTER rank
-    includeProviders: true,
-    includeMedia: true,
-  });
+  try {
+    // Stage 1 retrieval window: FIXED, independent of public page size.
+    //
+    // The 2000 default is PROVISIONAL. Empirical measurement against the real
+    // DMM corpus is required to validate or replace it. See roadmap Stage 3
+    // deferred measurement criterion.
+    //
+    // Public `limit` only controls post-rank pagination size — it never
+    // determines which candidates can win.
+    const effectiveRetrievalWindow = retrievalWindow
+      || parseInt(process.env.RETRIEVAL_WINDOW, 10)
+      || 2000;
 
-  // Media-scoped eligibility: require candidate_media association
-  const mediaId = searchOptions.mediaId || null;
-
-  // Convert local results to canonical evidence shape
-  const canonicalLocal = corpusResult.results.map(toCanonicalLocal);
-
-  // Optionally run live discovery and normalize to canonical shape.
-  // When mediaId is set, live discovery is already scoped by selected media
-  // intent — the liveDiscoveryFn receives mediaId and returns only candidates
-  // relevant to that media. No persisted candidate_media is required.
-  let canonicalLive = [];
-  if (includeLive && typeof liveDiscoveryFn === 'function') {
-    try {
-      const liveResults = await liveDiscoveryFn(options);
-      if (liveResults && Array.isArray(liveResults)) {
-        // Tag live candidates with selected-media intent provenance when
-        // mediaId is set. This preserves the invariant that live discovery
-        // was already scoped by the selected media, without manufacturing
-        // a candidate_media row or treating live intent as persisted identity.
-        canonicalLive = liveResults.map(r => toCanonicalLive(r, { selectedMediaId: mediaId }));
-      }
-    } catch (error) {
-      // Live discovery failure must not break corpus results
-      emit(EVENTS.DISCOVERY_ERROR, { scope: 'live', error: error.message });
-    }
-  }
-
-  // Merge into single candidate pool (local + live)
-  const allCandidates = [...canonicalLocal, ...canonicalLive];
-
-  // Deduplicate exact releaseKeys BEFORE ranking.
-  // For exact duplicates: merge evidence; neither source blindly replaces.
-  const deduped = deduplicateByReleaseKey(allCandidates);
-
-  // Build query intent for ranking
-  const parsed = _parseQuery(searchOptions.query || '');
-  const queryIntent = {};
-  if (parsed.filters.season != null) queryIntent.season = parsed.filters.season;
-  if (parsed.filters.episode != null) queryIntent.episode = parsed.filters.episode;
-
-  // Apply Stage 2 episode-coverage eligibility gate for LOCAL candidates.
-  // Live candidates are already scoped by selected-media/live-discovery intent
-  // and must NOT be rejected merely for lacking a persisted candidate_media row.
-  //
-  // Produce typed rejection reasons for diagnostics (not part of public results).
-  const rejections = [];
-  let eligibleCandidates = deduped;
-  if (queryIntent.season != null && queryIntent.episode != null) {
-    eligibleCandidates = deduped.filter(candidate => {
-      // Local corpus: apply episode-coverage hard gate.
-      // Requires candidate_media association (enforced by INNER JOIN in
-      // searchReleases) AND episode coverage.
-      if (candidate.sources.some(s => s.origin === 'corpus')) {
-        const evaluation = evaluateEligibility(
-          candidate,
-          queryIntent.season,
-          queryIntent.episode
-        );
-        if (!evaluation.eligible) {
-          rejections.push({
-            hash: candidate.hash,
-            fileIndex: candidate.fileIndex,
-            releaseKey: candidate.releaseKey,
-            reason: evaluation.reason,
-            description: evaluation.description,
-          });
-        }
-        return evaluation.eligible;
-      }
-      // Live: already scoped by selected-media/live-discovery intent.
-      // The liveDiscoveryFn was called with mediaId, so these candidates
-      // are already relevant to the selected media. No persisted
-      // candidate_media is required to enter the global ranking.
-      return true;
+    // Always search DMM corpus (returns locally-ranked results)
+    timing.start('corpus.lookup');
+    const corpusResult = searchReleases(cache, {
+      ...searchOptions,
+      limit: effectiveRetrievalWindow,
+      offset: 0,  // Stage 1 retrieval always starts at 0 — pagination happens AFTER rank
+      includeProviders: true,
+      includeMedia: true,
     });
+    timing.end('corpus.lookup', 'completed');
+
+    // Media-scoped eligibility: require candidate_media association
+    const mediaId = searchOptions.mediaId || null;
+
+    // Convert local results to canonical evidence shape
+    const canonicalLocal = corpusResult.results.map(toCanonicalLocal);
+
+    // Rejection tracker — every candidate that doesn't make it to results
+    // gets a rejection record. No silent discards.
+    const rejectionTracker = new RejectionTracker();
+
+    // Optionally run live discovery and normalize to canonical shape.
+    // When mediaId is set, live discovery is already scoped by selected media
+    // intent — the liveDiscoveryFn receives mediaId and returns only candidates
+    // relevant to that media. No persisted candidate_media is required.
+    let canonicalLive = [];
+    if (includeLive && typeof liveDiscoveryFn === 'function') {
+      timing.start('live.discovery');
+      try {
+        const liveResults = await liveDiscoveryFn(options);
+        if (liveResults && Array.isArray(liveResults)) {
+          // Filter out candidates with no infoHash — track as rejected
+          const withHash = [];
+          for (const r of liveResults) {
+            if (r.infoHash) {
+              withHash.push(r);
+            } else {
+              rejectionTracker.recordMissingHash(r);
+            }
+          }
+          // Tag live candidates with selected-media intent provenance when
+          // mediaId is set. This preserves the invariant that live discovery
+          // was already scoped by the selected media, without manufacturing
+          // a candidate_media row or treating live intent as persisted identity.
+          canonicalLive = withHash.map(r => toCanonicalLive(r, { selectedMediaId: mediaId }));
+        }
+        timing.end('live.discovery', 'completed');
+      } catch (error) {
+        // Live discovery failure must not break corpus results
+        timing.fail('live.discovery', error.message);
+        emit(EVENTS.DISCOVERY_ERROR, { scope: 'live', error: error.message });
+      }
+    }
+
+    // Merge into single candidate pool (local + live)
+    const allCandidates = [...canonicalLocal, ...canonicalLive];
+
+    // Deduplicate exact releaseKeys BEFORE ranking.
+    // For exact duplicates: merge evidence; neither source blindly replaces.
+    // Track duplicates as rejections.
+    timing.start('candidate.dedup');
+    const deduped = deduplicateByReleaseKey(allCandidates, {
+      onDuplicate: (duplicate, surviving) => {
+        rejectionTracker.recordDuplicate(duplicate, surviving.releaseKey);
+      },
+    });
+    timing.end('candidate.dedup', 'completed');
+
+    // Build query intent for ranking
+    const parsed = _parseQuery(searchOptions.query || '');
+    const queryIntent = {};
+    if (parsed.filters.season != null) queryIntent.season = parsed.filters.season;
+    if (parsed.filters.episode != null) queryIntent.episode = parsed.filters.episode;
+
+    // Apply Stage 2 episode-coverage eligibility gate for LOCAL candidates.
+    // Live candidates are already scoped by selected-media/live-discovery intent
+    // and must NOT be rejected merely for lacking a persisted candidate_media row.
+    //
+    // Produce typed rejection reasons for diagnostics (not part of public results).
+    timing.start('candidate.eligibility');
+    let eligibleCandidates = deduped;
+    if (queryIntent.season != null && queryIntent.episode != null) {
+      eligibleCandidates = deduped.filter(candidate => {
+        // Local corpus: apply episode-coverage hard gate.
+        // Requires candidate_media association (enforced by INNER JOIN in
+        // searchReleases) AND episode coverage.
+        if (candidate.sources.some(s => s.origin === 'corpus')) {
+          const evaluation = evaluateEligibility(
+            candidate,
+            queryIntent.season,
+            queryIntent.episode
+          );
+          if (!evaluation.eligible) {
+            rejectionTracker.record(createRejection({
+              hash: candidate.hash,
+              fileIndex: candidate.fileIndex,
+              releaseKey: candidate.releaseKey,
+              reason: evaluation.reason,
+              description: evaluation.description,
+            }));
+          }
+          return evaluation.eligible;
+        }
+        // Live: already scoped by selected-media/live-discovery intent.
+        // The liveDiscoveryFn was called with mediaId, so these candidates
+        // are already relevant to the selected media. No persisted
+        // candidate_media is required to enter the global ranking.
+        return true;
+      });
+    }
+    timing.end('candidate.eligibility', 'completed');
+
+    // ONE global deterministic rank across all eligible candidates.
+    // Source origin does NOT determine desirability — evidence does.
+    timing.start('candidate.ranking');
+    const rankingInputs = eligibleCandidates.map(toRankingInput);
+    const ranked = rankHits(rankingInputs, queryIntent, mediaId);
+    timing.end('candidate.ranking', 'completed');
+
+    // Pagination AFTER global rank. Source ordering cannot leak through.
+    const total = ranked.length;
+    const results = ranked.slice(offset, offset + limit);
+
+    // Track paginated-out candidates as rejections
+    for (let i = offset + limit; i < ranked.length; i++) {
+      rejectionTracker.recordPaginated(ranked[i], i + 1, offset, limit);
+    }
+
+    // Map to UI-compatible shape if requested
+    timing.start('candidate.selection');
+    const mappedResults = mode === 'ui' ? results.map(mapToUIShape) : results;
+    timing.end('candidate.selection', 'completed');
+
+    // Record metrics for each candidate
+    for (const [index, result] of mappedResults.entries()) {
+      const position = index + 1;
+
+      // Source tracking
+      inc('candidate_sources_total');
+      const source = result._source || determineSourceOrigin(result);
+      if (source === 'corpus' || source === 'merged') {
+        inc('torrentio_candidates'); // Legacy name for corpus candidates
+      }
+      if (source === 'live' || source === 'merged') {
+        inc('comet_candidates'); // Live candidates
+      }
+
+      // Score distribution
+      if (result.score != null) {
+        recordScore(result.score);
+      }
+
+      // Cache state tracking
+      const cacheState = result.providers?.torbox?.cached;
+      if (cacheState === true) {
+        inc('cached_candidates');
+      } else if (cacheState === false) {
+        inc('uncached_candidates');
+      } else {
+        inc('unknown_cache_state');
+      }
+
+      // Top-N cache state
+      recordTopNCacheState(position, cacheState === true);
+    }
+
+    // Track winner (first result)
+    if (mappedResults.length > 0) {
+      const winner = mappedResults[0];
+      const winnerSource = winner._source || determineSourceOrigin(winner);
+      if (winnerSource === 'corpus') {
+        inc('winner_source_corpus');
+      } else if (winnerSource === 'live') {
+        inc('winner_source_live');
+      } else if (winnerSource === 'merged') {
+        inc('winner_source_merged');
+      }
+
+      const winnerCache = winner.providers?.torbox?.cached;
+      if (winnerCache === true) {
+        inc('winner_cache_cached');
+      } else if (winnerCache === false) {
+        inc('winner_cache_uncached');
+      } else {
+        inc('winner_cache_unknown');
+      }
+    }
+
+    emit(EVENTS.DISCOVERY_RESULT, {
+      query: corpusResult.query,
+      mediaId: options.mediaId,
+      results: mappedResults.length,
+      total,
+    });
+
+    timing.complete();
+
+    return {
+      results: mappedResults,
+      total,
+      query: corpusResult.query,
+      stats: getSearchStats(cache),
+      // Debug/internal: all rejected candidates with reasons.
+      // No candidate is silently discarded.
+      debug: {
+        rejections: rejectionTracker.getRejections(),
+      },
+      timing: timing.summary(),
+    };
+  } catch (error) {
+    timing.complete();
+    throw error;
   }
+}
 
-  // ONE global deterministic rank across all eligible candidates.
-  // Source origin does NOT determine desirability — evidence does.
-  const rankingInputs = eligibleCandidates.map(toRankingInput);
-  const ranked = rankHits(rankingInputs, queryIntent, mediaId);
+/**
+ * Run a search and return full pipeline trace for diagnostics.
+ *
+ * Answers: "Why did I see these results?"
+ *
+ * Returns source counts, pipeline funnel, and candidate details
+ * with provenance, justification, and rejection reasons.
+ *
+ * @param {Object} cache - Discovery cache instance
+ * @param {Object} options - Same as combinedSearch, plus:
+ * @param {Function} [options.liveDiscoveryFnWithCounts] - Returns { releases, sources }
+ * @returns {Promise<Object>} Trace result
+ */
+export async function searchTrace(cache, options = {}) {
+  const {
+    limit = 50,
+    offset = 0,
+    includeLive = false,
+    liveDiscoveryFnWithCounts = null,
+    mode = 'raw',
+    retrievalWindow = null,
+    ...searchOptions
+  } = options;
 
-  // Pagination AFTER global rank. Source ordering cannot leak through.
-  const total = ranked.length;
-  const results = ranked.slice(offset, offset + limit);
+  const timing = new RequestTiming('search-trace');
 
-  // Map to UI-compatible shape if requested
-  const mappedResults = mode === 'ui' ? results.map(mapToUIShape) : results;
+  try {
+    const effectiveRetrievalWindow = retrievalWindow
+      || parseInt(process.env.RETRIEVAL_WINDOW, 10)
+      || 2000;
 
-  // Record metrics for each candidate
-  for (const [index, result] of mappedResults.entries()) {
-    const position = index + 1;
+    // Stage 1: Corpus retrieval
+    timing.start('corpus.lookup');
+    const corpusResult = searchReleases(cache, {
+      ...searchOptions,
+      limit: effectiveRetrievalWindow,
+      offset: 0,
+      includeProviders: true,
+      includeMedia: true,
+    });
+    timing.end('corpus.lookup', 'completed');
 
-    // Source tracking
-    inc('candidate_sources_total');
-    const source = result._source || determineSourceOrigin(result);
-    if (source === 'corpus' || source === 'merged') {
-      inc('torrentio_candidates'); // Legacy name for corpus candidates
+    const mediaId = searchOptions.mediaId || null;
+    const canonicalLocal = corpusResult.results.map(toCanonicalLocal);
+    const rejectionTracker = new RejectionTracker();
+
+    // Stage 1: Live retrieval with per-source counts
+    let canonicalLive = [];
+    let liveSources = {};
+    if (includeLive && typeof liveDiscoveryFnWithCounts === 'function') {
+      timing.start('live.discovery');
+      try {
+        const { releases, sources } = await liveDiscoveryFnWithCounts(options);
+        liveSources = sources;
+        const withHash = [];
+        for (const r of releases) {
+          if (r.infoHash) {
+            withHash.push(r);
+          } else {
+            rejectionTracker.recordMissingHash(r);
+          }
+        }
+        canonicalLive = withHash.map(r => toCanonicalLive(r, { selectedMediaId: mediaId }));
+      } catch (error) {
+        liveSources = { error: error.message };
+        timing.fail('live.discovery', error.message);
+      } finally {
+        if (liveSources.error) {
+          timing.fail('live.discovery', liveSources.error);
+        } else {
+          timing.end('live.discovery', 'completed');
+        }
+      }
     }
-    if (source === 'live' || source === 'merged') {
-      inc('comet_candidates'); // Live candidates
+
+    const allCandidates = [...canonicalLocal, ...canonicalLive];
+    const discovered = allCandidates.length;
+
+    // Dedup
+    timing.start('candidate.dedup');
+    const deduped = deduplicateByReleaseKey(allCandidates, {
+      onDuplicate: (duplicate, surviving) => {
+        rejectionTracker.recordDuplicate(duplicate, surviving.releaseKey);
+      },
+    });
+    timing.end('candidate.dedup', 'completed');
+
+    // Episode eligibility gate
+    const parsed = _parseQuery(searchOptions.query || '');
+    const queryIntent = {};
+    if (parsed.filters.season != null) queryIntent.season = parsed.filters.season;
+    if (parsed.filters.episode != null) queryIntent.episode = parsed.filters.episode;
+
+    timing.start('candidate.eligibility');
+    let eligibleCandidates = deduped;
+    if (queryIntent.season != null && queryIntent.episode != null) {
+      eligibleCandidates = deduped.filter(candidate => {
+        if (candidate.sources.some(s => s.origin === 'corpus')) {
+          const evaluation = evaluateEligibility(candidate, queryIntent.season, queryIntent.episode);
+          if (!evaluation.eligible) {
+            rejectionTracker.record(createRejection({
+              hash: candidate.hash,
+              fileIndex: candidate.fileIndex,
+              releaseKey: candidate.releaseKey,
+              reason: evaluation.reason,
+              description: evaluation.description,
+            }));
+          }
+          return evaluation.eligible;
+        }
+        return true;
+      });
+    }
+    timing.end('candidate.eligibility', 'completed');
+
+    // Rank
+    timing.start('candidate.ranking');
+    const rankingInputs = eligibleCandidates.map(toRankingInput);
+    const ranked = rankHits(rankingInputs, queryIntent, mediaId);
+    timing.end('candidate.ranking', 'completed');
+
+    // Pagination
+    const total = ranked.length;
+    const results = ranked.slice(offset, offset + limit);
+
+    // Track paginated-out
+    for (let i = offset + limit; i < ranked.length; i++) {
+      rejectionTracker.recordPaginated(ranked[i], i + 1, offset, limit);
     }
 
-    // Score distribution
-    if (result.score != null) {
-      recordScore(result.score);
-    }
+    timing.start('candidate.selection');
+    const mappedResults = mode === 'ui' ? results.map(mapToUIShape) : results;
+    timing.end('candidate.selection', 'completed');
 
-    // Cache state tracking
-    const cacheState = result.providers?.torbox?.cached;
-    if (cacheState === true) {
-      inc('cached_candidates');
-    } else if (cacheState === false) {
-      inc('uncached_candidates');
-    } else {
-      inc('unknown_cache_state');
-    }
+    // Build candidate trace — derive identity fields.
+    // mappedResults may be UI shape (infoHash/releaseKey) or raw (hash/fileIndex).
+    const candidates = mappedResults.map((r, i) => {
+      const hash = r.infoHash || r.hash;
+      const fileIndex = r.fileIndex ?? null;
+      const releaseKey = r.releaseKey || `${hash}:${fileIndex ?? 'torrent'}`;
+      return {
+        rank: i + 1,
+        hash,
+        fileIndex,
+        releaseKey,
+        filename: r.filename,
+        score: r.score ?? null,
+        source: r._source || null,
+        provenance: r._provenance || r.provenance || null,
+        justification: r._justification || r.justification || null,
+      };
+    });
 
-    // Top-N cache state
-    recordTopNCacheState(position, cacheState === true);
+    timing.complete();
+
+    return {
+      query: searchOptions.query || '',
+      sources: {
+        corpus: {
+          queried: true,
+          count: canonicalLocal.length,
+        },
+        live: includeLive ? {
+          torrentio: liveSources.torrentio?.count ?? 0,
+          torznab: liveSources.torznab?.count ?? 0,
+          errors: {
+            torrentio: liveSources.torrentio?.error || null,
+            torznab: liveSources.torznab?.error || null,
+          },
+        } : { queried: false },
+      },
+      pipeline: {
+        discovered,
+        deduped: deduped.length,
+        ranked: ranked.length,
+        returned: results.length,
+      },
+      rejections: rejectionTracker.getRejections(),
+      candidates,
+      timing: timing.summary(),
+    };
+  } catch (error) {
+    timing.complete();
+    throw error;
   }
-
-  // Track winner (first result)
-  if (mappedResults.length > 0) {
-    const winner = mappedResults[0];
-    const winnerSource = winner._source || determineSourceOrigin(winner);
-    if (winnerSource === 'corpus') {
-      inc('winner_source_corpus');
-    } else if (winnerSource === 'live') {
-      inc('winner_source_live');
-    } else if (winnerSource === 'merged') {
-      inc('winner_source_merged');
-    }
-
-    const winnerCache = winner.providers?.torbox?.cached;
-    if (winnerCache === true) {
-      inc('winner_cache_cached');
-    } else if (winnerCache === false) {
-      inc('winner_cache_uncached');
-    } else {
-      inc('winner_cache_unknown');
-    }
-  }
-
-  emit(EVENTS.DISCOVERY_RESULT, {
-    query: corpusResult.query,
-    mediaId: options.mediaId,
-    results: mappedResults.length,
-    total,
-  });
-
-  return {
-    results: mappedResults,
-    total,
-    query: corpusResult.query,
-    stats: getSearchStats(cache),
-    // Debug/internal: typed rejection reasons for candidates that failed
-    // hard eligibility. Not part of the normal public result list.
-    // Only populated when explicit S/E intent produced rejections.
-    debug: {
-      rejections,
-    },
-  };
 }
 
 /**
@@ -835,6 +1069,7 @@ function mapToUIShape(r) {
     _sources: r.sources || [],
     _selectedMediaId: r.selectedMediaId || null,
     _provenance: r.provenance || null,
+    _justification: r.justification || null,
   };
 }
 
