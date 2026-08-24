@@ -5,7 +5,7 @@
  * This is the first metadata provider; TMDB will be added later.
  *
  * Cinemeta API: https://v3-cinemeta.strem.io
- * - Search: /catalog/{type}/search={query}.json
+ * - Search: /catalog/{type}/top/search={query}.json
  * - Meta: /meta/{type}/{id}.json
  */
 
@@ -103,10 +103,10 @@ async function searchCinemeta(query, fetchImpl = fetch) {
     return [];
   }
 
-  // Text search: use the search catalog endpoint for each type
+  // Text search: use the top catalog search endpoint for each type
   const types = ['series', 'movie'];
   const attempts = await Promise.allSettled(types.map((type) =>
-    getJson(`/catalog/${type}/search=${encodeURIComponent(q)}.json`, fetchImpl)
+    getJson(`/catalog/${type}/top/search=${encodeURIComponent(q)}.json`, fetchImpl)
   ));
 
   const payloads = attempts

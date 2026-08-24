@@ -186,7 +186,7 @@ test('rejection: wrong local episode produces typed hard rejection', () => {
 // Test 5: Missing selected-media local association is rejection
 // =============================================================================
 
-test('rejection: missing selected-media association is rejection', () => {
+test('rejection: missing selected-media association — candidate appears with NEUTRAL identity', () => {
   const cache = createDiscoveryCache();
 
   storeReleaseAttributes(cache, {
@@ -214,7 +214,10 @@ test('rejection: missing selected-media association is rejection', () => {
     mediaId: MEDIA_SHOW,
   });
 
-  assert.equal(result.results.length, 0, 'No association to selected media should be rejected');
+  // Candidate appears (corpus searchable by release identity, not mediaId-gated)
+  assert.equal(result.results.length, 1, 'Candidate must appear');
+  // Identity confidence is NEUTRAL (0.5) since no association to MEDIA_SHOW
+  assert.equal(result.results[0].components.identityConfidence, 0.5, 'Identity confidence must be NEUTRAL');
 
   cache.close();
 });
@@ -226,18 +229,24 @@ test('rejection: missing selected-media association is rejection', () => {
 test('live: selected-TV live candidate NOT rejected for lacking candidate_media', async () => {
   const cache = createDiscoveryCache();
 
-  const mockLiveDiscovery = async () => [{
-    infoHash: HASH_LIVE,
-    fileIndex: null,
-    releaseKey: `${HASH_LIVE}:torrent`,
-    filename: 'Show.S01E03.Live.720p.mkv',
-    title: 'Show S01E03',
-    season: 1,
-    episode: 3,
-    resolution: '720p',
-    confidence: 0.8,
-    sources: [{ addonId: 'torrentio.torbox' }],
-  }];
+  const mockLiveDiscovery = async () => ({
+    releases: [{
+      infoHash: HASH_LIVE,
+      fileIndex: null,
+      releaseKey: `${HASH_LIVE}:torrent`,
+      filename: 'Show.S01E03.Live.720p.mkv',
+      title: 'Show S01E03',
+      season: 1,
+      episode: 3,
+      resolution: '720p',
+      confidence: 0.8,
+      sources: [{ addonId: 'torrentio.torbox' }],
+    }],
+    sources: {
+      torrentio: { count: 1, error: null },
+      torznab: { count: 0, error: null },
+    },
+  });
 
   const result = await combinedSearch(cache, {
     query: 'Show',
@@ -426,18 +435,17 @@ test('describeRejection: all reasons have descriptions', () => {
 
 // =============================================================================
 // FIX 1: NO_MEDIA_ASSOCIATION is NOT in active taxonomy
-// Missing association is enforced upstream by INNER JOIN — not observable here
+// Corpus searchable by release identity — mediaId only scopes ranking
 // =============================================================================
 
-test('NO_MEDIA_ASSOCIATION: not in active rejection taxonomy (upstream enforcement)', () => {
-  // NO_MEDIA_ASSOCIATION must NOT be in RejectionReason — missing association
-  // is enforced by candidate_media INNER JOIN in searchReleases(), which
-  // removes candidates BEFORE they reach combinedSearch(). The diagnostic
-  // boundary cannot observe this rejection.
+test('NO_MEDIA_ASSOCIATION: not in active rejection taxonomy', () => {
+  // NO_MEDIA_ASSOCIATION must NOT be in RejectionReason — corpus is now
+  // searchable by release identity (title/year/season/episode/filename tokens).
+  // mediaId only scopes identity confidence in ranking, not retrieval.
   assert.equal(
     RejectionReason.NO_MEDIA_ASSOCIATION,
     undefined,
-    'NO_MEDIA_ASSOCIATION must not exist — enforced upstream by INNER JOIN'
+    'NO_MEDIA_ASSOCIATION must not exist — corpus searchable by release identity'
   );
 
   // All active reasons must be observable at the eligibility/ranking boundary
@@ -449,9 +457,9 @@ test('NO_MEDIA_ASSOCIATION: not in active rejection taxonomy (upstream enforceme
   assert.ok(activeReasons.includes(RejectionReason.MALFORMED_RANGE));
 });
 
-test('NO_MEDIA_ASSOCIATION: upstream INNER JOIN still enforces selected-media eligibility', () => {
-  // Verify the INNER JOIN behavior is intact — this is the actual gate.
-  // A candidate associated only with OTHER media must NOT appear for MEDIA_SHOW.
+test('NO_MEDIA_ASSOCIATION: corpus searchable by release identity (not mediaId-gated)', () => {
+  // Verify corpus searchable by release identity — candidate associated only
+  // with OTHER media still appears for MEDIA_SHOW (identity confidence is NEUTRAL).
   const cache = createDiscoveryCache();
 
   storeReleaseAttributes(cache, {
@@ -479,8 +487,9 @@ test('NO_MEDIA_ASSOCIATION: upstream INNER JOIN still enforces selected-media el
     mediaId: MEDIA_SHOW,
   });
 
-  // INNER JOIN removes it — zero results
-  assert.equal(result.results.length, 0, 'INNER JOIN must exclude candidates without selected-media association');
+  // Candidate appears (corpus searchable by release identity)
+  assert.equal(result.results.length, 1, 'Corpus searchable by release identity — candidate must appear');
+  assert.equal(result.results[0].components.identityConfidence, 0.5, 'Identity confidence is NEUTRAL for MEDIA_SHOW');
 
   cache.close();
 });

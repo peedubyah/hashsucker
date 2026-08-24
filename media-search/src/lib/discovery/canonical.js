@@ -85,6 +85,7 @@ export function toCanonicalLocal(row) {
     fileIndex,
     releaseKey,
     filename: row.filename,
+    // Corpus candidates use BM25 text relevance (already computed)
     relevance: row.relevance ?? row.components?.relevance ?? 0,
     releaseAttributes: normalizeReleaseAttributes(row.parsed || row.releaseAttributes || {}),
     parserConfidence,
@@ -99,6 +100,9 @@ export function toCanonicalLocal(row) {
         evidenceType: 'fts5-ranked',
       },
     ],
+    // Corpus candidates: no live discovery, no live provider hints
+    hasLiveDiscovery: false,
+    liveProviderHints: null,
     provenance: buildProvenance({
       source: 'dmm-corpus',
       sourceType: 'stored',
@@ -215,24 +219,27 @@ export function toCanonicalLive(raw, options = {}) {
     fileIndex,
     releaseKey,
     filename: raw.filename || raw.title || '',
-    // Live results have no query relevance — they are ID-matched, not text-matched.
-    // NEUTRAL (0.5) is a neutral multiplier for the relevance component,
-    // NOT a penalty or bonus.
-    relevance: 0.5,
+    // Relevance: live candidates use identity-derived relevance.
+    // The relevanceFromIdentity() function will compute this based on
+    // whether the live discovery was scoped to the selected media.
+    relevance: 0, // Will be computed by relevanceFromIdentity()
     releaseAttributes,
     parserConfidence: raw.confidence ?? 0.5,
     // Live candidates never have candidate_media associations.
     // Association requires explicit enrichment/persistence.
+    // Identity confidence is derived from live scope, not associations.
     mediaAssociations: [],
     providerObservations,
     providerEvidence: providerObservations,
     sources,
     // Selected-media intent provenance: preserved to show live discovery
-    // was already scoped by the selected media. This is NOT persisted identity
-    // evidence — it does not create a candidate_media row or contribute to
-    // identity confidence. It simply records that the live source was already
-    // filtered to the selected media before reaching the global ranker.
+    // was already scoped by the selected media. This IS used for:
+    // - relevance: identity-derived relevance when scoped to queried media
+    // - identityConfidence: live scope match provides moderate confidence
     selectedMediaId,
+    // Flags for semantic confidence calculation:
+    hasLiveDiscovery: true, // This candidate came from live discovery
+    liveProviderHints: raw.providers || null, // Provider hints for availability
     provenance: buildProvenance({
       source: sourceName,
       sourceType: 'live',
@@ -361,6 +368,9 @@ export function mergeExactDuplicates(existing, incoming) {
     providerEvidence: mergedProviderEvidence,
     sources: mergedSources,
     selectedMediaId: mergedSelectedMediaId,
+    // Preserve live discovery evidence from either source
+    hasLiveDiscovery: existing.hasLiveDiscovery || incoming.hasLiveDiscovery,
+    liveProviderHints: existing.liveProviderHints || incoming.liveProviderHints,
     provenance: mergeProvenance(existing.provenance, incoming.provenance),
   };
 }

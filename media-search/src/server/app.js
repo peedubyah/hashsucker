@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import { toControlPlaneItemDetail, toControlPlaneItemSummary } from '../api/control-plane-dto.js';
 import { createReleaseIdentity, toPublicReleaseDto, validateReleaseIdentity } from '../api/release-contract.js';
+import { searchByMedia } from '../api/media-request.js';
 import { getControlPlaneHealth } from '../lib/control-plane/health.js';
 import { planReconciliation } from '../lib/control-plane/reconciler.js';
 import {
@@ -44,6 +45,7 @@ import { createWorkerVisibility } from '../lib/operator/worker-visibility.js';
 import { formatWorkerStatus } from '../lib/operator/worker-formatter.js';
 import { createLifecycleEventStore } from '../lib/operator/event-store.js';
 import { formatRequestTimeline, formatRecentRuns, formatFailedRuns } from '../lib/operator/event-formatter.js';
+import { getEnrichmentDiagnostics, formatEnrichmentDiagnostics } from '../lib/discovery/enrichment-diagnostics.js';
 
 const CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -402,6 +404,16 @@ export function createRequestHandler(dependencies = {}) {
       }
       if (request.method === 'GET' && url.pathname === '/api/metrics') {
         return sendJson(response, 200, getMetrics());
+      }
+      if (request.method === 'GET' && url.pathname === '/api/debug/enrichment') {
+        const diagnostics = getEnrichmentDiagnostics(searchCache);
+        const format = url.searchParams.get('format');
+        if (format === 'text') {
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+          response.end(formatEnrichmentDiagnostics(diagnostics));
+          return;
+        }
+        return sendJson(response, 200, diagnostics);
       }
       const debugMatch = request.method === 'GET' && url.pathname.match(/^\/api\/debug\/request\/([0-9a-f-]{36})$/i);
       if (debugMatch) {
@@ -918,6 +930,20 @@ export function createRequestHandler(dependencies = {}) {
           }));
         return sendJson(response, 200, { logs: recent });
       }
+      // Media request: search candidates by known media identity
+      if (request.method === 'POST' && url.pathname === '/api/media-request') {
+        const startedAt = performance.now();
+        const body = await readBody(request);
+        try {
+          const result = searchByMedia(searchCache, body);
+          return sendJson(response, 200, {
+            ...result,
+            timings: { totalMs: Math.round(performance.now() - startedAt) },
+          });
+        } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
+      }
       // Worker visibility endpoint
       if (request.method === 'GET' && url.pathname === '/api/operator/workers') {
         const workerVisibility = createWorkerVisibility({ requestsRoot: operatorRoot, now: clock });
@@ -990,7 +1016,7 @@ export function createRequestHandler(dependencies = {}) {
       }
       if (request.method === 'GET' && url.pathname === '/api/operator/health') {
         const health = await getSystemHealth({ env });
-        return sendJson(response, health.ok ? 200 : 503, health);
+        return sendJson(response, health.status === 'healthy' ? 200 : 503, health);
       }
       if (request.method === 'POST' && url.pathname === '/api/operator/requests/retry') {
         const body = await readBody(request);

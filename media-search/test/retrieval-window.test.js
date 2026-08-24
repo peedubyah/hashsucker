@@ -269,10 +269,11 @@ test('RETRIEVAL: adversarial winner outside old limit*2 window is retained', asy
 });
 
 // =============================================================================
-// Test 4: Selected-media eligibility remains fail-closed
+// Test 4: Corpus searchable by release identity (not mediaId-gated)
+// mediaId only scopes identity confidence in ranking
 // =============================================================================
 
-test('RETRIEVAL: selected-media eligibility remains fail-closed', async () => {
+test('RETRIEVAL: corpus searchable by release identity, mediaId scopes ranking', async () => {
   const cache = createDiscoveryCache();
 
   // Candidate associated with the selected media
@@ -309,9 +310,12 @@ test('RETRIEVAL: selected-media eligibility remains fail-closed', async () => {
     retrievalWindow: 100,
   });
 
-  // Only the associated candidate should appear
-  assert.equal(result.results.length, 1, 'Only selected-media associated candidate eligible');
-  assert.equal(result.results[0].hash, HASH_A, 'Associated candidate should be the result');
+  // Both candidates appear (corpus searchable by release identity)
+  assert.equal(result.results.length, 2, 'Both candidates appear (corpus searchable by release identity)');
+  // HASH_A ranks higher due to identity confidence from MEDIA_SHOW association
+  assert.equal(result.results[0].hash, HASH_A, 'Associated candidate ranks higher (identity confidence)');
+  assert.equal(result.results[0].components.identityConfidence, 0.9, 'Identity confidence from MEDIA_SHOW');
+  assert.equal(result.results[1].components.identityConfidence, 0.5, 'Non-associated candidate has NEUTRAL identity');
 });
 
 // =============================================================================
@@ -411,17 +415,23 @@ test('RETRIEVAL: live selected-TV behavior intact (no candidate_media required)'
   const HASH_LIVE = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
 
   // Mock live discovery returns a live result for the selected media
-  const mockLiveDiscovery = async () => [{
-    infoHash: HASH_LIVE,
-    fileIndex: null,
-    filename: 'Show.S03E04.Live.720p.mkv',
-    title: 'Show S03E04',
-    resolution: '720p',
-    confidence: 0.85,
-    season: 3,
-    episode: 4,
-    sources: [{ addonId: 'torrentio.torbox' }],
-  }];
+  const mockLiveDiscovery = async () => ({
+    releases: [{
+      infoHash: HASH_LIVE,
+      fileIndex: null,
+      filename: 'Show.S03E04.Live.720p.mkv',
+      title: 'Show S03E04',
+      resolution: '720p',
+      confidence: 0.85,
+      season: 3,
+      episode: 4,
+      sources: [{ addonId: 'torrentio.torbox' }],
+    }],
+    sources: {
+      torrentio: { count: 1, error: null },
+      torznab: { count: 0, error: null },
+    },
+  });
 
   const result = await combinedSearch(cache, {
     query: 'Show S03E04',

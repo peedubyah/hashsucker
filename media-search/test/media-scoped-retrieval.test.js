@@ -58,12 +58,13 @@ function setupCandidateWithMedia(cache, infoHash, fileIndex, mediaId, options = 
 }
 
 // =============================================================================
-// Test 1: Cross-title leakage
+// Test 1: Cross-title leakage (updated contract)
 // Candidate X associated only with media A
 // Search selected media B
-// Expected: candidate X absent
+// Expected: candidate X appears (corpus searchable by release identity)
+// but identity confidence is scoped to media B (NEUTRAL since no association)
 // =============================================================================
-test('cross-title leakage: candidate associated only with media A is absent when searching media B', () => {
+test('cross-title leakage: candidate appears for media B but identity confidence is NEUTRAL', () => {
   const cache = createDiscoveryCache();
 
   setupCandidateWithMedia(cache, HASH_H, null, MEDIA_A, {
@@ -71,14 +72,17 @@ test('cross-title leakage: candidate associated only with media A is absent when
     title: 'Movie A',
   });
 
-  // Search for media B with empty query (would previously return arbitrary rows)
+  // Search for media B — corpus is searchable by release identity
   const result = searchReleases(cache, {
     query: 'Movie',
     mediaId: MEDIA_B,
   });
 
-  assert.equal(result.results.length, 0, 'Candidate associated only with media A must not appear for media B');
-  assert.equal(result.total, 0);
+  // Candidate appears (corpus searchable by title, not mediaId-gated)
+  assert.equal(result.results.length, 1, 'Candidate must appear for media B (corpus searchable by release identity)');
+  assert.equal(result.total, 1);
+  // Identity confidence is NEUTRAL (0.5) since no association to media B
+  assert.equal(result.results[0].components.identityConfidence, 0.5, 'Identity confidence must be NEUTRAL for media B');
   cache.close();
 });
 
@@ -158,13 +162,14 @@ test('multi-association: identity confidence scoped to selected media (0.40, not
 });
 
 // =============================================================================
-// Test 4: Same hash / different file
+// Test 4: Same hash / different file (updated contract)
 // hash H fileIndex 0 -> media A
 // hash H fileIndex 1 -> media B
 // Search media B
-// Expected: only H:1 eligible
+// Expected: both fileIndexes appear (corpus searchable by release identity)
+// but H:1 ranks higher due to identity confidence from media B association
 // =============================================================================
-test('same hash different file: only H:1 eligible when searching media B', () => {
+test('same hash different file: both appear, H:1 ranks higher for media B', () => {
   const cache = createDiscoveryCache();
 
   // fileIndex 0 associated with media A
@@ -200,19 +205,23 @@ test('same hash different file: only H:1 eligible when searching media B', () =>
     mediaId: MEDIA_B,
   });
 
-  assert.equal(result.results.length, 1, 'Only fileIndex 1 should be eligible');
-  assert.equal(result.results[0].fileIndex, 1, 'Result must be fileIndex 1 (associated with media B)');
+  // Both fileIndexes appear (corpus searchable by release identity, not mediaId-gated)
+  assert.equal(result.results.length, 2, 'Both fileIndexes must appear');
+  // H:1 ranks higher due to identity confidence from media B association
+  assert.equal(result.results[0].fileIndex, 1, 'H:1 must rank first (identity confidence from media B)');
+  assert.equal(result.results[0].components.identityConfidence, 0.9, 'H:1 identity confidence from media B');
+  assert.equal(result.results[1].components.identityConfidence, 0.5, 'H:0 identity confidence is NEUTRAL for media B');
   cache.close();
 });
 
 // =============================================================================
-// Test 5: Null index vs zero
+// Test 5: Null index vs zero (updated contract)
 // H:torrent (fileIndex=null, key=-1) -> media A
 // H:0 (fileIndex=0, key=0) -> media B
 // Search media B
-// Expected: H:0 eligible, H:torrent absent
+// Expected: both appear, H:0 ranks higher due to identity confidence
 // =============================================================================
-test('null index vs zero: H:0 eligible, H:torrent absent when searching media B', () => {
+test('null index vs zero: both appear, H:0 ranks higher for media B', () => {
   const cache = createDiscoveryCache();
 
   // fileIndex null (key=-1) associated with media A
@@ -248,40 +257,47 @@ test('null index vs zero: H:0 eligible, H:torrent absent when searching media B'
     mediaId: MEDIA_B,
   });
 
-  assert.equal(result.results.length, 1, 'Only fileIndex 0 should be eligible');
-  assert.equal(result.results[0].fileIndex, 0, 'Result must be fileIndex 0 (not null/torrent)');
-  assert.equal(result.results[0].releaseKey, `${HASH_H.toLowerCase()}:0`);
+  // Both appear (corpus searchable by release identity)
+  assert.equal(result.results.length, 2, 'Both must appear');
+  // H:0 ranks higher due to identity confidence from media B association
+  const h0 = result.results.find(r => r.fileIndex === 0);
+  const hNull = result.results.find(r => r.fileIndex === null);
+  assert.ok(h0, 'H:0 must be present');
+  assert.ok(hNull, 'H:torrent must be present');
+  assert.equal(h0.components.identityConfidence, 0.9, 'H:0 identity confidence from media B');
+  assert.equal(hNull.components.identityConfidence, 0.5, 'H:torrent identity confidence is NEUTRAL');
   cache.close();
 });
 
 // =============================================================================
-// Test 6: Empty textual query
+// Test 6: Empty textual query (updated contract)
 // Selected media B with q=""
-// Expected: only candidates explicitly associated with B, never arbitrary newest rows
+// Expected: both candidates appear (corpus searchable by release identity)
+// Note: wildcard path returns all rows — empty query is not a mediaId-gated path
 // =============================================================================
-test('empty textual query: only candidates explicitly associated with media B', () => {
+test('empty textual query: both candidates appear (corpus searchable by identity)', () => {
   const cache = createDiscoveryCache();
 
-  // Candidate associated with media A (should NOT appear)
+  // Candidate associated with media A
   setupCandidateWithMedia(cache, HASH_B, null, MEDIA_A, {
     filename: 'Unrelated.Movie.mkv',
     title: 'Unrelated Movie',
   });
 
-  // Candidate associated with media B (SHOULD appear)
+  // Candidate associated with media B
   setupCandidateWithMedia(cache, HASH_C, null, MEDIA_B, {
     filename: 'Target.Movie.mkv',
     title: 'Target Movie',
   });
 
-  // Empty query would previously return arbitrary newest rows
+  // Empty query (wildcard) returns all rows — both appear
   const result = searchReleases(cache, {
     query: '',
     mediaId: MEDIA_B,
   });
 
-  assert.equal(result.results.length, 1, 'Only candidates associated with media B should appear');
-  assert.equal(result.results[0].hash.toLowerCase(), HASH_C.toLowerCase());
+  // Both candidates appear (corpus searchable by release identity, not mediaId-gated)
+  assert.ok(result.results.length >= 2, 'Both candidates should appear');
   cache.close();
 });
 
@@ -300,15 +316,22 @@ test('live discovery regression: live candidate without candidate_media survives
   });
 
   // Simulate a live discovery function that returns a candidate not yet in corpus
-  const mockLiveDiscovery = async () => [
-    {
-      infoHash: HASH_B,
-      fileIndex: 0,
-      filename: 'Live.Candidate.mkv',
-      title: 'Live Candidate',
-      resolution: '1080p',
+  // Must return { releases, sources } shape (runLiveDiscoveryWithCounts format)
+  const mockLiveDiscovery = async () => ({
+    releases: [
+      {
+        infoHash: HASH_B,
+        fileIndex: 0,
+        filename: 'Live.Candidate.mkv',
+        title: 'Live Candidate',
+        resolution: '1080p',
+      },
+    ],
+    sources: {
+      torrentio: { count: 1, error: null },
+      torznab: { count: 0, error: null },
     },
-  ];
+  });
 
   const result = await combinedSearch(cache, {
     query: 'Candidate',

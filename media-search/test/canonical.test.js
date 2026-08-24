@@ -149,12 +149,15 @@ test('toCanonicalLive: normalizes to same shape as local', () => {
   assert.equal(canonical.fileIndex, null);
   assert.equal(canonical.releaseKey, `${HASH_B}:torrent`);
   assert.equal(canonical.filename, 'Movie.2024.720p.mkv');
-  assert.equal(canonical.relevance, 0.5); // NEUTRAL for live
+  assert.equal(canonical.relevance, 0); // Will be computed by relevanceFromIdentity()
   assert.equal(canonical.parserConfidence, 0.7);
   assert.equal(canonical.mediaAssociations.length, 0); // No manufactured associations
   assert.equal(canonical.providerObservations.length, 0); // No authoritative observations
   assert.equal(canonical.sources.length, 1);
   assert.equal(canonical.sources[0].origin, 'live');
+  // Live discovery flags should be present
+  assert.equal(canonical.hasLiveDiscovery, true);
+  assert.equal(canonical.liveProviderHints, null);
 });
 
 test('toCanonicalLive: does not manufacture candidate_media from hints', () => {
@@ -253,10 +256,13 @@ test('toCanonicalLive: missing evidence is neutral, not penalized', () => {
 
   // Should still produce valid canonical shape with neutral defaults
   assert.equal(canonical.hash, HASH_B);
-  assert.equal(canonical.relevance, 0.5); // NEUTRAL
+  assert.equal(canonical.relevance, 0); // Will be computed by relevanceFromIdentity()
   assert.equal(canonical.parserConfidence, 0.5); // NEUTRAL
   assert.equal(canonical.releaseAttributes.resolution, null);
   assert.equal(canonical.releaseAttributes.sourceType, null);
+  // Live discovery flags should be present
+  assert.equal(canonical.hasLiveDiscovery, true);
+  assert.equal(canonical.liveProviderHints, null);
 });
 
 // =============================================================================

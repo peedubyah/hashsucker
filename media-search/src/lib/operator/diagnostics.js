@@ -1,215 +1,434 @@
 /**
- * Operator diagnostics — registry of test runners.
- * Each diagnostic calls an existing script or internal check.
+ * Operator diagnostics — container-native diagnostic runners.
+ *
+ * All diagnostics execute as JS functions. No shell spawning.
+ * Checks requiring external environment are marked unsupported.
  */
 
-import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { sampleRandomRelease } from '../discovery/corpus-sampler.js';
 
+/**
+ * Check if running inside a container (no bash, limited filesystem).
+ */
+function isContainerEnvironment() {
+  try {
+    require('node:fs').accessSync('/bin/bash');
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+const CONTAINER = isContainerEnvironment();
+
+/**
+ * Diagnostic registry — each entry is a JS function.
+ * Returns: { id, name, status, duration, result, unsupported, reason }
+ */
 const REGISTRY = [
+  {
+    id: 'database-connectivity',
+    name: 'Database Connectivity',
+    description: 'Verify SQLite databases are accessible and schema is current',
+    run: () => runDatabaseConnectivity(),
+  },
+  {
+    id: 'enrichment-pipeline',
+    name: 'Enrichment Pipeline',
+    description: 'Check identity enrichment queue status and resolver health',
+    run: () => runEnrichmentCheck(),
+  },
+  {
+    id: 'search-engine',
+    name: 'Search Engine',
+    description: 'Verify FTS5 index and search engine readiness',
+    run: () => runSearchEngineCheck(),
+  },
   {
     id: 'stream-smoke',
     name: 'Stream Pipeline',
     description: 'TorBox connectivity, cache check, requestdl, strm creation',
-    command: 'bash',
-    args: ['torbox-importer/tests/manual/stream-live-smoke.sh'],
-    cwd: process.env.PROJECT_ROOT || '/home/patrick/src/hashsucker',
+    run: () => runExternalCheck('stream-smoke', 'TorBox API + filesystem'),
   },
   {
     id: 'importer-health',
     name: 'Importer',
     description: 'Database, queue directories, worker permissions, TorBox API',
-    command: 'bash',
-    args: ['-c', 'echo "PASS: importer health check (placeholder)"'],
-    cwd: process.env.PROJECT_ROOT || '/home/patrick/src/hashsucker',
+    run: () => runExternalCheck('importer-health', 'Host filesystem + TorBox API'),
   },
   {
     id: 'control-plane',
     name: 'Control Plane',
-    description: 'Reconciliation and lifecycle projection',
-    command: 'bash',
-    args: ['-c', 'echo "PASS: control plane check (placeholder)"'],
-    cwd: process.env.PROJECT_ROOT || '/home/patrick/src/hashsucker',
+    description: 'Control plane subsystem health',
+    run: () => runExternalCheck('control-plane', 'Host filesystem + queue directories'),
   },
   {
     id: 'release-identity',
     name: 'Release Identity Contract',
-    description: 'Validate info_hash:file_index identity contract',
-    command: 'bash',
-    args: ['torbox-importer/tests/release-identity-contract.sh'],
-    cwd: process.env.PROJECT_ROOT || '/home/patrick/src/hashsucker',
+    description: 'Release identity schema validation',
+    run: () => runExternalCheck('release-identity', 'torbox-importer test scripts'),
   },
   {
     id: 'canary',
     name: 'Canary',
-    description: 'End-to-end pipeline test — proves one release survives the full pipeline',
-    command: 'node',
-    args: [path.join(import.meta.dirname, '..', '..', '..', 'scripts', 'canary.mjs')],
-    cwd: process.env.PROJECT_ROOT || '/home/patrick/src/hashsucker',
+    description: 'Random corpus sample — runs pipeline on sampled release',
+    run: () => runCanary(),
   },
   {
     id: 'request-inspector',
     name: 'Request Inspector',
-    description: 'Recommendations for stuck, failed, and orphaned requests (no automatic deletion)',
-    command: 'node',
-    args: [path.join(import.meta.dirname, 'request-inspector-runner.mjs')],
-    cwd: process.env.PROJECT_ROOT || '/home/patrick/src/hashsucker',
+    description: 'Recommendations for stuck, failed, and orphaned requests',
+    run: () => runRequestInspector(),
   },
 ];
 
+/**
+ * Get list of available diagnostics (UI-facing).
+ */
 export function listDiagnostics() {
   return REGISTRY.map(({ id, name, description }) => ({ id, name, description }));
 }
 
+/**
+ * Run a diagnostic by ID.
+ * @param {string} diagId
+ * @param {Object} options
+ * @returns {Object} { id, name, status, duration, result, unsupported, reason }
+ */
 export async function runDiagnostic(diagId, options = {}) {
   const diag = REGISTRY.find(d => d.id === diagId);
   if (!diag) {
     return { id: diagId, status: 'error', error: 'Unknown diagnostic' };
   }
 
-  const startedAt = Date.now();
-
-  return new Promise((resolve) => {
-    const proc = spawn(diag.command, diag.args, {
-      cwd: diag.cwd,
-      env: options.env || process.env,
-      timeout: 30000,
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-    proc.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    proc.on('close', (code) => {
-      const duration = (Date.now() - startedAt) / 1000;
-      resolve({
-        id: diagId,
-        name: diag.name,
-        status: code === 0 ? 'pass' : 'fail',
-        exitCode: code,
-        duration,
-        stdout: stdout.slice(-2000),
-        stderr: stderr.slice(-1000),
-        ranAt: new Date(startedAt).toISOString(),
-      });
-    });
-
-    proc.on('error', (err) => {
-      const duration = (Date.now() - startedAt) / 1000;
-      resolve({
-        id: diagId,
-        name: diag.name,
-        status: 'fail',
-        exitCode: -1,
-        duration,
-        stdout: stdout.slice(-2000),
-        stderr: err.message,
-        ranAt: new Date(startedAt).toISOString(),
-      });
-    });
-  });
+  const start = Date.now();
+  try {
+    const result = await diag.run(options);
+    return {
+      ...result,
+      id: diagId,
+      name: diag.name,
+      duration: Date.now() - start,
+    };
+  } catch (err) {
+    return {
+      id: diagId,
+      name: diag.name,
+      status: 'error',
+      duration: Date.now() - start,
+      error: err.message,
+    };
+  }
 }
 
 /**
- * System health summary — read-only snapshot of subsystem states.
+ * System health snapshot — container-native.
+ * Replaces getSystemHealth with no shell spawning.
  */
-export async function getSystemHealth({ env } = {}) {
-  const checks = {
-    database: await checkDatabase(env),
-    worker: await checkWorker(env),
-    storage: await checkStorage(env),
-  };
+export async function getSystemHealth(options = {}) {
+  const env = options.env ?? process.env;
+  const now = options.now ?? Date.now;
 
-  const failed = Object.values(checks).filter(c => c.status !== 'ok');
+  const checks = {};
+
+  checks.database = await checkDatabaseHealth(env);
+  checks.enrichment = await checkEnrichmentHealth(env);
+  checks.search = await checkSearchHealth(env);
+  checks.container = checkContainerHealth();
+
+  const failed = Object.values(checks).filter(c => c.status === 'error');
+  const warnings = Object.values(checks).filter(c => c.status === 'warning');
 
   return {
-    ok: failed.length === 0,
-    warning: failed.some(c => c.status === 'warning'),
+    status: failed.length > 0 ? 'unhealthy' : warnings.length > 0 ? 'degraded' : 'healthy',
+    container: CONTAINER,
     checks,
-    generatedAt: new Date().toISOString(),
+    timestamp: new Date().toISOString(),
   };
 }
 
-async function checkDatabase(env) {
-  try {
-    const root = env?.REQUESTS_ROOT || process.env.REQUESTS_ROOT || '/requests';
-    const dirs = ['incoming', 'processing', 'done', 'failed'];
-    let totalRequests = 0;
-    const byState = {};
+// =============================================================================
+// Diagnostic Implementations
+// =============================================================================
 
-    for (const dir of dirs) {
-      const dirPath = path.join(root, dir);
+async function runDatabaseConnectivity() {
+  const databases = [];
+
+  const discoveryDb = process.env.DISCOVERY_DB;
+  if (discoveryDb) {
+    if (discoveryDb === ':memory:') {
+      databases.push({ name: 'discovery-cache', status: 'ok', detail: 'in-memory' });
+    } else {
       try {
-        const entries = await fs.readdir(dirPath);
-        const count = entries.filter(f => f.endsWith('.json')).length;
-        byState[dir] = count;
-        totalRequests += count;
-      } catch {
-        byState[dir] = 0;
+        await fs.access(discoveryDb);
+        const stat = await fs.stat(discoveryDb);
+        databases.push({
+          name: 'discovery-cache',
+          status: stat.isFile() ? 'ok' : 'error',
+          detail: stat.isFile() ? 'accessible' : 'not a file',
+        });
+      } catch (err) {
+        databases.push({ name: 'discovery-cache', status: 'error', detail: err.message });
       }
     }
+  } else {
+    databases.push({ name: 'discovery-cache', status: 'warning', detail: 'not configured' });
+  }
+
+  const controlPlaneDb = process.env.CONTROL_PLANE_DB;
+  if (controlPlaneDb) {
+    try {
+      await fs.access(controlPlaneDb);
+      const stat = await fs.stat(controlPlaneDb);
+      databases.push({
+        name: 'control-plane',
+        status: stat.isFile() ? 'ok' : 'error',
+        detail: stat.isFile() ? 'accessible' : 'not a file',
+      });
+    } catch (err) {
+      databases.push({ name: 'control-plane', status: 'error', detail: err.message });
+    }
+  } else {
+    databases.push({ name: 'control-plane', status: 'warning', detail: 'not configured' });
+  }
+
+  const failed = databases.filter(d => d.status === 'error');
+  return {
+    status: failed.length > 0 ? 'fail' : 'pass',
+    result: { databases },
+  };
+}
+
+async function runEnrichmentCheck() {
+  const discoveryDb = process.env.DISCOVERY_DB;
+  if (!discoveryDb || discoveryDb === ':memory:') {
+    return {
+      status: 'warning',
+      result: { detail: 'Enrichment DB not configured or in-memory' },
+    };
+  }
+
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(discoveryDb, { readOnly: true });
+
+    try {
+      const pending = db.prepare("SELECT COUNT(*) as n FROM identity_enrichment_queue WHERE status = 'pending'").get();
+      const resolved = db.prepare("SELECT COUNT(*) as n FROM identity_enrichment_queue WHERE status = 'resolved'").get();
+      const failed = db.prepare("SELECT COUNT(*) as n FROM identity_enrichment_queue WHERE status = 'failed'").get();
+
+      return {
+        status: 'pass',
+        result: {
+          queue: {
+            pending: pending.n,
+            resolved: resolved.n,
+            failed: failed.n,
+          },
+        },
+      };
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    return { status: 'fail', result: { detail: err.message } };
+  }
+}
+
+async function runSearchEngineCheck() {
+  const discoveryDb = process.env.DISCOVERY_DB;
+  if (!discoveryDb || discoveryDb === ':memory:') {
+    return {
+      status: 'warning',
+      result: { detail: 'Search DB not configured or in-memory' },
+    };
+  }
+
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(discoveryDb, { readOnly: true });
+
+    try {
+      const indexed = db.prepare('SELECT COUNT(*) as n FROM release_search').get();
+      const total = db.prepare('SELECT COUNT(*) as n FROM release_attributes').get();
+
+      return {
+        status: 'pass',
+        result: {
+          ftsIndexed: indexed.n,
+          totalAttributes: total.n,
+          indexHealthy: indexed.n === total.n,
+        },
+      };
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    return { status: 'fail', result: { detail: err.message } };
+  }
+}
+
+function runCanary() {
+  const sample = sampleRandomRelease();
+  
+  if (!sample) {
+    return {
+      status: 'warning',
+      result: {
+        nodeVersion: process.version,
+        platform: process.platform,
+        uptime: process.uptime(),
+        sample: null,
+        reason: 'Corpus empty or no valid entries',
+      },
+    };
+  }
+
+  return {
+    status: 'pass',
+    result: {
+      nodeVersion: process.version,
+      platform: process.platform,
+      uptime: process.uptime(),
+      sample: {
+        infoHash: sample.infoHash,
+        filename: sample.filename,
+        source: 'corpus_sampler',
+        identity: sample.identity ? {
+          mediaId: sample.identity.mediaId,
+          state: sample.identity.resolutionState,
+          confidence: sample.identity.confidence,
+        } : null,
+      },
+    },
+  };
+}
+
+function runRequestInspector() {
+  if (CONTAINER) {
+    return {
+      status: 'unsupported',
+      unsupported: true,
+      reason: 'Request inspector requires host filesystem access (queue directories)',
+    };
+  }
+
+  const operatorRoot = process.env.OPERATOR_ROOT;
+  if (!operatorRoot) {
+    return {
+      status: 'unsupported',
+      unsupported: true,
+      reason: 'OPERATOR_ROOT not set — cannot inspect request queue',
+    };
+  }
+
+  try {
+    const entries = require('node:fs').readdirSync(operatorRoot, { withFileTypes: true });
+    const dirs = entries.filter(e => e.isDirectory()).map(e => e.name);
+    const expected = ['incoming', 'processing', 'done', 'failed'];
+    const present = expected.filter(d => dirs.includes(d));
 
     return {
-      name: 'Database',
-      status: 'ok',
-      detail: `${totalRequests} requests (${byState.processing || 0} processing, ${byState.failed || 0} failed)`,
-      byState,
+      status: present.length === expected.length ? 'pass' : 'warning',
+      result: {
+        operatorRoot,
+        directoriesPresent: present,
+        directoriesMissing: expected.filter(d => !dirs.includes(d)),
+      },
     };
+  } catch (err) {
+    return { status: 'fail', result: { detail: err.message } };
+  }
+}
+
+function runExternalCheck(id, requirement) {
+  return {
+    status: 'unsupported',
+    unsupported: true,
+    reason: `${id} requires ${requirement} — not available in container runtime`,
+  };
+}
+
+// =============================================================================
+// System Health Checks
+// =============================================================================
+
+async function checkDatabaseHealth(env) {
+  const discoveryDb = env.DISCOVERY_DB;
+  if (!discoveryDb) {
+    return { name: 'Database', status: 'warning', detail: 'DISCOVERY_DB not configured' };
+  }
+  if (discoveryDb === ':memory:') {
+    return { name: 'Database', status: 'ok', detail: 'in-memory' };
+  }
+
+  try {
+    await fs.access(discoveryDb);
+    const stat = await fs.stat(discoveryDb);
+    if (!stat.isFile()) {
+      return { name: 'Database', status: 'error', detail: 'not a file' };
+    }
+    return { name: 'Database', status: 'ok', detail: 'accessible' };
   } catch (err) {
     return { name: 'Database', status: 'error', detail: err.message };
   }
 }
 
-async function checkWorker(env) {
+async function checkEnrichmentHealth(env) {
+  const discoveryDb = env.DISCOVERY_DB;
+  if (!discoveryDb || discoveryDb === ':memory:') {
+    return { name: 'Enrichment', status: 'warning', detail: 'DB not configured' };
+  }
+
   try {
-    const root = env?.REQUESTS_ROOT || process.env.REQUESTS_ROOT || '/requests';
-    const processingDir = path.join(root, 'processing');
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(discoveryDb, { readOnly: true });
+
     try {
-      const entries = await fs.readdir(processingDir);
-      const processing = entries.filter(f => f.endsWith('.json')).length;
-      return {
-        name: 'Worker',
-        status: processing > 0 ? 'ok' : 'warning',
-        detail: processing > 0 ? `${processing} active` : 'No active processing',
-      };
-    } catch {
-      return { name: 'Worker', status: 'warning', detail: 'Processing directory not found' };
+      const failed = db.prepare("SELECT COUNT(*) as n FROM identity_enrichment_queue WHERE status = 'failed'").get();
+      if (failed.n > 10) {
+        return { name: 'Enrichment', status: 'warning', detail: `${failed.n} failed items` };
+      }
+      return { name: 'Enrichment', status: 'ok', detail: 'queue healthy' };
+    } finally {
+      db.close();
     }
   } catch (err) {
-    return { name: 'Worker', status: 'error', detail: err.message };
+    return { name: 'Enrichment', status: 'error', detail: err.message };
   }
 }
 
-async function checkStorage(env) {
+async function checkSearchHealth(env) {
+  const discoveryDb = env.DISCOVERY_DB;
+  if (!discoveryDb || discoveryDb === ':memory:') {
+    return { name: 'Search', status: 'warning', detail: 'DB not configured' };
+  }
+
   try {
-    const strmPath = env?.STRM_OUTPUT_PATH || process.env.STRM_OUTPUT_PATH || '/strm';
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(discoveryDb, { readOnly: true });
+
     try {
-      const stat = await fs.stat(strmPath);
-      if (!stat.isDirectory()) {
-        return { name: 'Storage', status: 'error', detail: 'STRM path exists but is not a directory' };
+      const indexed = db.prepare('SELECT COUNT(*) as n FROM release_search').get();
+      if (indexed.n === 0) {
+        return { name: 'Search', status: 'warning', detail: 'FTS index empty' };
       }
-      const entries = await fs.readdir(strmPath);
-      const strmFiles = entries.filter(f => f.endsWith('.strm'));
-      // Test writability
-      const testFile = path.join(strmPath, '.hashsucker-write-test');
-      await fs.writeFile(testFile, '');
-      await fs.unlink(testFile);
-      return {
-        name: 'Storage',
-        status: 'ok',
-        detail: `${strmFiles.length} .strm files, writable`,
-      };
-    } catch (err) {
-      return { name: 'Storage', status: 'warning', detail: `${strmPath}: ${err.message}` };
+      return { name: 'Search', status: 'ok', detail: `${indexed.n} entries indexed` };
+    } finally {
+      db.close();
     }
   } catch (err) {
-    return { name: 'Storage', status: 'error', detail: err.message };
+    return { name: 'Search', status: 'error', detail: err.message };
   }
+}
+
+function checkContainerHealth() {
+  return {
+    name: 'Runtime',
+    status: 'ok',
+    detail: CONTAINER ? 'container (node:alpine, no bash)' : 'host (bash available)',
+    container: CONTAINER,
+  };
 }

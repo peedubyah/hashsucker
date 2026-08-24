@@ -40,6 +40,7 @@ const HASH1 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const HASH2 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const HASH3 = 'cccccccccccccccccccccccccccccccccccccccc';
 const HASH4 = 'dddddddddddddddddddddddddddddddddddddddd';
+const HASH5 = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 
 // =============================================================================
 // Component Score Tests
@@ -1265,15 +1266,32 @@ test('classifyIdentityTier: text-only match is TextOnly', () => {
   assert.ok(result.IdentityEvidence.includes('text-similarity-only'));
 });
 
-test('classifyIdentityTier: live candidate scoped to media is ProviderMatched', () => {
+test('classifyIdentityTier: live candidate scoped to media with strong identity is ProviderConfirmed', () => {
   const hit = {
     hash: HASH1,
     filename: 'NCIS.S01E01.WEB-DL.mkv',
+    relevance: 0.7,
+    releaseAttributes: { title: 'NCIS', season: 1, episode: 1 },
     sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
     selectedMediaId: 'tt0364845',
   };
   const result = classifyIdentityTier(hit, { season: 1, episode: 1 }, 'tt0364845');
-  assert.equal(result.IdentityTier, 'ProviderMatched');
+  assert.equal(result.IdentityTier, 'ProviderConfirmed');
+  assert.ok(result.IdentityEvidence.includes('provider-scoped-to-media'));
+  assert.ok(result.IdentityEvidence.includes('strong-identity-evidence'));
+});
+
+test('classifyIdentityTier: live candidate scoped to media with weak identity is ProviderScoped', () => {
+  const hit = {
+    hash: HASH1,
+    filename: 'random_garbage_file.mkv',
+    relevance: 0.1,
+    releaseAttributes: {},
+    sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
+    selectedMediaId: 'tt0364845',
+  };
+  const result = classifyIdentityTier(hit, { season: 1, episode: 1 }, 'tt0364845');
+  assert.equal(result.IdentityTier, 'ProviderScoped');
   assert.ok(result.IdentityEvidence.includes('provider-scoped-to-media'));
 });
 
@@ -1437,10 +1455,12 @@ test('classifyIdentityTier: does not mutate input', () => {
 
 test('shadowRankComparison: returns comparison structure', () => {
   const candidates = [
-    // ProviderMatched (live-scoped)
+    // ProviderConfirmed (live-scoped with strong identity)
     {
       hash: HASH1,
       filename: 'NCIS.S01E01.WEB-DL.mkv',
+      relevance: 0.7,
+      releaseAttributes: { title: 'NCIS', season: 1, episode: 1 },
       sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
       selectedMediaId: 'tt0364845',
     },
@@ -1478,10 +1498,12 @@ test('shadowRankComparison: returns comparison structure', () => {
 
 test('shadowRankComparison: VerifiedOnly excludes non-verified candidates', () => {
   const candidates = [
-    // ProviderMatched (live-scoped) - NOT Verified
+    // ProviderConfirmed (live-scoped) - NOT Verified
     {
       hash: HASH1,
       filename: 'NCIS.S01E01.WEB-DL.mkv',
+      relevance: 0.7,
+      releaseAttributes: { title: 'NCIS', season: 1, episode: 1 },
       sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
       selectedMediaId: 'tt0364845',
     },
@@ -1497,18 +1519,20 @@ test('shadowRankComparison: VerifiedOnly excludes non-verified candidates', () =
   ];
 
   const result = shadowRankComparison(candidates, { season: 1, episode: 1 }, 'tt0364845', 50);
-  // Both are excluded from VerifiedOnly (ProviderMatched is not Verified)
+  // Both are excluded from VerifiedOnly (ProviderConfirmed is not Verified)
   assert.equal(result.CandidatesExcludedByVerifiedFilter, 2);
   assert.equal(result.VerifiedOnlyTopSources.corpus, 0);
   assert.equal(result.VerifiedOnlyTopSources.live, 0);
 });
 
-test('shadowRankComparison: Tiered mode includes provider-matched first then probable', () => {
+test('shadowRankComparison: Tiered mode includes provider-confirmed first then probable', () => {
   const candidates = [
-    // ProviderMatched (live-scoped)
+    // ProviderConfirmed (live-scoped with strong identity)
     {
       hash: HASH1,
       filename: 'NCIS.S01E01.WEB-DL.mkv',
+      relevance: 0.7,
+      releaseAttributes: { title: 'NCIS', season: 1, episode: 1 },
       sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
       selectedMediaId: 'tt0364845',
     },
@@ -1524,7 +1548,7 @@ test('shadowRankComparison: Tiered mode includes provider-matched first then pro
   ];
 
   const result = shadowRankComparison(candidates, { season: 1, episode: 1 }, 'tt0364845', 50);
-  // Tiered should have both candidates (ProviderMatched + Probable)
+  // Tiered should have both candidates (ProviderConfirmed + Probable)
   assert.equal(result.TieredTopSources.corpus + result.TieredTopSources.live, 2);
 });
 
@@ -1587,7 +1611,7 @@ test('shadowRankComparison: empty candidates returns empty results', () => {
 // Tiered Ranking Precedence Tests
 // =============================================================================
 
-test('rankHitsTiered: provider-matched candidates outrank probable regardless of source', () => {
+test('rankHitsTiered: ProviderConfirmed candidates outrank probable regardless of source', () => {
   const hits = [
     // Probable (corpus, high relevance score)
     {
@@ -1598,7 +1622,7 @@ test('rankHitsTiered: provider-matched candidates outrank probable regardless of
       sources: [{ origin: 'corpus', evidence: [], confidence: 0.9 }],
       mediaAssociations: [],
     },
-    // ProviderMatched (live-scoped, lower relevance)
+    // ProviderConfirmed (live-scoped, lower relevance, but strong identity evidence)
     {
       hash: HASH2,
       filename: 'NCIS.S01E01.WEB-DL.mkv',
@@ -1610,10 +1634,10 @@ test('rankHitsTiered: provider-matched candidates outrank probable regardless of
   ];
 
   const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1 }, 'tt0364845');
-  // ProviderMatched should come first even though it has lower relevance score
-  assert.equal(ranked[0].hash, HASH2); // ProviderMatched wins
+  // ProviderConfirmed should come first even though it has lower relevance score
+  assert.equal(ranked[0].hash, HASH2); // ProviderConfirmed wins
   assert.equal(ranked[1].hash, HASH1); // Probable second
-  assert.equal(tierMeta.TierCounts.ProviderMatched, 1);
+  assert.equal(tierMeta.TierCounts.ProviderConfirmed, 1);
   assert.equal(tierMeta.TierCounts.Probable, 1);
 });
 
@@ -1671,16 +1695,25 @@ test('rankHitsTiered: intra-tier ranking preserves existing score behavior', () 
   assert.equal(ranked[1].hash, HASH2);
 });
 
-test('rankHitsTiered: three-tier ordering provider-matched-probable-textonly', () => {
+test('rankHitsTiered: four-tier ordering ProviderConfirmed-Probable-ProviderScoped-TextOnly', () => {
   const hits = [
     // TextOnly (lowest relevance, no metadata)
     {
-      hash: HASH3,
+      hash: HASH4,
       filename: 'random_release.mkv',
       relevance: 0.1,
       releaseAttributes: {},
       sources: [{ origin: 'corpus', evidence: [], confidence: 0.3 }],
       mediaAssociations: [],
+    },
+    // ProviderScoped (live-scoped but no independent identity evidence)
+    {
+      hash: HASH3,
+      filename: 'random_garbage_file.mkv',
+      relevance: 0.1,
+      releaseAttributes: {},
+      sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
+      selectedMediaId: 'tt0364845',
     },
     // Probable (strong title match)
     {
@@ -1691,7 +1724,7 @@ test('rankHitsTiered: three-tier ordering provider-matched-probable-textonly', (
       sources: [{ origin: 'corpus', evidence: [], confidence: 0.9 }],
       mediaAssociations: [],
     },
-    // ProviderMatched (live-scoped)
+    // ProviderConfirmed (live-scoped with strong identity evidence)
     {
       hash: HASH1,
       filename: 'NCIS.S01E01.WEB-DL.mkv',
@@ -1703,11 +1736,13 @@ test('rankHitsTiered: three-tier ordering provider-matched-probable-textonly', (
   ];
 
   const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1 }, 'tt0364845');
-  assert.equal(ranked[0].hash, HASH1); // ProviderMatched
+  assert.equal(ranked[0].hash, HASH1); // ProviderConfirmed
   assert.equal(ranked[1].hash, HASH2); // Probable
-  assert.equal(ranked[2].hash, HASH3); // TextOnly
-  assert.equal(tierMeta.TierCounts.ProviderMatched, 1);
+  assert.equal(ranked[2].hash, HASH3); // ProviderScoped
+  assert.equal(ranked[3].hash, HASH4); // TextOnly
+  assert.equal(tierMeta.TierCounts.ProviderConfirmed, 1);
   assert.equal(tierMeta.TierCounts.Probable, 1);
+  assert.equal(tierMeta.TierCounts.ProviderScoped, 1);
   assert.equal(tierMeta.TierCounts.TextOnly, 1);
 });
 
@@ -1750,7 +1785,7 @@ test('rankHitsTiered: all candidates preserved (no deletions)', () => {
 
   const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1 }, 'tt0364845');
   assert.equal(ranked.length, 3); // All candidates preserved
-  const totalInTiers = tierMeta.TierCounts.Verified + tierMeta.TierCounts.ProviderMatched + tierMeta.TierCounts.Probable + tierMeta.TierCounts.TextOnly + tierMeta.TierCounts.Rejected;
+  const totalInTiers = tierMeta.TierCounts.Verified + tierMeta.TierCounts.ProviderConfirmed + tierMeta.TierCounts.Probable + tierMeta.TierCounts.ProviderScoped + tierMeta.TierCounts.TextOnly + tierMeta.TierCounts.Rejected;
   assert.equal(totalInTiers, 3);
 });
 
@@ -1759,6 +1794,8 @@ test('rankHitsTiered: tier metadata structure', () => {
     {
       hash: HASH1,
       filename: 'NCIS.S01E01.WEB-DL.mkv',
+      relevance: 0.7,
+      releaseAttributes: { title: 'NCIS', season: 1, episode: 1 },
       sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
       selectedMediaId: 'tt0364845',
     },
@@ -1769,8 +1806,9 @@ test('rankHitsTiered: tier metadata structure', () => {
   assert.ok(tierMeta.TierCounts);
   assert.ok(tierMeta.TopResultsByTier);
   assert.ok(Array.isArray(tierMeta.TopResultsByTier.Verified));
-  assert.ok(Array.isArray(tierMeta.TopResultsByTier.ProviderMatched));
+  assert.ok(Array.isArray(tierMeta.TopResultsByTier.ProviderConfirmed));
   assert.ok(Array.isArray(tierMeta.TopResultsByTier.Probable));
+  assert.ok(Array.isArray(tierMeta.TopResultsByTier.ProviderScoped));
   assert.ok(Array.isArray(tierMeta.TopResultsByTier.TextOnly));
 });
 
@@ -1795,15 +1833,17 @@ test('rankHitsTiered: does not mutate input hits', () => {
 // Refined Identity Tier Tests (Verified vs ProviderMatched)
 // =============================================================================
 
-test('classifyIdentityTier: live-scoped is ProviderMatched, not Verified', () => {
+test('classifyIdentityTier: live-scoped with strong identity is ProviderConfirmed, not Verified', () => {
   const hit = {
     hash: HASH1,
     filename: 'NCIS.S01E01.WEB-DL.mkv',
+    relevance: 0.7,
+    releaseAttributes: { title: 'NCIS', season: 1, episode: 1 },
     sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
     selectedMediaId: 'tt0364845',
   };
   const result = classifyIdentityTier(hit, { season: 1, episode: 1 }, 'tt0364845');
-  assert.equal(result.IdentityTier, 'ProviderMatched');
+  assert.equal(result.IdentityTier, 'ProviderConfirmed');
   assert.ok(result.IdentityEvidence.includes('provider-scoped-to-media'));
 });
 
@@ -1820,9 +1860,9 @@ test('classifyIdentityTier: corpus with media association is Verified', () => {
   assert.ok(result.IdentityEvidence.includes('media-association-match'));
 });
 
-test('rankHitsTiered: verified corpus outranks provider-matched live', () => {
+test('rankHitsTiered: verified corpus outranks ProviderConfirmed live', () => {
   const hits = [
-    // ProviderMatched (live-scoped, lower relevance)
+    // ProviderConfirmed (live-scoped, lower relevance)
     {
       hash: HASH1,
       filename: 'NCIS.S01E01.WEB-DL.mkv',
@@ -1843,14 +1883,14 @@ test('rankHitsTiered: verified corpus outranks provider-matched live', () => {
   ];
 
   const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1 }, 'tt0364845');
-  // Verified corpus should outrank provider-matched live
+  // Verified corpus should outrank ProviderConfirmed live
   assert.equal(ranked[0].hash, HASH2); // Verified wins
-  assert.equal(ranked[1].hash, HASH1); // ProviderMatched second
+  assert.equal(ranked[1].hash, HASH1); // ProviderConfirmed second
   assert.equal(tierMeta.TierCounts.Verified, 1);
-  assert.equal(tierMeta.TierCounts.ProviderMatched, 1);
+  assert.equal(tierMeta.TierCounts.ProviderConfirmed, 1);
 });
 
-test('rankHitsTiered: provider-matched outranks probable', () => {
+test('rankHitsTiered: ProviderConfirmed outranks probable', () => {
   const hits = [
     // Probable (corpus, strong title match)
     {
@@ -1861,7 +1901,7 @@ test('rankHitsTiered: provider-matched outranks probable', () => {
       sources: [{ origin: 'corpus', evidence: [], confidence: 0.9 }],
       mediaAssociations: [],
     },
-    // ProviderMatched (live-scoped)
+    // ProviderConfirmed (live-scoped with strong identity evidence)
     {
       hash: HASH2,
       filename: 'NCIS.S01E01.WEB-DL.mkv',
@@ -1873,14 +1913,14 @@ test('rankHitsTiered: provider-matched outranks probable', () => {
   ];
 
   const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1 }, 'tt0364845');
-  // ProviderMatched should outrank Probable
-  assert.equal(ranked[0].hash, HASH2); // ProviderMatched wins
+  // ProviderConfirmed should outrank Probable
+  assert.equal(ranked[0].hash, HASH2); // ProviderConfirmed wins
   assert.equal(ranked[1].hash, HASH1); // Probable second
-  assert.equal(tierMeta.TierCounts.ProviderMatched, 1);
+  assert.equal(tierMeta.TierCounts.ProviderConfirmed, 1);
   assert.equal(tierMeta.TierCounts.Probable, 1);
 });
 
-test('rankHitsTiered: four-tier ordering verified-providermatched-probable-textonly', () => {
+test('rankHitsTiered: five-tier ordering verified-providerconfirmed-providerscoped-probable-textonly', () => {
   const hits = [
     // TextOnly (lowest relevance, no metadata)
     {
@@ -1891,18 +1931,27 @@ test('rankHitsTiered: four-tier ordering verified-providermatched-probable-texto
       sources: [{ origin: 'corpus', evidence: [], confidence: 0.3 }],
       mediaAssociations: [],
     },
-    // Probable (strong title match)
+    // ProviderScoped (live-scoped but no independent identity evidence)
     {
       hash: HASH3,
+      filename: 'random_garbage_file.mkv',
+      relevance: 0.1,
+      releaseAttributes: {},
+      sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
+      selectedMediaId: 'tt0364845',
+    },
+    // Probable (strong title match)
+    {
+      hash: HASH2,
       filename: 'NCIS.S01E01.720p.mkv',
       relevance: 0.85,
       releaseAttributes: { title: 'NCIS', season: 1, episode: 1, resolution: '720p' },
       sources: [{ origin: 'corpus', evidence: [], confidence: 0.9 }],
       mediaAssociations: [],
     },
-    // ProviderMatched (live-scoped)
+    // ProviderConfirmed (live-scoped with strong identity evidence)
     {
-      hash: HASH2,
+      hash: HASH5,
       filename: 'NCIS.S01E01.WEB-DL.mkv',
       relevance: 0.7,
       releaseAttributes: { title: 'NCIS', season: 1, episode: 1 },
@@ -1922,12 +1971,14 @@ test('rankHitsTiered: four-tier ordering verified-providermatched-probable-texto
 
   const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1 }, 'tt0364845');
   assert.equal(ranked[0].hash, HASH1); // Verified
-  assert.equal(ranked[1].hash, HASH2); // ProviderMatched
-  assert.equal(ranked[2].hash, HASH3); // Probable
-  assert.equal(ranked[3].hash, HASH4); // TextOnly
+  assert.equal(ranked[1].hash, HASH5); // ProviderConfirmed
+  assert.equal(ranked[2].hash, HASH2); // Probable
+  assert.equal(ranked[3].hash, HASH3); // ProviderScoped
+  assert.equal(ranked[4].hash, HASH4); // TextOnly
   assert.equal(tierMeta.TierCounts.Verified, 1);
-  assert.equal(tierMeta.TierCounts.ProviderMatched, 1);
+  assert.equal(tierMeta.TierCounts.ProviderConfirmed, 1);
   assert.equal(tierMeta.TierCounts.Probable, 1);
+  assert.equal(tierMeta.TierCounts.ProviderScoped, 1);
   assert.equal(tierMeta.TierCounts.TextOnly, 1);
 });
 
@@ -1955,7 +2006,7 @@ test('rankHitsTiered: fallback when no verified or provider-matched exist', () =
   const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1 }, 'tt0364845');
   assert.equal(ranked.length, 2);
   assert.equal(tierMeta.TierCounts.Verified, 0);
-  assert.equal(tierMeta.TierCounts.ProviderMatched, 0);
+  assert.equal(tierMeta.TierCounts.ProviderConfirmed, 0);
   assert.equal(tierMeta.TierCounts.Probable, 2);
   // Fallback: probable candidates still ranked
   assert.equal(ranked[0].hash, HASH1);
@@ -1971,7 +2022,7 @@ test('rankHitsTiered: all candidates preserved with new tier', () => {
 
   const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1 }, 'tt0364845');
   assert.equal(ranked.length, 3); // All candidates preserved
-  const totalInTiers = tierMeta.TierCounts.Verified + tierMeta.TierCounts.ProviderMatched + tierMeta.TierCounts.Probable + tierMeta.TierCounts.TextOnly + tierMeta.TierCounts.Rejected;
+  const totalInTiers = tierMeta.TierCounts.Verified + tierMeta.TierCounts.ProviderConfirmed + tierMeta.TierCounts.Probable + tierMeta.TierCounts.ProviderScoped + tierMeta.TierCounts.TextOnly + tierMeta.TierCounts.Rejected;
   assert.equal(totalInTiers, 3);
 });
 
@@ -1997,7 +2048,7 @@ test('diagnoseIdentityEvidence: exposes evidence sources for verified candidate'
   assert.equal(result.EvidenceSources.Season_episode_match.matchStatus, 'exact_match');
 });
 
-test('diagnoseIdentityEvidence: exposes evidence for provider-matched candidate', () => {
+test('diagnoseIdentityEvidence: exposes evidence for ProviderConfirmed candidate', () => {
   const hit = {
     hash: HASH1,
     filename: 'NCIS.S01E01.WEB-DL.mkv',
@@ -2007,10 +2058,28 @@ test('diagnoseIdentityEvidence: exposes evidence for provider-matched candidate'
     selectedMediaId: 'tt0364845',
   };
   const result = diagnoseIdentityEvidence(hit, { season: 1, episode: 1 }, 'tt0364845');
-  assert.equal(result.IdentityTier, 'ProviderMatched');
+  assert.equal(result.IdentityTier, 'ProviderConfirmed');
   assert.equal(result.EvidenceSources.MediaId_scope.scoped, true);
   assert.equal(result.EvidenceSources.MediaId_scope.selectedMediaId, 'tt0364845');
   assert.equal(result.EvidenceSources.MediaId_scope.queriedMediaId, 'tt0364845');
+  assert.equal(result.EvidenceSources.Title_match.isStrongMatch, true);
+});
+
+test('diagnoseIdentityEvidence: exposes evidence for ProviderScoped candidate', () => {
+  const hit = {
+    hash: HASH1,
+    filename: 'random_garbage_file.mkv',
+    relevance: 0.1,
+    releaseAttributes: {},
+    sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
+    selectedMediaId: 'tt0364845',
+  };
+  const result = diagnoseIdentityEvidence(hit, { season: 1, episode: 1 }, 'tt0364845');
+  assert.equal(result.IdentityTier, 'ProviderScoped');
+  assert.equal(result.EvidenceSources.MediaId_scope.scoped, true);
+  assert.equal(result.EvidenceSources.Title_match.isStrongMatch, false);
+  assert.ok(result.promotionFailure);
+  assert.equal(result.promotionFailure.reason, 'insufficient-independent-identity-evidence');
 });
 
 test('diagnoseIdentityEvidence: exposes evidence for probable candidate', () => {
@@ -2066,7 +2135,7 @@ test('diagnoseTopCandidates: returns diagnostics for top N', () => {
   assert.equal(results[0].rank, 1);
   assert.equal(results[0].identity.IdentityTier, 'Verified');
   assert.equal(results[1].rank, 2);
-  assert.equal(results[1].identity.IdentityTier, 'ProviderMatched');
+  assert.equal(results[1].identity.IdentityTier, 'ProviderConfirmed');
 });
 
 test('diagnoseTopCandidates: limits to top N', () => {
@@ -2079,4 +2148,112 @@ test('diagnoseTopCandidates: limits to top N', () => {
   assert.equal(results.length, 2);
   assert.equal(results[0].rank, 1);
   assert.equal(results[1].rank, 2);
+});
+
+// =============================================================================
+// ProviderScoped vs ProviderConfirmed Tests
+// =============================================================================
+
+test('classifyIdentityTier: garbage live filename with correct mediaId becomes ProviderScoped', () => {
+  const hit = {
+    hash: HASH1,
+    filename: 'random_garbage_file.mkv',
+    relevance: 0.1,
+    releaseAttributes: {},
+    sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
+    selectedMediaId: 'tt0364845',
+  };
+  const result = classifyIdentityTier(hit, { season: 1, episode: 1 }, 'tt0364845');
+  assert.equal(result.IdentityTier, 'ProviderScoped');
+  assert.ok(result.IdentityEvidence.includes('provider-scoped-to-media'));
+});
+
+test('classifyIdentityTier: matching live filename becomes ProviderConfirmed', () => {
+  const hit = {
+    hash: HASH1,
+    filename: 'NCIS.S01E01.WEB-DL.mkv',
+    relevance: 0.7,
+    releaseAttributes: { title: 'NCIS', season: 1, episode: 1 },
+    sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
+    selectedMediaId: 'tt0364845',
+  };
+  const result = classifyIdentityTier(hit, { season: 1, episode: 1 }, 'tt0364845');
+  assert.equal(result.IdentityTier, 'ProviderConfirmed');
+  assert.ok(result.IdentityEvidence.includes('provider-scoped-to-media'));
+  assert.ok(result.IdentityEvidence.includes('strong-identity-evidence'));
+});
+
+test('rankHitsTiered: verified corpus beats ProviderScoped', () => {
+  const hits = [
+    // ProviderScoped (live-scoped but no independent identity evidence)
+    {
+      hash: HASH1,
+      filename: 'random_garbage_file.mkv',
+      relevance: 0.1,
+      releaseAttributes: {},
+      sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
+      selectedMediaId: 'tt0364845',
+    },
+    // Verified (corpus with media association)
+    {
+      hash: HASH2,
+      filename: 'NCIS.S01E01.720p.mkv',
+      relevance: 0.5,
+      releaseAttributes: { title: 'NCIS', season: 1, episode: 1, resolution: '720p' },
+      sources: [{ origin: 'corpus', evidence: [], confidence: 0.9 }],
+      mediaAssociations: [{ mediaId: 'tt0364845', confidence: 0.95 }],
+    },
+  ];
+
+  const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1 }, 'tt0364845');
+  assert.equal(ranked[0].hash, HASH2); // Verified wins
+  assert.equal(ranked[1].hash, HASH1); // ProviderScoped second
+  assert.equal(tierMeta.TierCounts.Verified, 1);
+  assert.equal(tierMeta.TierCounts.ProviderScoped, 1);
+});
+
+test('rankHitsTiered: ProviderConfirmed beats Probable', () => {
+  const hits = [
+    // Probable (corpus, strong title match)
+    {
+      hash: HASH1,
+      filename: 'NCIS.S01E01.2160p.mkv',
+      relevance: 0.95,
+      releaseAttributes: { title: 'NCIS', season: 1, episode: 1, resolution: '2160p', sourceType: 'BluRay' },
+      sources: [{ origin: 'corpus', evidence: [], confidence: 0.9 }],
+      mediaAssociations: [],
+    },
+    // ProviderConfirmed (live-scoped with strong identity evidence)
+    {
+      hash: HASH2,
+      filename: 'NCIS.S01E01.WEB-DL.mkv',
+      relevance: 0.7,
+      releaseAttributes: { title: 'NCIS', season: 1, episode: 1 },
+      sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
+      selectedMediaId: 'tt0364845',
+    },
+  ];
+
+  const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1 }, 'tt0364845');
+  assert.equal(ranked[0].hash, HASH2); // ProviderConfirmed wins
+  assert.equal(ranked[1].hash, HASH1); // Probable second
+  assert.equal(tierMeta.TierCounts.ProviderConfirmed, 1);
+  assert.equal(tierMeta.TierCounts.Probable, 1);
+});
+
+test('diagnoseIdentityEvidence: ProviderScoped shows promotion failure reason', () => {
+  const hit = {
+    hash: HASH1,
+    filename: 'random_garbage_file.mkv',
+    relevance: 0.1,
+    releaseAttributes: {},
+    sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
+    selectedMediaId: 'tt0364845',
+  };
+  const result = diagnoseIdentityEvidence(hit, { season: 1, episode: 1 }, 'tt0364845');
+  assert.equal(result.IdentityTier, 'ProviderScoped');
+  assert.ok(result.promotionFailure);
+  assert.equal(result.promotionFailure.reason, 'insufficient-independent-identity-evidence');
+  assert.ok(result.promotionFailure.failures.length > 0);
+  assert.ok(result.promotionFailure.recommendation.includes('ProviderConfirmed'));
 });

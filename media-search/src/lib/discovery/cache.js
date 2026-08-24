@@ -133,10 +133,68 @@ CREATE TABLE IF NOT EXISTS candidate_media (
   confidence REAL NOT NULL DEFAULT 1.0,
   evidence TEXT,
   associated_at INTEGER NOT NULL,
+  -- Provenance: how this association was created
+  resolver_source TEXT,
+  resolver_version TEXT,
+  match_method TEXT,
+  resolution_state TEXT NOT NULL DEFAULT 'unresolved',
   PRIMARY KEY (info_hash, file_index_key, media_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidate_media_media_id ON candidate_media(media_id);
+CREATE INDEX IF NOT EXISTS idx_candidate_media_resolution_state ON candidate_media(resolution_state);
+
+CREATE TABLE IF NOT EXISTS identity_enrichment_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  info_hash TEXT NOT NULL,
+  file_index_key INTEGER NOT NULL DEFAULT -1,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  resolver_source TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  next_attempt_at INTEGER,
+  error_message TEXT,
+  error_category TEXT,
+  UNIQUE(info_hash, file_index_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_enrichment_queue_status ON identity_enrichment_queue(status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_enrichment_queue_candidate ON identity_enrichment_queue(info_hash, file_index_key);
+
+CREATE TABLE IF NOT EXISTS media_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  media_id TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  season INTEGER,
+  episode INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending',
+  candidate_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_requests_media_id ON media_requests(media_id, created_at);
+
+CREATE TABLE IF NOT EXISTS media_request_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id INTEGER NOT NULL,
+  rank INTEGER NOT NULL,
+  info_hash TEXT NOT NULL,
+  file_index_key INTEGER NOT NULL DEFAULT -1,
+  filename TEXT,
+  score REAL NOT NULL DEFAULT 0,
+  score_breakdown TEXT,
+  identity_tier TEXT,
+  identity_confidence REAL,
+  identity_evidence TEXT,
+  resolution_state TEXT,
+  release_metadata TEXT,
+  ranking_breakdown TEXT,
+  FOREIGN KEY (request_id) REFERENCES media_requests(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_request_results_request ON media_request_results(request_id, rank);
 
 CREATE TABLE IF NOT EXISTS release_attributes (
   info_hash TEXT NOT NULL,
@@ -297,32 +355,45 @@ WHERE EXCLUDED.observed_at >= provider_observation_current.observed_at;
 
 const INSERT_MEDIA_ASSOCIATION = `
 INSERT INTO candidate_media (
-  info_hash, file_index_key, media_id, source, confidence, evidence, associated_at
+  info_hash, file_index_key, media_id, source, confidence, evidence, associated_at,
+  resolver_source, resolver_version, match_method, resolution_state
 ) VALUES (
-  @info_hash, @file_index_key, @media_id, @source, @confidence, @evidence, @associated_at
+  @info_hash, @file_index_key, @media_id, @source, @confidence, @evidence, @associated_at,
+  @resolver_source, @resolver_version, @match_method, @resolution_state
 )
 ON CONFLICT(info_hash, file_index_key, media_id) DO UPDATE SET
   source = EXCLUDED.source,
   confidence = EXCLUDED.confidence,
   evidence = EXCLUDED.evidence,
-  associated_at = EXCLUDED.associated_at;
+  associated_at = EXCLUDED.associated_at,
+  resolver_source = EXCLUDED.resolver_source,
+  resolver_version = EXCLUDED.resolver_version,
+  match_method = EXCLUDED.match_method,
+  resolution_state = EXCLUDED.resolution_state;
 `;
 
 const UPSERT_MEDIA_ASSOCIATION = `
 INSERT INTO candidate_media (
-  info_hash, file_index_key, media_id, source, confidence, evidence, associated_at
+  info_hash, file_index_key, media_id, source, confidence, evidence, associated_at,
+  resolver_source, resolver_version, match_method, resolution_state
 ) VALUES (
-  @info_hash, @file_index_key, @media_id, @source, @confidence, @evidence, @associated_at
+  @info_hash, @file_index_key, @media_id, @source, @confidence, @evidence, @associated_at,
+  @resolver_source, @resolver_version, @match_method, @resolution_state
 )
 ON CONFLICT(info_hash, file_index_key, media_id) DO UPDATE SET
   source = EXCLUDED.source,
   confidence = EXCLUDED.confidence,
   evidence = COALESCE(EXCLUDED.evidence, candidate_media.evidence),
-  associated_at = EXCLUDED.associated_at;
+  associated_at = EXCLUDED.associated_at,
+  resolver_source = EXCLUDED.resolver_source,
+  resolver_version = EXCLUDED.resolver_version,
+  match_method = EXCLUDED.match_method,
+  resolution_state = EXCLUDED.resolution_state;
 `;
 
 const GET_MEDIA_ASSOCIATIONS = `
-SELECT media_id, source, confidence, evidence, associated_at
+SELECT media_id, source, confidence, evidence, associated_at,
+       resolver_source, resolver_version, match_method, resolution_state
 FROM candidate_media
 WHERE info_hash = @info_hash AND file_index_key = @file_index_key;
 `;
@@ -761,6 +832,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       confidence: options.confidence != null ? options.confidence : 1.0,
       evidence: evidenceJson,
       associated_at: options.associatedAt ?? Date.now(),
+      resolver_source: options.resolverSource ?? null,
+      resolver_version: options.resolverVersion ?? null,
+      match_method: options.matchMethod ?? null,
+      resolution_state: options.resolutionState ?? 'unresolved',
     });
   }
 
@@ -774,6 +849,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       confidence: options.confidence != null ? options.confidence : 1.0,
       evidence: evidenceJson,
       associated_at: options.associatedAt ?? Date.now(),
+      resolver_source: options.resolverSource ?? null,
+      resolver_version: options.resolverVersion ?? null,
+      match_method: options.matchMethod ?? null,
+      resolution_state: options.resolutionState ?? 'unresolved',
     });
   }
 
@@ -792,6 +871,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       confidence: row.confidence,
       evidence: row.evidence ? JSON.parse(row.evidence) : null,
       associatedAt: row.associated_at,
+      resolverSource: row.resolver_source,
+      resolverVersion: row.resolver_version,
+      matchMethod: row.match_method,
+      resolutionState: row.resolution_state || 'unresolved',
     }));
   }
 
@@ -900,6 +983,470 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     return rows.map(rowToCandidate);
   }
 
+  // ---------------------------------------------------------------------------
+  // Identity enrichment queue management
+  // ---------------------------------------------------------------------------
+
+  const INSERT_ENRICHMENT_QUEUE = `
+    INSERT INTO identity_enrichment_queue (info_hash, file_index_key, status, attempts, max_attempts, resolver_source, created_at, updated_at, next_attempt_at)
+    VALUES (@info_hash, @file_index_key, 'pending', 0, @max_attempts, @resolver_source, @now, @now, @now)
+    ON CONFLICT(info_hash, file_index_key) DO UPDATE SET
+      updated_at = @now
+    WHERE status IN ('failed', 'resolved');
+  `;
+
+  const GET_PENDING_ENRICHMENT = `
+    SELECT * FROM identity_enrichment_queue
+    WHERE status IN ('pending', 'failed')
+      AND (next_attempt_at IS NULL OR next_attempt_at <= @now)
+      AND attempts < max_attempts
+    ORDER BY created_at ASC
+    LIMIT @limit;
+  `;
+
+  const GET_ENRICHMENT_QUEUE_ITEM = `
+    SELECT * FROM identity_enrichment_queue
+    WHERE info_hash = @info_hash AND file_index_key = @file_index_key;
+  `;
+
+  const UPDATE_ENRICHMENT_STATUS = `
+    UPDATE identity_enrichment_queue
+    SET status = @status, attempts = @attempts, updated_at = @now,
+        next_attempt_at = @next_attempt_at, error_message = @error_message,
+        error_category = @error_category, resolver_source = @resolver_source
+    WHERE info_hash = @info_hash AND file_index_key = @file_index_key;
+  `;
+
+  const GET_ENRICHMENT_STATS = `
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+      SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
+      SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) as resolved,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+    FROM identity_enrichment_queue;
+  `;
+
+  // Aggregate metrics for corpus observability
+  const GET_CANDIDATE_MEDIA_COVERAGE = `
+    SELECT
+      COUNT(DISTINCT c.info_hash || ':' || c.file_index_key) as total_candidates,
+      COUNT(DISTINCT CASE WHEN cm.info_hash IS NOT NULL THEN c.info_hash || ':' || c.file_index_key END) as candidates_with_media,
+      COUNT(DISTINCT CASE WHEN cm.info_hash IS NOT NULL AND cm.resolver_source IS NOT NULL THEN c.info_hash || ':' || c.file_index_key END) as candidates_with_resolved_media
+    FROM candidates c
+    LEFT JOIN candidate_media cm ON c.info_hash = cm.info_hash AND c.file_index_key = cm.file_index_key;
+  `;
+
+  const GET_RESOLVER_SUCCESS_RATES = `
+    SELECT
+      COALESCE(resolver_source, 'none') as resolver_source,
+      COUNT(*) as total_attempts,
+      SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) as resolved,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending
+    FROM identity_enrichment_queue
+    GROUP BY resolver_source;
+  `;
+
+  const GET_CONFIDENCE_DISTRIBUTION = `
+    SELECT
+      CASE
+        WHEN confidence >= 0.9 THEN 'very_high'
+        WHEN confidence >= 0.7 THEN 'high'
+        WHEN confidence >= 0.5 THEN 'medium'
+        WHEN confidence >= 0.3 THEN 'low'
+        ELSE 'very_low'
+      END as confidence_bucket,
+      COUNT(*) as count
+    FROM candidate_media
+    WHERE resolver_source IS NOT NULL
+    GROUP BY confidence_bucket;
+  `;
+
+  const GET_UNRESOLVED_STATS = `
+    SELECT
+      COUNT(*) as total_unresolved
+    FROM identity_enrichment_queue
+    WHERE status IN ('pending', 'failed')
+      AND attempts < max_attempts;
+  `;
+
+  const GET_MATCH_METHOD_DISTRIBUTION = `
+    SELECT
+      COALESCE(match_method, 'unknown') as match_method,
+      COUNT(*) as count
+    FROM candidate_media
+    WHERE resolver_source IS NOT NULL
+    GROUP BY match_method;
+  `;
+
+  const GET_RESOLUTION_STATE_DISTRIBUTION = `
+    SELECT
+      COALESCE(resolution_state, 'unresolved') as resolution_state,
+      COUNT(*) as count
+    FROM candidate_media
+    WHERE resolver_source IS NOT NULL
+    GROUP BY resolution_state;
+  `;
+
+  // Find candidates without candidate_media associations (unresolved)
+  const GET_UNRESOLVED_CANDIDATES = `
+    SELECT c.*
+    FROM candidates c
+    LEFT JOIN candidate_media cm ON c.info_hash = cm.info_hash AND c.file_index_key = cm.file_index_key
+    WHERE cm.info_hash IS NULL
+    ORDER BY c.first_seen ASC
+    LIMIT @limit OFFSET @offset;
+  `;
+
+  // Count candidates without candidate_media associations
+  const COUNT_UNRESOLVED_CANDIDATES = `
+    SELECT COUNT(*) as total
+    FROM candidates c
+    LEFT JOIN candidate_media cm ON c.info_hash = cm.info_hash AND c.file_index_key = cm.file_index_key
+    WHERE cm.info_hash IS NULL;
+  `;
+
+  // Check if candidate is already in queue
+  const CHECK_CANDIDATE_IN_QUEUE = `
+    SELECT 1 FROM identity_enrichment_queue
+    WHERE info_hash = @info_hash AND file_index_key = @file_index_key
+    LIMIT 1;
+  `;
+
+  // Media request persistence
+  const INSERT_MEDIA_REQUEST = `
+    INSERT INTO media_requests (media_id, media_type, season, episode, status, candidate_count, created_at)
+    VALUES (@media_id, @media_type, @season, @episode, @status, @candidate_count, @created_at);
+  `;
+
+  const INSERT_MEDIA_REQUEST_RESULT = `
+    INSERT INTO media_request_results (
+      request_id, rank, info_hash, file_index_key, filename, score,
+      score_breakdown, identity_tier, identity_confidence, identity_evidence,
+      resolution_state, release_metadata, ranking_breakdown
+    ) VALUES (
+      @request_id, @rank, @info_hash, @file_index_key, @filename, @score,
+      @score_breakdown, @identity_tier, @identity_confidence, @identity_evidence,
+      @resolution_state, @release_metadata, @ranking_breakdown
+    );
+  `;
+
+  const GET_MEDIA_REQUESTS = `
+    SELECT * FROM media_requests ORDER BY created_at DESC;
+  `;
+
+  const GET_MEDIA_REQUEST_RESULTS = `
+    SELECT * FROM media_request_results WHERE request_id = @request_id ORDER BY rank ASC;
+  `;
+
+  const insertEnrichmentQueueStmt = db.prepare(INSERT_ENRICHMENT_QUEUE);
+  const getPendingEnrichmentStmt = db.prepare(GET_PENDING_ENRICHMENT);
+  const getEnrichmentQueueItemStmt = db.prepare(GET_ENRICHMENT_QUEUE_ITEM);
+  const updateEnrichmentStatusStmt = db.prepare(UPDATE_ENRICHMENT_STATUS);
+  const getEnrichmentStatsStmt = db.prepare(GET_ENRICHMENT_STATS);
+  const getCandidateMediaCoverageStmt = db.prepare(GET_CANDIDATE_MEDIA_COVERAGE);
+  const getResolverSuccessRatesStmt = db.prepare(GET_RESOLVER_SUCCESS_RATES);
+  const getConfidenceDistributionStmt = db.prepare(GET_CONFIDENCE_DISTRIBUTION);
+  const getUnresolvedStatsStmt = db.prepare(GET_UNRESOLVED_STATS);
+  const getMatchMethodDistributionStmt = db.prepare(GET_MATCH_METHOD_DISTRIBUTION);
+  const getResolutionStateDistributionStmt = db.prepare(GET_RESOLUTION_STATE_DISTRIBUTION);
+  const getUnresolvedCandidatesStmt = db.prepare(GET_UNRESOLVED_CANDIDATES);
+  const countUnresolvedCandidatesStmt = db.prepare(COUNT_UNRESOLVED_CANDIDATES);
+  const checkCandidateInQueueStmt = db.prepare(CHECK_CANDIDATE_IN_QUEUE);
+  const insertMediaRequestStmt = db.prepare(INSERT_MEDIA_REQUEST);
+  const insertMediaRequestResultStmt = db.prepare(INSERT_MEDIA_REQUEST_RESULT);
+  const getMediaRequestsStmt = db.prepare(GET_MEDIA_REQUESTS);
+  const getMediaRequestResultsStmt = db.prepare(GET_MEDIA_REQUEST_RESULTS);
+
+  // ---------------------------------------------------------------------------
+  // Media request persistence functions
+  // ---------------------------------------------------------------------------
+
+  function persistMediaRequest(intent, results) {
+    const now = Date.now();
+    const info = insertMediaRequestStmt.run({
+      media_id: intent.mediaId,
+      media_type: intent.mediaType || 'movie',
+      season: intent.season || null,
+      episode: intent.episode != null ? intent.episode : (intent.episodes?.length ? intent.episodes[0] : null),
+      status: 'completed',
+      candidate_count: results.length,
+      created_at: now,
+    });
+
+    const requestId = info.lastInsertRowid;
+
+    for (const r of results) {
+      insertMediaRequestResultStmt.run({
+        request_id: requestId,
+        rank: r.rank,
+        info_hash: r.infoHash,
+        file_index_key: r.fileIndex === null || r.fileIndex === undefined ? -1 : r.fileIndex,
+        filename: r.filename,
+        score: r.score,
+        score_breakdown: r.scoreBreakdown ? JSON.stringify(r.scoreBreakdown) : null,
+        identity_tier: r.identity?.tier || 'unknown',
+        identity_confidence: r.identity?.confidence || 0,
+        identity_evidence: r.identity?.evidence ? JSON.stringify(r.identity.evidence) : null,
+        resolution_state: r.identity?.state || 'unresolved',
+        release_metadata: r.release ? JSON.stringify(r.release) : null,
+        ranking_breakdown: r.rankingBreakdown ? JSON.stringify(r.rankingBreakdown) : null,
+      });
+    }
+
+    return requestId;
+  }
+
+  function getMediaRequests() {
+    return getMediaRequestsStmt.all();
+  }
+
+  function getMediaRequestResults(requestId) {
+    return getMediaRequestResultsStmt.all({ request_id: requestId });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Identity enrichment queue management functions
+  // ---------------------------------------------------------------------------
+
+  function rowToEnrichmentQueueItem(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      infoHash: row.info_hash,
+      fileIndexKey: row.file_index_key,
+      status: row.status,
+      attempts: row.attempts,
+      maxAttempts: row.max_attempts,
+      resolverSource: row.resolver_source,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      nextAttemptAt: row.next_attempt_at,
+      errorMessage: row.error_message,
+      errorCategory: row.error_category,
+    };
+  }
+
+  function enqueueIdentityResolution(infoHash, fileIndex, options = {}) {
+    const now = Date.now();
+    insertEnrichmentQueueStmt.run({
+      info_hash: infoHash,
+      file_index_key: fileIndexKey(fileIndex),
+      max_attempts: options.maxAttempts ?? 3,
+      resolver_source: options.resolverSource ?? null,
+      now,
+    });
+    return getEnrichmentQueueItem(infoHash, fileIndex);
+  }
+
+  function getPendingEnrichments(limit = 10) {
+    const rows = getPendingEnrichmentStmt.all({ now: Date.now(), limit });
+    return rows.map(rowToEnrichmentQueueItem);
+  }
+
+  function getEnrichmentQueueItem(infoHash, fileIndex) {
+    const row = getEnrichmentQueueItemStmt.get({
+      info_hash: infoHash,
+      file_index_key: fileIndexKey(fileIndex),
+    });
+    return rowToEnrichmentQueueItem(row);
+  }
+
+  function updateEnrichmentStatus(infoHash, fileIndex, status, options = {}) {
+    const attempts = options.attempts ?? 0;
+    const nextAttemptAt = options.nextAttemptAt ?? null;
+    updateEnrichmentStatusStmt.run({
+      info_hash: infoHash,
+      file_index_key: fileIndexKey(fileIndex),
+      status,
+      attempts,
+      now: Date.now(),
+      next_attempt_at: nextAttemptAt,
+      error_message: options.errorMessage ?? null,
+      error_category: options.errorCategory ?? null,
+      resolver_source: options.resolverSource ?? null,
+    });
+    return getEnrichmentQueueItem(infoHash, fileIndex);
+  }
+
+  function getEnrichmentStats() {
+    const row = getEnrichmentStatsStmt.get();
+    return {
+      total: row.total || 0,
+      pending: row.pending || 0,
+      processing: row.processing || 0,
+      resolved: row.resolved || 0,
+      failed: row.failed || 0,
+    };
+  }
+
+  /**
+   * Get candidate_media coverage metrics.
+   * Shows how many candidates have media associations and resolved media.
+   */
+  function getCandidateMediaCoverage() {
+    const row = getCandidateMediaCoverageStmt.get();
+    const totalCandidates = row.total_candidates || 0;
+    const candidatesWithMedia = row.candidates_with_media || 0;
+    const candidatesWithResolvedMedia = row.candidates_with_resolved_media || 0;
+    return {
+      totalCandidates,
+      candidatesWithMedia,
+      candidatesWithResolvedMedia,
+      coveragePercentage: totalCandidates > 0 ? candidatesWithMedia / totalCandidates : 0,
+      resolvedPercentage: totalCandidates > 0 ? candidatesWithResolvedMedia / totalCandidates : 0,
+    };
+  }
+
+  /**
+   * Get resolver success rates grouped by resolver source.
+   */
+  function getResolverSuccessRates() {
+    const rows = getResolverSuccessRatesStmt.all();
+    return rows.map((row) => ({
+      resolverSource: row.resolver_source,
+      totalAttempts: row.total_attempts || 0,
+      resolved: row.resolved || 0,
+      failed: row.failed || 0,
+      pending: row.pending || 0,
+      successRate: row.total_attempts > 0 ? row.resolved / row.total_attempts : 0,
+    }));
+  }
+
+  /**
+   * Get confidence distribution for resolved media associations.
+   */
+  function getConfidenceDistribution() {
+    const rows = getConfidenceDistributionStmt.all();
+    const distribution = {
+      very_high: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
+      very_low: 0,
+    };
+    for (const row of rows) {
+      distribution[row.confidence_bucket] = row.count;
+    }
+    return distribution;
+  }
+
+  /**
+   * Get count of unresolved candidates (pending or failed but retryable).
+   */
+  function getUnresolvedStats() {
+    const row = getUnresolvedStatsStmt.get();
+    return {
+      totalUnresolved: row.total_unresolved || 0,
+    };
+  }
+
+  /**
+   * Get match method distribution for resolved associations.
+   */
+  function getMatchMethodDistribution() {
+    const rows = getMatchMethodDistributionStmt.all();
+    return rows.map((row) => ({
+      matchMethod: row.match_method,
+      count: row.count || 0,
+    }));
+  }
+
+  /**
+   * Get resolution state distribution for associations.
+   */
+  function getResolutionStateDistribution() {
+    const rows = getResolutionStateDistributionStmt.all();
+    return rows.map((row) => ({
+      resolutionState: row.resolution_state,
+      count: row.count || 0,
+    }));
+  }
+
+  /**
+   * Find candidates without candidate_media associations.
+   * Returns candidates that need identity resolution.
+   *
+   * @param {Object} options
+   * @param {number} [options.limit=100] - Max candidates to return
+   * @param {number} [options.offset=0] - Offset for pagination
+   * @returns {Array<Object>} Unresolved candidates
+   */
+  function getUnresolvedCandidates(options = {}) {
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+    const rows = getUnresolvedCandidatesStmt.all({ limit, offset });
+    return rows.map(rowToCandidate);
+  }
+
+  /**
+   * Count total candidates without candidate_media associations.
+   *
+   * @returns {number} Count of unresolved candidates
+   */
+  function countUnresolvedCandidates() {
+    const row = countUnresolvedCandidatesStmt.get();
+    return row.total || 0;
+  }
+
+  /**
+   * Check if a candidate is already in the enrichment queue.
+   *
+   * @param {string} infoHash
+   * @param {number|null} fileIndex
+   * @returns {boolean}
+   */
+  function isCandidateInQueue(infoHash, fileIndex) {
+    const row = checkCandidateInQueueStmt.get({
+      info_hash: infoHash,
+      file_index_key: fileIndexKey(fileIndex),
+    });
+    return row !== undefined;
+  }
+
+  /**
+   * Enqueue unresolved candidates for identity resolution.
+   * Finds candidates without candidate_media associations and adds them
+   * to the enrichment queue. Skips candidates already in queue.
+   *
+   * @param {Object} options
+   * @param {number} [options.limit=100] - Max candidates to enqueue
+   * @param {number} [options.offset=0] - Offset for pagination
+   * @param {number} [options.maxAttempts=3] - Max retry attempts
+   * @returns {Object} { enqueued, skipped, total }
+   */
+  function enqueueUnresolvedCandidates(options = {}) {
+    const { limit = 100, offset = 0, maxAttempts = 3 } = options;
+    const now = Date.now();
+
+    // Get unresolved candidates
+    const candidates = getUnresolvedCandidates({ limit, offset });
+
+    let enqueued = 0;
+    let skipped = 0;
+
+    for (const candidate of candidates) {
+      // Skip if already in queue
+      if (isCandidateInQueue(candidate.infoHash, candidate.fileIndex)) {
+        skipped++;
+        continue;
+      }
+
+      // Insert into queue, preserving first_seen as created_at
+      insertEnrichmentQueueStmt.run({
+        info_hash: candidate.infoHash,
+        file_index_key: fileIndexKey(candidate.fileIndex),
+        max_attempts: maxAttempts,
+        resolver_source: null,
+        now: candidate.firstSeen || now,
+      });
+      enqueued++;
+    }
+
+    return { enqueued, skipped, total: candidates.length };
+  }
+
   let closed = false;
 
   function isClosed() {
@@ -925,6 +1472,19 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     try { getReleaseAttributesStmt.finalize(); } catch {}
     try { getReleaseAttributesBySourceStmt.finalize(); } catch {}
     try { getCandidatesWithoutAttributesStmt.finalize(); } catch {}
+    try { insertEnrichmentQueueStmt.finalize(); } catch {}
+    try { getPendingEnrichmentStmt.finalize(); } catch {}
+    try { getEnrichmentQueueItemStmt.finalize(); } catch {}
+    try { updateEnrichmentStatusStmt.finalize(); } catch {}
+    try { getEnrichmentStatsStmt.finalize(); } catch {}
+    try { getCandidateMediaCoverageStmt.finalize(); } catch {}
+    try { getResolverSuccessRatesStmt.finalize(); } catch {}
+    try { getConfidenceDistributionStmt.finalize(); } catch {}
+    try { getUnresolvedStatsStmt.finalize(); } catch {}
+    try { getMatchMethodDistributionStmt.finalize(); } catch {}
+    try { getUnresolvedCandidatesStmt.finalize(); } catch {}
+    try { countUnresolvedCandidatesStmt.finalize(); } catch {}
+    try { checkCandidateInQueueStmt.finalize(); } catch {}
     db.close();
   }
 
@@ -946,6 +1506,28 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     _insertReleaseAttributes,
     getReleaseAttributes,
     getCandidatesWithoutReleaseAttributes,
+    // Identity enrichment queue
+    enqueueIdentityResolution,
+    getPendingEnrichments,
+    getEnrichmentQueueItem,
+    updateEnrichmentStatus,
+    getEnrichmentStats,
+    // Enrichment observability metrics
+    getCandidateMediaCoverage,
+    getResolverSuccessRates,
+    getConfidenceDistribution,
+    getUnresolvedStats,
+    getMatchMethodDistribution,
+    getResolutionStateDistribution,
+    // Queue seeding
+    getUnresolvedCandidates,
+    countUnresolvedCandidates,
+    isCandidateInQueue,
+    enqueueUnresolvedCandidates,
+    // Media request persistence
+    persistMediaRequest,
+    getMediaRequests,
+    getMediaRequestResults,
     // Exposed for testing/inspection
     get db() { return db; },
   };

@@ -43,10 +43,10 @@ export async function searchCatalog(query, fetchImpl = fetch) {
     return [];
   }
 
-  // Text search: use the search catalog endpoint for each type
+  // Text search: use the top catalog search endpoint for each type
   const types = ['series', 'movie'];
   const attempts = await Promise.allSettled(types.map((type) =>
-    getJson(`/catalog/${type}/search=${encodeURIComponent(q)}.json`, fetchImpl)
+    getJson(`/catalog/${type}/top/search=${encodeURIComponent(q)}.json`, fetchImpl)
   ));
   const payloads = attempts.filter((attempt) => attempt.status === 'fulfilled').map((attempt) => attempt.value);
   if (payloads.length === 0) throw attempts[0].reason;

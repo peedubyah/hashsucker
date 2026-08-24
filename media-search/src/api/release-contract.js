@@ -108,18 +108,18 @@ export function toPublicReleaseDto(release) {
     }
   }
 
-    // Provenance/evidence fields are optional with sensible defaults
-    const sources = Array.isArray(value._sources) ? value._sources : [];
-    const selectedMediaId = value._selectedMediaId ?? null;
-    const providerObservations = Array.isArray(value.providerObservations)
-      ? value.providerObservations
-      : [];
-    const provenance = value._provenance && typeof value._provenance === 'object'
-      ? value._provenance
-      : null;
-    const justification = value._justification && typeof value._justification === 'object'
-      ? value._justification
-      : null;
+  // Provenance/evidence fields are optional with sensible defaults
+  const sources = Array.isArray(value._sources) ? value._sources : [];
+  const selectedMediaId = value._selectedMediaId ?? null;
+  const providerObservations = Array.isArray(value.providerObservations)
+    ? value.providerObservations
+    : [];
+  const provenance = value._provenance && typeof value._provenance === 'object'
+    ? value._provenance
+    : null;
+  const justification = value._justification && typeof value._justification === 'object'
+    ? value._justification
+    : null;
 
   return Object.fromEntries([
     ...Object.entries(identity),

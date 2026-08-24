@@ -604,7 +604,7 @@ test('exact identity: null fileIndex vs zero fileIndex remain distinct', () => {
 // =============================================================================
 // ASSOCIATION + COVERAGE
 // =============================================================================
-test('association + coverage: correct episode but associated only to OTHER mediaId => rejected', () => {
+test('association + coverage: correct episode but associated only to OTHER mediaId => appears with NEUTRAL identity', () => {
   const cache = createDiscoveryCache();
   storeEpisodeAttrs(cache, HASH_EP, null, {
     filename: 'Show.S01E03.1080p.mkv',
@@ -620,7 +620,9 @@ test('association + coverage: correct episode but associated only to OTHER media
     mediaId: MEDIA_SHOW,
   });
 
-  assert.equal(result.results.length, 0);
+  // Corpus searchable by release identity — appears with NEUTRAL identity confidence
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].components.identityConfidence, 0.5);
   cache.close();
 });
 
@@ -666,7 +668,7 @@ test('association + coverage: selected-media association + valid coverage => eli
 // =============================================================================
 // EMPTY QUERY: selected-media + episode-compatible only
 // =============================================================================
-test('empty query: returns only selected-media-associated AND episode-compatible', () => {
+test('empty query: all candidates appear, HASH_EP ranks highest (identity + coverage)', () => {
   const cache = createDiscoveryCache();
 
   // Candidate associated with MEDIA_SHOW, correct episode
@@ -699,9 +701,11 @@ test('empty query: returns only selected-media-associated AND episode-compatible
     mediaId: MEDIA_SHOW,
   });
 
-  // Only HASH_EP should appear (associated with MEDIA_SHOW AND covers S01E03)
-  assert.equal(result.results.length, 1);
-  assert.equal(result.results[0].hash, HASH_EP);
+  // All candidates appear (corpus searchable by release identity)
+  assert.ok(result.results.length >= 2, 'Multiple candidates appear');
+  // HASH_EP ranks highest (identity confidence from MEDIA_SHOW + correct episode)
+  assert.equal(result.results[0].hash, HASH_EP, 'HASH_EP ranks highest');
+  assert.equal(result.results[0].components.identityConfidence, 0.9, 'Identity confidence from MEDIA_SHOW');
   cache.close();
 });
 

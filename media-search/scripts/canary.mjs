@@ -3,6 +3,9 @@
  * Startup Canary — proves one release survives the pipeline.
  *
  * Uses structured events for all output.
+ *
+ * Samples a random release from the corpus (via sampleRandomRelease).
+ * Pipeline behavior is unchanged from previous hardcoded version.
  */
 
 import fs from 'node:fs';
@@ -11,12 +14,10 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { pathToFileURL } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const STRM_WRITER = path.join(ROOT, '..', 'torbox-importer', 'scripts', 'strm-writer.sh');
-const DMM_DB = path.join(ROOT, '..', 'artifacts', 'stage3', 'dmm-stage3-functional.db');
 
 // ─── Load .env ───────────────────────────────────────────────────────────────
 function loadEnv() {
@@ -39,6 +40,7 @@ const TORBOX_API_URL = 'https://api.torbox.app/v1/api';
 
 // ─── Structured Events ──────────────────────────────────────────────────────
 const events = [];
+const stageResults = {};
 
 function emit(event, data = {}) {
   const entry = {
@@ -53,36 +55,46 @@ function emit(event, data = {}) {
 
 function fail(event, data = {}) {
   emit(event, { status: 'failed', ...data });
-  console.log(`\nCANARY FAILED\n`);
+  console.log('\nCANARY FAILED');
+  console.log('Stage results:', JSON.stringify(stageResults, null, 2));
   process.exit(1);
 }
 
 // ─── Temp dirs ───────────────────────────────────────────────────────────────
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'canary-'));
 const REQUESTS_ROOT = path.join(tmpRoot, 'requests');
-const STRM_OUTPUT = '/home/patrick/hashsucker-data/strm';
+const STRM_OUTPUT = process.env.STRM_OUTPUT_PATH || '/home/patrick/hashsucker-data/strm';
 fs.mkdirSync(STRM_OUTPUT, { recursive: true });
 fs.mkdirSync(path.join(REQUESTS_ROOT, 'incoming'), { recursive: true });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// STEP 0: Resolve known hash → release identity
+// STEP 0: Sample random release from corpus
 // ═══════════════════════════════════════════════════════════════════════════════
-const KNOWN_HASH = '112d2fabbb28050f2032bfcf1e73e0cd770a8bef';
+const sampleStart = Date.now();
 
-const dmmDb = new DatabaseSync(DMM_DB, { open: true, readOnly: true });
-const row = dmmDb.prepare(
-  'SELECT title, filename, size FROM candidates WHERE info_hash = ? LIMIT 1'
-).get(KNOWN_HASH);
-dmmDb.close();
+const { sampleRandomRelease } = await import(pathToFileURL(path.join(ROOT, 'src', 'lib', 'discovery', 'corpus-sampler.js')).href);
 
-if (!row) {
-  fail('canary.hash_not_found', { hash: KNOWN_HASH });
+const sample = sampleRandomRelease({ dbPath: process.env.DISCOVERY_DB });
+if (!sample) {
+  fail('canary.no_sample', { reason: 'Corpus empty or no valid entries' });
 }
+
+const { infoHash: KNOWN_HASH, filename: rowFilename, title: rowTitle, size: rowSize, identity } = sample;
+const row = { title: rowTitle, filename: rowFilename, size: rowSize };
+
+stageResults.sample = {
+  infoHash: KNOWN_HASH,
+  filename: row.filename,
+  identity: identity ? { mediaId: identity.mediaId, state: identity.resolutionState, confidence: identity.confidence } : null,
+  duration: Date.now() - sampleStart,
+};
 
 emit('canary.identity', {
   hash: KNOWN_HASH,
-  filename: row.title,
+  filename: row.filename,
   size: row.size,
+  source: 'corpus_sampler',
+  identity: stageResults.sample.identity,
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -170,20 +182,24 @@ const { createHandoff } = await import(pathToFileURL(path.join(ROOT, 'src', 'lib
 const { queueHandoff } = await import(pathToFileURL(path.join(ROOT, 'src', 'lib', 'requests', 'queue.js')).href);
 const { createRequestIntent } = await import(pathToFileURL(path.join(ROOT, 'src', 'lib', 'requests', 'intent.js')).href);
 
-const intent = createRequestIntent({ type: 'movie', mediaId: 'tt0111161' });
+const intent = identity && identity.mediaId
+  ? createRequestIntent({ type: 'series', mediaId: identity.mediaId })
+  : createRequestIntent({ type: 'movie', mediaId: 'tt0111161' });
 
 const release = {
   infoHash: KNOWN_HASH,
   fileIndex: null,
-  releaseKey: `${KNOWN_HASH}:torrent`,
+  releaseKey: sample.releaseKey,
   title: row.title,
-  filename: row.title,
+  filename: row.filename,
   size: row.size,
   resolution: '2160p',
   quality: 'BluRay',
   codec: 'x265',
   hdr: 'HDR',
 };
+
+const handoffStart = Date.now();
 
 const handoff = createHandoff({
   intent,
@@ -192,21 +208,26 @@ const handoff = createHandoff({
   handlingMode,
 });
 
-emit('canary.handoff', {
+stageResults.handoff = {
   requestId: handoff.requestId,
   hash: KNOWN_HASH,
   handlingMode,
   provider: 'torbox',
-});
+  duration: Date.now() - handoffStart,
+};
+
+emit('canary.handoff', stageResults.handoff);
 
 const handoffPath = await queueHandoff(handoff, {
   requestDir: path.join(REQUESTS_ROOT, 'incoming'),
 });
 
-emit('canary.queued', {
+stageResults.queue = {
   requestId: handoff.requestId,
   path: handoffPath,
-});
+};
+
+emit('canary.queued', stageResults.queue);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STEP 4: Build stream URL
@@ -228,6 +249,8 @@ emit('canary.stream_url', {
 const titleForStrm = row.title.replace(/^\[.*?\]\s*/, '').replace(/\.[a-zA-Z]{3,4}$/, '').trim();
 const yearMatch = row.title.match(/\b(19|20)\d{2}\b/);
 const yearStr = yearMatch ? yearMatch[0] : '';
+
+const materializationStart = Date.now();
 
 const strmResult = spawnSync('sh', [
   STRM_WRITER,
@@ -272,19 +295,34 @@ if (strmContent !== streamUrl) {
   });
 }
 
-emit('canary.strm_written', {
+stageResults.materialization = {
   path: strmFile,
   url: streamUrl,
   size: strmContent.length,
-});
+  duration: Date.now() - materializationStart,
+};
+
+emit('canary.strm_written', stageResults.materialization);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // RESULT
 // ═══════════════════════════════════════════════════════════════════════════════
+const totalDuration = Date.now() - sampleStart;
+
+const result = {
+  status: 'passed',
+  eventsEmitted: events.length,
+  artifact: strmFile,
+  url: streamUrl,
+  sample: stageResults.sample,
+  handoff: stageResults.handoff,
+  queue: stageResults.queue,
+  materialization: stageResults.materialization,
+  totalDuration,
+};
+
 console.log('\nCANARY PASSED');
-console.log(`Events emitted: ${events.length}`);
-console.log(`Artifact: ${strmFile}`);
-console.log(`URL: ${streamUrl}`);
+console.log(JSON.stringify(result, null, 2));
 
 // Clean up temp dir (but not the .strm)
 fs.rmSync(tmpRoot, { recursive: true, force: true });

@@ -424,9 +424,9 @@ export function countIdentityEligibility(hits, queryIntent = {}, mediaId = null)
  * Tiers (in precedence order):
  * - Verified: explicit candidate_media match, confirmed filename/parser identity,
  *             or season/episode confirmation where applicable
- * - ProviderMatched: live discovery returned candidate scoped to requested mediaId,
- *                    provider evidence exists, identity not independently confirmed
+ * - ProviderConfirmed: live mediaId scope AND strong identity evidence from filename/parser
  * - Probable: strong corpus/title metadata match
+ * - ProviderScoped: live mediaId scope only, no independent identity evidence
  * - TextOnly: retrieved only because of search text similarity
  * - Rejected: identity mismatch or no target media ID
  *
@@ -458,15 +458,47 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
   const targetMediaId = mediaId || hit.selectedMediaId || null;
   const textRelevance = hit.relevance || 0;
 
-  // Live candidates: tier based on provider scope
+  // Helper: check if filename/parser provides strong identity evidence
+  // Used to distinguish ProviderConfirmed from ProviderScoped for live candidates
+  // and to strengthen Verified tier for corpus candidates
+  const hasStrongIdentityEvidence = (h, intent) => {
+    const attrs = h.releaseAttributes || {};
+    const title = attrs.title || null;
+    const season = attrs.season ?? null;
+    const episode = attrs.episode ?? null;
+    const relevance = h.relevance || 0;
+
+    // Strong title match indicates filename matches query
+    const hasStrongTitle = relevance >= 0.6;
+
+    // Parsed season/episode matching query intent
+    const querySeason = intent?.season ?? null;
+    const queryEpisode = intent?.episode ?? null;
+    const hasMatchingSeason = querySeason != null && season === querySeason;
+    const hasMatchingEpisode = queryEpisode != null && episode === queryEpisode;
+    const hasMatchingSeasonEpisode = hasMatchingSeason && hasMatchingEpisode;
+
+    // Strong identity evidence: either strong title match OR matching season/episode
+    return hasStrongTitle || hasMatchingSeasonEpisode;
+  };
+
+  // Live candidates: tier based on provider scope + independent identity evidence
   // Provider scope is NOT equivalent to confirmed identity
   if (isLive && !isCorpus) {
     if (hit.selectedMediaId && hit.selectedMediaId === mediaId) {
       // Provider returned this candidate scoped to the requested mediaId
-      // This is ProviderMatched, not Verified — identity not independently confirmed
+      // Check for independent identity evidence to distinguish ProviderConfirmed vs ProviderScoped
+      if (hasStrongIdentityEvidence(hit, queryIntent)) {
+        return {
+          IdentityTier: 'ProviderConfirmed',
+          IdentityConfidence: 0.8,
+          IdentityEvidence: ['provider-scoped-to-media', 'strong-identity-evidence'],
+          RejectionReason: null,
+        };
+      }
       return {
-        IdentityTier: 'ProviderMatched',
-        IdentityConfidence: 0.7,
+        IdentityTier: 'ProviderScoped',
+        IdentityConfidence: 0.4,
         IdentityEvidence: ['provider-scoped-to-media'],
         RejectionReason: null,
       };
@@ -488,6 +520,9 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
       RejectionReason: 'no_target_media_id: query not scoped to specific media',
     };
   }
+
+  // Check for strong identity evidence from filename/parser (used for Verified tier)
+  const strongIdentityEvidence = hasStrongIdentityEvidence(hit, queryIntent);
 
   // Check explicit media association
   let explicitMatch = false;
@@ -696,6 +731,29 @@ export function diagnoseIdentityEvidence(hit, queryIntent = {}, mediaId = null) 
   const identityConfidence = hit.identityConfidence ?? 0.5;
   const parserConfidence = hit.parserConfidence ?? 0.5;
 
+  // Promotion failure diagnostic: why ProviderScoped failed promotion to ProviderScoped
+  let promotionFailure = null;
+  if (tier.IdentityTier === 'ProviderScoped') {
+    const failures = [];
+    if (!isStrongMatch) {
+      failures.push(`weak-title-match (relevance=${relevance.toFixed(2)}, need>=0.6)`);
+    }
+    if (querySeason != null && parsedSeason !== querySeason) {
+      failures.push(`season-mismatch (parsed=${parsedSeason}, query=${querySeason})`);
+    }
+    if (queryEpisode != null && parsedEpisode !== queryEpisode) {
+      failures.push(`episode-mismatch (parsed=${parsedEpisode}, query=${queryEpisode})`);
+    }
+    if (parsedSeason == null && parsedEpisode == null) {
+      failures.push('no-season-episode-parsed');
+    }
+    promotionFailure = {
+      reason: 'insufficient-independent-identity-evidence',
+      failures,
+      recommendation: 'Promote to ProviderConfirmed if filename/parser confirms identity',
+    };
+  }
+
   return {
     IdentityTier: tier.IdentityTier,
     EvidenceSources: {
@@ -723,6 +781,7 @@ export function diagnoseIdentityEvidence(hit, queryIntent = {}, mediaId = null) 
       parserConfidence,
       tierConfidence: tier.IdentityConfidence,
     },
+    ...(promotionFailure && { promotionFailure }),
   };
 }
 
@@ -781,8 +840,9 @@ export function aggregateIdentityTiers(hits, queryIntent = {}, mediaId = null) {
     CorpusRetrieved: corpusHits.length,
     LiveRetrieved: liveHits.length,
     VerifiedCount: evaluations.filter(e => e.IdentityTier === 'Verified').length,
-    ProviderMatchedCount: evaluations.filter(e => e.IdentityTier === 'ProviderMatched').length,
+    ProviderConfirmedCount: evaluations.filter(e => e.IdentityTier === 'ProviderConfirmed').length,
     ProbableCount: evaluations.filter(e => e.IdentityTier === 'Probable').length,
+    ProviderScopedCount: evaluations.filter(e => e.IdentityTier === 'ProviderScoped').length,
     TextOnlyCount: evaluations.filter(e => e.IdentityTier === 'TextOnly').length,
     RejectedCount: evaluations.filter(e => e.IdentityTier === 'Rejected').length,
     SeasonEpisodeFailures: evaluations.filter(e =>
@@ -831,17 +891,21 @@ export function shadowRankComparison(candidates, queryIntent = {}, mediaId = nul
   const verifiedOnlyRanked = rankHits(verifiedCandidates.map(toRankingInputShadow), queryIntent, mediaId);
   const verifiedOnlyTop = verifiedOnlyRanked.slice(0, topN);
 
-  // Tiered: Verified → ProviderMatched → Probable (matches active behavior)
-  const providerMatchedCandidates = evaluations
-    .filter(e => e.tier.IdentityTier === 'ProviderMatched')
+  // Tiered: Verified → ProviderConfirmed → Probable → ProviderScoped (matches active behavior)
+  const providerConfirmedCandidates = evaluations
+    .filter(e => e.tier.IdentityTier === 'ProviderConfirmed')
+    .map(e => e.candidate);
+  const providerScopedCandidates = evaluations
+    .filter(e => e.tier.IdentityTier === 'ProviderScoped')
     .map(e => e.candidate);
   const probableCandidates = evaluations
     .filter(e => e.tier.IdentityTier === 'Probable')
     .map(e => e.candidate);
   const tieredRanked = [
     ...verifiedOnlyRanked,
-    ...rankHits(providerMatchedCandidates.map(toRankingInputShadow), queryIntent, mediaId),
+    ...rankHits(providerConfirmedCandidates.map(toRankingInputShadow), queryIntent, mediaId),
     ...rankHits(probableCandidates.map(toRankingInputShadow), queryIntent, mediaId),
+    ...rankHits(providerScopedCandidates.map(toRankingInputShadow), queryIntent, mediaId),
   ];
   const tieredTop = tieredRanked.slice(0, topN);
 
@@ -1246,24 +1310,27 @@ export function rankHitsTiered(hits, queryIntent = {}, mediaId = null) {
 
   // Group by tier (preserve all candidates)
   const verified = classified.filter(c => c.tier.IdentityTier === 'Verified');
-  const providerMatched = classified.filter(c => c.tier.IdentityTier === 'ProviderMatched');
+  const providerConfirmed = classified.filter(c => c.tier.IdentityTier === 'ProviderConfirmed');
   const probable = classified.filter(c => c.tier.IdentityTier === 'Probable');
+  const providerScoped = classified.filter(c => c.tier.IdentityTier === 'ProviderScoped');
   const textOnly = classified.filter(c => c.tier.IdentityTier === 'TextOnly');
   const rejected = classified.filter(c => c.tier.IdentityTier === 'Rejected');
 
   // Rank within each tier using existing behavior
   const rankedVerified = rankHits(verified.map(c => c.hit), queryIntent, mediaId);
-  const rankedProviderMatched = rankHits(providerMatched.map(c => c.hit), queryIntent, mediaId);
+  const rankedProviderConfirmed = rankHits(providerConfirmed.map(c => c.hit), queryIntent, mediaId);
   const rankedProbable = rankHits(probable.map(c => c.hit), queryIntent, mediaId);
+  const rankedProviderScoped = rankHits(providerScoped.map(c => c.hit), queryIntent, mediaId);
   const rankedTextOnly = rankHits(textOnly.map(c => c.hit), queryIntent, mediaId);
   const rankedRejected = rankHits(rejected.map(c => c.hit), queryIntent, mediaId);
 
-  // Concatenate: Verified → ProviderMatched → Probable → TextOnly → Rejected
+  // Concatenate: Verified → ProviderConfirmed → Probable → ProviderScoped → TextOnly → Rejected
   // Fallback is implicit: if a tier is empty, we simply proceed to the next
   const ranked = [
     ...rankedVerified,
-    ...rankedProviderMatched,
+    ...rankedProviderConfirmed,
     ...rankedProbable,
+    ...rankedProviderScoped,
     ...rankedTextOnly,
     ...rankedRejected,
   ];
@@ -1281,15 +1348,17 @@ export function rankHitsTiered(hits, queryIntent = {}, mediaId = null) {
     TieredRankingApplied: true,
     TierCounts: {
       Verified: rankedVerified.length,
-      ProviderMatched: rankedProviderMatched.length,
+      ProviderConfirmed: rankedProviderConfirmed.length,
       Probable: rankedProbable.length,
+      ProviderScoped: rankedProviderScoped.length,
       TextOnly: rankedTextOnly.length,
       Rejected: rankedRejected.length,
     },
     TopResultsByTier: {
       Verified: rankedVerified.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
-      ProviderMatched: rankedProviderMatched.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
+      ProviderConfirmed: rankedProviderConfirmed.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
       Probable: rankedProbable.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
+      ProviderScoped: rankedProviderScoped.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
       TextOnly: rankedTextOnly.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
     },
   };
