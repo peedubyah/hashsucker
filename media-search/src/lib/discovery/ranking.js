@@ -98,6 +98,9 @@ export function qualityScore(attrs = {}) {
 /**
  * Compute identity confidence from media associations.
  *
+ * Semantic: measures confidence that this candidate IS the requested media.
+ * Absence of associations means unknown (NEUTRAL), not low confidence.
+ *
  * @param {Array<Object>} mediaAssociations - From candidate_media
  * @returns {number} 0.0-1.0 (NEUTRAL if no associations)
  */
@@ -131,8 +134,39 @@ export function identityConfidenceForMedia(mediaAssociations = [], mediaId) {
 }
 
 /**
+ * Compute identity confidence from live discovery scoping.
+ *
+ * When live discovery is scoped to a selected media ID, the fact that
+ * a live provider returned this candidate for that media IS identity
+ * evidence. This is not manufactured — it reflects that the live source
+ * already filtered to the requested media.
+ *
+ * @param {string|null} selectedMediaId - The media ID live discovery was scoped to
+ * @param {Array<Object>} mediaAssociations - Existing media associations (if any)
+ * @param {string|null} mediaId - The media ID being queried
+ * @returns {number} 0.0-1.0
+ */
+export function identityConfidenceFromLiveScope(selectedMediaId, mediaAssociations = [], mediaId) {
+  // If we have explicit associations, use those (higher trust)
+  if (mediaAssociations.length > 0) {
+    return identityConfidenceForMedia(mediaAssociations, mediaId);
+  }
+
+  // If live discovery was scoped to the queried media, that's identity evidence
+  // The live provider already filtered to this media — that's meaningful
+  if (selectedMediaId && selectedMediaId === mediaId) {
+    // Live scope match is weaker than a persisted association
+    // but stronger than unknown (NEUTRAL)
+    return 0.7; // Moderate confidence from live scoping
+  }
+
+  return NEUTRAL;
+}
+
+/**
  * Compute provider availability score from observations.
  *
+ * Semantic: measures evidence that this candidate is available from providers.
  * Unknown state (no observations) is NEUTRAL, not a penalty.
  *
  * @param {Array<Object>} providerObservations - From provider_observations
@@ -149,6 +183,69 @@ export function providerAvailabilityScore(providerObservations = []) {
   if (cached.length === total) return 1.0;
   if (uncached.length === total) return 0.0;
   return cached.length / total;
+}
+
+/**
+ * Compute provider availability from live discovery evidence.
+ *
+ * When a live provider returns a candidate, that IS availability evidence.
+ * The provider has the file and is offering it. This is not manufactured —
+ * it reflects real-time provider state.
+ *
+ * @param {Array<Object>} providerObservations - Existing provider observations
+ * @param {boolean} hasLiveDiscovery - Whether this candidate came from live discovery
+ * @param {Object} [liveProviderHints] - Provider hints from live discovery
+ * @returns {number} 0.0-1.0
+ */
+export function providerAvailabilityFromLive(providerObservations = [], hasLiveDiscovery = false, liveProviderHints = null) {
+  // If we have explicit observations, use those (higher trust)
+  if (providerObservations.length > 0) {
+    return providerAvailabilityScore(providerObservations);
+  }
+
+  // Live discovery itself is availability evidence
+  // The provider returned this candidate — they have it
+  if (hasLiveDiscovery) {
+    // Check if we have cache hints from live source
+    if (liveProviderHints && typeof liveProviderHints === 'object') {
+      const hints = Object.values(liveProviderHints);
+      const cachedCount = hints.filter(h => h && (h.cached === true || h.cached === 1)).length;
+      if (cachedCount > 0) return 0.8; // Provider says it's cached
+    }
+    // Live discovery without cache hint = moderate availability evidence
+    return 0.6;
+  }
+
+  return NEUTRAL;
+}
+
+/**
+ * Compute relevance from identity evidence for live candidates.
+ *
+ * Semantic: measures how well this candidate matches the query.
+ * For corpus: BM25 text relevance (exact title match).
+ * For live: identity-derived relevance (scoped to selected media).
+ *
+ * @param {number} textRelevance - BM25-based relevance (corpus only)
+ * @param {string|null} selectedMediaId - Media ID live discovery was scoped to
+ * @param {string|null} mediaId - Media ID being queried
+ * @returns {number} 0.0-1.0
+ */
+export function relevanceFromIdentity(textRelevance, selectedMediaId = null, mediaId = null) {
+  // If we have text relevance (corpus), use it directly
+  if (textRelevance > 0) {
+    return textRelevance;
+  }
+
+  // For live candidates: if discovery was scoped to the queried media,
+  // that's relevance evidence — the candidate IS for the requested media
+  if (selectedMediaId && selectedMediaId === mediaId) {
+    // Identity-derived relevance: live provider returned this for the requested media
+    // This is not as strong as exact text match, but it's meaningful
+    return 0.7;
+  }
+
+  return NEUTRAL;
 }
 
 /**
@@ -206,6 +303,612 @@ export function episodeMatchScore(releaseAttrs = {}, queryIntent = {}) {
 }
 
 /**
+ * Identity eligibility diagnostic — measures identity match for corpus candidates
+ * without filtering or changing ranking behavior.
+ *
+ * Pure function: reads hit evidence, returns diagnostic snapshot.
+ * Does NOT modify the candidate or ranking outcome.
+ *
+ * @param {Object} hit - Corpus candidate entering ranking
+ * @param {string} hit.hash - InfoHash
+ * @param {number|null} hit.fileIndex - File index
+ * @param {string} hit.filename - Release filename
+ * @param {string} [hit.releaseKey] - Pre-computed release key
+ * @param {Object} [hit.releaseAttributes] - Parsed release attributes
+ * @param {Array<Object>} [hit.mediaAssociations] - Media associations (candidate_media rows)
+ * @param {Array<Object>} [hit.sources] - Provenance sources
+ * @param {string|null} [hit.selectedMediaId] - Selected media intent provenance
+ * @param {Object} [queryIntent] - Query intent for episode matching
+ * @param {number} [queryIntent.season] - Query season
+ * @param {number} [queryIntent.episode] - Query episode
+ * @param {string} [mediaId] - Selected media ID being queried
+ * @returns {IdentityDiagnostic|null} Diagnostic snapshot, or null for non-corpus
+ */
+export function diagnoseIdentityEligibility(hit, queryIntent = {}, mediaId = null) {
+  const releaseAttributes = hit.releaseAttributes || {};
+  const mediaAssociations = hit.mediaAssociations || [];
+  const sources = hit.sources || [];
+  const isCorpus = sources.some(s => s.origin === 'corpus');
+
+  // Only corpus candidates have persisted identity to diagnose
+  if (!isCorpus) {
+    return null;
+  }
+
+  const parsedTitle = releaseAttributes.title || null;
+  const parsedSeason = releaseAttributes.season ?? null;
+  const parsedEpisode = releaseAttributes.episode ?? null;
+  const targetMediaId = mediaId || hit.selectedMediaId || null;
+
+  let identityMatch = false;
+  let rejectionReason = null;
+
+  if (targetMediaId && mediaAssociations.length > 0) {
+    const forMedia = mediaAssociations.filter(a => a.mediaId === targetMediaId);
+    identityMatch = forMedia.length > 0;
+
+    if (!identityMatch) {
+      const associatedIds = [...new Set(mediaAssociations.map(a => a.mediaId))];
+      rejectionReason = `identity_mismatch: associated with [${associatedIds.join(', ')}] but queried ${targetMediaId}`;
+    }
+  } else if (targetMediaId && mediaAssociations.length === 0) {
+    rejectionReason = 'no_identity_evidence: no candidate_media rows';
+  } else if (!targetMediaId) {
+    rejectionReason = 'no_target_media_id: query not scoped to specific media';
+  }
+
+  let seasonEpisodeMatch = null;
+  if (queryIntent.season != null && queryIntent.episode != null) {
+    if (parsedSeason == null) {
+      seasonEpisodeMatch = 'unknown_season';
+    } else if (parsedSeason !== queryIntent.season) {
+      seasonEpisodeMatch = `wrong_season: parsed=${parsedSeason}, query=${queryIntent.season}`;
+    } else if (parsedEpisode != null && parsedEpisode !== queryIntent.episode) {
+      seasonEpisodeMatch = `wrong_episode: parsed=${parsedEpisode}, query=${queryIntent.episode}`;
+    } else {
+      seasonEpisodeMatch = 'match';
+    }
+  }
+
+  return {
+    releaseKey: hit.releaseKey || null,
+    filename: hit.filename || null,
+    identityMatch,
+    parsedTitle,
+    parsedSeason,
+    parsedEpisode,
+    targetMediaId,
+    rejectionReason,
+    seasonEpisodeMatch,
+  };
+}
+
+/**
+ * Aggregate identity eligibility counts for a batch of corpus candidates.
+ *
+ * Pure function: calls diagnoseIdentityEligibility for each candidate,
+ * returns aggregate counts. Does NOT modify any candidate or ranking.
+ *
+ * @param {Array<Object>} hits - Corpus candidates entering ranking
+ * @param {Object} [queryIntent] - Query intent
+ * @param {string} [mediaId] - Selected media ID being queried
+ * @returns {IdentityEligibilityCounts} Aggregate counts
+ */
+export function countIdentityEligibility(hits, queryIntent = {}, mediaId = null) {
+  const diagnostics = hits
+    .map(h => diagnoseIdentityEligibility(h, queryIntent, mediaId))
+    .filter(d => d !== null);
+
+  const total = diagnostics.length;
+  const identityMatched = diagnostics.filter(d => d.identityMatch).length;
+  const identityRejected = diagnostics.filter(d => !d.identityMatch && d.rejectionReason).length;
+  const textOnlyMatches = diagnostics.filter(d => d.rejectionReason && d.rejectionReason.includes('no_identity_evidence')).length;
+  const seasonEpisodeFailures = diagnostics.filter(d => d.seasonEpisodeMatch && d.seasonEpisodeMatch !== 'match').length;
+
+  return {
+    corpusRetrieved: total,
+    identityMatched,
+    identityRejected,
+    textOnlyMatches,
+    seasonEpisodeFailures,
+    ranked: total,
+  };
+}
+
+/**
+ * Identity tier classification — categorizes a candidate's identity match quality.
+ *
+ * Pure function: reads hit evidence, returns tier classification.
+ * Does NOT modify the candidate or ranking outcome.
+ *
+ * Tiers (in precedence order):
+ * - Verified: explicit candidate_media match, confirmed filename/parser identity,
+ *             or season/episode confirmation where applicable
+ * - ProviderMatched: live discovery returned candidate scoped to requested mediaId,
+ *                    provider evidence exists, identity not independently confirmed
+ * - Probable: strong corpus/title metadata match
+ * - TextOnly: retrieved only because of search text similarity
+ * - Rejected: identity mismatch or no target media ID
+ *
+ * @param {Object} hit - Candidate entering ranking
+ * @param {string} hit.hash - InfoHash
+ * @param {number|null} hit.fileIndex - File index
+ * @param {string} hit.filename - Release filename
+ * @param {number} [hit.relevance] - Title relevance from search (0.0-1.0)
+ * @param {Object} [hit.releaseAttributes] - Parsed release attributes
+ * @param {Array<Object>} [hit.mediaAssociations] - Media associations (candidate_media rows)
+ * @param {Array<Object>} [hit.sources] - Provenance sources
+ * @param {string|null} [hit.selectedMediaId] - Selected media intent provenance
+ * @param {Object} [queryIntent] - Query intent for episode matching
+ * @param {number} [queryIntent.season] - Query season
+ * @param {number} [queryIntent.episode] - Query episode
+ * @param {string} [mediaId] - Selected media ID being queried
+ * @returns {{IdentityTier: string, IdentityConfidence: number, IdentityEvidence: string[], RejectionReason: string|null}}
+ */
+export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
+  const releaseAttributes = hit.releaseAttributes || {};
+  const mediaAssociations = hit.mediaAssociations || [];
+  const sources = hit.sources || [];
+  const isCorpus = sources.some(s => s.origin === 'corpus');
+  const isLive = sources.some(s => s.origin === 'live');
+
+  const parsedTitle = releaseAttributes.title || null;
+  const parsedSeason = releaseAttributes.season ?? null;
+  const parsedEpisode = releaseAttributes.episode ?? null;
+  const targetMediaId = mediaId || hit.selectedMediaId || null;
+  const textRelevance = hit.relevance || 0;
+
+  // Live candidates: tier based on provider scope
+  // Provider scope is NOT equivalent to confirmed identity
+  if (isLive && !isCorpus) {
+    if (hit.selectedMediaId && hit.selectedMediaId === mediaId) {
+      // Provider returned this candidate scoped to the requested mediaId
+      // This is ProviderMatched, not Verified — identity not independently confirmed
+      return {
+        IdentityTier: 'ProviderMatched',
+        IdentityConfidence: 0.7,
+        IdentityEvidence: ['provider-scoped-to-media'],
+        RejectionReason: null,
+      };
+    }
+    return {
+      IdentityTier: 'Probable',
+      IdentityConfidence: 0.5,
+      IdentityEvidence: ['live-discovery'],
+      RejectionReason: null,
+    };
+  }
+
+  // Corpus candidates require a target media ID to classify
+  if (!targetMediaId) {
+    return {
+      IdentityTier: 'Rejected',
+      IdentityConfidence: 0.0,
+      IdentityEvidence: [],
+      RejectionReason: 'no_target_media_id: query not scoped to specific media',
+    };
+  }
+
+  // Check explicit media association
+  let explicitMatch = false;
+  let identityMismatch = false;
+  let associatedIds = [];
+
+  if (mediaAssociations.length > 0) {
+    const forMedia = mediaAssociations.filter(a => a.mediaId === targetMediaId);
+    explicitMatch = forMedia.length > 0;
+    if (!explicitMatch) {
+      identityMismatch = true;
+      associatedIds = [...new Set(mediaAssociations.map(a => a.mediaId))];
+    }
+  }
+
+  // Season/episode match evaluation
+  let seasonEpisodeMatch = null;
+  if (queryIntent.season != null && queryIntent.episode != null) {
+    if (parsedSeason == null) {
+      seasonEpisodeMatch = 'unknown_season';
+    } else if (parsedSeason !== queryIntent.season) {
+      seasonEpisodeMatch = 'wrong_season';
+    } else if (parsedEpisode != null && parsedEpisode !== queryIntent.episode) {
+      seasonEpisodeMatch = 'wrong_episode';
+    } else if (parsedEpisode != null && parsedEpisode === queryIntent.episode) {
+      seasonEpisodeMatch = 'match';
+    } else {
+      seasonEpisodeMatch = 'unknown_episode';
+    }
+  }
+
+  // Rejected: explicit mismatch
+  if (identityMismatch) {
+    return {
+      IdentityTier: 'Rejected',
+      IdentityConfidence: 0.1,
+      IdentityEvidence: [`associated-with:${associatedIds.join(',')}`],
+      RejectionReason: `identity_mismatch: associated with [${associatedIds.join(', ')}] but queried ${targetMediaId}`,
+    };
+  }
+
+  // Verified: explicit media association match (confirmed identity)
+  if (explicitMatch) {
+    const evidence = ['media-association-match'];
+    let confidence = 0.9;
+
+    if (seasonEpisodeMatch === 'match') {
+      evidence.push('season-episode-match');
+      confidence = 1.0;
+    } else if (seasonEpisodeMatch === 'unknown_episode') {
+      evidence.push('correct-season');
+    } else if (seasonEpisodeMatch === 'wrong_season') {
+      evidence.push('wrong-season');
+      confidence = 0.7;
+    } else if (seasonEpisodeMatch === 'wrong_episode') {
+      evidence.push('wrong-episode');
+      confidence = 0.6;
+    }
+
+    return {
+      IdentityTier: 'Verified',
+      IdentityConfidence: confidence,
+      IdentityEvidence: evidence,
+      RejectionReason: null,
+    };
+  }
+
+  // No explicit media association from here on
+  const hasTitleMatch = textRelevance >= 0.6;
+  const hasParsedMetadata = parsedTitle || parsedSeason != null || parsedEpisode != null;
+
+  // Probable: strong title match but no media association
+  if (hasTitleMatch) {
+    const evidence = ['strong-title-match'];
+    let confidence = 0.6;
+
+    if (parsedSeason != null) {
+      evidence.push('parsed-season');
+      confidence += 0.1;
+    }
+    if (parsedEpisode != null) {
+      evidence.push('parsed-episode');
+      confidence += 0.1;
+    }
+
+    return {
+      IdentityTier: 'Probable',
+      IdentityConfidence: Math.min(0.8, confidence),
+      IdentityEvidence: evidence,
+      RejectionReason: null,
+    };
+  }
+
+  // Probable: partial metadata evidence
+  if (hasParsedMetadata) {
+    const evidence = [];
+    if (parsedTitle) evidence.push('parsed-title');
+    if (parsedSeason != null) evidence.push('parsed-season');
+    if (parsedEpisode != null) evidence.push('parsed-episode');
+
+    return {
+      IdentityTier: 'Probable',
+      IdentityConfidence: 0.4,
+      IdentityEvidence: evidence,
+      RejectionReason: null,
+    };
+  }
+
+  // TextOnly: retrieved only because of search text similarity
+  return {
+    IdentityTier: 'TextOnly',
+    IdentityConfidence: 0.2,
+    IdentityEvidence: ['text-similarity-only'],
+    RejectionReason: 'no_identity_evidence: no candidate_media rows',
+  };
+}
+
+/**
+ * Evaluate identity tier for all candidates in a batch.
+ *
+ * Pure function: calls classifyIdentityTier for each candidate,
+ * returns per-candidate evaluations. Does NOT modify any candidate or ranking.
+ *
+ * @param {Array<Object>} hits - Candidates entering ranking
+ * @param {Object} [queryIntent] - Query intent
+ * @param {string} [mediaId] - Selected media ID being queried
+ * @returns {Array<{IdentityTier: string, IdentityConfidence: number, IdentityEvidence: string[], RejectionReason: string|null}>}
+ */
+export function evaluateIdentityTiers(hits, queryIntent = {}, mediaId = null) {
+  return hits.map(h => classifyIdentityTier(h, queryIntent, mediaId));
+}
+
+/**
+ * Detailed identity diagnostic — shows why each candidate received its tier.
+ *
+ * Pure function: reads candidate evidence, returns diagnostic snapshot.
+ * Does NOT modify any candidate or ranking outcome.
+ *
+ * Exposes evidence sources for understanding tier assignments:
+ * - Candidate_media: explicit media associations from corpus
+ * - Parsed_filename: title/season/episode parsed from filename
+ * - MediaId_scope: whether candidate was scoped to requested mediaId
+ * - Title_match: text relevance score
+ * - Season_episode_match: season/episode confirmation where applicable
+ *
+ * @param {Object} hit - Candidate entering ranking
+ * @param {Object} [queryIntent] - Query intent for episode matching
+ * @param {string} [mediaId] - Selected media ID being queried
+ * @returns {{IdentityTier: string, EvidenceSources: {Candidate_media: string[], Parsed_filename: Object, MediaId_scope: {selectedMediaId: string|null, queriedMediaId: string|null, scoped: boolean}, Title_match: {relevance: number, isStrongMatch: boolean}, Season_episode_match: {querySeason: number|null, queryEpisode: number|null, parsedSeason: number|null, parsedEpisode: number|null, matchStatus: string|null}}, ConfidenceSignals: {identityConfidence: number, parserConfidence: number, tierConfidence: number}}}
+ */
+export function diagnoseIdentityEvidence(hit, queryIntent = {}, mediaId = null) {
+  const releaseAttributes = hit.releaseAttributes || {};
+  const mediaAssociations = hit.mediaAssociations || [];
+  const sources = hit.sources || {};
+  const isCorpus = sources.some?.(s => s.origin === 'corpus');
+  const isLive = sources.some?.(s => s.origin === 'live');
+
+  // Classify tier
+  const tier = classifyIdentityTier(hit, queryIntent, mediaId);
+
+  // Evidence: Candidate_media (explicit media associations)
+  const candidateMedia = mediaAssociations.map(a => 
+    `${a.mediaId}${a.confidence ? `(${(a.confidence * 100).toFixed(0)}%)` : ''}`
+  );
+
+  // Evidence: Parsed_filename
+  const parsedFilename = {
+    title: releaseAttributes.title || null,
+    season: releaseAttributes.season ?? null,
+    episode: releaseAttributes.episode ?? null,
+    resolution: releaseAttributes.resolution || null,
+    sourceType: releaseAttributes.sourceType || null,
+  };
+
+  // Evidence: MediaId_scope
+  const selectedMediaId = hit.selectedMediaId || null;
+  const queriedMediaId = mediaId || null;
+  const scoped = !!(selectedMediaId && queriedMediaId && selectedMediaId === queriedMediaId);
+
+  // Evidence: Title_match
+  const relevance = hit.relevance || 0;
+  const isStrongMatch = relevance >= 0.6;
+
+  // Evidence: Season_episode_match
+  const querySeason = queryIntent?.season ?? null;
+  const queryEpisode = queryIntent?.episode ?? null;
+  const parsedSeason = releaseAttributes.season ?? null;
+  const parsedEpisode = releaseAttributes.episode ?? null;
+
+  let matchStatus = null;
+  if (querySeason != null && queryEpisode != null) {
+    if (parsedSeason == null) {
+      matchStatus = 'unknown_season';
+    } else if (parsedSeason !== querySeason) {
+      matchStatus = 'wrong_season';
+    } else if (parsedEpisode != null && parsedEpisode !== queryEpisode) {
+      matchStatus = 'wrong_episode';
+    } else if (parsedEpisode != null && parsedEpisode === queryEpisode) {
+      matchStatus = 'exact_match';
+    } else {
+      matchStatus = 'season_only';
+    }
+  }
+
+  // Confidence signals
+  const identityConfidence = hit.identityConfidence ?? 0.5;
+  const parserConfidence = hit.parserConfidence ?? 0.5;
+
+  return {
+    IdentityTier: tier.IdentityTier,
+    EvidenceSources: {
+      Candidate_media: candidateMedia,
+      Parsed_filename: parsedFilename,
+      MediaId_scope: {
+        selectedMediaId,
+        queriedMediaId,
+        scoped,
+      },
+      Title_match: {
+        relevance,
+        isStrongMatch,
+      },
+      Season_episode_match: {
+        querySeason,
+        queryEpisode,
+        parsedSeason,
+        parsedEpisode,
+        matchStatus,
+      },
+    },
+    ConfidenceSignals: {
+      identityConfidence,
+      parserConfidence,
+      tierConfidence: tier.IdentityConfidence,
+    },
+  };
+}
+
+/**
+ * Generate detailed identity diagnostics for top N candidates.
+ *
+ * Pure function: calls diagnoseIdentityEvidence for each candidate.
+ * Does NOT modify any candidate or ranking outcome.
+ *
+ * @param {Array<Object>} hits - Ranked candidates (output of rankHitsTiered)
+ * @param {Object} [queryIntent] - Query intent
+ * @param {string} [mediaId] - Selected media ID being queried
+ * @param {number} [topN] - Number of top candidates to diagnose (default 50)
+ * @returns {Array<{rank: number, releaseKey: string, source: string, score: number, identity: Object}>}
+ */
+export function diagnoseTopCandidates(hits, queryIntent = {}, mediaId = null, topN = 50) {
+  return hits.slice(0, topN).map((hit, i) => {
+    const source = hit.sources?.some?.(s => s.origin === 'live') ? 'live' : 'corpus';
+    const releaseKey = hit.releaseKey || `${hit.hash}:${hit.fileIndex ?? 'torrent'}`;
+    const identity = diagnoseIdentityEvidence(hit, queryIntent, mediaId);
+
+    return {
+      rank: i + 1,
+      releaseKey,
+      source,
+      score: hit.score ?? null,
+      identity,
+    };
+  });
+}
+
+/**
+ * Aggregate identity tier distribution for a batch of candidates.
+ *
+ * Pure function: calls classifyIdentityTier for each candidate,
+ * returns aggregate counts. Does NOT modify any candidate or ranking.
+ *
+ * @param {Array<Object>} hits - Candidates entering ranking
+ * @param {Object} [queryIntent] - Query intent
+ * @param {string} [mediaId] - Selected media ID being queried
+ * @returns {{CorpusRetrieved: number, LiveRetrieved: number, VerifiedCount: number, ProviderMatchedCount: number, ProbableCount: number, TextOnlyCount: number, RejectedCount: number, SeasonEpisodeFailures: number, IdentityMismatches: number}}
+ */
+export function aggregateIdentityTiers(hits, queryIntent = {}, mediaId = null) {
+  const evaluations = hits.map(h => classifyIdentityTier(h, queryIntent, mediaId));
+
+  const corpusHits = hits.filter(h => {
+    const sources = h.sources || [];
+    return sources.some(s => s.origin === 'corpus');
+  });
+  const liveHits = hits.filter(h => {
+    const sources = h.sources || [];
+    return sources.some(s => s.origin === 'live');
+  });
+
+  return {
+    CorpusRetrieved: corpusHits.length,
+    LiveRetrieved: liveHits.length,
+    VerifiedCount: evaluations.filter(e => e.IdentityTier === 'Verified').length,
+    ProviderMatchedCount: evaluations.filter(e => e.IdentityTier === 'ProviderMatched').length,
+    ProbableCount: evaluations.filter(e => e.IdentityTier === 'Probable').length,
+    TextOnlyCount: evaluations.filter(e => e.IdentityTier === 'TextOnly').length,
+    RejectedCount: evaluations.filter(e => e.IdentityTier === 'Rejected').length,
+    SeasonEpisodeFailures: evaluations.filter(e =>
+      e.IdentityEvidence && e.IdentityEvidence.some(ev =>
+        ev.includes('wrong-season') || ev.includes('wrong-episode')
+      )
+    ).length,
+    IdentityMismatches: evaluations.filter(e =>
+      e.RejectionReason && e.RejectionReason.includes('identity_mismatch')
+    ).length,
+  };
+}
+
+/**
+ * Shadow ranking comparison — computes hypothetical result sets without
+ * modifying the active ranking behavior.
+ *
+ * Pure function: reads candidates, returns comparison diagnostics.
+ * Does NOT modify any candidate or the active ranking outcome.
+ *
+ * Three modes:
+ * 1. Current: all candidates ranked together (the active behavior)
+ * 2. VerifiedOnly: only Verified candidates ranked
+ * 3. Tiered: Verified → ProviderMatched → Probable (active behavior)
+ *
+ * @param {Array<Object>} candidates - Eligible candidates (post-dedup, post-eligibility)
+ * @param {Object} [queryIntent] - Query intent for episode matching
+ * @param {string} [mediaId] - Selected media ID for identity confidence scoping
+ * @param {number} [topN] - Number of top results to compare (default 50)
+ * @returns {{CurrentTopSources: string[], VerifiedOnlyTopSources: string[], TieredTopSources: string[], CurrentTopScoreRange: {min: number, max: number}|null, VerifiedOnlyTopScoreRange: {min: number, max: number}|null, CandidatesExcludedByVerifiedFilter: number, CurrentTop10: string[], VerifiedOnlyTop10: string[], TieredTop10: string[]}}
+ */
+export function shadowRankComparison(candidates, queryIntent = {}, mediaId = null, topN = 50) {
+  const evaluations = candidates.map(c => ({
+    candidate: c,
+    tier: classifyIdentityTier(c, queryIntent, mediaId),
+  }));
+
+  // Current: all candidates ranked together
+  const currentRanked = rankHits(candidates.map(toRankingInputShadow), queryIntent, mediaId);
+  const currentTop = currentRanked.slice(0, topN);
+
+  // VerifiedOnly: only Verified candidates
+  const verifiedCandidates = evaluations
+    .filter(e => e.tier.IdentityTier === 'Verified')
+    .map(e => e.candidate);
+  const verifiedOnlyRanked = rankHits(verifiedCandidates.map(toRankingInputShadow), queryIntent, mediaId);
+  const verifiedOnlyTop = verifiedOnlyRanked.slice(0, topN);
+
+  // Tiered: Verified → ProviderMatched → Probable (matches active behavior)
+  const providerMatchedCandidates = evaluations
+    .filter(e => e.tier.IdentityTier === 'ProviderMatched')
+    .map(e => e.candidate);
+  const probableCandidates = evaluations
+    .filter(e => e.tier.IdentityTier === 'Probable')
+    .map(e => e.candidate);
+  const tieredRanked = [
+    ...verifiedOnlyRanked,
+    ...rankHits(providerMatchedCandidates.map(toRankingInputShadow), queryIntent, mediaId),
+    ...rankHits(probableCandidates.map(toRankingInputShadow), queryIntent, mediaId),
+  ];
+  const tieredTop = tieredRanked.slice(0, topN);
+
+  // Extract source distribution for top N
+  const extractSources = (ranked) => {
+    const sources = ranked.map(r => {
+      const src = r.sources?.find(s => s.origin === 'live') ? 'live' : 'corpus';
+      return src;
+    });
+    const corpusCount = sources.filter(s => s === 'corpus').length;
+    const liveCount = sources.filter(s => s === 'live').length;
+    return { corpus: corpusCount, live: liveCount };
+  };
+
+  // Extract score range for top N
+  const scoreRange = (ranked) => {
+    if (ranked.length === 0) return null;
+    const scores = ranked.map(r => r.score || 0);
+    return {
+      min: Math.min(...scores),
+      max: Math.max(...scores),
+    };
+  };
+
+  // Extract top 10 releaseKeys
+  const top10Keys = (ranked) => ranked.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`);
+
+  return {
+    CurrentTopSources: extractSources(currentTop),
+    VerifiedOnlyTopSources: extractSources(verifiedOnlyTop),
+    TieredTopSources: extractSources(tieredTop),
+    CurrentTopScoreRange: scoreRange(currentTop),
+    VerifiedOnlyTopScoreRange: scoreRange(verifiedOnlyTop),
+    CandidatesExcludedByVerifiedFilter: candidates.length - verifiedCandidates.length,
+    CurrentTop10: top10Keys(currentTop),
+    VerifiedOnlyTop10: top10Keys(verifiedOnlyTop),
+    TieredTop10: top10Keys(tieredTop),
+  };
+}
+
+/**
+ * Convert a canonical candidate to ranking input shape for shadow ranking.
+ * Reuses the same transformation as the active pipeline.
+ *
+ * @param {Object} candidate - Canonical candidate
+ * @returns {Object} Ranking input
+ */
+function toRankingInputShadow(candidate) {
+  return {
+    hash: candidate.hash,
+    fileIndex: candidate.fileIndex ?? null,
+    filename: candidate.filename,
+    relevance: candidate.relevance ?? 0,
+    releaseAttributes: candidate.releaseAttributes || {},
+    parserConfidence: candidate.parserConfidence ?? 0.5,
+    mediaAssociations: candidate.mediaAssociations || [],
+    providerObservations: candidate.providerObservations || [],
+    providerEvidence: candidate.providerEvidence || candidate.providerObservations || [],
+    sources: candidate.sources || [],
+    selectedMediaId: candidate.selectedMediaId ?? null,
+    hasLiveDiscovery: candidate.hasLiveDiscovery ?? false,
+    liveProviderHints: candidate.liveProviderHints ?? null,
+    releaseKey: candidate.releaseKey,
+  };
+}
+
+/**
  * Rank a single search hit.
  *
  * Preserves provenance (sources, selectedMediaId) through the ranking boundary
@@ -243,24 +946,41 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     providerEvidence = providerObservations,
     sources = [],
     selectedMediaId = null,
+    hasLiveDiscovery = false,
+    liveProviderHints = null,
   } = hit;
 
-  // Compute component scores
+  // Compute component scores using semantic confidence functions.
+  // Each component measures evidence quality, not data availability.
   const quality = qualityScore(releaseAttributes);
   const releaseConfidence = Math.min(1.0, Math.max(0.0, parserConfidence));
-  // When mediaId is provided, scope identity confidence to that association.
-  // This prevents cross-title identity leakage.
+
+  // Relevance: text-based for corpus, identity-derived for live
+  // For live candidates scoped to the selected media, the scope itself
+  // is relevance evidence (the provider returned it for this media)
+  const effectiveRelevance = relevanceFromIdentity(relevance, selectedMediaId, mediaId);
+
+  // Identity confidence: associations for corpus, live scope for live
+  // Absence of associations doesn't imply low confidence — it means unknown
   const identityConfidence = mediaId
-    ? identityConfidenceForMedia(mediaAssociations, mediaId)
+    ? identityConfidenceFromLiveScope(selectedMediaId, mediaAssociations, mediaId)
     : identityConfidenceScore(mediaAssociations);
-  const providerAvailability = providerAvailabilityScore(providerObservations);
+
+  // Provider availability: observations for corpus, live discovery for live
+  // A live provider returning a candidate IS availability evidence
+  const providerAvailability = providerAvailabilityFromLive(
+    providerObservations,
+    hasLiveDiscovery,
+    liveProviderHints
+  );
+
   const episodeMatch = episodeMatchScore(releaseAttributes, queryIntent);
 
   // Compute weighted contributions (raw, before rounding) — these are what
   // actually produced the score. Stored so explainRank() doesn't recompute
   // from rounded component values and drift from the true score.
   const contributions = {
-    relevance: relevance * WEIGHTS.relevance,
+    relevance: effectiveRelevance * WEIGHTS.relevance,
     quality: quality * WEIGHTS.quality,
     releaseConfidence: releaseConfidence * WEIGHTS.releaseConfidence,
     identityConfidence: identityConfidence * WEIGHTS.identityConfidence,
@@ -290,7 +1010,7 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
       qualityScore: Math.round(quality * 1000) / 1000,
       sourceScore: Math.round(releaseConfidence * 1000) / 1000,
       metadataScore: Math.round(identityConfidence * 1000) / 1000,
-      popularityScore: Math.round(relevance * 1000) / 1000,
+      popularityScore: Math.round(effectiveRelevance * 1000) / 1000,
     }),
     weights: Object.freeze({ ...WEIGHTS }),
   });
@@ -301,7 +1021,7 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     filename,
     score: roundedScore,
     components: {
-      relevance: Math.round(relevance * 1000) / 1000,
+      relevance: Math.round(effectiveRelevance * 1000) / 1000,
       quality: Math.round(quality * 1000) / 1000,
       releaseConfidence: Math.round(releaseConfidence * 1000) / 1000,
       identityConfidence: Math.round(identityConfidence * 1000) / 1000,
@@ -498,6 +1218,83 @@ export function rankHits(hits, queryIntent = {}, mediaId = null) {
     });
   }
   return ranked;
+}
+
+/**
+ * Tiered ranking precedence — identity tier as primary sort signal.
+ *
+ * Ranking behavior:
+ * 1. Verified candidates rank above ProviderMatched candidates
+ * 2. ProviderMatched candidates rank above Probable candidates
+ * 3. Probable candidates rank above TextOnly candidates
+ * 4. Within each tier, existing ranking behavior is preserved (score, then tie-breakers)
+ * 5. If a higher tier has no candidates, falls back to the next tier
+ *
+ * No candidates are deleted or discarded — all candidates appear in the output.
+ *
+ * @param {Array<Object>} hits - Search hits
+ * @param {Object} [queryIntent] - Query intent
+ * @param {string} [mediaId] - Selected media ID for identity confidence scoping
+ * @returns {{ranked: Array<Object>, tierMeta: {TieredRankingApplied: boolean, TierCounts: Object, TopResultsByTier: Object}}}
+ */
+export function rankHitsTiered(hits, queryIntent = {}, mediaId = null) {
+  // Classify each candidate by identity tier
+  const classified = hits.map(hit => ({
+    hit,
+    tier: classifyIdentityTier(hit, queryIntent, mediaId),
+  }));
+
+  // Group by tier (preserve all candidates)
+  const verified = classified.filter(c => c.tier.IdentityTier === 'Verified');
+  const providerMatched = classified.filter(c => c.tier.IdentityTier === 'ProviderMatched');
+  const probable = classified.filter(c => c.tier.IdentityTier === 'Probable');
+  const textOnly = classified.filter(c => c.tier.IdentityTier === 'TextOnly');
+  const rejected = classified.filter(c => c.tier.IdentityTier === 'Rejected');
+
+  // Rank within each tier using existing behavior
+  const rankedVerified = rankHits(verified.map(c => c.hit), queryIntent, mediaId);
+  const rankedProviderMatched = rankHits(providerMatched.map(c => c.hit), queryIntent, mediaId);
+  const rankedProbable = rankHits(probable.map(c => c.hit), queryIntent, mediaId);
+  const rankedTextOnly = rankHits(textOnly.map(c => c.hit), queryIntent, mediaId);
+  const rankedRejected = rankHits(rejected.map(c => c.hit), queryIntent, mediaId);
+
+  // Concatenate: Verified → ProviderMatched → Probable → TextOnly → Rejected
+  // Fallback is implicit: if a tier is empty, we simply proceed to the next
+  const ranked = [
+    ...rankedVerified,
+    ...rankedProviderMatched,
+    ...rankedProbable,
+    ...rankedTextOnly,
+    ...rankedRejected,
+  ];
+
+  // Assign final rank (1-based position in sorted results)
+  for (let i = 0; i < ranked.length; i++) {
+    ranked[i].justification = Object.freeze({
+      ...ranked[i].justification,
+      rank: i + 1,
+    });
+  }
+
+  // Build tier metadata for diagnostics
+  const tierMeta = {
+    TieredRankingApplied: true,
+    TierCounts: {
+      Verified: rankedVerified.length,
+      ProviderMatched: rankedProviderMatched.length,
+      Probable: rankedProbable.length,
+      TextOnly: rankedTextOnly.length,
+      Rejected: rankedRejected.length,
+    },
+    TopResultsByTier: {
+      Verified: rankedVerified.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
+      ProviderMatched: rankedProviderMatched.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
+      Probable: rankedProbable.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
+      TextOnly: rankedTextOnly.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
+    },
+  };
+
+  return { ranked, tierMeta };
 }
 
 /**

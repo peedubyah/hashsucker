@@ -40,7 +40,7 @@
 import { createReleaseIdentity, createReleaseKey } from '../../api/release-contract.js';
 import { emit, EVENTS } from '../../lib/trace/events.js';
 import { inc, recordScore, recordTopNCacheState } from '../../lib/metrics.js';
-import { rankHits } from './ranking.js';
+import { rankHits, countIdentityEligibility, aggregateIdentityTiers, shadowRankComparison, rankHitsTiered, diagnoseTopCandidates } from './ranking.js';
 import { isEpisodeCovered } from './episode-coverage.js';
 import { evaluateEligibility } from './rejection.js';
 import { RejectionReason, RejectionTracker, createRejection } from './rejection-tracker.js';
@@ -319,18 +319,12 @@ export function searchReleases(cache, options = {}) {
   // FTS5 BM25: lower score = more relevant
   // We invert so higher = better for composite scoring
   //
-  // When mediaId is provided (selected-media path), we INNER JOIN with
-  // candidate_media to require an explicit association between the exact
-  // candidate (info_hash, file_index_key) and the selected mediaId.
-  // This is the hard eligibility filter: no association → ineligible.
+  // Corpus lookup is searchable by release identity: title, year,
+  // season/episode, filename tokens. mediaId is NOT a required lookup
+  // key — it only scopes identity confidence in ranking (via rankHits).
+  // candidate_media associations are enrichment, not retrieval gates.
   let sql, countSql;
   const isWildcard = parsed.match === '*';
-
-  // Media-scoped eligibility: require candidate_media association
-  const mediaJoin = mediaId
-    ? 'INNER JOIN candidate_media cm ON cm.info_hash = ra.info_hash AND cm.file_index_key = ra.file_index_key AND cm.media_id = @mediaId'
-    : '';
-  const mediaParam = mediaId ? { mediaId } : {};
 
   if (isWildcard) {
     // For wildcard/empty queries, don't use MATCH (not supported)
@@ -355,7 +349,6 @@ export function searchReleases(cache, options = {}) {
         ra.evidence,
         0 as bm25_score
       FROM release_attributes ra
-      ${mediaJoin}
       WHERE ${where}
       ORDER BY ra.parsed_at DESC
       LIMIT @limit OFFSET @offset
@@ -363,7 +356,6 @@ export function searchReleases(cache, options = {}) {
     countSql = `
       SELECT COUNT(*) as total
       FROM release_attributes ra
-      ${mediaJoin}
       WHERE ${where}
     `;
   } else {
@@ -389,7 +381,6 @@ export function searchReleases(cache, options = {}) {
         bm25(release_search) as bm25_score
       FROM release_search rs
       JOIN release_attributes ra ON ra.rowid = rs.rowid
-      ${mediaJoin}
       WHERE release_search MATCH @match
         AND ${where}
       ORDER BY bm25_score ASC
@@ -399,7 +390,6 @@ export function searchReleases(cache, options = {}) {
       SELECT COUNT(*) as total
       FROM release_search rs
       JOIN release_attributes ra ON ra.rowid = rs.rowid
-      ${mediaJoin}
       WHERE release_search MATCH @match
         AND ${where}
     `;
@@ -413,14 +403,12 @@ export function searchReleases(cache, options = {}) {
     limit,
     offset,
     ...params,
-    ...mediaParam,
   };
 
   const rows = stmt.all(queryParams);
   const countRow = countStmt.get({
     ...(isWildcard ? {} : { match: parsed.match }),
     ...params,
-    ...mediaParam,
   });
   const total = countRow?.total || 0;
 
@@ -627,10 +615,34 @@ export async function combinedSearch(cache, options = {}) {
     // intent — the liveDiscoveryFn receives mediaId and returns only candidates
     // relevant to that media. No persisted candidate_media is required.
     let canonicalLive = [];
+    let liveDebug = {
+      started: false,
+      providersAttempted: 0,
+      providersSucceeded: 0,
+      candidatesReturned: 0,
+      candidatesRejected: 0,
+      errors: [],
+    };
     if (includeLive && typeof liveDiscoveryFn === 'function') {
       timing.start('live.discovery');
+      liveDebug.started = true;
       try {
-        const liveResults = await liveDiscoveryFn(options);
+        const result = await liveDiscoveryFn(options);
+        // Support both shapes: array (legacy) and { releases, sources } (with counts)
+        let liveResults = [];
+        let liveSources = {};
+        if (Array.isArray(result)) {
+          liveResults = result;
+        } else if (result && typeof result === 'object') {
+          liveResults = result.releases || [];
+          liveSources = result.sources || {};
+        }
+        liveDebug.providersAttempted = Object.keys(liveSources).length;
+        liveDebug.providersSucceeded = Object.values(liveSources).filter(s => !s.error).length;
+        for (const [name, src] of Object.entries(liveSources)) {
+          if (src.error) liveDebug.errors.push({ provider: name, error: src.error });
+        }
+        liveDebug.candidatesReturned = liveResults.length;
         if (liveResults && Array.isArray(liveResults)) {
           // Filter out candidates with no infoHash — track as rejected
           const withHash = [];
@@ -639,6 +651,7 @@ export async function combinedSearch(cache, options = {}) {
               withHash.push(r);
             } else {
               rejectionTracker.recordMissingHash(r);
+              liveDebug.candidatesRejected++;
             }
           }
           // Tag live candidates with selected-media intent provenance when
@@ -651,12 +664,27 @@ export async function combinedSearch(cache, options = {}) {
       } catch (error) {
         // Live discovery failure must not break corpus results
         timing.fail('live.discovery', error.message);
+        liveDebug.errors.push({ provider: 'unknown', error: error.message });
         emit(EVENTS.DISCOVERY_ERROR, { scope: 'live', error: error.message });
       }
     }
 
     // Merge into single candidate pool (local + live)
     const allCandidates = [...canonicalLocal, ...canonicalLive];
+
+    // Debug: track candidate flow through pipeline
+    const pipelineDebug = {
+      corpusCandidates: canonicalLocal.length,
+      liveCandidates: canonicalLive.length,
+      mergedCandidates: allCandidates.length,
+      dedupedCandidates: 0,
+      eligibleCandidates: 0,
+      rankedCandidates: 0,
+      returnedCandidates: 0,
+      rejections: [],
+    };
+
+    let eligibleCandidates = allCandidates;
 
     // Deduplicate exact releaseKeys BEFORE ranking.
     // For exact duplicates: merge evidence; neither source blindly replaces.
@@ -665,8 +693,14 @@ export async function combinedSearch(cache, options = {}) {
     const deduped = deduplicateByReleaseKey(allCandidates, {
       onDuplicate: (duplicate, surviving) => {
         rejectionTracker.recordDuplicate(duplicate, surviving.releaseKey);
+        pipelineDebug.rejections.push({
+          candidate: { hash: duplicate.hash, fileIndex: duplicate.fileIndex, releaseKey: duplicate.releaseKey },
+          stage: 'deduplication',
+          reason: `duplicate of ${surviving.releaseKey}`,
+        });
       },
     });
+    pipelineDebug.dedupedCandidates = deduped.length;
     timing.end('candidate.dedup', 'completed');
 
     // Build query intent for ranking
@@ -681,12 +715,10 @@ export async function combinedSearch(cache, options = {}) {
     //
     // Produce typed rejection reasons for diagnostics (not part of public results).
     timing.start('candidate.eligibility');
-    let eligibleCandidates = deduped;
+    eligibleCandidates = deduped;
     if (queryIntent.season != null && queryIntent.episode != null) {
       eligibleCandidates = deduped.filter(candidate => {
         // Local corpus: apply episode-coverage hard gate.
-        // Requires candidate_media association (enforced by INNER JOIN in
-        // searchReleases) AND episode coverage.
         if (candidate.sources.some(s => s.origin === 'corpus')) {
           const evaluation = evaluateEligibility(
             candidate,
@@ -701,37 +733,100 @@ export async function combinedSearch(cache, options = {}) {
               reason: evaluation.reason,
               description: evaluation.description,
             }));
+            pipelineDebug.rejections.push({
+              candidate: { hash: candidate.hash, fileIndex: candidate.fileIndex, releaseKey: candidate.releaseKey },
+              stage: 'eligibility',
+              reason: evaluation.reason,
+              description: evaluation.description,
+            });
           }
           return evaluation.eligible;
         }
         // Live: already scoped by selected-media/live-discovery intent.
-        // The liveDiscoveryFn was called with mediaId, so these candidates
-        // are already relevant to the selected media. No persisted
-        // candidate_media is required to enter the global ranking.
         return true;
       });
     }
+    pipelineDebug.eligibleCandidates = eligibleCandidates.length;
     timing.end('candidate.eligibility', 'completed');
+
+    // Identity tier diagnostic — classify identity match quality before ranking.
+    // Measurement only, no filtering. Exposes distribution of valid matches.
+    timing.start('candidate.identity-tier');
+    const identityTierCounts = aggregateIdentityTiers(eligibleCandidates, queryIntent, mediaId);
+    timing.end('candidate.identity-tier', 'completed');
+
+    // Shadow ranking comparison — hypothetical result sets without changing active ranking.
+    // Measurement only, no filtering. Exposes what-if scenarios for identity filtering.
+    timing.start('candidate.shadow-ranking');
+    const shadowRanking = shadowRankComparison(eligibleCandidates, queryIntent, mediaId, limit);
+    timing.end('candidate.shadow-ranking', 'completed');
 
     // ONE global deterministic rank across all eligible candidates.
     // Source origin does NOT determine desirability — evidence does.
+    // Apply identity tier as primary precedence signal.
     timing.start('candidate.ranking');
     const rankingInputs = eligibleCandidates.map(toRankingInput);
-    const ranked = rankHits(rankingInputs, queryIntent, mediaId);
+    const { ranked, tierMeta } = rankHitsTiered(rankingInputs, queryIntent, mediaId);
+    pipelineDebug.rankedCandidates = ranked.length;
+    pipelineDebug.afterRanking = ranked.length;
+    pipelineDebug.tieredRanking = tierMeta;
+
+    // Identity evidence diagnostic — shows why each candidate received its tier
+    timing.start('candidate.identity-diag');
+    const identityDiagnostics = diagnoseTopCandidates(ranked, queryIntent, mediaId, limit);
+    timing.end('candidate.identity-diag');
+
+    const topRanked = ranked.slice(0, limit);
+    const rankingComposition = {
+      beforeRanking: {
+        corpusCount: eligibleCandidates.filter(candidate => candidate.sources.some(source => source.origin === 'corpus')).length,
+        liveCount: eligibleCandidates.filter(candidate => candidate.sources.some(source => source.origin === 'live')).length,
+      },
+      afterRanking: {
+        corpusInTopN: topRanked.filter(candidate => candidate.sources.some(source => source.origin === 'corpus')).length,
+        liveInTopN: topRanked.filter(candidate => candidate.sources.some(source => source.origin === 'live')).length,
+      },
+      liveCandidateRanks: ranked
+        .filter(candidate => candidate.sources.some(source => source.origin === 'live'))
+        .map(candidate => ({
+          releaseKey: candidate.releaseKey,
+          rank: candidate.justification?.rank ?? null,
+          score: candidate.score,
+        })),
+    };
+
+    // Extract ranking factor explanations for top candidates
+    const rankingExplanations = extractRankingExplanations(ranked);
+
     timing.end('candidate.ranking', 'completed');
 
     // Pagination AFTER global rank. Source ordering cannot leak through.
     const total = ranked.length;
+    pipelineDebug.paginationOffset = offset;
+    pipelineDebug.paginationLimit = limit;
     const results = ranked.slice(offset, offset + limit);
+    pipelineDebug.afterPagination = results.length;
 
     // Track paginated-out candidates as rejections
     for (let i = offset + limit; i < ranked.length; i++) {
       rejectionTracker.recordPaginated(ranked[i], i + 1, offset, limit);
+      pipelineDebug.rejections.push({
+        candidate: { hash: ranked[i].hash, fileIndex: ranked[i].fileIndex, releaseKey: ranked[i].releaseKey },
+        stage: 'pagination',
+        reason: `paginated out (position ${i + 1}, limit ${limit})`,
+      });
     }
 
     // Map to UI-compatible shape if requested
     timing.start('candidate.selection');
-    const mappedResults = mode === 'ui' ? results.map(mapToUIShape) : results;
+    let mappedResults = [];
+    try {
+      mappedResults = mode === 'ui' ? results.map(mapToUIShape) : results;
+    } catch (mappingError) {
+      pipelineDebug.mappingError = mappingError.message;
+    }
+    pipelineDebug.afterMapping = mappedResults.length;
+    pipelineDebug.returnedCandidates = mappedResults.length;
     timing.end('candidate.selection', 'completed');
 
     // Record metrics for each candidate
@@ -807,6 +902,13 @@ export async function combinedSearch(cache, options = {}) {
       // No candidate is silently discarded.
       debug: {
         rejections: rejectionTracker.getRejections(),
+        liveDiscovery: liveDebug,
+        pipeline: pipelineDebug,
+        rankingComposition,
+        rankingExplanations,
+        identityTiers: identityTierCounts,
+        shadowRanking,
+        identityDiagnostics,
       },
       timing: timing.summary(),
     };
@@ -931,10 +1033,45 @@ export async function searchTrace(cache, options = {}) {
     }
     timing.end('candidate.eligibility', 'completed');
 
+    // Identity eligibility diagnostic — measure only, no filtering
+    timing.start('candidate.identity-diag');
+    const identityEligibilityCounts = countIdentityEligibility(eligibleCandidates, queryIntent, mediaId);
+    pipelineDebug.identityEligibility = identityEligibilityCounts;
+    timing.end('candidate.identity-diag', 'completed');
+
+    // Identity tier classification — classify identity match quality before ranking
+    timing.start('candidate.identity-tier');
+    const identityTierCounts = aggregateIdentityTiers(eligibleCandidates, queryIntent, mediaId);
+    timing.end('candidate.identity-tier', 'completed');
+
+    // Shadow ranking comparison — hypothetical result sets without changing active ranking
+    timing.start('candidate.shadow-ranking');
+    const shadowRanking = shadowRankComparison(eligibleCandidates, queryIntent, mediaId, limit);
+    timing.end('candidate.shadow-ranking', 'completed');
+
     // Rank
     timing.start('candidate.ranking');
     const rankingInputs = eligibleCandidates.map(toRankingInput);
     const ranked = rankHits(rankingInputs, queryIntent, mediaId);
+    const topRanked = ranked.slice(0, limit);
+    const rankingComposition = {
+      beforeRanking: {
+        corpusCount: eligibleCandidates.filter(candidate => candidate.sources.some(source => source.origin === 'corpus')).length,
+        liveCount: eligibleCandidates.filter(candidate => candidate.sources.some(source => source.origin === 'live')).length,
+      },
+      afterRanking: {
+        corpusInTopN: topRanked.filter(candidate => candidate.sources.some(source => source.origin === 'corpus')).length,
+        liveInTopN: topRanked.filter(candidate => candidate.sources.some(source => source.origin === 'live')).length,
+      },
+      liveCandidateRanks: ranked
+        .filter(candidate => candidate.sources.some(source => source.origin === 'live'))
+        .map(candidate => ({
+          releaseKey: candidate.releaseKey,
+          rank: candidate.justification?.rank ?? null,
+          score: candidate.score,
+        })),
+    };
+    const rankingExplanations = extractRankingExplanations(ranked);
     timing.end('candidate.ranking', 'completed');
 
     // Pagination
@@ -993,6 +1130,10 @@ export async function searchTrace(cache, options = {}) {
         ranked: ranked.length,
         returned: results.length,
       },
+      rankingComposition,
+      rankingExplanations,
+      identityTiers: identityTierCounts,
+      shadowRanking,
       rejections: rejectionTracker.getRejections(),
       candidates,
       timing: timing.summary(),
@@ -1001,6 +1142,29 @@ export async function searchTrace(cache, options = {}) {
     timing.complete();
     throw error;
   }
+}
+
+/**
+ * Extract ranking factor explanations for top candidates.
+ */
+function extractRankingExplanations(ranked) {
+  const extractExplanation = (candidate) => ({
+    releaseKey: candidate.releaseKey,
+    source: candidate.sources?.some(source => source.origin === 'live') ? 'live' : 'corpus',
+    totalScore: candidate.score,
+    scoreComponents: candidate.components ?? {},
+    contributions: candidate.contributions ?? {},
+  });
+
+  const top10 = ranked.slice(0, 10).map(extractExplanation);
+  const liveCandidates = ranked.filter(candidate => candidate.sources?.some(source => source.origin === 'live'));
+  const top10Live = liveCandidates.slice(0, 10).map(extractExplanation);
+
+  return {
+    top10,
+    top10Live,
+    liveCandidateCount: liveCandidates.length,
+  };
 }
 
 /**

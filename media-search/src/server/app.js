@@ -637,15 +637,54 @@ export function createRequestHandler(dependencies = {}) {
             includeMedia: true,
             mode: 'ui',
             mediaId,
-            liveDiscoveryFn: async () => runLiveDiscovery(mediaId, { season: intent.season, episode: intent.episodes[0] }),
+            liveDiscoveryFn: async () => runLiveDiscoveryWithCounts(mediaId, { season: intent.season, episode: intent.episodes[0] }),
           });
-          return sendJson(response, 200, {
+          // Expose debug output in the response
+          const liveDebug = result.debug?.liveDiscovery || null;
+          const pipelineDebug = result.debug?.pipeline || null;
+          const rankingComposition = result.debug?.rankingComposition || null;
+          const rankingExplanations = result.debug?.rankingExplanations || null;
+          const identityTiers = result.debug?.identityTiers || null;
+          const shadowRanking = result.debug?.shadowRanking || null;
+          const identityDiagnostics = result.debug?.identityDiagnostics || null;
+          // Instrument serialization boundary
+          const beforeSerialization = result.results.length;
+          let serializedResults = [];
+          try {
+            serializedResults = result.results.map(toPublicReleaseDto);
+          } catch (serializationError) {
+            pipelineDebug.serializationError = serializationError.message;
+            serializedResults = [];
+          }
+          const responseBody = {
             intent,
-            results: result.results.map(toPublicReleaseDto),
+            results: serializedResults,
             total: result.total,
             timings: { ...result.timings, totalMs: Math.round(performance.now() - startedAt) },
             stats: result.stats,
-          });
+            debug: {
+              rejections: result.debug?.rejections || [],
+              liveDiscovery: liveDebug,
+              pipeline: {
+                ...pipelineDebug,
+                beforeSerialization,
+                serializedCandidates: serializedResults.length,
+                responseCandidates: serializedResults.length,
+              },
+              rankingComposition,
+              rankingExplanations,
+              identityTiers,
+              shadowRanking,
+              identityDiagnostics,
+            },
+          };
+          console.log('API_RESPONSE_PAYLOAD:', JSON.stringify({
+            resultsLength: responseBody.results.length,
+            total: responseBody.total,
+            firstResult: responseBody.results[0] || null,
+            pipeline: responseBody.debug?.pipeline
+          }));
+          return sendJson(response, 200, responseBody);
         }
 
         // Unified title search: provider-agnostic, cache-backed.
