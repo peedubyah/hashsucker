@@ -938,9 +938,8 @@ test('GET /stream/movie/:id returns 501 with structured JSON for stub resolver',
 
   assert.equal(response.status, 501);
   const body = JSON.parse(response.text);
-  assert.equal(body.status, 'not_implemented');
-  assert.equal(body.provider, null);
-  assert.equal(body.redirectUrl, null);
+  assert.equal(body.status, 'debug');
+  assert.equal(body.resolverStatus, 'not_implemented');
   // Must NOT return media bytes
   assert.equal(response.headers['content-type'], 'application/json; charset=utf-8');
   // Must NOT issue an HTTP redirect
@@ -953,9 +952,8 @@ test('GET /stream/series/:id returns 501 with structured JSON for valid series r
 
   assert.equal(response.status, 501);
   const body = JSON.parse(response.text);
-  assert.equal(body.status, 'not_implemented');
-  assert.equal(body.provider, null);
-  assert.equal(body.redirectUrl, null);
+  assert.equal(body.status, 'debug');
+  assert.equal(body.resolverStatus, 'not_implemented');
 });
 
 test('GET /stream/series/:id returns 400 when season/episode missing', async () => {
@@ -1008,7 +1006,8 @@ test('GET /stream/movie/:id normalizes mixed-case type segment', async () => {
 
   assert.equal(response.status, 501);
   const body = JSON.parse(response.text);
-  assert.equal(body.status, 'not_implemented');
+  assert.equal(body.status, 'debug');
+  assert.equal(body.resolverStatus, 'not_implemented');
 });
 
 test('GET /stream/series/:id accepts colon-separated mediaId (tt0944947:1:1)', async () => {
@@ -1017,5 +1016,222 @@ test('GET /stream/series/:id accepts colon-separated mediaId (tt0944947:1:1)', a
 
   assert.equal(response.status, 501);
   const body = JSON.parse(response.text);
-  assert.equal(body.status, 'not_implemented');
+  assert.equal(body.status, 'debug');
+  assert.equal(body.resolverStatus, 'not_implemented');
+});
+
+// =============================================================================
+// Existing Selection Lookup Tests
+// =============================================================================
+// Tests for getExistingSelection boundary — consuming persisted selections
+// without performing live discovery or re-ranking.
+
+test('getExistingSelection: returns null when no handoff exists', () => {
+  const cache = createDiscoveryCache();
+  const result = cache.getExistingSelection('tt9999999');
+  assert.equal(result, null);
+  cache.close();
+});
+
+test('getExistingSelection: returns selected when handoff exists with cached state', () => {
+  const cache = createDiscoveryCache();
+  const mediaId = 'tt1234567';
+  const infoHash = HASH;
+
+  // Create a request first
+  const requestId = cache.persistMediaRequest(
+    {
+      mediaId,
+      mediaType: 'movie',
+      season: null,
+      episode: null,
+      source: 'test',
+    },
+    [{
+      infoHash,
+      fileIndex: null,
+      filename: 'Movie.mkv',
+      score: 0.85,
+      rank: 1,
+      release: { infoHash, fileIndex: null, releaseKey: `${infoHash}:torrent` },
+    }]
+  );
+
+  // Persist a handoff for this media
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId,
+    mediaType: 'movie',
+    season: null,
+    episode: null,
+    releaseKey: `${infoHash}:torrent`,
+    infoHash,
+    fileIndex: null,
+    filename: 'Movie.mkv',
+    provider: 'torbox',
+    providerState: 'cached',
+    identityTier: 'Verified',
+    resolutionState: 'confirmed',
+    selectionReason: 'test selection',
+    selectedAt: Date.now(),
+  });
+
+  // Persist a provider observation indicating cached state
+  cache.appendProviderObservation({
+    provider: 'torbox',
+    accountScope: 'primary',
+    scope: 'candidate',
+    infoHash,
+    fileIndex: null,
+    state: 'cached',
+    kind: 'authoritative',
+    observedAt: Date.now(),
+    expiresAt: Date.now() + 3600000,
+    source: 'test',
+  });
+
+  const result = cache.getExistingSelection(mediaId);
+  assert.equal(result.status, 'selected');
+  assert.equal(result.mediaId, mediaId);
+  assert.equal(result.selectedHash, infoHash);
+  assert.equal(result.fileIndex, null);
+  assert.equal(result.provider, 'torbox');
+  assert.equal(result.providerState, 'cached');
+  assert.equal(result.reason, 'test selection');
+
+  cache.close();
+});
+
+test('getExistingSelection: returns debug when handoff exists but not usable', () => {
+  const cache = createDiscoveryCache();
+  const mediaId = 'tt7654321';
+  const infoHash = HASH;
+
+  const requestId = cache.persistMediaRequest(
+    {
+      mediaId,
+      mediaType: 'movie',
+      season: null,
+      episode: null,
+      source: 'test',
+    },
+    [{
+      infoHash,
+      fileIndex: null,
+      filename: 'Movie.mkv',
+      score: 0.85,
+      rank: 1,
+      release: { infoHash, fileIndex: null, releaseKey: `${infoHash}:torrent` },
+    }]
+  );
+
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId,
+    mediaType: 'movie',
+    season: null,
+    episode: null,
+    releaseKey: `${infoHash}:torrent`,
+    infoHash,
+    fileIndex: null,
+    filename: 'Movie.mkv',
+    provider: 'torbox',
+    providerState: 'uncached',
+    identityTier: 'Verified',
+    resolutionState: 'confirmed',
+    selectionReason: 'test selection',
+    selectedAt: Date.now(),
+  });
+
+  // No observation = unknown state (not usable)
+  const result = cache.getExistingSelection(mediaId);
+  assert.equal(result.status, 'debug');
+  assert.equal(result.mediaId, mediaId);
+  assert.equal(result.selectedHash, infoHash);
+  assert.equal(result.providerState, 'unknown');
+
+  cache.close();
+});
+
+test('GET /stream returns 200 with selected status when existing selection exists', async () => {
+  const cache = createDiscoveryCache();
+  const mediaId = 'tt5555555';
+  const infoHash = HASH;
+
+  // Create request + handoff + observation
+  const requestId = cache.persistMediaRequest(
+    {
+      mediaId,
+      mediaType: 'movie',
+      season: null,
+      episode: null,
+      source: 'test',
+    },
+    [{
+      infoHash,
+      fileIndex: null,
+      filename: 'Movie.mkv',
+      score: 0.85,
+      rank: 1,
+      release: { infoHash, fileIndex: null, releaseKey: `${infoHash}:torrent` },
+    }]
+  );
+
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId,
+    mediaType: 'movie',
+    season: null,
+    episode: null,
+    releaseKey: `${infoHash}:torrent`,
+    infoHash,
+    fileIndex: null,
+    filename: 'Movie.mkv',
+    provider: 'torbox',
+    providerState: 'cached',
+    identityTier: 'Verified',
+    resolutionState: 'confirmed',
+    selectionReason: 'test selection',
+    selectedAt: Date.now(),
+  });
+
+  cache.appendProviderObservation({
+    provider: 'torbox',
+    accountScope: 'primary',
+    scope: 'candidate',
+    infoHash,
+    fileIndex: null,
+    state: 'cached',
+    kind: 'authoritative',
+    observedAt: Date.now(),
+    expiresAt: Date.now() + 3600000,
+    source: 'test',
+  });
+
+  const handler = createRequestHandler({ searchCache: cache });
+
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = `/stream/movie/${mediaId}`;
+
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8'), headers: this.headers }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.status, 'selected');
+  assert.equal(body.mediaId, mediaId);
+  assert.equal(body.selectedHash, infoHash);
+  assert.equal(body.fileIndex, null);
+  assert.equal(body.provider, 'torbox');
+  assert.equal(body.providerState, 'cached');
+  assert.equal(body.reason, 'test selection');
+
+  cache.close();
 });

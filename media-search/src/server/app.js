@@ -419,13 +419,30 @@ export function createRequestHandler(dependencies = {}) {
             season: season != null ? parseInt(season, 10) : null,
             episode: episode != null ? parseInt(episode, 10) : null,
           });
+
+          // 1. Check for existing persisted selection first
+          const existingSelection = searchCache.getExistingSelection(rawId);
+          if (existingSelection && existingSelection.status === 'selected') {
+            return sendJson(response, 200, existingSelection);
+          }
+
+          // 2. Fall back to resolver stub
           const result = await resolveStream(identity);
           if (result.status === 'not_implemented') {
-            return sendJson(response, 501, {
-              status: result.status,
-              provider: result.provider,
-              redirectUrl: result.redirectUrl,
-            });
+            // Merge stored knowledge into debug response
+            const debugResponse = existingSelection
+              ? { ...existingSelection, resolverStatus: result.status, provider: null, redirectUrl: null }
+              : {
+                  status: 'debug',
+                  mediaId: rawId,
+                  mediaType,
+                  resolverStatus: result.status,
+                  provider: null,
+                  redirectUrl: null,
+                  candidates: [],
+                  message: 'No stored knowledge found',
+                };
+            return sendJson(response, 501, debugResponse);
           }
           return sendJson(response, 200, result);
         } catch (err) {

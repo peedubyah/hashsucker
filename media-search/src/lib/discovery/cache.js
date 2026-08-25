@@ -1699,6 +1699,143 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   }
 
   // ---------------------------------------------------------------------------
+  // Stored knowledge lookup for resolver debug
+  // ---------------------------------------------------------------------------
+
+  const GET_MEDIA_REQUESTS_BY_MEDIA_ID = `
+    SELECT * FROM media_requests
+    WHERE media_id = @media_id
+    ORDER BY created_at DESC
+    LIMIT 1;
+  `;
+
+  const GET_PLAYBACK_HANDOFFS_BY_MEDIA_ID = `
+    SELECT * FROM playback_handoffs
+    WHERE media_id = @media_id
+    ORDER BY created_at DESC
+    LIMIT 1;
+  `;
+
+  const getMediaRequestsByMediaIdStmt = db.prepare(GET_MEDIA_REQUESTS_BY_MEDIA_ID);
+  const getPlaybackHandoffsByMediaIdStmt = db.prepare(GET_PLAYBACK_HANDOFFS_BY_MEDIA_ID);
+
+  /**
+   * Look up existing stored knowledge for a media identity.
+   * Queries persisted request/selection/handoff state without performing
+   * any live discovery or cache revalidation.
+   *
+   * @param {string} mediaId - Media identifier
+   * @returns {Object|null} Debug knowledge object or null if no stored state
+   */
+  function getStoredKnowledge(mediaId) {
+    const request = getMediaRequestsByMediaIdStmt.get({ media_id: mediaId });
+    if (!request) return null;
+
+    const results = getMediaRequestResultsStmt.all({ request_id: request.id });
+    const handoff = getPlaybackHandoffsByMediaIdStmt.get({ media_id: mediaId });
+
+    // Build candidates from persisted results + observations
+    const candidates = results.map((r) => {
+      // file_index_key: -1 = torrent-level (null), 0+ = specific file
+      const observations = getProviderObservations(r.info_hash, r.file_index_key, {
+        includeStale: true,
+      });
+
+      // Find the most recent observation for cache state
+      let cacheState = 'unknown';
+      let lastChecked = null;
+      if (observations.length > 0) {
+        const latest = observations.reduce((a, b) => (b.observedAt > a.observedAt ? b : a));
+        cacheState = latest.state || 'unknown';
+        lastChecked = latest.observedAt;
+      }
+
+      return {
+        releaseKey: r.release_metadata ? JSON.parse(r.release_metadata).releaseKey || null : null,
+        infoHash: r.info_hash,
+        fileIndex: r.file_index_key === -1 ? null : r.file_index_key,
+        provider: handoff?.provider || 'unknown',
+        cacheState,
+        score: r.score || 0,
+        lastChecked,
+      };
+    });
+
+    return {
+      status: 'debug',
+      mediaId,
+      mediaType: request.media_type,
+      season: request.season,
+      episode: request.episode,
+      requestId: request.id,
+      handoff: handoff ? rowToPlaybackHandoff(handoff) : null,
+      candidates,
+      storedAt: request.created_at,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Existing selection lookup boundary
+  // ---------------------------------------------------------------------------
+  // Isolated boundary for consuming persisted playback selections.
+  // Can be swapped to a different contract (e.g., intelligence branch handoff)
+  // without changing callers.
+
+  /**
+   * Look up an existing persisted selection for a media identity.
+   * Returns the selected candidate if:
+   *   - A playback handoff exists for this media_id
+   *   - The selection is eligible (not marked ineligible)
+   *   - Provider availability indicates usable/cached state
+   *
+   * @param {string} mediaId - Media identifier
+   * @returns {Object|null} Selection object or null if no valid selection
+   */
+  function getExistingSelection(mediaId) {
+    const handoff = getPlaybackHandoffsByMediaIdStmt.get({ media_id: mediaId });
+    if (!handoff) return null;
+
+    // Check provider availability for the selected hash
+    const observations = getProviderObservations(handoff.info_hash, handoff.file_index, {
+      includeStale: true,
+    });
+
+    // Find the most recent observation to determine current state
+    let providerState = 'unknown';
+    if (observations.length > 0) {
+      const latest = observations.reduce((a,b) => (b.observedAt > a.observedAt ? b : a));
+      providerState = latest.state || 'unknown';
+    }
+
+    // Only return selection if provider state indicates usability
+    const usableStates = new Set(['cached', 'usable', 'available']);
+    const isUsable = usableStates.has(providerState);
+
+    if (!isUsable) {
+      return {
+        status: 'debug',
+        mediaId,
+        selectedHash: handoff.info_hash,
+        fileIndex: handoff.file_index,
+        provider: handoff.provider,
+        providerState,
+        reason: 'existing selection not currently usable',
+      };
+    }
+
+    return {
+      status: 'selected',
+      mediaId,
+      releaseKey: handoff.release_key,
+      selectedHash: handoff.info_hash,
+      fileIndex: handoff.file_index,
+      provider: handoff.provider,
+      providerState,
+      reason: handoff.selection_reason || 'existing persisted selection',
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // Identity enrichment queue management functions
   // ---------------------------------------------------------------------------
 
@@ -2033,6 +2170,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getPlaybackHandoffByRequestId,
     getPlaybackHandoffById,
     rowToPlaybackHandoff,
+    // Stored knowledge lookup for resolver debug
+    getStoredKnowledge,
+    // Existing selection lookup boundary
+    getExistingSelection,
     // Exposed for testing/inspection
     get db() { return db; },
   };
