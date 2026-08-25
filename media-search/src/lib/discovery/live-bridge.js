@@ -56,7 +56,9 @@ export async function runLiveDiscovery(mediaId, options = {}) {
     .map(r => ({
       ...createReleaseIdentity(r.infoHash, r.fileIndex),
       filename: r.filename || r.title,
-      title: r.title || r.filename,
+      // Prefer actual release filename for title (accurate identity source),
+      // fall back to Stremio UI label only when no filename available
+      title: r.filename || r.title,
       year: r.year,
       season: r.season,
       episode: r.episode,

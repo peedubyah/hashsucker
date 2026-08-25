@@ -20,17 +20,17 @@ const DB_PATH = process.env.DISCOVERY_DB || ':memory:';
 const TEST_CASES = [
   {
     name: 'Bicycle Thieves (movie - corpus success path)',
-    request: { mediaId: 'tt0040522', mediaType: 'movie' },
+    request: { mediaId: 'tt0040522', mediaType: 'movie', mediaTitle: 'Bicycle Thieves' },
     expectLiveDiscovery: false,
   },
   {
     name: 'Family Guy S05E12 (series - needs live discovery)',
-    request: { mediaId: 'tt0182576', mediaType: 'series', season: 5, episode: 12 },
+    request: { mediaId: 'tt0182576', mediaType: 'series', season: 5, episode: 12, mediaTitle: 'Family Guy' },
     expectLiveDiscovery: true,
   },
   {
     name: 'Star Wars Young Jedi Adventures S01E01 (series - needs live discovery)',
-    request: { mediaId: 'tt0458290', mediaType: 'series', season: 1, episode: 1 },
+    request: { mediaId: 'tt0458290', mediaType: 'series', season: 1, episode: 1, mediaTitle: 'Star Wars Young Jedi Adventures' },
     expectLiveDiscovery: true,
   },
 ];
@@ -137,6 +137,20 @@ async function runValidation() {
       console.log(`  Uncached: ${result.availability.uncached}`);
       console.log(`  Unknown: ${result.availability.unknown}`);
       console.log(`  Duration: ${duration}ms`);
+
+      // Selection
+      const sel = result.selection;
+      console.log(`\n  Selection:`);
+      console.log(`    Reason: ${sel.reason}`);
+      if (sel.selected) {
+        console.log(`    Selected: rank=${sel.selected.rank}, filename=${sel.selected.filename}`);
+        console.log(`      source: ${sel.selected.sources?.join(', ')}, tier: ${sel.selected.identityTier}, confidence: ${sel.selected.identityConfidence}`);
+        console.log(`      torbox: ${sel.selected.torboxState}`);
+        console.log(`      score: ${sel.selected.score?.toFixed(3)}`);
+      } else {
+        console.log(`    Selected: none`);
+      }
+      console.log(`    Alternates: ${sel.alternates.length}`);
 
       // Top 5 eligible candidates
       const eligible = result.results.filter(r => r.identity.eligible !== false);

@@ -17,6 +17,7 @@ import { getStrongestReleaseAttributes } from '../lib/discovery/release-attribut
 import { evaluateObservationFreshness } from '../lib/providers/observations.js';
 import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
 import { createAvailabilityChecker } from '../lib/intents/availability.js';
+import { selectBestCandidate } from '../lib/discovery/selection.js';
 
 /**
  * Minimum eligible corpus candidates before live discovery is triggered.
@@ -86,6 +87,7 @@ export async function searchByMedia(cache, request) {
   const sourceLabel = request.sourceLabel || null;
   const requestedBy = request.requestedBy || null;
   const priority = request.priority ?? null;
+  const mediaTitle = request.mediaTitle || null; // Optional: human-readable media name for identity verification
 
   if (!mediaId) {
     throw new Error('mediaId is required');
@@ -128,7 +130,7 @@ export async function searchByMedia(cache, request) {
 
         const eligibility = evaluateIdentityEligibility(
           { releaseAttributes: releaseAttrs },
-          { season, episode, mediaType }
+          { season, episode, mediaType, mediaTitle }
         );
         liveEligibilityByHash.set(key, eligibility);
         if (eligibility.eligible) liveEligibleCount++;
@@ -168,12 +170,11 @@ export async function searchByMedia(cache, request) {
         identitySummary: { tier: 'none', confidence: 0, evidence: [] },
         ranking: { TieredRankingApplied: false, TierCounts: {} },
         discovery: { liveDiscoveryTriggered, liveCandidates: 0, liveEligible: 0 },
-        availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
-      };
+        availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },        selection: { selected: null, reason: 'no candidates', alternates: [] },      };
     }
 
     // Rank live candidates
-    const { ranked, tierMeta } = rankHitsTiered(liveCandidates, { season, episode }, mediaId, liveEligibilityByHash);
+    const { ranked, tierMeta } = rankHitsTiered(liveCandidates, { season, episode, mediaTitle }, mediaId, liveEligibilityByHash);
     const total = ranked.length;
     const results = ranked.slice(offset, offset + limit);
 
@@ -184,7 +185,7 @@ export async function searchByMedia(cache, request) {
 
       const tier = classifyIdentityTier(
         { releaseAttributes: hit.releaseAttributes, mediaAssociations: hit.mediaAssociations, sources: hit.sources, relevance: hit.components?.relevance || 0, selectedMediaId: hit.selectedMediaId },
-        { season, episode }, mediaId
+        { season, episode, mediaTitle }, mediaId
       );
 
       const identityTier = (eligibility && !eligibility.eligible) ? 'Ineligible' : tier.IdentityTier;
@@ -235,6 +236,9 @@ export async function searchByMedia(cache, request) {
       }
     }
 
+    // Stage 7: Select best candidate
+    const selection = selectBestCandidate(explainable);
+
     return {
       intent,
       results: explainable,
@@ -244,6 +248,7 @@ export async function searchByMedia(cache, request) {
       ranking: tierMeta,
       discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
       availability: availabilityStats,
+      selection,
     };
   }
 
@@ -256,8 +261,7 @@ export async function searchByMedia(cache, request) {
       identitySummary: { tier: 'none', confidence: 0, evidence: [] },
       ranking: { TieredRankingApplied: false, TierCounts: {} },
       discovery: { liveDiscoveryTriggered: false, liveCandidates: 0, liveEligible: 0 },
-      availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
-    };
+      availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },      selection: { selected: null, reason: 'no candidates', alternates: [] },    };
   }
 
   // Stage 2: Build ranking inputs with identity associations
@@ -377,7 +381,7 @@ export async function searchByMedia(cache, request) {
         // Same identity eligibility gate as corpus
         const eligibility = evaluateIdentityEligibility(
           { releaseAttributes: releaseAttrs },
-          { season, episode, mediaType }
+          { season, episode, mediaType, mediaTitle }
         );
         liveEligibilityByHash.set(key, eligibility);
 
@@ -420,7 +424,7 @@ export async function searchByMedia(cache, request) {
   // Stage 3: Rank within tier (with eligibility overrides)
   // Merge eligibility maps for ranking
   const allEligibilityByHash = new Map([...eligibilityByHash, ...liveEligibilityByHash]);
-  const { ranked, tierMeta } = rankHitsTiered(rankingInputs, { season, episode }, mediaId, allEligibilityByHash);
+  const { ranked, tierMeta } = rankHitsTiered(rankingInputs, { season, episode, mediaTitle }, mediaId, allEligibilityByHash);
 
   // Stage 4: Paginate
   const total = ranked.length;
@@ -441,7 +445,7 @@ export async function searchByMedia(cache, request) {
         relevance: hit.components?.relevance || 0,
         selectedMediaId: hit.selectedMediaId,
       },
-      { season, episode },
+      { season, episode, mediaTitle },
       mediaId
     );
 
@@ -543,6 +547,9 @@ export async function searchByMedia(cache, request) {
     );
   }
 
+  // Stage 7: Select best candidate
+  const selection = selectBestCandidate(explainable);
+
   return {
     requestId,
     intent,
@@ -557,6 +564,7 @@ export async function searchByMedia(cache, request) {
       liveEligible: liveEligibleCount,
     },
     availability: availabilityStats,
+    selection,
   };
 }
 

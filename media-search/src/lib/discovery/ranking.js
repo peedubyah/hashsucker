@@ -14,6 +14,41 @@
 import { parseEpisodeRange } from './episode-coverage.js';
 
 /**
+ * Normalize a title for comparison.
+ * Lowercases, removes punctuation, collapses whitespace.
+ */
+function normalizeTitle(title) {
+  return String(title || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Check if parsed title matches the requested media title.
+ * Returns:
+ *   true  - titles match (same show)
+ *   false - titles clearly differ (different show)
+ *   null  - insufficient data to determine (missing title)
+ */
+function titlesMatch(requestedTitle, parsedTitle) {
+  const r = normalizeTitle(requestedTitle);
+  const p = normalizeTitle(parsedTitle);
+
+  if (!r || !p) return null;
+
+  // Exact match or substring containment
+  if (r === p || r.includes(p) || p.includes(r)) return true;
+
+  // Token overlap: at least 60% of requested tokens present in parsed
+  const rTokens = r.split(' ').filter(Boolean);
+  const pTokens = p.split(' ').filter(Boolean);
+  const overlap = rTokens.filter(t => pTokens.includes(t)).length;
+  return overlap / rTokens.length >= 0.6;
+}
+
+/**
  * Identity Eligibility Evaluation
  *
  * Determines whether a candidate is eligible for ranking given a specific
@@ -37,17 +72,31 @@ import { parseEpisodeRange } from './episode-coverage.js';
  * @returns {{ eligible: boolean, reason: string|null, code: string|null }}
  */
 export function evaluateIdentityEligibility(hit, queryIntent = {}) {
-  const { season: querySeason, episode: queryEpisode, mediaType } = queryIntent;
+  const { season: querySeason, episode: queryEpisode, mediaType, mediaTitle: requestedMediaTitle } = queryIntent;
   const releaseAttributes = hit.releaseAttributes || {};
   const parsedSeason = releaseAttributes.season ?? null;
   const parsedEpisode = releaseAttributes.episode ?? null;
   const episodeRange = releaseAttributes.episodeRange ?? null;
   const seasonOnly = releaseAttributes.seasonOnly ?? false;
   const parsedMediaType = releaseAttributes.mediaType || null;
+  const parsedTitle = releaseAttributes.title || null;
 
   // Movies: no episode constraints possible
   if (mediaType === 'movie' || !querySeason) {
     return { eligible: true, reason: null, code: null };
+  }
+
+  // Title cross-check: if requested title and parsed title both exist,
+  // reject candidates from a clearly different show
+  if (requestedMediaTitle && parsedTitle) {
+    const titleResult = titlesMatch(requestedMediaTitle, parsedTitle);
+    if (titleResult === false) {
+      return {
+        eligible: false,
+        reason: `title_mismatch: parsed title "${parsedTitle}" does not match requested "${requestedMediaTitle}"`,
+        code: 'title_mismatch',
+      };
+    }
   }
 
   // Series with specific season+episode requested
@@ -545,16 +594,22 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
 
   // Helper: check if filename/parser provides strong identity evidence
   // Used to distinguish ProviderConfirmed from ProviderScoped for live candidates
-  // and to strengthen Verified tier for corpus candidates
+  // and to strengthen Verified tier for corpus candidates.
+  //
+  // IMPORTANT: relevance score is NOT a title match signal. For live candidates
+  // relevance is hardcoded and does not reflect actual title similarity.
+  // Must use actual title comparison when mediaTitle is available.
   const hasStrongIdentityEvidence = (h, intent) => {
     const attrs = h.releaseAttributes || {};
     const title = attrs.title || null;
     const season = attrs.season ?? null;
     const episode = attrs.episode ?? null;
-    const relevance = h.relevance || 0;
 
-    // Strong title match indicates filename matches query
-    const hasStrongTitle = relevance >= 0.6;
+    // Title comparison: only positive if titles actually match.
+    // Returns null if we can't determine (missing title) — not evidence either way.
+    const requestedTitle = intent?.mediaTitle || null;
+    const titleEvidence = titlesMatch(requestedTitle, title);
+    const hasStrongTitle = titleEvidence === true;
 
     // Parsed season/episode matching query intent
     const querySeason = intent?.season ?? null;

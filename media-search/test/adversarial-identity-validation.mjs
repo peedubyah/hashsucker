@@ -10,6 +10,7 @@ import {
   classifyIdentityTier,
   rankHitsTiered,
   diagnoseIdentityEvidence,
+  evaluateIdentityEligibility,
 } from '../src/lib/discovery/ranking.js';
 
 const HASH = (n) => 'a'.repeat(40) + n;
@@ -160,12 +161,12 @@ const cases = [
 
   // === EDGE CASES ===
   {
-    name: 'ProviderScoped: live scoped with title but relevance exactly 0.59',
+    name: 'ProviderScoped: live scoped with non-matching title (Different Show)',
     hit: {
       hash: HASH('11'),
-      filename: 'NCIS.1080p',
+      filename: 'Different.Show.S01E01.1080p',
       relevance: 0.59,
-      releaseAttributes: { title: 'NCIS', resolution: '1080p' },
+      releaseAttributes: { title: 'Different Show', resolution: '1080p' },
       sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
       selectedMediaId: 'tt0364845',
     },
@@ -173,7 +174,7 @@ const cases = [
     expectedConfidence: { min: 0.3, max: 0.5 },
   },
   {
-    name: 'ProviderConfirmed: live scoped with relevance exactly 0.6',
+    name: 'ProviderConfirmed: live scoped with matching title (NCIS)',
     hit: {
       hash: HASH('12'),
       filename: 'NCIS.1080p',
@@ -198,8 +199,8 @@ let fail = 0;
 const failures = [];
 
 for (const tc of cases) {
-  const result = classifyIdentityTier(tc.hit, { season: 1, episode: 1 }, 'tt0364845');
-  
+  // Pass mediaTitle for tests that need title-based identity evidence
+  const result = classifyIdentityTier(tc.hit, { season: 1, episode: 1, mediaTitle: 'NCIS' }, 'tt0364845');
   const tierOk = result.IdentityTier === tc.expectedTier;
   const confOk = result.IdentityConfidence >= tc.expectedConfidence.min && 
                  result.IdentityConfidence <= tc.expectedConfidence.max;
@@ -325,6 +326,107 @@ if (diag.promotionFailure && diag.promotionFailure.failures.length > 0) {
   console.log('✗ Missing promotion failure diagnostic');
   failures.push('Promotion failure diagnostic');
   fail++;
+}
+
+// ============================================================
+// YOUNG JEDI ADVERSARIAL REGRESSION TEST
+// ============================================================
+
+console.log('\n=== YOUNG JEDI ADVERSARIAL REGRESSION ===\n');
+
+// Adversarial case: Clone Wars film cut returned under Young Jedi mediaId
+// This candidate should NOT be eligible/ProviderConfirmed because the title
+// clearly refers to a different show (The Clone Wars vs Young Jedi Adventures)
+const adversarialCases = [
+  {
+    name: 'Clone Wars film cut under Young Jedi request',
+    requestedMediaTitle: 'Star Wars Young Jedi Adventures',
+    hit: {
+      hash: 'f'.repeat(40),
+      filename: 'Star Wars The Clone Wars - 0.1 The Malevolence Film Cut 2160P',
+      relevance: 0.8,
+      releaseAttributes: {
+        title: 'Star Wars The Clone Wars',
+        season: 0,
+        episode: 1,
+        resolution: '2160p',
+      },
+      sources: [{ origin: 'live', evidence: [], confidence: 0.6 }],
+      selectedMediaId: 'tt0458290',
+    },
+    queryIntent: { season: 1, episode: 1 },
+    expectedEligible: false,
+    expectedTierNot: ['ProviderConfirmed', 'Verified'],
+    description: 'Different show (Clone Wars vs Young Jedi) must be ineligible',
+  },
+  {
+    name: 'Family Guy valid candidate remains eligible',
+    requestedMediaTitle: 'Family Guy',
+    hit: {
+      hash: 'a'.repeat(40),
+      filename: "Family Guy - S05E12 - Airport '07.mp4",
+      relevance: 0.9,
+      releaseAttributes: {
+        title: 'Family Guy',
+        season: 5,
+        episode: 12,
+      },
+      sources: [{ origin: 'live', evidence: [], confidence: 0.8 }],
+      selectedMediaId: 'tt0182576',
+    },
+    queryIntent: { season: 5, episode: 12 },
+    expectedEligible: true,
+    expectedTier: 'ProviderConfirmed',
+    description: 'Matching title + correct S05E12 must remain ProviderConfirmed',
+  },
+];
+
+for (const ac of adversarialCases) {
+  console.log(`Test: ${ac.name}`);
+  console.log(`  Description: ${ac.description}`);
+
+  // Evaluate eligibility
+  const eligibility = evaluateIdentityEligibility(
+    { releaseAttributes: ac.hit.releaseAttributes },
+    { ...ac.queryIntent, mediaTitle: ac.requestedMediaTitle }
+  );
+  console.log(`  Eligibility: eligible=${eligibility.eligible}, code=${eligibility.code}, reason=${eligibility.reason}`);
+
+  // Classify tier
+  const tier = classifyIdentityTier(
+    ac.hit,
+    { ...ac.queryIntent, mediaTitle: ac.requestedMediaTitle },
+    ac.hit.selectedMediaId
+  );
+  console.log(`  Tier: ${tier.IdentityTier}, Confidence: ${tier.IdentityConfidence}`);
+
+  // Validate
+  let casePass = true;
+
+  if (eligibility.eligible !== ac.expectedEligible) {
+    console.log(`  ✗ FAIL: expected eligible=${ac.expectedEligible}, got ${eligibility.eligible}`);
+    casePass = false;
+  }
+
+  if (ac.expectedTierNot && ac.expectedTierNot.includes(tier.IdentityTier)) {
+    console.log(`  ✗ FAIL: tier ${tier.IdentityTier} is in rejected list [${ac.expectedTierNot.join(', ')}]`);
+    casePass = false;
+  }
+
+  if (ac.expectedTier && tier.IdentityTier !== ac.expectedTier) {
+    console.log(`  ✗ FAIL: expected tier=${ac.expectedTier}, got ${tier.IdentityTier}`);
+    casePass = false;
+  }
+
+  if (casePass) {
+    console.log(`  ✓ PASS`);
+    pass++;
+  } else {
+    console.log(`  ✗ FAIL`);
+    failures.push(ac.name);
+    fail++;
+  }
+  console.log();
 }
 
 // ============================================================

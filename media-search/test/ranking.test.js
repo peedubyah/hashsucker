@@ -1275,7 +1275,7 @@ test('classifyIdentityTier: live candidate scoped to media with strong identity 
     sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
     selectedMediaId: 'tt0364845',
   };
-  const result = classifyIdentityTier(hit, { season: 1, episode: 1 }, 'tt0364845');
+  const result = classifyIdentityTier(hit, { season: 1, episode: 1, mediaTitle: 'NCIS' }, 'tt0364845');
   assert.equal(result.IdentityTier, 'ProviderConfirmed');
   assert.ok(result.IdentityEvidence.includes('provider-scoped-to-media'));
   assert.ok(result.IdentityEvidence.includes('strong-identity-evidence'));
@@ -1842,7 +1842,7 @@ test('classifyIdentityTier: live-scoped with strong identity is ProviderConfirme
     sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
     selectedMediaId: 'tt0364845',
   };
-  const result = classifyIdentityTier(hit, { season: 1, episode: 1 }, 'tt0364845');
+  const result = classifyIdentityTier(hit, { season: 1, episode: 1, mediaTitle: 'NCIS' }, 'tt0364845');
   assert.equal(result.IdentityTier, 'ProviderConfirmed');
   assert.ok(result.IdentityEvidence.includes('provider-scoped-to-media'));
 });
@@ -2177,7 +2177,7 @@ test('classifyIdentityTier: matching live filename becomes ProviderConfirmed', (
     sources: [{ origin: 'live', evidence: [], confidence: 0.5 }],
     selectedMediaId: 'tt0364845',
   };
-  const result = classifyIdentityTier(hit, { season: 1, episode: 1 }, 'tt0364845');
+  const result = classifyIdentityTier(hit, { season: 1, episode: 1, mediaTitle: 'NCIS' }, 'tt0364845');
   assert.equal(result.IdentityTier, 'ProviderConfirmed');
   assert.ok(result.IdentityEvidence.includes('provider-scoped-to-media'));
   assert.ok(result.IdentityEvidence.includes('strong-identity-evidence'));

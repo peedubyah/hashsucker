@@ -356,6 +356,7 @@ export function normalizeStream(raw, addonMeta = {}) {
     role: addonMeta.role || 'discovery',
     title: title || description || 'Stream',
     description,
+    filename,
     quality: parsed.quality,
     resolution: parsed.resolution,
     codec: parsed.codec,
