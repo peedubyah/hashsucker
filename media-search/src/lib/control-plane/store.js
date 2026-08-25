@@ -438,6 +438,22 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     return row ? rowToPlacement(row) : null;
   }
 
+  function findPlacementByInfoHash(provider, infoHash) {
+    const row = db.prepare(`
+      SELECT * FROM provider_placements
+      WHERE provider = ? AND info_hash = ?
+    `).get(normalizeIdentifier(provider), normalizeInfoHash(infoHash));
+    return row ? rowToPlacement(row) : null;
+  }
+
+  function findFileMapping(releaseKey, placementId) {
+    const row = db.prepare(`
+      SELECT * FROM candidate_file_mappings
+      WHERE release_key = ? AND placement_id = ?
+    `).get(releaseKey, placementId);
+    return row ? rowToFileMapping(row) : null;
+  }
+
   function recordPlacementLookupObservation(input) {
     const identity = createReleaseIdentity(input.infoHash, null);
     const provider = normalizeIdentifier(input.provider);
@@ -1298,6 +1314,8 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     ensureCanonicalPath,
     recordPlacement,
     findPlacement,
+    findPlacementByInfoHash,
+    findFileMapping,
     recordPlacementLookupObservation,
     recordReadinessObservation,
     replaceProviderFileInventory,
@@ -1573,6 +1591,9 @@ function requireBoundedExpiry(value, observedAt, subject) {
 function requireEnum(value, allowed, field) {
   if (!allowed.includes(value)) throw new TypeError(`Invalid ${field}: ${value}`);
   return value;
+}
+function normalizeInfoHash(infoHash) {
+  return String(infoHash || '').trim().toLowerCase();
 }
 function requireString(value, field, max = 256) {
   if (typeof value !== 'string' || value.trim().length === 0 || value.length > max) {

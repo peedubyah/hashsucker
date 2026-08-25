@@ -47,6 +47,7 @@ import { createLifecycleEventStore } from '../lib/operator/event-store.js';
 import { formatRequestTimeline, formatRecentRuns, formatFailedRuns } from '../lib/operator/event-formatter.js';
 import { getEnrichmentDiagnostics, formatEnrichmentDiagnostics } from '../lib/discovery/enrichment-diagnostics.js';
 import { resolveStream, parseMediaIdentity, StreamResolverError } from '../lib/stream-resolver/index.js';
+import { resolveTorBoxRedirect, RedirectResolutionError, formatRedirectLog } from '../lib/resolver/torbox-redirect.js';
 
 const CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -423,6 +424,42 @@ export function createRequestHandler(dependencies = {}) {
           // 1. Check for existing persisted selection first
           const existingSelection = searchCache.getExistingSelection(rawId);
           if (existingSelection && existingSelection.status === 'selected') {
+            // 1a. Selected candidate must be TorBox-resolvable for redirect
+            if (existingSelection.provider !== 'torbox') {
+              return sendJson(response, 400, {
+                error: `Provider '${existingSelection.provider}' is not resolvable via TorBox`,
+                code: 'PROVIDER_NOT_TORBOX',
+                mediaId: rawId,
+                mediaType,
+              });
+            }
+            // 1b. Attempt TorBox redirect resolution when control plane is available
+            if (controlPlaneStore) {
+              try {
+                const redirect = resolveTorBoxRedirect(existingSelection, controlPlaneStore);
+                // HTTP 307 — Temporary Redirect
+                response.writeHead(307, {
+                  location: redirect.redirectUrl,
+                  'cache-control': 'no-store',
+                  'x-torrent-id': redirect.torrentId,
+                  'x-file-id': redirect.providerFileId,
+                });
+                response.end();
+                return;
+              } catch (redirectErr) {
+                // Map redirect failures to clear non-redirect responses
+                if (redirectErr instanceof RedirectResolutionError) {
+                  return sendJson(response, redirectErr.status, {
+                    error: redirectErr.message,
+                    code: redirectErr.code,
+                    mediaId: rawId,
+                    mediaType,
+                  });
+                }
+                throw redirectErr;
+              }
+            }
+            // 1c. No control plane store — return selection JSON (legacy behavior)
             return sendJson(response, 200, existingSelection);
           }
 

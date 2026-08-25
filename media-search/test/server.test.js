@@ -1235,3 +1235,483 @@ test('GET /stream returns 200 with selected status when existing selection exist
 
   cache.close();
 });
+
+test('GET /stream returns HTTP 307 redirect when TorBox selection exists with valid mapping', async () => {
+  const cache = createDiscoveryCache();
+  const controlPlane = createControlPlaneStore();
+  const mediaId = 'tt3076462';
+  const infoHash = HASH;
+
+  // Create request + handoff + observation
+  const requestId = cache.persistMediaRequest(
+    {
+      mediaId,
+      mediaType: 'movie',
+      season: null,
+      episode: null,
+      source: 'test',
+    },
+    [{
+      infoHash,
+      fileIndex: null,
+      filename: 'Movie.mkv',
+      score: 0.85,
+      rank: 1,
+      release: { infoHash, fileIndex: null, releaseKey: `${infoHash}:torrent` },
+    }]
+  );
+
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId,
+    mediaType: 'movie',
+    season: null,
+    episode: null,
+    releaseKey: `${infoHash}:torrent`,
+    infoHash,
+    fileIndex: null,
+    filename: 'Movie.mkv',
+    provider: 'torbox',
+    providerState: 'cached',
+    identityTier: 'Verified',
+    resolutionState: 'confirmed',
+    selectionReason: 'test selection',
+    selectedAt: Date.now(),
+  });
+
+  cache.appendProviderObservation({
+    provider: 'torbox',
+    accountScope: 'primary',
+    scope: 'candidate',
+    infoHash,
+    fileIndex: null,
+    state: 'cached',
+    kind: 'authoritative',
+    observedAt: Date.now(),
+    expiresAt: Date.now() + 3600000,
+    source: 'test',
+  });
+
+  // Create TorBox placement + file mapping
+  const placement = controlPlane.recordPlacement({
+    provider: 'torbox',
+    accountScope: 'primary',
+    infoHash,
+    providerResourceId: '12345',
+    state: 'ready',
+    ownership: 'owned',
+    provenance: 'test',
+  });
+
+  // Must create provider_files before file mapping (FK constraint)
+  controlPlane.replaceProviderFileInventory(placement.id, [{
+    providerFileId: '67890',
+    path: '/movie.mkv',
+    name: 'movie.mkv',
+    size: 1000000,
+    selected: true,
+  }], { authoritative: true, complete: true });
+
+  controlPlane.recordFileMapping({
+    infoHash,
+    fileIndex: null,
+    fileIndexKey: -1,
+    releaseKey: `${infoHash}:torrent`,
+    placementId: placement.id,
+    providerFileId: '67890',
+    state: 'mapped',
+    method: 'test',
+    authoritative: true,
+  });
+
+  const handler = createRequestHandler({
+    searchCache: cache,
+    controlPlaneStore: controlPlane,
+  });
+
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = `/stream/movie/${mediaId}`;
+
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8'), headers: this.headers }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  // Must be a 307 redirect
+  assert.equal(response.status, 307);
+  assert.ok(response.headers.location, 'Location header is required');
+  assert.match(response.headers.location, /torrents\/requestdl/, 'Location must contain requestdl endpoint');
+  assert.match(response.headers.location, /torrent_id=12345/, 'Location must contain correct torrent_id');
+  assert.match(response.headers.location, /file_id=67890/, 'Location must contain correct provider_file_id');
+  // Must NOT proxy media bytes — no content-length > 0, no media content-type
+  assert.equal(response.text, '', '307 must not proxy media bytes');
+  // No temporary CDN URL is persisted — we didn't call any provider
+  cache.close();
+});
+
+test('GET /stream redirect fails with 404 when no torrent mapping exists', async () => {
+  const cache = createDiscoveryCache();
+  const controlPlane = createControlPlaneStore();
+  const mediaId = 'tt9999998';
+  const infoHash = HASH;
+
+  const requestId = cache.persistMediaRequest(
+    {
+      mediaId,
+      mediaType: 'movie',
+      season: null,
+      episode: null,
+      source: 'test',
+    },
+    [{
+      infoHash,
+      fileIndex: null,
+      filename: 'Movie.mkv',
+      score: 0.85,
+      rank: 1,
+      release: { infoHash, fileIndex: null, releaseKey: `${infoHash}:torrent` },
+    }]
+  );
+
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId,
+    mediaType: 'movie',
+    season: null,
+    episode: null,
+    releaseKey: `${infoHash}:torrent`,
+    infoHash,
+    fileIndex: null,
+    filename: 'Movie.mkv',
+    provider: 'torbox',
+    providerState: 'cached',
+    identityTier: 'Verified',
+    resolutionState: 'confirmed',
+    selectionReason: 'test selection',
+    selectedAt: Date.now(),
+  });
+
+  cache.appendProviderObservation({
+    provider: 'torbox',
+    accountScope: 'primary',
+    scope: 'candidate',
+    infoHash,
+    fileIndex: null,
+    state: 'cached',
+    kind: 'authoritative',
+    observedAt: Date.now(),
+    expiresAt: Date.now() + 3600000,
+    source: 'test',
+  });
+
+  // No placement, no mapping — just an empty control plane
+  const handler = createRequestHandler({
+    searchCache: cache,
+    controlPlaneStore: controlPlane,
+  });
+
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = `/stream/movie/${mediaId}`;
+
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8'), headers: this.headers }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 404);
+  const body = JSON.parse(response.text);
+  assert.equal(body.code, 'MISSING_TORRENT_MAPPING');
+  cache.close();
+});
+
+test('GET /stream redirect fails with 404 when file mapping missing', async () => {
+  const cache = createDiscoveryCache();
+  const controlPlane = createControlPlaneStore();
+  const mediaId = 'tt9999997';
+  const infoHash = HASH;
+
+  const requestId = cache.persistMediaRequest(
+    {
+      mediaId,
+      mediaType: 'movie',
+      season: null,
+      episode: null,
+      source: 'test',
+    },
+    [{
+      infoHash,
+      fileIndex: null,
+      filename: 'Movie.mkv',
+      score: 0.85,
+      rank: 1,
+      release: { infoHash, fileIndex: null, releaseKey: `${infoHash}:torrent` },
+    }]
+  );
+
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId,
+    mediaType: 'movie',
+    season: null,
+    episode: null,
+    releaseKey: `${infoHash}:torrent`,
+    infoHash,
+    fileIndex: null,
+    filename: 'Movie.mkv',
+    provider: 'torbox',
+    providerState: 'cached',
+    identityTier: 'Verified',
+    resolutionState: 'confirmed',
+    selectionReason: 'test selection',
+    selectedAt: Date.now(),
+  });
+
+  cache.appendProviderObservation({
+    provider: 'torbox',
+    accountScope: 'primary',
+    scope: 'candidate',
+    infoHash,
+    fileIndex: null,
+    state: 'cached',
+    kind: 'authoritative',
+    observedAt: Date.now(),
+    expiresAt: Date.now() + 3600000,
+    source: 'test',
+  });
+
+  // Create placement but NO file mapping
+  const placement2 = controlPlane.recordPlacement({
+    provider: 'torbox',
+    accountScope: 'primary',
+    infoHash,
+    providerResourceId: '12345',
+    state: 'ready',
+    ownership: 'owned',
+    provenance: 'test',
+  });
+
+  // No provider_files or file_mapping created
+
+  const handler = createRequestHandler({
+    searchCache: cache,
+    controlPlaneStore: controlPlane,
+  });
+
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = `/stream/movie/${mediaId}`;
+
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8'), headers: this.headers }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 404);
+  const body = JSON.parse(response.text);
+  assert.equal(body.code, 'MISSING_FILE_MAPPING');
+  cache.close();
+});
+
+test('GET /stream redirect fails with 400 when provider is not TorBox', async () => {
+  const cache = createDiscoveryCache();
+  const controlPlane = createControlPlaneStore();
+  const mediaId = 'tt9999996';
+  const infoHash = HASH;
+
+  const requestId = cache.persistMediaRequest(
+    {
+      mediaId,
+      mediaType: 'movie',
+      season: null,
+      episode: null,
+      source: 'test',
+    },
+    [{
+      infoHash,
+      fileIndex: null,
+      filename: 'Movie.mkv',
+      score: 0.85,
+      rank: 1,
+      release: { infoHash, fileIndex: null, releaseKey: `${infoHash}:torrent` },
+    }]
+  );
+
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId,
+    mediaType: 'movie',
+    season: null,
+    episode: null,
+    releaseKey: `${infoHash}:torrent`,
+    infoHash,
+    fileIndex: null,
+    filename: 'Movie.mkv',
+    provider: 'realdebrid', // Not TorBox
+    providerState: 'cached',
+    identityTier: 'Verified',
+    resolutionState: 'confirmed',
+    selectionReason: 'test selection',
+    selectedAt: Date.now(),
+  });
+
+  cache.appendProviderObservation({
+    provider: 'realdebrid',
+    accountScope: 'primary',
+    scope: 'candidate',
+    infoHash,
+    fileIndex: null,
+    state: 'cached',
+    kind: 'authoritative',
+    observedAt: Date.now(),
+    expiresAt: Date.now() + 3600000,
+    source: 'test',
+  });
+
+  const handler = createRequestHandler({
+    searchCache: cache,
+    controlPlaneStore: controlPlane,
+  });
+
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = `/stream/movie/${mediaId}`;
+
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8'), headers: this.headers }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 400);
+  const body = JSON.parse(response.text);
+  assert.equal(body.code, 'PROVIDER_NOT_TORBOX');
+  cache.close();
+});
+
+test('GET /stream redirect fails with 404 when mapping state is not mapped', async () => {
+  const cache = createDiscoveryCache();
+  const controlPlane = createControlPlaneStore();
+  const mediaId = 'tt9999995';
+  const infoHash = HASH;
+
+  const requestId = cache.persistMediaRequest(
+    {
+      mediaId,
+      mediaType: 'movie',
+      season: null,
+      episode: null,
+      source: 'test',
+    },
+    [{
+      infoHash,
+      fileIndex: null,
+      filename: 'Movie.mkv',
+      score: 0.85,
+      rank: 1,
+      release: { infoHash, fileIndex: null, releaseKey: `${infoHash}:torrent` },
+    }]
+  );
+
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId,
+    mediaType: 'movie',
+    season: null,
+    episode: null,
+    releaseKey: `${infoHash}:torrent`,
+    infoHash,
+    fileIndex: null,
+    filename: 'Movie.mkv',
+    provider: 'torbox',
+    providerState: 'cached',
+    identityTier: 'Verified',
+    resolutionState: 'confirmed',
+    selectionReason: 'test selection',
+    selectedAt: Date.now(),
+  });
+
+  cache.appendProviderObservation({
+    provider: 'torbox',
+    accountScope: 'primary',
+    scope: 'candidate',
+    infoHash,
+    fileIndex: null,
+    state: 'cached',
+    kind: 'authoritative',
+    observedAt: Date.now(),
+    expiresAt: Date.now() + 3600000,
+    source: 'test',
+  });
+
+  const placement = controlPlane.recordPlacement({
+    provider: 'torbox',
+    accountScope: 'primary',
+    infoHash,
+    providerResourceId: '12345',
+    state: 'ready',
+    ownership: 'owned',
+    provenance: 'test',
+  });
+
+  // Must create provider_files before file mapping (FK constraint)
+  controlPlane.replaceProviderFileInventory(placement.id, [{
+    providerFileId: '67890',
+    path: '/movie.mkv',
+    name: 'movie.mkv',
+    size: 1000000,
+    selected: true,
+  }], { authoritative: true, complete: true });
+
+  // Mapping exists but is in 'stale' state — not safe to use
+  controlPlane.recordFileMapping({
+    infoHash,
+    fileIndex: null,
+    fileIndexKey: -1,
+    releaseKey: `${infoHash}:torrent`,
+    placementId: placement.id,
+    providerFileId: '67890',
+    state: 'stale',
+    method: 'test',
+    authoritative: true,
+  });
+
+  const handler = createRequestHandler({
+    searchCache: cache,
+    controlPlaneStore: controlPlane,
+  });
+
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = `/stream/movie/${mediaId}`;
+
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8'), headers: this.headers }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 404);
+  const body = JSON.parse(response.text);
+  assert.equal(body.code, 'MAPPING_NOT_MAPPED');
+  cache.close();
+});
