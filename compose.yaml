@@ -40,6 +40,7 @@ services:
       TORBOX_DB: /config/state/torbox-importer.db
       POLL_INTERVAL: "${POLL_INTERVAL:-10}"
       STRM_OUTPUT_PATH: "${STRM_OUTPUT_PATH:-/strm}"
+      HASHSUCKER_BASE_URL: "${HASHSUCKER_BASE_URL:-http://media-search:3000}"
       RADARR_URL: ${RADARR_URL:?Set RADARR_URL in .env}
       RADARR_API_KEY: ${RADARR_API_KEY:?Set RADARR_API_KEY in .env}
       RADARR_ROOT_FOLDER: "${RADARR_ROOT_FOLDER:-/data/Movies}"

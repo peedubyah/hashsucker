@@ -74,73 +74,18 @@ if ! [[ "$INFO_HASH" =~ ^[0-9a-f]{40}$ ]]; then
     fail_request "invalid info hash: $INFO_HASH"
 fi
 
-log "stream materialization for hash: $INFO_HASH"
+# Step 1: Build stable Hashsucker resolver URL
+# .strm now encodes media identity, not a transient provider URL.
+# The resolver endpoint (GET /stream/:type/:id) handles redirect logic.
+HASHSUCKER_BASE_URL="${HASHSUCKER_BASE_URL:-http://localhost:8080}"
+PLAYBACK_URL="${HASHSUCKER_BASE_URL}/stream/${MEDIA_TYPE}/${MEDIA_ID}"
+log "stable resolver URL: $PLAYBACK_URL"
 
-# Step 1: Check TorBox cache by info_hash
-log "checking TorBox cache state for hash $INFO_HASH"
-
-CACHE_RESPONSE="$(
-    curl -fsS -m 15 \
-        -H "Authorization: Bearer $TORBOX_API_KEY" \
-        "$TORBOX_API_URL/torrents/checkcached?hash=$INFO_HASH&format=list" 2>&1
-)" || {
-    fail_request "cache check failed: cannot determine TorBox state"
-}
-
-IS_CACHED="$(printf '%s' "$CACHE_RESPONSE" | jq -r '.data // false' 2>/dev/null || echo "false")"
-
-if [ "$IS_CACHED" != "true" ]; then
-    fail_request "release not cached in TorBox (hash: $INFO_HASH)"
-fi
-
-log "release confirmed cached in TorBox"
-
-# Step 2: Resolve playback target from existing TorBox torrent list
-log "resolving playback target for hash $INFO_HASH"
-
-LIST_RESPONSE="$(
-    curl -fsS -m 15 \
-        -H "Authorization: Bearer $TORBOX_API_KEY" \
-        "$TORBOX_API_URL/torrents/mylist?bypass_cache=true" 2>&1
-)" || {
-    fail_request "failed to retrieve TorBox torrent list"
-}
-
-# Find torrent and files for our hash
-TORBOX_ID="$(printf '%s' "$LIST_RESPONSE" | jq -r '.data[] | select(.hash == "'$INFO_HASH'") | .id' 2>/dev/null | head -1)"
-
-if [ -z "$TORBOX_ID" ] || [ "$TORBOX_ID" = "null" ]; then
-    fail_request "cached hash not found in TorBox torrent list"
-fi
-
-# Pick the largest file as the main content
-BEST_FILE="$(printf '%s' "$LIST_RESPONSE" | jq -r --arg tid "$TORBOX_ID" '.data[] | select(.id == ($tid | tonumber)) | .files | sort_by(-.size) | .[0]' 2>/dev/null)"
-
-if [ -z "$BEST_FILE" ] || [ "$BEST_FILE" = "null" ]; then
-    fail_request "no playable files found for cached hash"
-fi
-
-FILE_ID="$(printf '%s' "$BEST_FILE" | jq -r '.id' 2>/dev/null)"
-FILE_NAME="$(printf '%s' "$BEST_FILE" | jq -r '.name // empty' 2>/dev/null)"
-
-if [ -z "$FILE_ID" ] || [ "$FILE_ID" = "null" ]; then
-    fail_request "could not resolve file_id for playback"
-fi
-
-log "resolved playback target: torrent=$TORBOX_ID file=$FILE_ID"
-
-# Step 3: Build durable TorBox permalink
-PLAYBACK_URL="${TORBOX_API_URL}/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${TORBOX_ID}&file_id=${FILE_ID}&redirect=true"
-log "durable permalink created"
-
-# Step 4: Resolve media title for .strm artifact naming
+# Step 2: Resolve media title for .strm artifact naming
 RESOLVED_TITLE="$RELEASE_TITLE"
 if [ -z "$RESOLVED_TITLE" ] || [ "$RESOLVED_TITLE" = "Unknown" ]; then
     if [ -n "$RELEASE_FILENAME" ]; then
         RESOLVED_TITLE="$RELEASE_FILENAME"
-        RESOLVED_TITLE="${RESOLVED_TITLE%.*}"
-    elif [ -n "$FILE_NAME" ]; then
-        RESOLVED_TITLE="$FILE_NAME"
         RESOLVED_TITLE="${RESOLVED_TITLE%.*}"
     fi
 fi
@@ -158,7 +103,7 @@ case "$RESOLVED_TITLE" in
         ;;
 esac
 
-# Step 5: Materialize .strm artifact
+# Step 3: Materialize .strm artifact
 log "materializing .strm artifact: $RESOLVED_TITLE"
 
 set +e
@@ -172,7 +117,7 @@ fi
 
 log "strm artifact created: $STRM_PATH"
 
-# Step 6: Mark request complete
+# Step 4: Mark request complete
 sqlite3 "$DB" "UPDATE requests SET state='done', last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE request_id=$(sqlq "$REQUEST_ID");"
 
 log "stream materialization complete"

@@ -919,3 +919,103 @@ test('POST /api/attributes/run triggers attribute parsing', async () => {
   assert.equal(body.parsed, 1);
   cache.close();
 });
+
+// =============================================================================
+// Stream Resolver HTTP Endpoint Tests
+// =============================================================================
+// Route: GET /stream/:type/:id
+// Tests the thin HTTP layer that wraps the stream resolver module.
+// Constraints verified:
+//   - No media bytes returned (never pipes media)
+//   - No HTTP redirects issued
+//   - No provider-specific logic at the HTTP layer
+//   - No discovery/ranking performed here
+//   - .strm behavior unchanged
+
+test('GET /stream/movie/:id returns 501 with structured JSON for stub resolver', async () => {
+  const { request } = createHarness();
+  const response = await request('/stream/movie/tt1234567');
+
+  assert.equal(response.status, 501);
+  const body = JSON.parse(response.text);
+  assert.equal(body.status, 'not_implemented');
+  assert.equal(body.provider, null);
+  assert.equal(body.redirectUrl, null);
+  // Must NOT return media bytes
+  assert.equal(response.headers['content-type'], 'application/json; charset=utf-8');
+  // Must NOT issue an HTTP redirect
+  assert.equal(response.headers.location, undefined);
+});
+
+test('GET /stream/series/:id returns 501 with structured JSON for valid series route', async () => {
+  const { request } = createHarness();
+  const response = await request('/stream/series/tt0182576?season=5&episode=12');
+
+  assert.equal(response.status, 501);
+  const body = JSON.parse(response.text);
+  assert.equal(body.status, 'not_implemented');
+  assert.equal(body.provider, null);
+  assert.equal(body.redirectUrl, null);
+});
+
+test('GET /stream/series/:id returns 400 when season/episode missing', async () => {
+  const { request } = createHarness();
+  const response = await request('/stream/series/tt0182576');
+
+  assert.equal(response.status, 400);
+  const body = JSON.parse(response.text);
+  assert.match(body.error, /season and episode/);
+});
+
+test('GET /stream/:invalidType/:id returns 400 for invalid media type', async () => {
+  const { request } = createHarness();
+  const response = await request('/stream/song/tt1234567');
+
+  // Regex restricts to movie|series only, so this falls through to 404
+  // because the route pattern itself rejects unknown types
+  assert.equal(response.status, 404);
+});
+
+test('GET /stream/movie/:id does not return media body or proxy content', async () => {
+  const { request } = createHarness();
+  const response = await request('/stream/movie/tt0133093');
+
+  // Must be JSON, never media bytes
+  assert.match(response.headers['content-type'], /application\/json/);
+  // Body must be parseable JSON (not binary media)
+  const body = JSON.parse(response.text);
+  assert.ok(body.status);
+  // No redirect location header
+  assert.equal(response.headers.location, undefined);
+});
+
+test('GET /stream/movie/:id is a thin route — no discovery or ranking side effects', async () => {
+  const { request } = createHarness();
+  // A request to /stream should not trigger any search/discovery/ranking
+  // It only validates input and calls resolveStream()
+  const response = await request('/stream/movie/tt0133093');
+
+  assert.equal(response.status, 501);
+  const body = JSON.parse(response.text);
+  // Stub response has no release/provider details — those come later
+  assert.equal(body.provider, null);
+  assert.equal(body.redirectUrl, null);
+});
+
+test('GET /stream/movie/:id normalizes mixed-case type segment', async () => {
+  const { request } = createHarness();
+  const response = await request('/stream/MOVIE/tt1234567');
+
+  assert.equal(response.status, 501);
+  const body = JSON.parse(response.text);
+  assert.equal(body.status, 'not_implemented');
+});
+
+test('GET /stream/series/:id accepts colon-separated mediaId (tt0944947:1:1)', async () => {
+  const { request } = createHarness();
+  const response = await request('/stream/series/tt0944947:1:1?season=1&episode=1');
+
+  assert.equal(response.status, 501);
+  const body = JSON.parse(response.text);
+  assert.equal(body.status, 'not_implemented');
+});

@@ -46,6 +46,7 @@ import { formatWorkerStatus } from '../lib/operator/worker-formatter.js';
 import { createLifecycleEventStore } from '../lib/operator/event-store.js';
 import { formatRequestTimeline, formatRecentRuns, formatFailedRuns } from '../lib/operator/event-formatter.js';
 import { getEnrichmentDiagnostics, formatEnrichmentDiagnostics } from '../lib/discovery/enrichment-diagnostics.js';
+import { resolveStream, parseMediaIdentity, StreamResolverError } from '../lib/stream-resolver/index.js';
 
 const CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -401,6 +402,38 @@ export function createRequestHandler(dependencies = {}) {
       if (request.method === 'GET' && url.pathname === '/health/ready') {
         const ready = readiness({ env });
         return sendJson(response, ready.status === 'healthy' ? 200 : 503, ready);
+      }
+      // Stream resolver endpoint — answers "where should playback redirect?"
+      // Route pattern: GET /stream/:type/:id (e.g., /stream/movie/tt1234567)
+      // ID may be colon-separated (e.g., tt0944947:1:1 for series episodes)
+      const streamMatch = request.method === 'GET' && url.pathname.match(/^\/stream\/(movie|series)\/([^/?]+)$/i);
+      if (streamMatch) {
+        const mediaType = streamMatch[1].toLowerCase();
+        const rawId = streamMatch[2];
+        const season = url.searchParams.get('season');
+        const episode = url.searchParams.get('episode');
+        try {
+          const identity = parseMediaIdentity({
+            mediaId: rawId,
+            mediaType,
+            season: season != null ? parseInt(season, 10) : null,
+            episode: episode != null ? parseInt(episode, 10) : null,
+          });
+          const result = await resolveStream(identity);
+          if (result.status === 'not_implemented') {
+            return sendJson(response, 501, {
+              status: result.status,
+              provider: result.provider,
+              redirectUrl: result.redirectUrl,
+            });
+          }
+          return sendJson(response, 200, result);
+        } catch (err) {
+          if (err instanceof StreamResolverError) {
+            return sendJson(response, err.status, { error: err.message });
+          }
+          throw err;
+        }
       }
       if (request.method === 'GET' && url.pathname === '/api/metrics') {
         return sendJson(response, 200, getMetrics());
