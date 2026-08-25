@@ -49,8 +49,8 @@ for (const query of queries) {
   console.log('═'.repeat(70));
 
   const encoded = encodeURIComponent(query);
-  const seriesUrl = `${CINEMETA_BASE}/catalog/series/search=${encoded}.json`;
-  const movieUrl = `${CINEMETA_BASE}/catalog/movie/search=${encoded}.json`;
+  const seriesUrl = `${CINEMETA_BASE}/catalog/series/top/search=${encoded}.json`;
+  const movieUrl = `${CINEMETA_BASE}/catalog/movie/top/search=${encoded}.json`;
 
   console.log('Series URL:', seriesUrl);
   console.log('Movie URL:', movieUrl);

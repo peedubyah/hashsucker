@@ -163,15 +163,44 @@ CREATE TABLE IF NOT EXISTS identity_enrichment_queue (
 CREATE INDEX IF NOT EXISTS idx_enrichment_queue_status ON identity_enrichment_queue(status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_enrichment_queue_candidate ON identity_enrichment_queue(info_hash, file_index_key);
 
+CREATE TABLE IF NOT EXISTS media_intents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  media_id TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  season INTEGER,
+  episode INTEGER,
+  source TEXT NOT NULL DEFAULT 'api',
+  source_type TEXT,
+  source_id TEXT,
+  source_label TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  priority INTEGER NOT NULL DEFAULT 0,
+  requested_by TEXT,
+  request_count INTEGER NOT NULL DEFAULT 1,
+  last_requested_at INTEGER NOT NULL,
+  last_processed_at INTEGER,
+  last_result_count INTEGER,
+  last_error TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_intents_media_id ON media_intents(media_id, last_requested_at);
+CREATE INDEX IF NOT EXISTS idx_media_intents_source ON media_intents(source, source_type, last_requested_at);
+CREATE INDEX IF NOT EXISTS idx_media_intents_status ON media_intents(status, priority DESC);
+
 CREATE TABLE IF NOT EXISTS media_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   media_id TEXT NOT NULL,
   media_type TEXT NOT NULL,
   season INTEGER,
   episode INTEGER,
+  intent_id INTEGER,
+  source TEXT NOT NULL DEFAULT 'api',
+  source_type TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
   candidate_count INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (intent_id) REFERENCES media_intents(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_media_requests_media_id ON media_requests(media_id, created_at);
@@ -180,6 +209,7 @@ CREATE TABLE IF NOT EXISTS media_request_results (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   request_id INTEGER NOT NULL,
   rank INTEGER NOT NULL,
+  intent_id INTEGER,
   info_hash TEXT NOT NULL,
   file_index_key INTEGER NOT NULL DEFAULT -1,
   filename TEXT,
@@ -191,7 +221,13 @@ CREATE TABLE IF NOT EXISTS media_request_results (
   resolution_state TEXT,
   release_metadata TEXT,
   ranking_breakdown TEXT,
-  FOREIGN KEY (request_id) REFERENCES media_requests(id)
+  eligible INTEGER,
+  ineligible_reason TEXT,
+  ineligible_code TEXT,
+  expected_media_scope TEXT,
+  parsed_candidate_scope TEXT,
+  FOREIGN KEY (request_id) REFERENCES media_requests(id),
+  FOREIGN KEY (intent_id) REFERENCES media_intents(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_media_request_results_request ON media_request_results(request_id, rank);
@@ -454,6 +490,8 @@ WHERE ra.info_hash IS NULL;
 `;
 
 const LEGACY_OBSERVATION_MIGRATION = 'provider-observations-v2';
+const MEDIA_REQUEST_ELIGIBILITY_COLUMNS = 'media-request-eligibility-columns';
+const MEDIA_INTENTS_SCHEMA = 'media-intents-v1';
 
 function migrateLegacyProviderObservations(db) {
   const applied = db.prepare(
@@ -505,12 +543,123 @@ function migrateLegacyProviderObservations(db) {
   }
 }
 
+function migrateMediaRequestEligibilityColumns(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(MEDIA_REQUEST_ELIGIBILITY_COLUMNS);
+  if (applied) return;
+
+  // Check if columns already exist (from CREATE TABLE)
+  const tableInfo = db.prepare('PRAGMA table_info(media_request_results)').all();
+  const hasEligible = tableInfo.some(col => col.name === 'eligible');
+
+  if (!hasEligible) {
+    // Add eligibility columns to existing media_request_results tables
+    db.exec('ALTER TABLE media_request_results ADD COLUMN eligible INTEGER');
+    db.exec('ALTER TABLE media_request_results ADD COLUMN ineligible_reason TEXT');
+    db.exec('ALTER TABLE media_request_results ADD COLUMN ineligible_code TEXT');
+    db.exec('ALTER TABLE media_request_results ADD COLUMN expected_media_scope TEXT');
+    db.exec('ALTER TABLE media_request_results ADD COLUMN parsed_candidate_scope TEXT');
+  }
+
+  db.prepare(
+    'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+  ).run(MEDIA_REQUEST_ELIGIBILITY_COLUMNS, Date.now());
+}
+
+function migrateMediaIntents(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(MEDIA_INTENTS_SCHEMA);
+  if (applied) return;
+
+  // Check if media_intents table exists
+  const tableExists = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_intents'"
+  ).get();
+
+  if (!tableExists) {
+    db.exec(`
+      CREATE TABLE media_intents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        media_id TEXT NOT NULL,
+        media_type TEXT NOT NULL,
+        season INTEGER,
+        episode INTEGER,
+        source TEXT NOT NULL DEFAULT 'api',
+        source_type TEXT,
+        source_id TEXT,
+        source_label TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        priority INTEGER NOT NULL DEFAULT 0,
+        requested_by TEXT,
+        request_count INTEGER NOT NULL DEFAULT 1,
+        last_requested_at INTEGER NOT NULL,
+        last_processed_at INTEGER,
+        last_result_count INTEGER,
+        last_error TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `);
+    db.exec('CREATE INDEX idx_media_intents_media_id ON media_intents(media_id, last_requested_at)');
+    db.exec('CREATE INDEX idx_media_intents_source ON media_intents(source, source_type, last_requested_at)');
+    db.exec('CREATE INDEX idx_media_intents_status ON media_intents(status, priority DESC)');
+  }
+
+  // Add processing columns to media_intents if missing
+  const intentInfo = db.prepare('PRAGMA table_info(media_intents)').all();
+  const hasLastProcessedAt = intentInfo.some(col => col.name === 'last_processed_at');
+  if (!hasLastProcessedAt) {
+    db.exec('ALTER TABLE media_intents ADD COLUMN last_processed_at INTEGER');
+  }
+  const hasLastResultCount = intentInfo.some(col => col.name === 'last_result_count');
+  if (!hasLastResultCount) {
+    db.exec('ALTER TABLE media_intents ADD COLUMN last_result_count INTEGER');
+  }
+  const hasLastError = intentInfo.some(col => col.name === 'last_error');
+  if (!hasLastError) {
+    db.exec('ALTER TABLE media_intents ADD COLUMN last_error TEXT');
+  }
+
+  // Add intent_id column to media_requests if missing
+  const reqInfo = db.prepare('PRAGMA table_info(media_requests)').all();
+  const hasIntentId = reqInfo.some(col => col.name === 'intent_id');
+  if (!hasIntentId) {
+    db.exec('ALTER TABLE media_requests ADD COLUMN intent_id INTEGER');
+  }
+
+  // Add source column to media_requests if missing
+  const hasSource = reqInfo.some(col => col.name === 'source');
+  if (!hasSource) {
+    db.exec("ALTER TABLE media_requests ADD COLUMN source TEXT NOT NULL DEFAULT 'api'");
+  }
+
+  // Add source_type column to media_requests if missing
+  const hasSourceType = reqInfo.some(col => col.name === 'source_type');
+  if (!hasSourceType) {
+    db.exec('ALTER TABLE media_requests ADD COLUMN source_type TEXT');
+  }
+
+  // Add intent_id column to media_request_results if missing
+  const resInfo = db.prepare('PRAGMA table_info(media_request_results)').all();
+  const hasResultIntentId = resInfo.some(col => col.name === 'intent_id');
+  if (!hasResultIntentId) {
+    db.exec('ALTER TABLE media_request_results ADD COLUMN intent_id INTEGER');
+  }
+
+  db.prepare(
+    'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+  ).run(MEDIA_INTENTS_SCHEMA, Date.now());
+}
+
 export function createDiscoveryCache({ dbPath = ':memory:', database = null } = {}) {
   const db = database || new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec(SCHEMA);
 
   migrateLegacyProviderObservations(db);
+  migrateMediaRequestEligibilityColumns(db);
+  migrateMediaIntents(db);
 
   const insertCandidateStmt = db.prepare(INSERT_CANDIDATE);
   const getCandidateStmt = db.prepare(GET_CANDIDATE);
@@ -1114,23 +1263,105 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     LIMIT 1;
   `;
 
-  // Media request persistence
-  const INSERT_MEDIA_REQUEST = `
-    INSERT INTO media_requests (media_id, media_type, season, episode, status, candidate_count, created_at)
-    VALUES (@media_id, @media_type, @season, @episode, @status, @candidate_count, @created_at);
+  // Media intents
+  const UPSERT_MEDIA_INTENT = `
+    INSERT INTO media_intents (media_id, media_type, season, episode, source, source_type, source_id, source_label, status, priority, requested_by, request_count, last_requested_at, created_at)
+    VALUES (@media_id, @media_type, @season, @episode, @source, @source_type, @source_id, @source_label, @status, @priority, @requested_by, 1, @now, @now)
+    ON CONFLICT(media_id, media_type, source) WHERE season IS @season AND episode IS @episode DO UPDATE SET
+      request_count = request_count + 1,
+      last_requested_at = @now,
+      source_label = COALESCE(@source_label, media_intents.source_label),
+      source_type = COALESCE(@source_type, media_intents.source_type),
+      source_id = COALESCE(@source_id, media_intents.source_id),
+      requested_by = COALESCE(@requested_by, media_intents.requested_by),
+      priority = MAX(priority, COALESCE(@priority, 0))
+    RETURNING id;
   `;
 
-  const INSERT_MEDIA_REQUEST_RESULT = `
-    INSERT INTO media_request_results (
-      request_id, rank, info_hash, file_index_key, filename, score,
-      score_breakdown, identity_tier, identity_confidence, identity_evidence,
-      resolution_state, release_metadata, ranking_breakdown
-    ) VALUES (
-      @request_id, @rank, @info_hash, @file_index_key, @filename, @score,
-      @score_breakdown, @identity_tier, @identity_confidence, @identity_evidence,
-      @resolution_state, @release_metadata, @ranking_breakdown
-    );
+  const GET_MEDIA_INTENT = `
+    SELECT * FROM media_intents WHERE id = @id;
   `;
+
+  const GET_MEDIA_INTENTS_BY_MEDIA_ID = `
+    SELECT * FROM media_intents WHERE media_id = @media_id ORDER BY last_requested_at DESC;
+  `;
+
+  const GET_MEDIA_INTENTS_BY_SOURCE = `
+    SELECT * FROM media_intents WHERE source = @source ORDER BY last_requested_at DESC LIMIT @limit;
+  `;
+
+  const GET_RECENT_MEDIA_INTENTS = `
+    SELECT * FROM media_intents ORDER BY last_requested_at DESC LIMIT @limit;
+  `;
+
+  const UPDATE_MEDIA_INTENT_STATUS = `
+    UPDATE media_intents SET status = @status WHERE id = @id;
+  `;
+
+  const GET_MEDIA_INTENT_STATS = `
+    SELECT
+      COUNT(*) as total_intents,
+      SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active_intents,
+      SUM(request_count) as total_requests,
+      COUNT(DISTINCT media_id) as unique_media,
+      COUNT(DISTINCT source) as unique_sources
+    FROM media_intents;
+  `;
+
+  // Media request persistence
+  function buildInsertMediaRequestSql(intent) {
+    const cols = ['media_id', 'media_type', 'season', 'episode', 'status', 'candidate_count', 'created_at'];
+    const values = [
+      intent.mediaId,
+      intent.mediaType || 'movie',
+      intent.season || null,
+      intent.episode != null ? intent.episode : (intent.episodes?.length ? intent.episodes[0] : null),
+      'completed',
+      intent.resultsLength || 0,
+      intent.now,
+    ];
+    if (intent.source) { cols.push('source'); values.push(intent.source); }
+    if (intent.sourceType) { cols.push('source_type'); values.push(intent.sourceType); }
+    if (intent.intentId) { cols.push('intent_id'); values.push(intent.intentId); }
+    const placeholders = cols.map(() => '?').join(', ');
+    return { sql: `INSERT INTO media_requests (${cols.join(', ')}) VALUES (${placeholders});`, values };
+  }
+
+  function buildInsertMediaRequestResultSql(intentId) {
+    const cols = [
+      'request_id', 'rank', 'info_hash', 'file_index_key', 'filename', 'score',
+      'score_breakdown', 'identity_tier', 'identity_confidence', 'identity_evidence',
+      'resolution_state', 'release_metadata', 'ranking_breakdown',
+      'eligible', 'ineligible_reason', 'ineligible_code', 'expected_media_scope', 'parsed_candidate_scope'
+    ];
+    if (intentId) { cols.push('intent_id'); }
+    const placeholders = cols.map(() => '?').join(', ');
+    const buildValues = (r) => {
+      const values = [
+        r.requestId,
+        r.rank,
+        r.infoHash,
+        r.fileIndexKey,
+        r.filename,
+        r.score,
+        r.scoreBreakdown,
+        r.identityTier,
+        r.identityConfidence,
+        r.identityEvidence,
+        r.resolutionState,
+        r.releaseMetadata,
+        r.rankingBreakdown,
+        r.eligible,
+        r.ineligibleReason,
+        r.ineligibleCode,
+        r.expectedMediaScope,
+        r.parsedCandidateScope,
+      ];
+      if (intentId) { values.push(intentId); }
+      return values;
+    };
+    return { sql: `INSERT INTO media_request_results (${cols.join(', ')}) VALUES (${placeholders});`, buildValues };
+  }
 
   const GET_MEDIA_REQUESTS = `
     SELECT * FROM media_requests ORDER BY created_at DESC;
@@ -1154,10 +1385,127 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const getUnresolvedCandidatesStmt = db.prepare(GET_UNRESOLVED_CANDIDATES);
   const countUnresolvedCandidatesStmt = db.prepare(COUNT_UNRESOLVED_CANDIDATES);
   const checkCandidateInQueueStmt = db.prepare(CHECK_CANDIDATE_IN_QUEUE);
-  const insertMediaRequestStmt = db.prepare(INSERT_MEDIA_REQUEST);
-  const insertMediaRequestResultStmt = db.prepare(INSERT_MEDIA_REQUEST_RESULT);
+  const getMediaIntentStmt = db.prepare(GET_MEDIA_INTENT);
+  const getMediaIntentsByMediaIdStmt = db.prepare(GET_MEDIA_INTENTS_BY_MEDIA_ID);
+  const getMediaIntentsBySourceStmt = db.prepare(GET_MEDIA_INTENTS_BY_SOURCE);
+  const getRecentMediaIntentsStmt = db.prepare(GET_RECENT_MEDIA_INTENTS);
+  const updateMediaIntentStatusStmt = db.prepare(UPDATE_MEDIA_INTENT_STATUS);
+  const getMediaIntentStatsStmt = db.prepare(GET_MEDIA_INTENT_STATS);
   const getMediaRequestsStmt = db.prepare(GET_MEDIA_REQUESTS);
   const getMediaRequestResultsStmt = db.prepare(GET_MEDIA_REQUEST_RESULTS);
+
+  // ---------------------------------------------------------------------------
+  // Media intents persistence functions
+  // ---------------------------------------------------------------------------
+
+  function upsertMediaIntent(input) {
+    const now = Date.now();
+
+    // Use a transaction to handle the upsert atomically
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      // Check for existing intent with matching NULL handling
+      const existing = db.prepare(
+        'SELECT id, priority FROM media_intents WHERE media_id = ? AND media_type = ? AND source = ? AND season IS ? AND episode IS ?'
+      ).get(
+        input.mediaId,
+        input.mediaType || 'movie',
+        input.source || 'api',
+        input.season ?? null,
+        input.episode ?? null
+      );
+
+      if (existing) {
+        // Update existing
+        db.prepare(
+          'UPDATE media_intents SET request_count = request_count + 1, last_requested_at = ?, source_label = COALESCE(?, source_label), source_type = COALESCE(?, source_type), source_id = COALESCE(?, source_id), requested_by = COALESCE(?, requested_by), priority = MAX(priority, ?) WHERE id = ?'
+        ).run(
+          now,
+          input.sourceLabel || null,
+          input.sourceType || null,
+          input.sourceId || null,
+          input.requestedBy || null,
+          input.priority ?? 0,
+          existing.id
+        );
+        db.exec('COMMIT');
+        return existing.id;
+      } else {
+        // Insert new
+        const info = db.prepare(
+          'INSERT INTO media_intents (media_id, media_type, season, episode, source, source_type, source_id, source_label, status, priority, requested_by, request_count, last_requested_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)'
+        ).run(
+          input.mediaId,
+          input.mediaType || 'movie',
+          input.season ?? null,
+          input.episode ?? null,
+          input.source || 'api',
+          input.sourceType || null,
+          input.sourceId || null,
+          input.sourceLabel || null,
+          input.status || 'active',
+          input.priority ?? 0,
+          input.requestedBy || null,
+          now,
+          now
+        );
+        db.exec('COMMIT');
+        return info.lastInsertRowid;
+      }
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  function getMediaIntent(id) {
+    const row = getMediaIntentStmt.get({ id });
+    return row ? rowToMediaIntent(row) : null;
+  }
+
+  function getMediaIntentsByMediaId(mediaId) {
+    return getMediaIntentsByMediaIdStmt.all({ media_id: mediaId }).map(rowToMediaIntent);
+  }
+
+  function getMediaIntentsBySource(source, limit = 100) {
+    return getMediaIntentsBySourceStmt.all({ source, limit }).map(rowToMediaIntent);
+  }
+
+  function getRecentMediaIntents(limit = 100) {
+    return getRecentMediaIntentsStmt.all({ limit }).map(rowToMediaIntent);
+  }
+
+  function updateMediaIntentStatus(id, status) {
+    updateMediaIntentStatusStmt.run({ id, status });
+  }
+
+  function getMediaIntentStats() {
+    return getMediaIntentStatsStmt.get() || { total_intents: 0, active_intents: 0, total_requests: 0, unique_media: 0, unique_sources: 0 };
+  }
+
+  function rowToMediaIntent(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      mediaId: row.media_id,
+      mediaType: row.media_type,
+      season: row.season,
+      episode: row.episode,
+      source: row.source,
+      sourceType: row.source_type,
+      sourceId: row.source_id,
+      sourceLabel: row.source_label,
+      status: row.status,
+      priority: row.priority,
+      requestedBy: row.requested_by,
+      requestCount: row.request_count,
+      lastRequestedAt: row.last_requested_at,
+      lastProcessedAt: row.last_processed_at,
+      lastResultCount: row.last_result_count,
+      lastError: row.last_error,
+      createdAt: row.created_at,
+    };
+  }
 
   // ---------------------------------------------------------------------------
   // Media request persistence functions
@@ -1165,34 +1513,63 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
   function persistMediaRequest(intent, results) {
     const now = Date.now();
-    const info = insertMediaRequestStmt.run({
-      media_id: intent.mediaId,
-      media_type: intent.mediaType || 'movie',
-      season: intent.season || null,
-      episode: intent.episode != null ? intent.episode : (intent.episodes?.length ? intent.episodes[0] : null),
-      status: 'completed',
-      candidate_count: results.length,
-      created_at: now,
+    const intentLength = results.length;
+
+    // Upsert intent and get intent_id
+    let intentId = null;
+    if (intent.source || intent.sourceType || intent.sourceId || intent.sourceLabel) {
+      intentId = upsertMediaIntent({
+        mediaId: intent.mediaId,
+        mediaType: intent.mediaType,
+        season: intent.season,
+        episode: intent.episode,
+        source: intent.source,
+        sourceType: intent.sourceType,
+        sourceId: intent.sourceId,
+        sourceLabel: intent.sourceLabel,
+        requestedBy: intent.requestedBy,
+        priority: intent.priority,
+      });
+    }
+
+    const { sql: reqSql, values: reqValues } = buildInsertMediaRequestSql({
+      mediaId: intent.mediaId,
+      mediaType: intent.mediaType || 'movie',
+      season: intent.season,
+      episode: intent.episode ?? (intent.episodes?.length ? intent.episodes[0] : null),
+      resultsLength: intentLength,
+      now,
+      source: intent.source || null,
+      sourceType: intent.sourceType || null,
+      intentId,
     });
 
+    const info = db.prepare(reqSql).run(...reqValues);
     const requestId = info.lastInsertRowid;
 
+    const resultTemplate = buildInsertMediaRequestResultSql(intentId);
+
     for (const r of results) {
-      insertMediaRequestResultStmt.run({
-        request_id: requestId,
+      db.prepare(resultTemplate.sql).run(...resultTemplate.buildValues({
+        requestId,
         rank: r.rank,
-        info_hash: r.infoHash,
-        file_index_key: r.fileIndex === null || r.fileIndex === undefined ? -1 : r.fileIndex,
+        infoHash: r.infoHash,
+        fileIndexKey: r.fileIndex === null || r.fileIndex === undefined ? -1 : r.fileIndex,
         filename: r.filename,
         score: r.score,
-        score_breakdown: r.scoreBreakdown ? JSON.stringify(r.scoreBreakdown) : null,
-        identity_tier: r.identity?.tier || 'unknown',
-        identity_confidence: r.identity?.confidence || 0,
-        identity_evidence: r.identity?.evidence ? JSON.stringify(r.identity.evidence) : null,
-        resolution_state: r.identity?.state || 'unresolved',
-        release_metadata: r.release ? JSON.stringify(r.release) : null,
-        ranking_breakdown: r.rankingBreakdown ? JSON.stringify(r.rankingBreakdown) : null,
-      });
+        scoreBreakdown: r.scoreBreakdown ? JSON.stringify(r.scoreBreakdown) : null,
+        identityTier: r.identity?.tier || 'unknown',
+        identityConfidence: r.identity?.confidence || 0,
+        identityEvidence: r.identity?.evidence ? JSON.stringify(r.identity.evidence) : null,
+        resolutionState: r.identity?.state || 'unresolved',
+        releaseMetadata: r.release ? JSON.stringify(r.release) : null,
+        rankingBreakdown: r.rankingBreakdown ? JSON.stringify(r.rankingBreakdown) : null,
+        eligible: r.identity?.eligible === false ? 0 : 1,
+        ineligibleReason: r.identity?.ineligibleReason || null,
+        ineligibleCode: r.identity?.ineligibleCode || null,
+        expectedMediaScope: r.identity?.expectedMediaScope || null,
+        parsedCandidateScope: r.identity?.parsedCandidateScope || null,
+      }));
     }
 
     return requestId;
@@ -1524,6 +1901,14 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     countUnresolvedCandidates,
     isCandidateInQueue,
     enqueueUnresolvedCandidates,
+    // Media intents
+    upsertMediaIntent,
+    getMediaIntent,
+    getMediaIntentsByMediaId,
+    getMediaIntentsBySource,
+    getRecentMediaIntents,
+    updateMediaIntentStatus,
+    getMediaIntentStats,
     // Media request persistence
     persistMediaRequest,
     getMediaRequests,

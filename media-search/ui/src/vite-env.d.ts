@@ -7,7 +7,11 @@ declare module '@api/client' {
   export function submitRequest(request: {
     type: import('@/types/api').SearchIntent['streamType'];
     mediaId: string;
-    release: import('@/types/api').ReleaseResult;
+    release: {
+      infoHash: string;
+      fileIndex: number | null;
+      releaseKey: string;
+    };
     handlingMode?: 'download' | 'stream';
   }): Promise<import('@/types/api').RequestSubmissionResult>;
   export function getRequestStatus(requestId: string): Promise<import('@/types/api').RequestStatusResult>;

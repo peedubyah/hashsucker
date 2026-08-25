@@ -1,0 +1,57 @@
+{
+  "requests": [
+    {
+      "mediaId": "tt0182576",
+      "mediaType": "series",
+      "season": 5,
+      "episode": 12,
+      "label": "Family Guy S05E12"
+    },
+    {
+      "mediaId": "tt0111161",
+      "mediaType": "movie",
+      "label": "The Shawshank Redemption"
+    },
+    {
+      "mediaId": "tt0944947",
+      "mediaType": "series",
+      "season": 1,
+      "episode": 1,
+      "label": "Game of Thrones S01E01"
+    },
+    {
+      "mediaId": "tt0903747",
+      "mediaType": "series",
+      "season": 1,
+      "episode": 1,
+      "label": "Breaking Bad S01E01"
+    },
+    {
+      "mediaId": "tt0133093",
+      "mediaType": "movie",
+      "label": "The Matrix"
+    },
+    {
+      "mediaId": "tt0182576",
+      "mediaType": "series",
+      "season": 21,
+      "episode": 20,
+      "label": "Family Guy S21E20 (wrong episode test)"
+    },
+    {
+      "mediaId": "tt0182576",
+      "mediaType": "series",
+      "season": 5,
+      "label": "Family Guy S05 (season-only)"
+    },
+    {
+      "mediaId": "tt0111161",
+      "mediaType": "movie",
+      "label": "The Shawshank Redemption (duplicate test)"
+    }
+  ],
+  "options": {
+    "limit": 50,
+    "persist": false
+  }
+}

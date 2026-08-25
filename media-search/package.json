@@ -14,7 +14,10 @@
     "dmm:ingest": "node src/scripts/dmm-ingest.js",
     "enrichment": "node src/scripts/enrichment.js",
     "canary": "node scripts/canary.mjs",
-    "media-request": "node src/scripts/media-request.js"
+    "media-request": "node src/scripts/media-request.js",
+    "media-request-batch": "node src/scripts/media-request-batch.js",
+    "intents": "node src/scripts/intents.js",
+    "availability": "node src/scripts/availability.js"
   },
   "allowScripts": {
     "better-sqlite3@11.10.0": true

@@ -1,320 +1,110 @@
-# HashSucker
+# Hashsucker
 
-**Evidence-driven media discovery and acquisition intelligence.**
+## Media release discovery, indexing, and ranking system
 
-HashSucker is a media candidate intelligence layer designed to bridge the gap between torrent discovery, provider reality, and reliable acquisition decisions.
+Hashsucker is an experimental system for discovering and ranking media
+release candidates from multiple external sources.
 
-It does not treat a torrent index, filename match, or historical availability as truth.
+It focuses on the engineering problems involved in:
 
-Instead, HashSucker separates:
+-   Aggregating release candidate data
+-   Normalizing inconsistent release metadata
+-   Resolving candidate identity
+-   Ranking results using multiple signals
+-   Maintaining historical observations
 
-- what was discovered
-- what was ranked
-- what providers currently report
-- what action is justified
+The system is designed around a separation between:
 
-into explicit, testable boundaries.
+-   **Media metadata** --- what the requested title represents
+-   **Release candidates** --- individual files/releases associated with
+    that media
+-   **Availability sources** --- external services that report candidate
+    availability
 
----
+------------------------------------------------------------------------
 
-## The Problem
+# Core Problem
 
-Modern media automation often collapses several different problems into one:
+Media release discovery is difficult because the available signals are
+incomplete and sometimes contradictory.
 
-```
-Find a release
-      |
-      v
-Assume it is valid
-      |
-      v
-Assume it is available
-      |
-      v
-Attempt acquisition
-```
+A candidate may have:
 
-This works until it does not.
+-   A matching title but incorrect identity
+-   Excellent quality but uncertain provenance
+-   Confirmed identity but unavailable sources
+-   Provider availability but weak metadata
 
-Real-world media sources contain:
+Hashsucker explores how to represent and rank these conflicting signals.
 
-- duplicate releases
-- weak metadata associations
-- stale hashes
-- ambiguous file identities
-- unavailable provider state
-- inconsistent provider APIs
+------------------------------------------------------------------------
 
-HashSucker treats these as separate concerns.
+# Corpus
 
----
+The corpus is an internal index of previously observed release
+candidates.
 
-# Architecture
+It contains:
 
-```
-                    Discovery Sources
-                          |
-                          v
+-   Release identifiers
+-   Hashes
+-   Filenames
+-   Parsed attributes
+-   Media associations
+-   Historical observations
 
-                 Candidate Corpus
-                          |
-                          v
+The corpus is not a replacement for general media metadata databases.
 
-              Identity + Metadata Layer
-                          |
-                          v
+Instead, it represents accumulated knowledge about release candidates
+encountered by the system.
 
-                 Stage 3 Ranking
-                          |
-                          v
+------------------------------------------------------------------------
 
-          Provider Observation Layer
-                          |
-                          v
+# Identity and Ranking
 
-             Acquisition Decision Layer
-                          |
-                          v
+A central design goal is avoiding the assumption:
 
-              Provider Execution Layer
-```
+> "A source returned this candidate, therefore it is correct."
 
-Each stage has a defined responsibility.
+Candidates are evaluated using evidence such as:
 
----
+-   Explicit media associations
+-   Filename parsing
+-   Title matching
+-   Season/episode information
+-   Historical observations
+-   Availability information
 
-# Core Principles
+The system currently models multiple confidence levels:
 
-## Discovery is not truth
-
-A torrent appearing in a database does not prove:
-
-- it is the correct release
-- it contains the desired file
-- it is available from a provider
-- it should be acquired
-
-Discovery provides candidates.
-
----
-
-## Ranking and availability are separate
-
-Candidate quality and provider reality are different questions.
-
-HashSucker does not fold provider state into search ranking.
-
-Instead:
-
-```
-Candidate quality
-        +
-Provider evidence
+    Verified
         |
-        v
-Explainable decision
-```
-
-This prevents provider state from corrupting search quality.
-
----
-
-## Provider observations are evidence
-
-Provider information is modeled explicitly:
-
-```
-cached
-uncached
-unknown
-error
-```
-
-with:
-
-- provider identity
-- account scope
-- observation time
-- expiration
-- authority level
-- evidence source
-
-Unknown is not uncached.
-
-Failure is not absence.
-
-Prediction is not truth.
-
----
-
-# Identity Model
-
-HashSucker treats exact identity as a first-class concern.
-
-Primary identity:
-
-```
-(infoHash, fileIndex)
-```
-
-or:
-
-```
-releaseKey
-```
-
-Important distinctions:
-
-```
-fileIndex = null
-```
-
-is not:
-
-```
-fileIndex = 0
-```
-
-Torrent-level evidence cannot silently authorize a file-level candidate.
-
----
-
-# Provider Model
-
-Providers expose independent capabilities.
-
-Examples:
-
-```
-CACHE_OBSERVATION
-PLACEMENT_CREATE
-FILE_INVENTORY
-EXPOSURE
-REPAIR
-```
-
-A provider supporting one capability does not imply support for another.
-
-This avoids pretending providers have identical behavior.
-
----
-
-# Current Implementation Status
-
-## Completed
-
-### Stage 3 — Candidate Intelligence
-
-- discovery corpus
-- metadata normalization
-- ranked candidate generation
-- deterministic ranking behavior
-
-### Stage 4 Foundation
-
-- provider-neutral observations
-- observation history/current projection
-- exact candidate projection
-- TorBox cache observation
-- TorBox placement creation boundary
-- bounded provider observation collection
-- decision contracts
-
----
-
-## Intentionally Incomplete
-
-HashSucker does not currently attempt to:
-
-- replace every media automation tool
-- scrape every ecosystem
-- predict provider state as fact
-- maintain a global cache oracle
-- blindly automate destructive actions
-
-The goal is correctness before convenience.
-
----
-
-# Design Philosophy
-
-HashSucker follows a simple rule:
-
-> Store enough information to make a good decision. Do not pretend incomplete information is certainty.
-
-The system prefers:
-
-```
-deferred
-```
-
-over:
-
-```
-wrong
-```
-
-and:
-
-```
-explainable uncertainty
-```
-
-over:
-
-```
-false confidence
-```
-
----
-
-# Why Not Just Use Existing Indexers?
-
-Existing systems are excellent at:
-
-- library management
-- monitoring
-- metadata workflows
-- generic indexing
-
-HashSucker focuses on a different problem:
-
-```
-Given these possible candidates,
-what is actually the correct and actionable choice?
-```
-
-It is designed as an intelligence layer, not a replacement for every existing component.
-
----
-
-# Roadmap Direction
-
-Future work:
-
-- additional provider integrations
-- richer observation sources
-- lifecycle reconciliation
-- cache reputation modeling
-- external compatibility APIs
-- deeper execution workflows
-
-while preserving the core separation:
-
-```
-Evidence
-    |
-    v
-Decision
-    |
-    v
-Action
-```
-
----
-
-# Status
-
-Early-stage infrastructure project.
-
-Currently focused on building reliable boundaries before expanding automation.
+    ProviderConfirmed
+        |
+    ProviderScoped
+        |
+    Probable
+        |
+    TextOnly
+
+------------------------------------------------------------------------
+
+# Current Status
+
+## Implemented
+
+-   Canonical candidate pipeline
+-   Multi-source ingestion
+-   Release metadata parsing
+-   Identity classification
+-   Tier-aware ranking
+-   Ranking diagnostics
+-   Shadow ranking analysis
+-   Operator tracing
+
+## In Progress
+
+-   Improved identity validation
+-   Historical candidate reputation
+-   Long-term corpus growth strategies
+-   Production observability

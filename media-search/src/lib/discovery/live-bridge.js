@@ -25,9 +25,17 @@ export async function runLiveDiscovery(mediaId, options = {}) {
   const { season, episode } = options;
   const mediaType = episode != null ? 'series' : 'movie';
 
+  // Stremio requires full episode identifier format: tt0944947:5:14
+  let stremioMediaId = mediaId;
+  if (season != null && episode != null) {
+    stremioMediaId = `${mediaId}:${season}:${episode}`;
+  } else if (season != null) {
+    stremioMediaId = `${mediaId}:${season}`;
+  }
+
   const results = await Promise.allSettled([
     // Stremio/Torrentio discovery
-    searchStremio({ type: mediaType, mediaId }),
+    searchStremio({ type: mediaType, mediaId: stremioMediaId }),
     // Torznab discovery
     searchTorznab({ type: mediaType, mediaId }),
   ]);

@@ -935,7 +935,7 @@ export function createRequestHandler(dependencies = {}) {
         const startedAt = performance.now();
         const body = await readBody(request);
         try {
-          const result = searchByMedia(searchCache, body);
+          const result = await searchByMedia(searchCache, body);
           return sendJson(response, 200, {
             ...result,
             timings: { totalMs: Math.round(performance.now() - startedAt) },

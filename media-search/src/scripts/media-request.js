@@ -96,7 +96,7 @@ async function main() {
   try {
     const startedAt = Date.now();
 
-    const result = searchByMedia(cache, {
+    const result = await searchByMedia(cache, {
       mediaId: args.mediaId,
       mediaType: args.mediaType,
       season: args.season,

@@ -14,6 +14,91 @@
 import { parseEpisodeRange } from './episode-coverage.js';
 
 /**
+ * Identity Eligibility Evaluation
+ *
+ * Determines whether a candidate is eligible for ranking given a specific
+ * media request with optional season/episode constraints.
+ *
+ * Eligibility Rules:
+ * - Movie requests: no season/episode constraint → always eligible
+ * - Series requests with season+episode: parsed season/episode must match
+ * - Series requests without episode constraints: eligible if no parsed episode
+ *   OR parsed season matches query (or no season constraint)
+ *
+ * This is a pre-ranking gate. Ineligible candidates are NOT removed from results
+ * — they are reclassified to "Ineligible" tier for diagnostics but cannot rank
+ * above valid episode matches.
+ *
+ * @param {Object} hit - Candidate to evaluate
+ * @param {Object} queryIntent - Query intent with optional season/episode
+ * @param {number} [queryIntent.season] - Requested season
+ * @param {number} [queryIntent.episode] - Requested episode
+ * @param {string} [queryIntent.mediaType] - 'movie' or 'series'
+ * @returns {{ eligible: boolean, reason: string|null, code: string|null }}
+ */
+export function evaluateIdentityEligibility(hit, queryIntent = {}) {
+  const { season: querySeason, episode: queryEpisode, mediaType } = queryIntent;
+  const releaseAttributes = hit.releaseAttributes || {};
+  const parsedSeason = releaseAttributes.season ?? null;
+  const parsedEpisode = releaseAttributes.episode ?? null;
+  const episodeRange = releaseAttributes.episodeRange ?? null;
+  const seasonOnly = releaseAttributes.seasonOnly ?? false;
+  const parsedMediaType = releaseAttributes.mediaType || null;
+
+  // Movies: no episode constraints possible
+  if (mediaType === 'movie' || !querySeason) {
+    return { eligible: true, reason: null, code: null };
+  }
+
+  // Series with specific season+episode requested
+  if (querySeason != null && queryEpisode != null) {
+    // Wrong season → ineligible
+    if (parsedSeason != null && parsedSeason !== querySeason) {
+      return {
+        eligible: false,
+        reason: `season_mismatch: parsed S${String(parsedSeason).padStart(2, '0')} but requested S${String(querySeason).padStart(2, '0')}`,
+        code: 'season_mismatch',
+      };
+    }
+
+    // Wrong episode (single episode, not range)
+    if (parsedEpisode != null && episodeRange == null && parsedEpisode !== queryEpisode) {
+      return {
+        eligible: false,
+        reason: `episode_mismatch: parsed E${String(parsedEpisode).padStart(2, '0')} but requested E${String(queryEpisode).padStart(2, '0')}`,
+        code: 'episode_mismatch',
+      };
+    }
+
+    // Season-only pack for different season → ineligible
+    if (seasonOnly === true && parsedMediaType === 'season' && parsedSeason != null && parsedSeason !== querySeason) {
+      return {
+        eligible: false,
+        reason: `season_pack_mismatch: parsed season pack S${String(parsedSeason).padStart(2, '0')} but requested S${String(querySeason).padStart(2, '0')}`,
+        code: 'season_pack_mismatch',
+      };
+    }
+
+    return { eligible: true, reason: null, code: null };
+  }
+
+  // Series with season-only constraint (no episode)
+  if (querySeason != null && queryEpisode == null) {
+    if (parsedSeason != null && parsedSeason !== querySeason) {
+      return {
+        eligible: false,
+        reason: `season_mismatch: parsed S${String(parsedSeason).padStart(2, '0')} but requested S${String(querySeason).padStart(2, '0')}`,
+        code: 'season_mismatch',
+      };
+    }
+    return { eligible: true, reason: null, code: null };
+  }
+
+  // No constraints at all → eligible
+  return { eligible: true, reason: null, code: null };
+}
+
+/**
  * Ranking Contract:
  *   score = relevance × 0.25
  *         + quality × 0.20
@@ -1288,25 +1373,46 @@ export function rankHits(hits, queryIntent = {}, mediaId = null) {
  * Tiered ranking precedence — identity tier as primary sort signal.
  *
  * Ranking behavior:
- * 1. Verified candidates rank above ProviderMatched candidates
- * 2. ProviderMatched candidates rank above Probable candidates
+ * 1. Verified candidates rank above ProviderConfirmed candidates
+ * 2. ProviderConfirmed candidates rank above Probable candidates
  * 3. Probable candidates rank above TextOnly candidates
  * 4. Within each tier, existing ranking behavior is preserved (score, then tie-breakers)
- * 5. If a higher tier has no candidates, falls back to the next tier
+ * 5. Ineligible candidates (season/episode mismatch) rank below all eligible candidates
+ * 6. If a higher tier has no candidates, falls back to the next tier
  *
  * No candidates are deleted or discarded — all candidates appear in the output.
  *
  * @param {Array<Object>} hits - Search hits
  * @param {Object} [queryIntent] - Query intent
  * @param {string} [mediaId] - Selected media ID for identity confidence scoping
- * @returns {{ranked: Array<Object>, tierMeta: {TieredRankingApplied: boolean, TierCounts: Object, TopResultsByTier: Object}}}
+ * @param {Array<Object>} [eligibilityOverrides] - Per-hit eligibility results keyed by hit.releaseKey
+ * @returns {{ranked: Array<Object>, tierMeta: {TieredRankingApplied: boolean, TierCounts: Object, TopResultsByTier: Object, IneligibleCount: number}}}
  */
-export function rankHitsTiered(hits, queryIntent = {}, mediaId = null) {
+export function rankHitsTiered(hits, queryIntent = {}, mediaId = null, eligibilityOverrides = null) {
   // Classify each candidate by identity tier
-  const classified = hits.map(hit => ({
-    hit,
-    tier: classifyIdentityTier(hit, queryIntent, mediaId),
-  }));
+  const classified = hits.map(hit => {
+    const key = hit.releaseKey || `${hit.hash}:${hit.fileIndex ?? 'torrent'}`;
+    const eligibility = eligibilityOverrides?.get(key);
+
+    if (eligibility && !eligibility.eligible) {
+      return {
+        hit,
+        tier: {
+          IdentityTier: 'Ineligible',
+          IdentityConfidence: 0,
+          IdentityEvidence: [eligibility.code],
+          RejectionReason: eligibility.reason,
+        },
+        eligibility,
+      };
+    }
+
+    return {
+      hit,
+      tier: classifyIdentityTier(hit, queryIntent, mediaId),
+      eligibility: null,
+    };
+  });
 
   // Group by tier (preserve all candidates)
   const verified = classified.filter(c => c.tier.IdentityTier === 'Verified');
@@ -1315,6 +1421,7 @@ export function rankHitsTiered(hits, queryIntent = {}, mediaId = null) {
   const providerScoped = classified.filter(c => c.tier.IdentityTier === 'ProviderScoped');
   const textOnly = classified.filter(c => c.tier.IdentityTier === 'TextOnly');
   const rejected = classified.filter(c => c.tier.IdentityTier === 'Rejected');
+  const ineligible = classified.filter(c => c.tier.IdentityTier === 'Ineligible');
 
   // Rank within each tier using existing behavior
   const rankedVerified = rankHits(verified.map(c => c.hit), queryIntent, mediaId);
@@ -1323,8 +1430,9 @@ export function rankHitsTiered(hits, queryIntent = {}, mediaId = null) {
   const rankedProviderScoped = rankHits(providerScoped.map(c => c.hit), queryIntent, mediaId);
   const rankedTextOnly = rankHits(textOnly.map(c => c.hit), queryIntent, mediaId);
   const rankedRejected = rankHits(rejected.map(c => c.hit), queryIntent, mediaId);
+  const rankedIneligible = rankHits(ineligible.map(c => c.hit), queryIntent, mediaId);
 
-  // Concatenate: Verified → ProviderConfirmed → Probable → ProviderScoped → TextOnly → Rejected
+  // Concatenate: Verified → ProviderConfirmed → Probable → ProviderScoped → TextOnly → Rejected → Ineligible
   // Fallback is implicit: if a tier is empty, we simply proceed to the next
   const ranked = [
     ...rankedVerified,
@@ -1333,10 +1441,19 @@ export function rankHitsTiered(hits, queryIntent = {}, mediaId = null) {
     ...rankedProviderScoped,
     ...rankedTextOnly,
     ...rankedRejected,
+    ...rankedIneligible,
   ];
 
-  // Assign final rank (1-based position in sorted results)
+  // Attach eligibility info to each ranked hit
   for (let i = 0; i < ranked.length; i++) {
+    const key = ranked[i].releaseKey || `${ranked[i].hash}:${ranked[i].fileIndex ?? 'torrent'}`;
+    const classEntry = classified.find(c => {
+      const cKey = c.hit.releaseKey || `${c.hit.hash}:${c.hit.fileIndex ?? 'torrent'}`;
+      return cKey === key;
+    });
+    if (classEntry?.eligibility) {
+      ranked[i].eligibility = classEntry.eligibility;
+    }
     ranked[i].justification = Object.freeze({
       ...ranked[i].justification,
       rank: i + 1,
@@ -1353,13 +1470,16 @@ export function rankHitsTiered(hits, queryIntent = {}, mediaId = null) {
       ProviderScoped: rankedProviderScoped.length,
       TextOnly: rankedTextOnly.length,
       Rejected: rankedRejected.length,
+      Ineligible: rankedIneligible.length,
     },
+    IneligibleCount: rankedIneligible.length,
     TopResultsByTier: {
       Verified: rankedVerified.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
       ProviderConfirmed: rankedProviderConfirmed.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
       Probable: rankedProbable.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
       ProviderScoped: rankedProviderScoped.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
       TextOnly: rankedTextOnly.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
+      Ineligible: rankedIneligible.slice(0, 10).map(r => r.releaseKey || `${r.hash}:${r.fileIndex ?? 'torrent'}`),
     },
   };
 

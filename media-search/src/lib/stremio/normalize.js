@@ -235,6 +235,35 @@ function extractCometTorBoxInfoHash(raw) {
   return bingeHash && bingeHash === pathHash ? bingeHash : null;
 }
 
+/**
+ * Extract infoHash from Torrentio TorBox resolve URL format.
+ * Format: https://torrentio.strem.fun/resolve/torbox/{uuid}/{infoHash}/...
+ * The infoHash appears after the UUID segment in the URL path.
+ */
+function extractTorrentioTorBoxInfoHash(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (typeof raw.url !== 'string') return null;
+
+  let url;
+  try {
+    url = new URL(raw.url);
+  } catch {
+    return null;
+  }
+
+  // Look for Torrentio TorBox resolve URL pattern
+  // Pattern: /resolve/torbox/{uuid}/{infoHash}/...
+  const pathMatch = url.pathname.match(
+    /\/resolve\/torbox\/[a-f0-9-]+\/([a-f0-9]{40})(?:\/|$)/i
+  );
+
+  if (pathMatch) {
+    return normalizeInfoHash(pathMatch[1]);
+  }
+
+  return null;
+}
+
 function fingerprint(parts) {
   return parts.filter(Boolean).join('|');
 }
@@ -283,7 +312,8 @@ export function normalizeStream(raw, addonMeta = {}) {
   const infoHash =
     normalizeInfoHash(raw.infoHash) ||
     extractInfoHashFromMagnetUrl(raw.url) ||
-    extractCometTorBoxInfoHash(raw);
+    extractCometTorBoxInfoHash(raw) ||
+    extractTorrentioTorBoxInfoHash(raw);
   const nzbUrl =
     typeof raw.nzbUrl === 'string' && /^https?:\/\//i.test(raw.nzbUrl.trim())
       ? raw.nzbUrl.trim()

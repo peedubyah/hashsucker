@@ -5,12 +5,48 @@
  * Pipeline:
  *   media ID → corpus retrieval → identity association → tier-aware ranking → explainable JSON
  *
+ * When corpus returns insufficient eligible candidates, falls back to live discovery
+ * (Torrentio/Comet). Live results pass through the same identity eligibility gate.
+ *
  * Contract: media ID -> ranked release candidates -> explainable JSON response.
  */
 
 import { createRequestIntent } from '../lib/requests/intent.js';
-import { rankHitsTiered, classifyIdentityTier } from '../lib/discovery/ranking.js';
+import { rankHitsTiered, classifyIdentityTier, evaluateIdentityEligibility } from '../lib/discovery/ranking.js';
 import { getStrongestReleaseAttributes } from '../lib/discovery/release-attributes.js';
+import { evaluateObservationFreshness } from '../lib/providers/observations.js';
+import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
+import { createAvailabilityChecker } from '../lib/intents/availability.js';
+
+/**
+ * Minimum eligible corpus candidates before live discovery is triggered.
+ * Configurable via request.liveDiscoveryThreshold.
+ */
+const DEFAULT_LIVE_DISCOVERY_THRESHOLD = 1;
+
+/**
+ * Get availability info for a candidate from stored observations.
+ * @param {Object} hit - Ranked candidate
+ * @returns {Object}
+ */
+function _getAvailabilityForCandidate(hit) {
+  const observations = hit.providerObservations || [];
+  const availability = {};
+
+  for (const obs of observations) {
+    if (obs.provider && obs.state) {
+      const freshness = evaluateObservationFreshness(obs, { now: Date.now() });
+      availability[obs.provider] = {
+        state: obs.state,
+        checkedAt: obs.observedAt,
+        ageMs: freshness.ageMs,
+        fileMetadata: obs.evidence?.fileMetadata || null,
+      };
+    }
+  }
+
+  return availability;
+}
 
 /**
  * Search for release candidates by media identity.
@@ -24,9 +60,12 @@ import { getStrongestReleaseAttributes } from '../lib/discovery/release-attribut
  * @param {number} [request.limit=50] - Max results
  * @param {number} [request.offset=0] - Pagination offset
  * @param {boolean} [request.persist=true] - Persist results to database
- * @returns {Object} Ranked results with identity state and score breakdown
+ * @param {number} [request.liveDiscoveryThreshold] - Min eligible corpus before live discovery
+ * @param {boolean} [request.skipLiveDiscovery] - Skip live discovery fallback
+ * @param {boolean} [request.skipAvailability] - Skip TorBox availability check
+ * @returns {Promise<Object>} Ranked results with identity state and score breakdown
  */
-export function searchByMedia(cache, request) {
+export async function searchByMedia(cache, request) {
   const mediaId = String(request.mediaId || '').trim();
   const mediaType = request.mediaType || 'movie';
   const season = request.season != null ? parseInt(request.season, 10) : null;
@@ -34,6 +73,19 @@ export function searchByMedia(cache, request) {
   const limit = Math.min(parseInt(request.limit, 10) || 50, 100);
   const offset = parseInt(request.offset, 10) || 0;
   const persist = request.persist !== false;
+  const liveDiscoveryThreshold = request.liveDiscoveryThreshold != null
+    ? parseInt(request.liveDiscoveryThreshold, 10)
+    : DEFAULT_LIVE_DISCOVERY_THRESHOLD;
+  const skipLiveDiscovery = request.skipLiveDiscovery === true;
+  const skipAvailability = request.skipAvailability === true;
+
+  // Intent source metadata (optional)
+  const source = request.source || null;
+  const sourceType = request.sourceType || null;
+  const sourceId = request.sourceId || null;
+  const sourceLabel = request.sourceLabel || null;
+  const requestedBy = request.requestedBy || null;
+  const priority = request.priority ?? null;
 
   if (!mediaId) {
     throw new Error('mediaId is required');
@@ -44,6 +96,157 @@ export function searchByMedia(cache, request) {
   // Stage 1: Retrieve candidates by media association
   const candidates = cache.queryCandidatesByMedia(mediaId);
 
+  if (candidates.length === 0 && !skipLiveDiscovery) {
+    // No corpus candidates — try live discovery
+    let liveCandidates = [];
+    let liveEligibleCount = 0;
+    const liveMetadataByHash = new Map();
+    const liveEligibilityByHash = new Map();
+    let liveDiscoveryTriggered = true;
+
+    try {
+      const liveResults = await runLiveDiscovery(mediaId, { season, episode });
+      for (const live of liveResults) {
+        const key = live.releaseKey;
+        if (!key || !live.infoHash) continue;
+
+        const releaseAttrs = {
+          title: live.title || live.filename,
+          year: live.year,
+          season: live.season,
+          episode: live.episode,
+          episodeRange: live.episodeRange,
+          seasonOnly: live.seasonOnly,
+          mediaType: live.mediaType,
+          resolution: live.resolution,
+          source: live.source,
+          codec: live.codec,
+          hdr: live.hdr,
+          audio: live.audio,
+          releaseGroup: live.releaseGroup,
+        };
+
+        const eligibility = evaluateIdentityEligibility(
+          { releaseAttributes: releaseAttrs },
+          { season, episode, mediaType }
+        );
+        liveEligibilityByHash.set(key, eligibility);
+        if (eligibility.eligible) liveEligibleCount++;
+
+        liveMetadataByHash.set(key, {
+          filename: live.filename,
+          releaseAttributes: releaseAttrs,
+          providers: live.providers,
+        });
+
+        liveCandidates.push({
+          hash: live.infoHash,
+          fileIndex: live.fileIndex,
+          releaseKey: key,
+          filename: live.filename || live.title,
+          relevance: 0.8,
+          releaseAttributes: releaseAttrs,
+          parserConfidence: live.confidence ?? 0.5,
+          mediaAssociations: [],
+          providerObservations: [],
+          providerEvidence: [],
+          sources: [{ origin: 'live', evidence: [], confidence: live.confidence ?? 0.5 }],
+          selectedMediaId: mediaId,
+          hasLiveDiscovery: true,
+        });
+      }
+    } catch (error) {
+      console.error(`Live discovery failed for ${mediaId}: ${error.message}`);
+    }
+
+    if (liveCandidates.length === 0) {
+      return {
+        intent,
+        results: [],
+        total: 0,
+        query: { mediaId, mediaType, season, episode },
+        identitySummary: { tier: 'none', confidence: 0, evidence: [] },
+        ranking: { TieredRankingApplied: false, TierCounts: {} },
+        discovery: { liveDiscoveryTriggered, liveCandidates: 0, liveEligible: 0 },
+        availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
+      };
+    }
+
+    // Rank live candidates
+    const { ranked, tierMeta } = rankHitsTiered(liveCandidates, { season, episode }, mediaId, liveEligibilityByHash);
+    const total = ranked.length;
+    const results = ranked.slice(offset, offset + limit);
+
+    const explainable = results.map((hit, index) => {
+      const key = `${hit.hash}:${hit.fileIndex ?? 'torrent'}`;
+      const meta = liveMetadataByHash.get(key) || {};
+      const eligibility = hit.eligibility || liveEligibilityByHash.get(key);
+
+      const tier = classifyIdentityTier(
+        { releaseAttributes: hit.releaseAttributes, mediaAssociations: hit.mediaAssociations, sources: hit.sources, relevance: hit.components?.relevance || 0, selectedMediaId: hit.selectedMediaId },
+        { season, episode }, mediaId
+      );
+
+      const identityTier = (eligibility && !eligibility.eligible) ? 'Ineligible' : tier.IdentityTier;
+      const identityConfidence = (eligibility && !eligibility.eligible) ? 0 : tier.IdentityConfidence;
+      const identityEvidence = (eligibility && !eligibility.eligible) ? (tier.IdentityEvidence || []).concat([eligibility.code]) : (tier.IdentityEvidence || []);
+      const expectedMediaScope = `${mediaType}${season != null ? `:S${String(season).padStart(2, '0')}` : ''}${episode != null ? `:E${String(episode).padStart(2, '0')}` : ''}`;
+      const parsedCandidateScope = hit.releaseAttributes?.season != null || hit.releaseAttributes?.episode != null
+        ? `${hit.releaseAttributes?.mediaType || 'unknown'}:S${String(hit.releaseAttributes?.season || 0).padStart(2, '0')}:E${String(hit.releaseAttributes?.episode || 0).padStart(2, '0')}`
+        : null;
+
+      return {
+        rank: offset + index + 1,
+        infoHash: hit.hash,
+        fileIndex: hit.fileIndex,
+        filename: hit.filename,
+        score: hit.score,
+        scoreBreakdown: hit.justification?.scoreBreakdown || {},
+        identity: { tier: identityTier, confidence: identityConfidence, evidence: identityEvidence, state: meta.resolutionState || 'unresolved', matchMethod: meta.matchMethod, eligible: eligibility ? eligibility.eligible : true, ineligibleReason: eligibility && !eligibility.eligible ? eligibility.reason : null, ineligibleCode: eligibility && !eligibility.eligible ? eligibility.code : null, expectedMediaScope, parsedCandidateScope },
+        release: hit.releaseAttributes,
+        sources: hit.sources || [],
+        observations: [],
+        availability: {},
+      };
+    });
+
+    // TorBox availability check
+    let availabilityStats = { checked: 0, cached: 0, uncached: 0, unknown: 0 };
+    if (!skipAvailability) {
+      const eligibleHashes = explainable.filter(r => r.identity?.eligible !== false && r.infoHash).map(r => r.infoHash);
+      if (eligibleHashes.length > 0) {
+        try {
+          const checker = createAvailabilityChecker(cache);
+          const batchResult = await checker.checkAvailability(eligibleHashes);
+          availabilityStats.checked = eligibleHashes.length;
+          availabilityStats.cached = batchResult.results.filter(r => r.state === 'cached').length;
+          availabilityStats.uncached = batchResult.results.filter(r => r.state === 'uncached').length;
+          availabilityStats.unknown = batchResult.results.filter(r => r.state === 'unknown').length;
+          const availabilityByHash = new Map(batchResult.results.map(r => [r.infoHash, r]));
+          for (const result of explainable) {
+            const avail = availabilityByHash.get(result.infoHash);
+            if (avail) {
+              result.availability.torbox = { state: avail.state, checkedAt: avail.checkedAt, latencyMs: avail.latencyMs };
+            }
+          }
+        } catch (error) {
+          console.error(`Availability check failed: ${error.message}`);
+        }
+      }
+    }
+
+    return {
+      intent,
+      results: explainable,
+      total,
+      query: { mediaId, mediaType, season, episode },
+      identitySummary: summarizeIdentity(explainable),
+      ranking: tierMeta,
+      discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
+      availability: availabilityStats,
+    };
+  }
+
   if (candidates.length === 0) {
     return {
       intent,
@@ -52,12 +255,15 @@ export function searchByMedia(cache, request) {
       query: { mediaId, mediaType, season, episode },
       identitySummary: { tier: 'none', confidence: 0, evidence: [] },
       ranking: { TieredRankingApplied: false, TierCounts: {} },
+      discovery: { liveDiscoveryTriggered: false, liveCandidates: 0, liveEligible: 0 },
+      availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
     };
   }
 
   // Stage 2: Build ranking inputs with identity associations
   // Preserve metadata separately — rankHit() returns a new object that doesn't include custom fields
   const metadataByHash = new Map();
+  const eligibilityByHash = new Map();
 
   const rankingInputs = candidates.map(candidate => {
     const attrs = getStrongestReleaseAttributes(cache, candidate.infoHash, candidate.fileIndex);
@@ -78,24 +284,37 @@ export function searchByMedia(cache, request) {
       filename: candidate.filename,
     });
 
+    // Build release attributes for eligibility evaluation
+    const releaseAttrs = attrs ? {
+      title: attrs.title,
+      year: attrs.year,
+      season: attrs.season,
+      episode: attrs.episode,
+      episodeRange: attrs.episodeRange,
+      seasonOnly: attrs.seasonOnly,
+      mediaType: attrs.mediaType,
+      resolution: attrs.resolution,
+      source: attrs.sourceType,
+      codec: attrs.codec,
+      hdr: attrs.hdr,
+      audio: attrs.audio,
+      releaseGroup: attrs.releaseGroup,
+    } : {};
+
+    // Evaluate identity eligibility for this candidate
+    const eligibility = evaluateIdentityEligibility(
+      { releaseAttributes: releaseAttrs },
+      { season, episode, mediaType }
+    );
+    eligibilityByHash.set(key, eligibility);
+
     return {
       hash: candidate.infoHash,
       fileIndex: candidate.fileIndex,
       releaseKey: key,
       filename: candidate.filename,
       relevance: 1.0, // Direct media match = max relevance
-      releaseAttributes: attrs ? {
-        title: attrs.title,
-        year: attrs.year,
-        season: attrs.season,
-        episode: attrs.episode,
-        resolution: attrs.resolution,
-        source: attrs.sourceType,
-        codec: attrs.codec,
-        hdr: attrs.hdr,
-        audio: attrs.audio,
-        releaseGroup: attrs.releaseGroup,
-      } : {},
+      releaseAttributes: releaseAttrs,
       parserConfidence: attrs?.confidence ?? 0,
       mediaAssociations: associations.map(a => ({
         mediaId: a.mediaId,
@@ -111,8 +330,97 @@ export function searchByMedia(cache, request) {
     };
   });
 
-  // Stage 3: Rank within tier
-  const { ranked, tierMeta } = rankHitsTiered(rankingInputs, { season, episode }, mediaId);
+  // Stage 2b: Determine corpus eligible count
+  const corpusEligibleCount = rankingInputs.filter(input => {
+    const eligibility = eligibilityByHash.get(input.releaseKey);
+    return eligibility ? eligibility.eligible : true;
+  }).length;
+
+  // Stage 2c: Live discovery fallback
+  let liveDiscoveryTriggered = false;
+  let liveCandidates = [];
+  let liveEligibleCount = 0;
+  const liveMetadataByHash = new Map();
+  const liveEligibilityByHash = new Map();
+
+  if (!skipLiveDiscovery && corpusEligibleCount < liveDiscoveryThreshold) {
+    liveDiscoveryTriggered = true;
+    try {
+      const liveResults = await runLiveDiscovery(mediaId, { season, episode });
+
+      for (const live of liveResults) {
+        const key = live.releaseKey;
+        if (!key || !live.infoHash) continue;
+
+        // Skip if already present in corpus (will be deduped later)
+        if (eligibilityByHash.has(key)) {
+          liveMetadataByHash.set(key, { ...liveMetadataByHash.get(key), live: true });
+          continue;
+        }
+
+        const releaseAttrs = {
+          title: live.title || live.filename,
+          year: live.year,
+          season: live.season,
+          episode: live.episode,
+          episodeRange: live.episodeRange,
+          seasonOnly: live.seasonOnly,
+          mediaType: live.mediaType,
+          resolution: live.resolution,
+          source: live.source,
+          codec: live.codec,
+          hdr: live.hdr,
+          audio: live.audio,
+          releaseGroup: live.releaseGroup,
+        };
+
+        // Same identity eligibility gate as corpus
+        const eligibility = evaluateIdentityEligibility(
+          { releaseAttributes: releaseAttrs },
+          { season, episode, mediaType }
+        );
+        liveEligibilityByHash.set(key, eligibility);
+
+        if (eligibility.eligible) {
+          liveEligibleCount++;
+        }
+
+        liveMetadataByHash.set(key, {
+          filename: live.filename,
+          releaseAttributes: releaseAttrs,
+          providers: live.providers,
+        });
+
+        // Build ranking input for live candidate
+        const rankingInput = {
+          hash: live.infoHash,
+          fileIndex: live.fileIndex,
+          releaseKey: key,
+          filename: live.filename || live.title,
+          relevance: 0.8, // Live discovery slightly lower relevance than direct corpus match
+          releaseAttributes: releaseAttrs,
+          parserConfidence: live.confidence ?? 0.5,
+          mediaAssociations: [], // Live has no persisted media associations
+          providerObservations: [], // Will be populated by availability check
+          providerEvidence: [],
+          sources: [{ origin: 'live', evidence: [], confidence: live.confidence ?? 0.5 }],
+          selectedMediaId: mediaId,
+          hasLiveDiscovery: true,
+        };
+
+        rankingInputs.push(rankingInput);
+        liveCandidates.push(rankingInput);
+      }
+    } catch (error) {
+      // Live discovery failure must not break corpus results
+      console.error(`Live discovery failed for ${mediaId}: ${error.message}`);
+    }
+  }
+
+  // Stage 3: Rank within tier (with eligibility overrides)
+  // Merge eligibility maps for ranking
+  const allEligibilityByHash = new Map([...eligibilityByHash, ...liveEligibilityByHash]);
+  const { ranked, tierMeta } = rankHitsTiered(rankingInputs, { season, episode }, mediaId, allEligibilityByHash);
 
   // Stage 4: Paginate
   const total = ranked.length;
@@ -122,7 +430,8 @@ export function searchByMedia(cache, request) {
   const explainable = results.map((hit, index) => {
     // Restore metadata from pre-ranking store
     const key = `${hit.hash}:${hit.fileIndex ?? 'torrent'}`;
-    const meta = metadataByHash.get(key) || {};
+    const meta = metadataByHash.get(key) || liveMetadataByHash.get(key) || {};
+    const eligibility = hit.eligibility || allEligibilityByHash.get(key);
 
     const tier = classifyIdentityTier(
       {
@@ -136,6 +445,17 @@ export function searchByMedia(cache, request) {
       mediaId
     );
 
+    // Use eligibility-based tier if available (Ineligible overrides classifyIdentityTier)
+    const identityTier = (eligibility && !eligibility.eligible) ? 'Ineligible' : tier.IdentityTier;
+    const identityConfidence = (eligibility && !eligibility.eligible) ? 0 : tier.IdentityConfidence;
+    const identityEvidence = (eligibility && !eligibility.eligible)
+      ? (tier.IdentityEvidence || []).concat([eligibility.code])
+      : (tier.IdentityEvidence || []);
+    // Build scope information for diagnostics
+    const expectedMediaScope = `${mediaType}${season != null ? `:S${String(season).padStart(2, '0')}` : ''}${episode != null ? `:E${String(episode).padStart(2, '0')}` : ''}`;
+    const parsedCandidateScope = hit.releaseAttributes?.season != null || hit.releaseAttributes?.episode != null
+      ? `${hit.releaseAttributes?.mediaType || 'unknown'}:S${String(hit.releaseAttributes?.season || 0).padStart(2, '0')}:E${String(hit.releaseAttributes?.episode || 0).padStart(2, '0')}`
+      : null;
     return {
       rank: offset + index + 1,
       infoHash: hit.hash,
@@ -144,21 +464,64 @@ export function searchByMedia(cache, request) {
       score: hit.score,
       scoreBreakdown: hit.justification?.scoreBreakdown || {},
       identity: {
-        tier: tier.IdentityTier,
-        confidence: tier.IdentityConfidence,
-        evidence: tier.IdentityEvidence || [],
+        tier: identityTier,
+        confidence: identityConfidence,
+        evidence: identityEvidence,
         state: meta.resolutionState || 'unresolved',
         matchMethod: meta.matchMethod,
+        eligible: eligibility ? eligibility.eligible : true,
+        ineligibleReason: eligibility && !eligibility.eligible ? eligibility.reason : null,
+        ineligibleCode: eligibility && !eligibility.eligible ? eligibility.code : null,
+        expectedMediaScope,
+        parsedCandidateScope,
       },
       release: hit.releaseAttributes,
+      sources: hit.sources || [],
       observations: (hit.providerObservations || []).map(o => ({
         provider: o.provider,
         state: o.state,
         cached: o.state === 'cached',
         observedAt: o.observedAt,
       })),
+      availability: _getAvailabilityForCandidate(hit),
     };
   });
+
+  // Stage 5b: TorBox availability check for eligible candidates
+  let availabilityStats = { checked: 0, cached: 0, uncached: 0, unknown: 0 };
+  if (!skipAvailability) {
+    const eligibleHashes = explainable
+      .filter(r => r.identity?.eligible !== false && r.infoHash)
+      .map(r => r.infoHash);
+
+    if (eligibleHashes.length > 0) {
+      try {
+        const checker = createAvailabilityChecker(cache);
+        const batchResult = await checker.checkAvailability(eligibleHashes);
+        availabilityStats.checked = eligibleHashes.length;
+        availabilityStats.cached = batchResult.results.filter(r => r.state === 'cached').length;
+        availabilityStats.uncached = batchResult.results.filter(r => r.state === 'uncached').length;
+        availabilityStats.unknown = batchResult.results.filter(r => r.state === 'unknown').length;
+
+        // Merge availability into results
+        const availabilityByHash = new Map(batchResult.results.map(r => [r.infoHash, r]));
+        for (const result of explainable) {
+          const avail = availabilityByHash.get(result.infoHash);
+          if (avail) {
+            result.availability = result.availability || {};
+            result.availability.torbox = {
+              state: avail.state,
+              checkedAt: avail.checkedAt,
+              latencyMs: avail.latencyMs,
+            };
+          }
+        }
+      } catch (error) {
+        // Availability check failure must not break results
+        console.error(`Availability check failed: ${error.message}`);
+      }
+    }
+  }
 
   // Stage 6: Persist results
   let requestId = null;
@@ -169,6 +532,12 @@ export function searchByMedia(cache, request) {
         mediaType: intent.mediaType,
         season,
         episode,
+        source,
+        sourceType,
+        sourceId,
+        sourceLabel,
+        requestedBy,
+        priority,
       },
       explainable
     );
@@ -182,6 +551,12 @@ export function searchByMedia(cache, request) {
     query: { mediaId, mediaType, season, episode },
     identitySummary: summarizeIdentity(explainable),
     ranking: tierMeta,
+    discovery: {
+      liveDiscoveryTriggered,
+      liveCandidates: liveCandidates.length,
+      liveEligible: liveEligibleCount,
+    },
+    availability: availabilityStats,
   };
 }
 
@@ -191,11 +566,46 @@ function summarizeIdentity(results) {
   }
 
   const top = results[0];
+  const ineligibleCount = results.filter(r => r.identity?.eligible === false).length;
+  const eligibleCount = results.length - ineligibleCount;
+
+  // Count by eligibility code
+  const ineligibleByCode = results.reduce((acc, r) => {
+    if (r.identity?.eligible === false && r.identity?.ineligibleCode) {
+      acc[r.identity.ineligibleCode] = (acc[r.identity.ineligibleCode] || 0) + 1;
+    }
+    return acc;
+  }, {});
+
+  // Count by tier
+  const tierCounts = results.reduce((acc, r) => {
+    const tier = r.identity?.tier || 'unknown';
+    acc[tier] = (acc[tier] || 0) + 1;
+    return acc;
+  }, {});
+
+  // Count exact episode matches and season packs
+  const exactEpisodeMatches = results.filter(r =>
+    r.identity?.eligible !== false &&
+    r.release?.season != null &&
+    r.release?.episode != null
+  ).length;
+  const seasonPackMatches = results.filter(r =>
+    r.identity?.eligible !== false &&
+    r.release?.seasonOnly === true || r.release?.mediaType === 'season'
+  ).length;
+
   return {
     tier: top.identity?.tier || 'unknown',
     confidence: top.identity?.confidence || 0,
     evidence: top.identity?.evidence || [],
     totalCandidates: results.length,
+    eligibleCount,
+    ineligibleCount,
+    ineligibleByCode,
+    tierCounts,
+    exactEpisodeMatches,
+    seasonPackMatches,
     resolutionStates: results.reduce((acc, r) => {
       const state = r.identity?.state || 'unresolved';
       acc[state] = (acc[state] || 0) + 1;
