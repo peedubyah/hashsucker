@@ -182,3 +182,68 @@ test('handoff: missing request returns null', () => {
   const result = cache.getPlaybackHandoffByRequestId(99999);
   assert.equal(result, null);
 });
+
+test('handoff: persist:false does not create handoff', () => {
+  const cache = createDiscoveryCache({ dbPath: ':memory:' });
+
+  // First, create a request
+  const reqId = cache.persistMediaRequest({
+    mediaId: 'tt123',
+    mediaType: 'movie',
+  }, []);
+
+  // Build and persist a handoff manually
+  const selection = {
+    selected: {
+      infoHash: HASH,
+      fileIndex: 1,
+      filename: 'test.mkv',
+      identityTier: 'ProviderConfirmed',
+      torboxState: 'cached',
+    },
+    reason: 'test',
+    alternates: [],
+  };
+  const handoff = buildPlaybackHandoff(selection, { requestId: reqId, mediaId: 'tt123', mediaType: 'movie' });
+  cache.persistPlaybackHandoff(handoff);
+
+  // Verify we can retrieve it
+  const retrieved = cache.getPlaybackHandoffByRequestId(reqId);
+  assert.ok(retrieved);
+  assert.equal(retrieved.request_id, reqId);
+});
+
+test('handoff: retrieved handoff requestId matches request', () => {
+  const cache = createDiscoveryCache({ dbPath: ':memory:' });
+
+  const reqId = cache.persistMediaRequest({
+    mediaId: 'tt999',
+    mediaType: 'series',
+    season: 1,
+    episode: 1,
+  }, []);
+
+  const selection = {
+    selected: {
+      infoHash: HASH,
+      fileIndex: null,
+      filename: 'S01E01.mkv',
+      identityTier: 'Verified',
+      torboxState: 'cached',
+    },
+    reason: 'test',
+    alternates: [],
+  };
+  const handoff = buildPlaybackHandoff(selection, {
+    requestId: reqId,
+    mediaId: 'tt999',
+    mediaType: 'series',
+    season: 1,
+    episode: 1,
+  });
+  cache.persistPlaybackHandoff(handoff);
+
+  const retrieved = cache.getPlaybackHandoffByRequestId(reqId);
+  assert.ok(retrieved);
+  assert.strictEqual(retrieved.request_id, reqId);
+});

@@ -64,6 +64,22 @@ async function validate() {
       console.log(`Retrieved releaseKey: ${retrieved.release_key}`);
     }
   }
+
+  // Print required validation output
+  console.log('\n--- REQUIRED VALIDATION OUTPUT ---');
+  console.log(`media request ID: ${result.requestId}`);
+  console.log(`handoff request ID: ${result.handoff?.requestId ?? 'MISSING'}`);
+  console.log(`persisted handoff ID: ${result.handoff?.requestId ? cache.getPlaybackHandoffByRequestId(result.handoff.requestId)?.id : 'N/A'}`);
+  console.log(`releaseKey: ${result.handoff?.releaseKey ?? 'N/A'}`);
+  console.log(`provider: ${result.handoff?.provider ?? 'N/A'}`);
+
+  // Verify agreement
+  if (result.requestId && result.handoff && result.requestId === result.handoff.requestId) {
+    console.log('\n✓ IDs AGREE');
+  } else {
+    console.log('\n✗ IDs DO NOT AGREE');
+    process.exit(1);
+  }
 }
 
 validate().catch(console.error);

@@ -165,6 +165,7 @@ export async function searchByMedia(cache, request) {
 
     if (liveCandidates.length === 0) {
       return {
+        requestId,
         intent,
         results: [],
         total: 0,
@@ -172,7 +173,9 @@ export async function searchByMedia(cache, request) {
         identitySummary: { tier: 'none', confidence: 0, evidence: [] },
         ranking: { TieredRankingApplied: false, TierCounts: {} },
         discovery: { liveDiscoveryTriggered, liveCandidates: 0, liveEligible: 0 },
-        availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },        selection: { selected: null, reason: 'no candidates', alternates: [] },      };
+        availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
+        selection: { selected: null, reason: 'no candidates', alternates: [] },
+      };
     }
 
     // Rank live candidates
@@ -241,11 +244,30 @@ export async function searchByMedia(cache, request) {
     // Stage 7: Select best candidate
     const selection = selectBestCandidate(explainable);
 
-    // Stage 8: Build playback handoff if selection succeeded
+    // Stage 8: Persist media request to obtain requestId
+    if (persist) {
+      requestId = cache.persistMediaRequest(
+        {
+          mediaId: intent.mediaId,
+          mediaType: intent.mediaType,
+          season,
+          episode,
+          source,
+          sourceType,
+          sourceId,
+          sourceLabel,
+          requestedBy,
+          priority,
+        },
+        explainable
+      );
+    }
+
+    // Stage 9: Build playback handoff if selection succeeded and request was persisted
     let handoff = null;
-    if (selection.selected && !selection.selected.ineligibleReason) {
+    if (selection.selected && !selection.selected.ineligibleReason && requestId) {
       const handoffRequest = {
-        requestId: requestId || null,
+        requestId,
         mediaId,
         mediaType,
         season,
@@ -264,6 +286,7 @@ export async function searchByMedia(cache, request) {
     }
 
     return {
+      requestId,
       intent,
       results: explainable,
       total,
@@ -279,6 +302,7 @@ export async function searchByMedia(cache, request) {
 
   if (candidates.length === 0) {
     return {
+      requestId: null,
       intent,
       results: [],
       total: 0,
@@ -286,7 +310,9 @@ export async function searchByMedia(cache, request) {
       identitySummary: { tier: 'none', confidence: 0, evidence: [] },
       ranking: { TieredRankingApplied: false, TierCounts: {} },
       discovery: { liveDiscoveryTriggered: false, liveCandidates: 0, liveEligible: 0 },
-      availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },      selection: { selected: null, reason: 'no candidates', alternates: [] },    };
+      availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
+      selection: { selected: null, reason: 'no candidates', alternates: [] },
+    };
   }
 
   // Stage 2: Build ranking inputs with identity associations
@@ -575,9 +601,9 @@ export async function searchByMedia(cache, request) {
   // Stage 7: Select best candidate
   const selection = selectBestCandidate(explainable);
 
-  // Stage 8: Build playback handoff if selection succeeded
+  // Stage 8: Build playback handoff if selection succeeded and request was persisted
   let handoff = null;
-  if (selection.selected && !selection.selected.ineligibleReason) {
+  if (selection.selected && !selection.selected.ineligibleReason && requestId) {
     const handoffRequest = {
       requestId,
       mediaId,

@@ -120,7 +120,7 @@ test('buildPlaybackHandoff: ineligible candidate cannot build handoff', () => {
   assert.equal(handoff, null);
 });
 
-test('buildPlaybackHandoff: no selection returns no handoff', () => {
+test('buildPlaybackHandoff: missing requestId throws error', () => {
   const selection = {
     selected: {
       infoHash: HASH,
@@ -135,14 +135,12 @@ test('buildPlaybackHandoff: no selection returns no handoff', () => {
     alternates: [],
   };
 
-  // Valid selection but missing request info should still work
+  // Missing requestId should throw
   const request = {};
 
-  const handoff = buildPlaybackHandoff(selection, request);
-
-  assert.ok(handoff);
-  assert.equal(handoff.requestId, null);
-  assert.equal(handoff.mediaId, null);
+  assert.throws(() => {
+    buildPlaybackHandoff(selection, request);
+  }, /requestId is required/);
 });
 
 test('buildPlaybackHandoff: provider comes from availability state', () => {
@@ -171,6 +169,34 @@ test('buildPlaybackHandoff: provider comes from availability state', () => {
   assert.ok(handoff);
   assert.equal(handoff.provider, 'torbox');
   assert.equal(handoff.providerState, 'cached');
+});
+
+test('buildPlaybackHandoff: requestId is preserved as number', () => {
+  const selection = {
+    selected: {
+      infoHash: HASH,
+      fileIndex: 1,
+      filename: 'test.mkv',
+      rank: 1,
+      score: 0.5,
+      identityTier: 'ProviderConfirmed',
+      torboxState: 'cached',
+    },
+    reason: 'highest-ranked cached eligible candidate',
+    alternates: [],
+  };
+
+  const request = {
+    requestId: 42,
+    mediaId: 'tt123',
+    mediaType: 'movie',
+  };
+
+  const handoff = buildPlaybackHandoff(selection, request);
+
+  assert.ok(handoff);
+  assert.equal(handoff.requestId, 42);
+  assert.strictEqual(typeof handoff.requestId, 'number');
 });
 
 test('validatePlaybackHandoff: valid handoff passes', () => {

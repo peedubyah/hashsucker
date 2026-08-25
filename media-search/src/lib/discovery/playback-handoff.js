@@ -13,17 +13,23 @@
  *
  * @param {Object} selection - Result from selectBestCandidate()
  * @param {Object} request - Original media request context
- * @param {string} request.requestId - Media request ID
+ * @param {number} request.requestId - Media request ID (required, from media_requests.id)
  * @param {string} request.mediaId - Media identifier
  * @param {string} request.mediaType - 'movie' or 'series'
  * @param {number} [request.season] - Season number
  * @param {number} [request.episode] - Episode number
  * @returns {Object|null} Handoff object, or null if selection is invalid
+ * @throws {Error} If requestId is null or undefined
  */
 export function buildPlaybackHandoff(selection, request) {
   // Refuse to build handoff for no-selection or ineligible candidates
   if (!selection || !selection.selected) {
     return null;
+  }
+
+  // Request ID is required — handoff must be tied to a persisted request
+  if (request.requestId == null) {
+    throw new Error('buildPlaybackHandoff: requestId is required');
   }
 
   const sel = selection.selected;
@@ -48,7 +54,7 @@ export function buildPlaybackHandoff(selection, request) {
     : (sel.identityTier === 'Verified' ? 'confirmed' : 'probable');
 
   return {
-    requestId: request.requestId || null,
+    requestId: request.requestId,
     mediaId: request.mediaId || null,
     mediaType: request.mediaType || 'movie',
     season: request.season ?? null,
