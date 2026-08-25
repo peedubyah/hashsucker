@@ -944,6 +944,15 @@ export function createRequestHandler(dependencies = {}) {
           return sendJson(response, 400, { error: err.message });
         }
       }
+      // Playback handoff: retrieve handoff by request ID
+      const handoffMatch = request.method === 'GET'
+        && url.pathname.match(/^\/api\/media-request\/(\d+)\/handoff$/);
+      if (handoffMatch) {
+        const requestId = parseInt(handoffMatch[1], 10);
+        const row = searchCache.getPlaybackHandoffByRequestId(requestId);
+        const handoff = searchCache.rowToPlaybackHandoff(row);
+        return sendJson(response, handoff ? 200 : 404, handoff || { error: 'Handoff not found' });
+      }
       // Worker visibility endpoint
       if (request.method === 'GET' && url.pathname === '/api/operator/workers') {
         const workerVisibility = createWorkerVisibility({ requestsRoot: operatorRoot, now: clock });

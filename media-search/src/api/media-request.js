@@ -18,6 +18,7 @@ import { evaluateObservationFreshness } from '../lib/providers/observations.js';
 import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
 import { createAvailabilityChecker } from '../lib/intents/availability.js';
 import { selectBestCandidate } from '../lib/discovery/selection.js';
+import { buildPlaybackHandoff } from '../lib/discovery/playback-handoff.js';
 
 /**
  * Minimum eligible corpus candidates before live discovery is triggered.
@@ -105,6 +106,7 @@ export async function searchByMedia(cache, request) {
     const liveMetadataByHash = new Map();
     const liveEligibilityByHash = new Map();
     let liveDiscoveryTriggered = true;
+    let requestId = null;
 
     try {
       const liveResults = await runLiveDiscovery(mediaId, { season, episode });
@@ -239,6 +241,28 @@ export async function searchByMedia(cache, request) {
     // Stage 7: Select best candidate
     const selection = selectBestCandidate(explainable);
 
+    // Stage 8: Build playback handoff if selection succeeded
+    let handoff = null;
+    if (selection.selected && !selection.selected.ineligibleReason) {
+      const handoffRequest = {
+        requestId: requestId || null,
+        mediaId,
+        mediaType,
+        season,
+        episode,
+      };
+      handoff = buildPlaybackHandoff(selection, handoffRequest);
+
+      // Persist handoff
+      if (handoff) {
+        try {
+          cache.persistPlaybackHandoff(handoff);
+        } catch (error) {
+          console.error(`Handoff persistence failed: ${error.message}`);
+        }
+      }
+    }
+
     return {
       intent,
       results: explainable,
@@ -249,6 +273,7 @@ export async function searchByMedia(cache, request) {
       discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
       availability: availabilityStats,
       selection,
+      handoff,
     };
   }
 
@@ -550,6 +575,28 @@ export async function searchByMedia(cache, request) {
   // Stage 7: Select best candidate
   const selection = selectBestCandidate(explainable);
 
+  // Stage 8: Build playback handoff if selection succeeded
+  let handoff = null;
+  if (selection.selected && !selection.selected.ineligibleReason) {
+    const handoffRequest = {
+      requestId,
+      mediaId,
+      mediaType,
+      season,
+      episode,
+    };
+    handoff = buildPlaybackHandoff(selection, handoffRequest);
+
+    // Persist handoff
+    if (handoff) {
+      try {
+        cache.persistPlaybackHandoff(handoff);
+      } catch (error) {
+        console.error(`Handoff persistence failed: ${error.message}`);
+      }
+    }
+  }
+
   return {
     requestId,
     intent,
@@ -565,6 +612,7 @@ export async function searchByMedia(cache, request) {
     },
     availability: availabilityStats,
     selection,
+    handoff,
   };
 }
 

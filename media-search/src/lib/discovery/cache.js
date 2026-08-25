@@ -260,6 +260,36 @@ CREATE TABLE IF NOT EXISTS release_attributes (
 CREATE INDEX IF NOT EXISTS idx_release_attributes_source ON release_attributes(source);
 CREATE INDEX IF NOT EXISTS idx_release_attributes_parsed_at ON release_attributes(parsed_at);
 
+-- ============================================================================
+-- Playback Handoffs
+-- ============================================================================
+-- Stable boundary object representing the exact candidate chosen for playback.
+-- Retrieved by request ID for playback materialization.
+
+CREATE TABLE IF NOT EXISTS playback_handoffs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id INTEGER,
+  media_id TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  season INTEGER,
+  episode INTEGER,
+  release_key TEXT NOT NULL,
+  info_hash TEXT NOT NULL,
+  file_index INTEGER,
+  filename TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT 'torbox',
+  provider_state TEXT NOT NULL DEFAULT 'unknown',
+  identity_tier TEXT,
+  resolution_state TEXT,
+  selection_reason TEXT,
+  selected_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER)),
+  FOREIGN KEY (request_id) REFERENCES media_requests(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_playback_handoffs_request ON playback_handoffs(request_id);
+CREATE INDEX IF NOT EXISTS idx_playback_handoffs_media ON playback_handoffs(media_id, created_at);
+
 -- FTS5 full-text search index over release_attributes
 -- Stores its own copy of searchable fields (simpler than external content)
 CREATE VIRTUAL TABLE IF NOT EXISTS release_search USING fts5(
@@ -1395,6 +1425,91 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const getMediaRequestResultsStmt = db.prepare(GET_MEDIA_REQUEST_RESULTS);
 
   // ---------------------------------------------------------------------------
+  // Playback handoff persistence
+  // ---------------------------------------------------------------------------
+
+  const INSERT_PLAYBACK_HANDOFF = `
+    INSERT INTO playback_handoffs (
+      request_id, media_id, media_type, season, episode,
+      release_key, info_hash, file_index, filename,
+      provider, provider_state, identity_tier, resolution_state,
+      selection_reason, selected_at
+    ) VALUES (
+      @request_id, @media_id, @media_type, @season, @episode,
+      @release_key, @info_hash, @file_index, @filename,
+      @provider, @provider_state, @identity_tier, @resolution_state,
+      @selection_reason, @selected_at
+    );
+  `;
+
+  const GET_PLAYBACK_HANDOFF_BY_REQUEST = `
+    SELECT * FROM playback_handoffs
+    WHERE request_id = @request_id
+    ORDER BY created_at DESC
+    LIMIT 1;
+  `;
+
+  const GET_PLAYBACK_HANDOFF_BY_ID = `
+    SELECT * FROM playback_handoffs WHERE id = @id;
+  `;
+
+  const insertPlaybackHandoffStmt = db.prepare(INSERT_PLAYBACK_HANDOFF);
+  const getPlaybackHandoffByRequestStmt = db.prepare(GET_PLAYBACK_HANDOFF_BY_REQUEST);
+  const getPlaybackHandoffByIdStmt = db.prepare(GET_PLAYBACK_HANDOFF_BY_ID);
+
+  function persistPlaybackHandoff(handoff) {
+    const info = insertPlaybackHandoffStmt.run({
+      request_id: handoff.requestId || null,
+      media_id: handoff.mediaId,
+      media_type: handoff.mediaType,
+      season: handoff.season ?? null,
+      episode: handoff.episode ?? null,
+      release_key: handoff.releaseKey,
+      info_hash: handoff.infoHash,
+      file_index: handoff.fileIndex ?? null,
+      filename: handoff.filename,
+      provider: handoff.provider,
+      provider_state: handoff.providerState,
+      identity_tier: handoff.identityTier,
+      resolution_state: handoff.resolutionState,
+      selection_reason: handoff.selectionReason,
+      selected_at: handoff.selectedAt,
+    });
+    return info.lastInsertRowid;
+  }
+
+  function getPlaybackHandoffByRequestId(requestId) {
+    return getPlaybackHandoffByRequestStmt.get({ request_id: requestId }) || null;
+  }
+
+  function getPlaybackHandoffById(id) {
+    return getPlaybackHandoffByIdStmt.get({ id });
+  }
+
+  function rowToPlaybackHandoff(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      requestId: row.request_id,
+      mediaId: row.media_id,
+      mediaType: row.media_type,
+      season: row.season,
+      episode: row.episode,
+      releaseKey: row.release_key,
+      infoHash: row.info_hash,
+      fileIndex: row.file_index,
+      filename: row.filename,
+      provider: row.provider,
+      providerState: row.provider_state,
+      identityTier: row.identity_tier,
+      resolutionState: row.resolution_state,
+      selectionReason: row.selection_reason,
+      selectedAt: row.selected_at,
+      createdAt: row.created_at,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // Media intents persistence functions
   // ---------------------------------------------------------------------------
 
@@ -1913,6 +2028,11 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     persistMediaRequest,
     getMediaRequests,
     getMediaRequestResults,
+    // Playback handoff persistence
+    persistPlaybackHandoff,
+    getPlaybackHandoffByRequestId,
+    getPlaybackHandoffById,
+    rowToPlaybackHandoff,
     // Exposed for testing/inspection
     get db() { return db; },
   };
