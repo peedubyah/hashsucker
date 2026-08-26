@@ -1694,6 +1694,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     return getMediaRequestsStmt.all();
   }
 
+  function getMediaRequestsByMediaId(mediaId) {
+    return getMediaRequestsByMediaIdStmt.get({ media_id: mediaId }) || null;
+  }
+
   function getMediaRequestResults(requestId) {
     return getMediaRequestResultsStmt.all({ request_id: requestId });
   }
@@ -1815,6 +1819,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       return {
         status: 'debug',
         mediaId,
+        releaseKey: handoff.release_key,
         selectedHash: handoff.info_hash,
         fileIndex: handoff.file_index,
         provider: handoff.provider,
@@ -2164,6 +2169,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     // Media request persistence
     persistMediaRequest,
     getMediaRequests,
+    getMediaRequestsByMediaId,
     getMediaRequestResults,
     // Playback handoff persistence
     persistPlaybackHandoff,

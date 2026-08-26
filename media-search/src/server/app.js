@@ -48,6 +48,10 @@ import { formatRequestTimeline, formatRecentRuns, formatFailedRuns } from '../li
 import { getEnrichmentDiagnostics, formatEnrichmentDiagnostics } from '../lib/discovery/enrichment-diagnostics.js';
 import { resolveStream, parseMediaIdentity, StreamResolverError } from '../lib/stream-resolver/index.js';
 import { resolveTorBoxRedirect, RedirectResolutionError, formatRedirectLog } from '../lib/resolver/torbox-redirect.js';
+import { createAlternateFallback, FALLBACK_REASON } from '../lib/resolver/alternate-fallback.js';
+import { createRevalidator, mapRevalidationToHttp, REVALIDATION_SOURCE, REVALIDATION_OUTCOME } from '../lib/resolver/availability-revalidation.js';
+import { checkTorBoxCached } from '../lib/providers/torbox.js';
+import { createResolverTelemetry, getRecentResolverTelemetry, RESOLVER_OUTCOME } from '../lib/resolver/telemetry.js';
 
 const CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -342,6 +346,115 @@ function parseOptionalStage6Scope(params) {
   };
 }
 
+/**
+ * Try alternate candidate fallback when primary selection is unavailable.
+ * Loads persisted request results, filters by eligibility and scope, and
+ * checks availability in rank order until a usable candidate is found.
+ *
+ * @returns {Promise<boolean>} True if fallback succeeded and response was sent
+ */
+async function tryAlternateCandidateFallback({
+  searchCache,
+  alternateFallback,
+  revalidator,
+  controlPlaneStore,
+  existingSelection,
+  primaryRevalidation,
+  rawId,
+  mediaType,
+  recordTelemetry,
+  response,
+  sendJson,
+  clock,
+}) {
+  // Load persisted request to get expected scope and results
+  const persistedRequest = searchCache.getMediaRequestsByMediaId(rawId);
+  if (!persistedRequest) return false;
+
+  // Build expected scope from the original request
+  const expectedScope = {
+    media_type: persistedRequest.media_type,
+    season: persistedRequest.season,
+    episode: persistedRequest.episode,
+  };
+
+  // Find a usable alternate candidate
+  const fallback = await alternateFallback.findUsableAlternate({
+    mediaId: rawId,
+    primaryReleaseKey: existingSelection.releaseKey,
+    expectedScope,
+  });
+
+  if (!fallback) return false;
+
+  const { candidate, revalidation } = fallback;
+
+  // Build a pseudo-selection object for redirect resolution
+  const fallbackSelection = {
+    status: 'selected',
+    mediaId: rawId,
+    releaseKey: candidate.releaseKey,
+    selectedHash: candidate.info_hash,
+    fileIndex: candidate.fileIndex,
+    provider: 'torbox',
+  };
+
+  // Attempt TorBox redirect resolution
+  if (!controlPlaneStore) return false;
+
+  try {
+    const redirect = resolveTorBoxRedirect(fallbackSelection, controlPlaneStore);
+    const fallbackTelemetry = alternateFallback.buildFallbackTelemetry({
+      originalReleaseKey: existingSelection.releaseKey,
+      selectedReleaseKey: candidate.releaseKey,
+      fallbackRank: candidate.rank,
+      reason: primaryRevalidation.cacheState === REVALIDATION_OUTCOME.UNCACHED
+        ? FALLBACK_REASON.PRIMARY_UNAVAILABLE
+        : FALLBACK_REASON.PRIMARY_PROVIDER_ERROR,
+    });
+    recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
+      infoHash: candidate.info_hash,
+      releaseKey: candidate.releaseKey,
+      provider: 'torbox',
+      availabilitySource: revalidation.availabilitySource,
+      providerCheckOccurred: revalidation.providerCheckOccurred,
+      ...fallbackTelemetry,
+    });
+    response.writeHead(307, {
+      location: redirect.redirectUrl,
+      'cache-control': 'no-store',
+      'x-torrent-id': redirect.torrentId,
+      'x-file-id': redirect.providerFileId,
+      'x-availability-source': revalidation.availabilitySource,
+      'x-provider-check-occurred': revalidation.providerCheckOccurred ? 'true' : 'false',
+      'x-fallback-used': 'true',
+      'x-fallback-rank': String(candidate.rank),
+      'x-fallback-original-release-key': existingSelection.releaseKey,
+      'x-fallback-selected-release-key': candidate.releaseKey,
+    });
+    response.end();
+    return true;
+  } catch (redirectErr) {
+    if (redirectErr instanceof RedirectResolutionError) {
+      recordTelemetry(RESOLVER_OUTCOME.FAILED, redirectErr.code, null, {
+        infoHash: candidate.info_hash,
+        releaseKey: candidate.releaseKey,
+        provider: 'torbox',
+        availabilitySource: revalidation.availabilitySource,
+        providerCheckOccurred: revalidation.providerCheckOccurred,
+      });
+      sendJson(response, redirectErr.status, {
+        error: redirectErr.message,
+        code: redirectErr.code,
+        mediaId: rawId,
+        mediaType,
+      });
+      return true;
+    }
+    throw redirectErr;
+  }
+}
+
 function validateSupportedRequest(body) {
   const intent = createRequestIntent({ type: body.type || 'series', mediaId: body.mediaId });
   const singleEpisode = intent.mediaType === 'tv' && intent.scope === 'episode' && intent.episodes.length === 1;
@@ -394,6 +507,27 @@ export function createRequestHandler(dependencies = {}) {
   const staticRoot = dependencies.staticRoot === undefined ? process.env.STATIC_ROOT : dependencies.staticRoot;
   const env = dependencies.env ?? process.env;
 
+  // Availability revalidator for playback-time TorBox checks
+  // Configured via STREAM_AVAILABILITY_MAX_AGE_MS and STREAM_PROVIDER_CHECK_TIMEOUT_MS
+  const revalidator = dependencies.revalidator || createRevalidator({
+    checkTorBoxCached,
+    now: clock,
+    maxAgeMs: env.STREAM_AVAILABILITY_MAX_AGE_MS
+      ? parseInt(env.STREAM_AVAILABILITY_MAX_AGE_MS, 10)
+      : 5 * 60 * 1000,
+    checkTimeoutMs: env.STREAM_PROVIDER_CHECK_TIMEOUT_MS
+      ? parseInt(env.STREAM_PROVIDER_CHECK_TIMEOUT_MS, 10)
+      : 3000,
+    apiKey: env.TORBOX_API_KEY,
+  });
+
+  // Alternate candidate fallback for when primary selection is unavailable
+  const alternateFallback = dependencies.alternateFallback || createAlternateFallback({
+    searchCache,
+    revalidator,
+    now: clock,
+  });
+
   return async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
     try {
@@ -413,6 +547,38 @@ export function createRequestHandler(dependencies = {}) {
         const rawId = streamMatch[2];
         const season = url.searchParams.get('season');
         const episode = url.searchParams.get('episode');
+        const resolverStartTime = clock();
+        let telemetryRecorded = false;
+
+        /**
+         * Record resolver telemetry for this attempt.
+         * Fire-and-forget: errors are caught, never block resolution.
+         */
+        const recordTelemetry = (outcome, failureCode, redirectStatus, extra = {}) => {
+          if (telemetryRecorded || !eventStore) return;
+          telemetryRecorded = true;
+          const resolverTelemetry = createResolverTelemetry({ eventStore, now: clock });
+          resolverTelemetry.recordAttempt({
+            mediaId: rawId,
+            mediaType,
+            infoHash: extra.infoHash ?? null,
+            releaseKey: extra.releaseKey ?? null,
+            provider: extra.provider ?? null,
+            availabilitySource: extra.availabilitySource ?? null,
+            providerCheckOccurred: extra.providerCheckOccurred ?? null,
+            outcome,
+            failureCode,
+            redirectStatus,
+            durationMs: clock() - resolverStartTime,
+            // Preserve fallback telemetry fields if present
+            ...(extra.fallbackUsed != null ? { fallbackUsed: extra.fallbackUsed } : {}),
+            ...(extra.originalReleaseKey != null ? { originalReleaseKey: extra.originalReleaseKey } : {}),
+            ...(extra.selectedReleaseKey != null ? { selectedReleaseKey: extra.selectedReleaseKey } : {}),
+            ...(extra.fallbackRank != null ? { fallbackRank: extra.fallbackRank } : {}),
+            ...(extra.reason != null ? { reason: extra.reason } : {}),
+          });
+        };
+
         try {
           const identity = parseMediaIdentity({
             mediaId: rawId,
@@ -423,9 +589,14 @@ export function createRequestHandler(dependencies = {}) {
 
           // 1. Check for existing persisted selection first
           const existingSelection = searchCache.getExistingSelection(rawId);
-          if (existingSelection && existingSelection.status === 'selected') {
+          // Accept both 'selected' and 'debug' status — 'debug' means the handoff exists
+          // but provider state is not usable, which triggers revalidation and potential fallback
+          if (existingSelection && (existingSelection.status === 'selected' || existingSelection.status === 'debug')) {
             // 1a. Selected candidate must be TorBox-resolvable for redirect
             if (existingSelection.provider !== 'torbox') {
+              recordTelemetry(RESOLVER_OUTCOME.FAILED, 'PROVIDER_NOT_TORBOX', null, {
+                provider: existingSelection.provider,
+              });
               return sendJson(response, 400, {
                 error: `Provider '${existingSelection.provider}' is not resolvable via TorBox`,
                 code: 'PROVIDER_NOT_TORBOX',
@@ -433,22 +604,80 @@ export function createRequestHandler(dependencies = {}) {
                 mediaType,
               });
             }
-            // 1b. Attempt TorBox redirect resolution when control plane is available
+            // 1b. Revalidate availability before redirect
+            const revalidation = await revalidator.revalidateAvailability({
+              cache: searchCache,
+              infoHash: existingSelection.selectedHash,
+              mediaId: rawId,
+              releaseKey: existingSelection.releaseKey,
+              provider: existingSelection.provider,
+            });
+            const httpOutcome = mapRevalidationToHttp(revalidation);
+            if (!httpOutcome.shouldRedirect) {
+              // Try alternate candidate fallback before returning typed failure
+              const fallbackAttempted = await tryAlternateCandidateFallback({
+                searchCache,
+                alternateFallback,
+                revalidator,
+                controlPlaneStore,
+                existingSelection,
+                primaryRevalidation: revalidation,
+                rawId,
+                mediaType,
+                recordTelemetry,
+                response,
+                sendJson,
+                clock,
+              });
+              if (fallbackAttempted) return;
+
+              // No usable alternate — return original typed failure
+              recordTelemetry(RESOLVER_OUTCOME.FAILED, httpOutcome.body.code, null, {
+                infoHash: existingSelection.selectedHash,
+                releaseKey: existingSelection.releaseKey,
+                provider: existingSelection.provider,
+                availabilitySource: revalidation.availabilitySource,
+                providerCheckOccurred: revalidation.providerCheckOccurred,
+              });
+              return sendJson(response, httpOutcome.status, {
+                ...httpOutcome.body,
+                availabilitySource: revalidation.availabilitySource,
+                providerCheckOccurred: revalidation.providerCheckOccurred,
+                checkLatencyMs: revalidation.checkLatencyMs,
+              });
+            }
+            // 1c. Attempt TorBox redirect resolution when control plane is available
             if (controlPlaneStore) {
               try {
                 const redirect = resolveTorBoxRedirect(existingSelection, controlPlaneStore);
+                recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
+                  infoHash: existingSelection.selectedHash,
+                  releaseKey: existingSelection.releaseKey,
+                  provider: existingSelection.provider,
+                  availabilitySource: revalidation.availabilitySource,
+                  providerCheckOccurred: revalidation.providerCheckOccurred,
+                });
                 // HTTP 307 — Temporary Redirect
                 response.writeHead(307, {
                   location: redirect.redirectUrl,
                   'cache-control': 'no-store',
                   'x-torrent-id': redirect.torrentId,
                   'x-file-id': redirect.providerFileId,
+                  'x-availability-source': revalidation.availabilitySource,
+                  'x-provider-check-occurred': revalidation.providerCheckOccurred ? 'true' : 'false',
                 });
                 response.end();
                 return;
               } catch (redirectErr) {
                 // Map redirect failures to clear non-redirect responses
                 if (redirectErr instanceof RedirectResolutionError) {
+                  recordTelemetry(RESOLVER_OUTCOME.FAILED, redirectErr.code, null, {
+                    infoHash: existingSelection.selectedHash,
+                    releaseKey: existingSelection.releaseKey,
+                    provider: existingSelection.provider,
+                    availabilitySource: revalidation.availabilitySource,
+                    providerCheckOccurred: revalidation.providerCheckOccurred,
+                  });
                   return sendJson(response, redirectErr.status, {
                     error: redirectErr.message,
                     code: redirectErr.code,
@@ -459,13 +688,24 @@ export function createRequestHandler(dependencies = {}) {
                 throw redirectErr;
               }
             }
-            // 1c. No control plane store — return selection JSON (legacy behavior)
+            // 1d. No control plane store — return selection JSON (legacy behavior)
+            recordTelemetry(RESOLVER_OUTCOME.FAILED, 'NO_CONTROL_PLANE', null, {
+              infoHash: existingSelection.selectedHash,
+              releaseKey: existingSelection.releaseKey,
+              provider: existingSelection.provider,
+            });
             return sendJson(response, 200, existingSelection);
           }
 
           // 2. Fall back to resolver stub
           const result = await resolveStream(identity);
           if (result.status === 'not_implemented') {
+            const failureCode = existingSelection ? 'SELECTION_NOT_USABLE' : 'NO_SELECTION';
+            recordTelemetry(RESOLVER_OUTCOME.FAILED, failureCode, null, {
+              infoHash: existingSelection?.selectedHash,
+              releaseKey: existingSelection?.releaseKey,
+              provider: existingSelection?.provider,
+            });
             // Merge stored knowledge into debug response
             const debugResponse = existingSelection
               ? { ...existingSelection, resolverStatus: result.status, provider: null, redirectUrl: null }
@@ -481,9 +721,13 @@ export function createRequestHandler(dependencies = {}) {
                 };
             return sendJson(response, 501, debugResponse);
           }
+          recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 200, {
+            provider: result.provider,
+          });
           return sendJson(response, 200, result);
         } catch (err) {
           if (err instanceof StreamResolverError) {
+            recordTelemetry(RESOLVER_OUTCOME.FAILED, err.code, null);
             return sendJson(response, err.status, { error: err.message });
           }
           throw err;
@@ -593,13 +837,22 @@ export function createRequestHandler(dependencies = {}) {
           : searchDecisionStore.getRecentDecisions(limit);
         // Support timing comparison output
         if (url.searchParams.get('format') === 'timing') {
-          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf8', 'cache-control': 'no-store' });
           response.end(formatTimingComparison(decisions.map(d => d.timing || {})));
           return;
         }
         return sendJson(response, 200, {
           total: searchDecisionStore.countDecisions(),
           decisions,
+        });
+      }
+      // Resolver telemetry — recent /stream/:type/:id resolution attempts
+      if (request.method === 'GET' && url.pathname === '/api/debug/resolver-telemetry') {
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
+        const records = getRecentResolverTelemetry(eventStore, { limit });
+        return sendJson(response, 200, {
+          total: records.length,
+          records,
         });
       }
       if (request.method === 'GET' && url.pathname === '/api/control-plane/health') {
