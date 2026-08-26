@@ -2,20 +2,15 @@
  * Request inspector — builds a structured view of request lifecycle
  * with recommendations (not automatic actions).
  *
- * Data model:
- *   Request
- *    |
- *    +-- state
- *    +-- created_at
- *    +-- updated_at
- *    +-- last_event
- *    +-- queue_location
- *    +-- failure_reason
- *    +-- retry_count
+ * Previous implementation scanned host filesystem queue directories
+ * (incoming/processing/done/failed). This is not available in
+ * container-native environments (node:24-alpine, no bash, no host mounts).
+ *
+ * Request lifecycle state is now surfaced through:
+ * - GET /api/operator/requests (list with filter)
+ * - GET /api/operator/events/recent, /failed, /stats
+ * - GET /api/debug/cache-intelligence (provider-observation + probe-queue state)
  */
-
-import fs from 'node:fs/promises';
-import path from 'node:path';
 
 // Thresholds for recommendations (in milliseconds)
 const STUCK_THRESHOLD_MS = 60 * 60 * 1000;      // 1 hour
@@ -24,129 +19,19 @@ const ORPHANED_THRESHOLD_MS = 30 * 60 * 1000;    // 30 minutes
 
 /**
  * Inspect all requests and generate recommendations.
- * @param {Object} options
- * @param {string} options.requestsRoot - Path to requests directory
- * @param {Object} [options.controlPlaneStore] - Control-plane store instance
- * @param {() => number} [options.now] - Clock function
- * @returns {Promise<{ requests: Array, recommendations: Array, summary: Object }>}
+ *
+ * @returns {Unsupported structured result}
  */
-export async function inspectRequests({ requestsRoot, controlPlaneStore, now = Date.now } = {}) {
-  const requests = [];
-  const recommendations = [];
-
-  const dirs = ['incoming', 'processing', 'done', 'failed'];
-  const allQueueFiles = [];
-
-  // 1. Scan all queue files
-  for (const dir of dirs) {
-    const dirPath = path.join(requestsRoot, dir);
-    let entries;
-    try {
-      entries = await fs.readdir(dirPath);
-    } catch {
-      continue;
-    }
-
-    for (const entry of entries) {
-      if (!entry.endsWith('.json')) continue;
-      const requestId = entry.slice(0, -5);
-      if (!/^[0-9a-f-]{36}$/i.test(requestId)) continue;
-
-      try {
-        const body = await fs.readFile(path.join(dirPath, entry), 'utf8');
-        const request = JSON.parse(body);
-        allQueueFiles.push({ requestId, status: dir, request });
-      } catch {
-        // Unreadable file — still report it
-        allQueueFiles.push({ requestId, status: dir, request: null, unreadable: true });
-      }
-    }
-  }
-
-  // 2. Build structured view for each request
-  for (const { requestId, status, request, unreadable } of allQueueFiles) {
-    const mediaId = request?.mediaId || request?.media_id;
-    const createdAt = request?.createdAt || request?.created_at;
-    const updatedAt = request?.updatedAt || request?.updated_at;
-    const retryCount = request?.retryCount ?? request?.retry_count ?? 0;
-    const lastError = request?.lastError || request?.last_error;
-    const failureReason = request?.failureReason || request?.failure_reason || lastError;
-
-    // Build timeline from request fields
-    const timeline = buildTimeline(request);
-
-    // Determine last event
-    const lastEvent = timeline.length > 0 ? timeline[timeline.length - 1].label : 'unknown';
-
-    const requestView = {
-      requestId,
-      state: status,
-      created_at: createdAt,
-      updated_at: updatedAt,
-      last_event: lastEvent,
-      queue_location: status,
-      failure_reason: failureReason || null,
-      retry_count: retryCount,
-      media_id: mediaId,
-      timeline,
-      unreadable: unreadable || false,
-    };
-
-    requests.push(requestView);
-
-    // 3. Generate recommendations based on rules
-    const rec = generateRecommendation({
-      request: requestView,
-      controlPlaneStore,
-      now,
-    });
-    if (rec) {
-      recommendations.push(rec);
-    }
-  }
-
-  // 4. Check for DB-only records (no queue file)
-  if (controlPlaneStore) {
-    try {
-      const dbItems = controlPlaneStore.db.prepare(`
-        SELECT DISTINCT le.library_item_id
-        FROM lifecycle_events le
-        WHERE le.status = 'failed'
-      `).all();
-
-      for (const { library_item_id: itemId } of dbItems) {
-        // Check if there's a queue file for this item
-        const hasQueueFile = allQueueFiles.some(r => {
-          const mediaId = r.request?.mediaId || r.request?.media_id;
-          return mediaId && mediaId.includes(itemId.slice(0, 8));
-        });
-
-        if (!hasQueueFile) {
-          recommendations.push({
-            type: 'orphaned-database-record',
-            severity: 'info',
-            library_item_id: itemId,
-            reason: 'library item has failed lifecycle but no queue file',
-            suggestion: 'reconcile or purge database record',
-          });
-        }
-      }
-    } catch {
-      // Table may not exist
-    }
-  }
-
-  const summary = {
-    total: requests.length,
-    queued: requests.filter(r => r.state === 'incoming').length,
-    processing: requests.filter(r => r.state === 'processing').length,
-    done: requests.filter(r => r.state === 'done').length,
-    failed: requests.filter(r => r.state === 'failed').length,
-    recommendations: recommendations.length,
+export async function inspectRequests() {
+  return {
+    status: 'unsupported',
+    unsupported: true,
+    reason: 'Request inspection requires host filesystem access (queue directories). Use /api/operator/requests or /api/debug/cache-intelligence for container-native visibility.',
   };
-
-  return { requests, recommendations, summary };
 }
+
+// Formatters retained for backward compatibility — unreachable from
+// inspectRequests() after the unsupported early return above.
 
 /**
  * Build a timeline of events from request fields.
@@ -318,6 +203,6 @@ function formatDuration(ms) {
 
   if (days > 0) return `${days}d ${hours % 24}h`;
   if (hours > 0) return `${hours}h ${minutes % 60}m`;
-  if (minutes > 0) return `${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
   return `${seconds}s`;
 }

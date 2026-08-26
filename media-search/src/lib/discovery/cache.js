@@ -144,11 +144,27 @@ CREATE TABLE IF NOT EXISTS candidate_media (
 CREATE INDEX IF NOT EXISTS idx_candidate_media_media_id ON candidate_media(media_id);
 CREATE INDEX IF NOT EXISTS idx_candidate_media_resolution_state ON candidate_media(resolution_state);
 
+CREATE TABLE IF NOT EXISTS cache_probe_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  info_hash TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  reason TEXT NOT NULL DEFAULT 'manual',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'checking', 'complete', 'failed')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_attempt INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_probe_queue_active_hash ON cache_probe_queue(info_hash) WHERE status IN ('pending', 'checking');
+CREATE INDEX IF NOT EXISTS idx_cache_probe_queue_status_priority ON cache_probe_queue(status, priority DESC, created_at ASC);
+
 CREATE TABLE IF NOT EXISTS identity_enrichment_queue (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   info_hash TEXT NOT NULL,
   file_index_key INTEGER NOT NULL DEFAULT -1,
   status TEXT NOT NULL DEFAULT 'pending',
+  priority INTEGER NOT NULL DEFAULT 0,
   attempts INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 3,
   resolver_source TEXT,
@@ -160,7 +176,7 @@ CREATE TABLE IF NOT EXISTS identity_enrichment_queue (
   UNIQUE(info_hash, file_index_key)
 );
 
-CREATE INDEX IF NOT EXISTS idx_enrichment_queue_status ON identity_enrichment_queue(status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_enrichment_queue_status_priority ON identity_enrichment_queue(status, priority DESC, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_enrichment_queue_candidate ON identity_enrichment_queue(info_hash, file_index_key);
 
 CREATE TABLE IF NOT EXISTS media_intents (
@@ -682,14 +698,74 @@ function migrateMediaIntents(db) {
   ).run(MEDIA_INTENTS_SCHEMA, Date.now());
 }
 
+// Demand priority constants for queue promotion
+// Background corpus work: ~10, explicit request: ~100, selected release: ~200
+export const DEMAND_PRIORITY = Object.freeze({
+  BACKGROUND: 10,      // Normal DMM corpus seeding
+  MEDIA_INTENT: 50,    // Normalized media intent (when mappable to hashes)
+  EXPLICIT_REQUEST: 100, // Explicit /api/media-request
+  SELECTED_RELEASE: 200, // User selected this specific release
+});
+
+// Default max age for cache probe refresh eligibility.
+// When a hash's latest authoritative TorBox observation is older than this,
+// it becomes eligible for re-probing. Aligned with provider observation
+// freshness semantics (expiresAt-based) — not a separate TTL architecture.
+export const CACHE_PROBE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+const IDENTITY_ENRICHMENT_QUEUE_PRIORITY = 'identity-enrichment-queue-priority-v1';
+
+function migrateIdentityEnrichmentQueuePriority(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(IDENTITY_ENRICHMENT_QUEUE_PRIORITY);
+  if (applied) return;
+
+  // Check if identity_enrichment_queue table exists and has priority column
+  const tableExists = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='identity_enrichment_queue'"
+  ).get();
+
+  if (tableExists) {
+    const cols = db.prepare('PRAGMA table_info(identity_enrichment_queue)').all();
+    const hasPriority = cols.some(col => col.name === 'priority');
+    if (!hasPriority) {
+      db.exec('ALTER TABLE identity_enrichment_queue ADD COLUMN priority INTEGER NOT NULL DEFAULT 0');
+    }
+  }
+
+  db.prepare(
+    'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+  ).run(IDENTITY_ENRICHMENT_QUEUE_PRIORITY, Date.now());
+}
+
+const CACHE_PROBE_QUEUE_SCHEMA = 'cache-probe-queue-v1';
+
+function migrateCacheProbeQueue(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(CACHE_PROBE_QUEUE_SCHEMA);
+  if (applied) return;
+
+  // Table is created via SCHEMA constant; migration tracks application.
+  db.prepare(
+    'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+  ).run(CACHE_PROBE_QUEUE_SCHEMA, Date.now());
+}
+
 export function createDiscoveryCache({ dbPath = ':memory:', database = null } = {}) {
   const db = database || new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
+
+  // Run migrations that need to alter tables before SCHEMA is applied
+  migrateIdentityEnrichmentQueuePriority(db);
+
   db.exec(SCHEMA);
 
   migrateLegacyProviderObservations(db);
   migrateMediaRequestEligibilityColumns(db);
   migrateMediaIntents(db);
+  migrateCacheProbeQueue(db);
 
   const insertCandidateStmt = db.prepare(INSERT_CANDIDATE);
   const getCandidateStmt = db.prepare(GET_CANDIDATE);
@@ -891,6 +967,32 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     });
     const now = options.now ?? Date.now();
     return rows.map((row) => rowToObservation(row, now));
+  }
+
+  /**
+   * Check whether a hash has a fresh authoritative TorBox observation.
+   * Uses the provider observation freshness semantics (expiresAt-based).
+   *
+   * @param {string} infoHash - Info hash
+   * @param {number|null} fileIndex - File index or null
+   * @param {number} [maxAgeMs] - Max age in ms (default: CACHE_PROBE_MAX_AGE_MS)
+   * @returns {boolean} True if fresh authoritative TorBox observation exists
+   */
+  function hasFreshTorBoxObservation(infoHash, fileIndex, maxAgeMs = CACHE_PROBE_MAX_AGE_MS) {
+    const now = Date.now();
+    const observations = getProviderObservations(infoHash, fileIndex, {
+      includeStale: true,
+      kinds: ['authoritative'],
+    });
+    const torboxObs = observations.find(o => o.provider === 'torbox');
+    if (!torboxObs) return false;
+    // Use freshness evaluation (expiresAt-based)
+    const freshness = evaluateObservationFreshness(torboxObs, { now });
+    if (freshness.freshness === 'unbounded') {
+      // No expiry: treat as fresh only if within maxAgeMs of observedAt
+      return freshness.ageMs < maxAgeMs;
+    }
+    return freshness.fresh;
   }
 
   /**
@@ -1167,11 +1269,13 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   // ---------------------------------------------------------------------------
 
   const INSERT_ENRICHMENT_QUEUE = `
-    INSERT INTO identity_enrichment_queue (info_hash, file_index_key, status, attempts, max_attempts, resolver_source, created_at, updated_at, next_attempt_at)
-    VALUES (@info_hash, @file_index_key, 'pending', 0, @max_attempts, @resolver_source, @now, @now, @now)
+    INSERT INTO identity_enrichment_queue (info_hash, file_index_key, status, priority, attempts, max_attempts, resolver_source, created_at, updated_at, next_attempt_at)
+    VALUES (@info_hash, @file_index_key, 'pending', @priority, 0, @max_attempts, @resolver_source, @now, @now, @now)
     ON CONFLICT(info_hash, file_index_key) DO UPDATE SET
-      updated_at = @now
-    WHERE status IN ('failed', 'resolved');
+      priority = MAX(priority, @priority),
+      updated_at = @now,
+      next_attempt_at = @now
+    WHERE status IN ('pending', 'failed', 'resolved');
   `;
 
   const GET_PENDING_ENRICHMENT = `
@@ -1179,7 +1283,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     WHERE status IN ('pending', 'failed')
       AND (next_attempt_at IS NULL OR next_attempt_at <= @now)
       AND attempts < max_attempts
-    ORDER BY created_at ASC
+    ORDER BY priority DESC, created_at ASC
     LIMIT @limit;
   `;
 
@@ -1204,6 +1308,77 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) as resolved,
       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
     FROM identity_enrichment_queue;
+  `;
+
+  // ---------------------------------------------------------------------------
+  // Cache probe queue
+  // ---------------------------------------------------------------------------
+
+  const INSERT_CACHE_PROBE = `
+    INSERT INTO cache_probe_queue (info_hash, priority, reason, status, attempt_count, created_at, updated_at)
+    VALUES (@info_hash, @priority, @reason, 'pending', 0, @now, @now);
+  `;
+
+  const CHECK_ACTIVE_PROBE = `
+    SELECT 1 FROM cache_probe_queue
+    WHERE info_hash = @info_hash AND status IN ('pending', 'checking')
+    LIMIT 1;
+  `;
+
+  const CLAIM_CACHE_PROBES = `
+    WITH candidates AS (
+      SELECT id
+      FROM cache_probe_queue
+      WHERE status = 'pending'
+      ORDER BY priority DESC, created_at ASC
+      LIMIT @limit
+    )
+    UPDATE cache_probe_queue
+    SET status = 'checking',
+        attempt_count = attempt_count + 1,
+        last_attempt = @now,
+        updated_at = @now
+    WHERE id IN (SELECT id FROM candidates)
+    RETURNING *;
+  `;
+
+  const COMPLETE_CACHE_PROBE = `
+    UPDATE cache_probe_queue
+    SET status = 'complete',
+        updated_at = @now
+    WHERE id = @id AND status = 'checking';
+  `;
+
+  const FAIL_CACHE_PROBE = `
+    UPDATE cache_probe_queue
+    SET status = 'failed',
+        updated_at = @now
+    WHERE id = @id AND status = 'checking';
+  `;
+
+  const GET_CACHE_PROBE_BY_HASH = `
+    SELECT * FROM cache_probe_queue
+    WHERE info_hash = @info_hash
+    ORDER BY created_at DESC
+    LIMIT 1;
+  `;
+
+  const PROMOTE_CACHE_PROBE = `
+    UPDATE cache_probe_queue
+    SET priority = MAX(priority, @priority),
+        updated_at = @now
+    WHERE info_hash = @info_hash
+      AND status IN ('pending', 'checking');
+  `;
+
+  const GET_CACHE_PROBE_STATS = `
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+      SUM(CASE WHEN status = 'checking' THEN 1 ELSE 0 END) as checking,
+      SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) as complete,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+    FROM cache_probe_queue;
   `;
 
   // Aggregate metrics for corpus observability
@@ -1406,6 +1581,14 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const getEnrichmentQueueItemStmt = db.prepare(GET_ENRICHMENT_QUEUE_ITEM);
   const updateEnrichmentStatusStmt = db.prepare(UPDATE_ENRICHMENT_STATUS);
   const getEnrichmentStatsStmt = db.prepare(GET_ENRICHMENT_STATS);
+  const insertCacheProbeStmt = db.prepare(INSERT_CACHE_PROBE);
+  const checkActiveProbeStmt = db.prepare(CHECK_ACTIVE_PROBE);
+  const claimCacheProbesStmt = db.prepare(CLAIM_CACHE_PROBES);
+  const completeCacheProbeStmt = db.prepare(COMPLETE_CACHE_PROBE);
+  const failCacheProbeStmt = db.prepare(FAIL_CACHE_PROBE);
+  const getCacheProbeByHashStmt = db.prepare(GET_CACHE_PROBE_BY_HASH);
+  const promoteCacheProbeStmt = db.prepare(PROMOTE_CACHE_PROBE);
+  const getCacheProbeStatsStmt = db.prepare(GET_CACHE_PROBE_STATS);
   const getCandidateMediaCoverageStmt = db.prepare(GET_CANDIDATE_MEDIA_COVERAGE);
   const getResolverSuccessRatesStmt = db.prepare(GET_RESOLVER_SUCCESS_RATES);
   const getConfidenceDistributionStmt = db.prepare(GET_CONFIDENCE_DISTRIBUTION);
@@ -1851,6 +2034,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       infoHash: row.info_hash,
       fileIndexKey: row.file_index_key,
       status: row.status,
+      priority: row.priority || 0,
       attempts: row.attempts,
       maxAttempts: row.max_attempts,
       resolverSource: row.resolver_source,
@@ -1867,6 +2051,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     insertEnrichmentQueueStmt.run({
       info_hash: infoHash,
       file_index_key: fileIndexKey(fileIndex),
+      priority: options.priority ?? 0,
       max_attempts: options.maxAttempts ?? 3,
       resolver_source: options.resolverSource ?? null,
       now,
@@ -2081,6 +2266,260 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     return { enqueued, skipped, total: candidates.length };
   }
 
+  // ---------------------------------------------------------------------------
+  // Cache probe queue functions
+  // ---------------------------------------------------------------------------
+
+  function rowToCacheProbe(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      infoHash: row.info_hash,
+      priority: row.priority,
+      reason: row.reason,
+      status: row.status,
+      attemptCount: row.attempt_count,
+      lastAttempt: row.last_attempt,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  function enqueueProbe(infoHash, options = {}) {
+    const existing = checkActiveProbeStmt.get({ info_hash: infoHash });
+    if (existing) return getCacheProbeByHash(infoHash);
+    const now = Date.now();
+    const reason = options.reason ? String(options.reason).slice(0, 128) : 'manual';
+    const priority = options.priority ?? 0;
+    insertCacheProbeStmt.run({
+      info_hash: infoHash,
+      priority,
+      reason,
+      now,
+    });
+    return getCacheProbeByHash(infoHash);
+  }
+
+  function claimProbeBatch(limit = 1) {
+    const rows = claimCacheProbesStmt.all({ now: Date.now(), limit });
+    // RETURNING * doesn't guarantee order, so re-sort by priority DESC, created_at ASC
+    rows.sort((a, b) => {
+      if (b.priority !== a.priority) return b.priority - a.priority;
+      return a.created_at - b.created_at;
+    });
+    return rows.map(rowToCacheProbe);
+  }
+
+  function completeProbe(id) {
+    completeCacheProbeStmt.run({ id, now: Date.now() });
+  }
+
+  function failProbe(id) {
+    failCacheProbeStmt.run({ id, now: Date.now() });
+  }
+
+  function getCacheProbeByHash(infoHash) {
+    const row = getCacheProbeByHashStmt.get({ info_hash: infoHash });
+    return rowToCacheProbe(row);
+  }
+
+  function getCacheProbeStats() {
+    const row = getCacheProbeStatsStmt.get();
+    return {
+      total: row.total || 0,
+      pending: row.pending || 0,
+      checking: row.checking || 0,
+      complete: row.complete || 0,
+      failed: row.failed || 0,
+    };
+  }
+
+  /**
+   * Promote candidate work in response to demand signals.
+   * Enqueues or promotes identity enrichment and cache probe work for given candidates.
+   * Uses MAX(existingPriority, demandPriority) to avoid demotion.
+   * Does not create duplicate active rows.
+   *
+   * @param {Array<{infoHash: string, fileIndex: number|null}>} candidates - Candidates to promote
+   * @param {number} demandPriority - Priority from DEMAND_PRIORITY constants
+   * @param {Object} [options] - Options
+   * @param {boolean} [options.enrichment=true] - Whether to promote identity enrichment
+   * @param {boolean} [options.probe=true] - Whether to promote cache probing
+   * @param {string} [options.reason] - Reason for queue entry (default: 'demand')
+   * @returns {Object} { enrichmentPromoted, probePromoted }
+   */
+  function promoteDemand(candidates, demandPriority, options = {}) {
+    const { enrichment = true, probe = true, reason = 'demand' } = options;
+    let enrichmentPromoted = 0;
+    let probePromoted = 0;
+
+    for (const { infoHash, fileIndex } of candidates) {
+      if (!infoHash) continue;
+
+      // Identity enrichment: only if candidate lacks media association
+      if (enrichment) {
+        const associations = getMediaAssociations(infoHash, fileIndex);
+        if (associations.length === 0) {
+          // No identity yet - enqueue/promote enrichment
+          enqueueIdentityResolution(infoHash, fileIndex, {
+            priority: demandPriority,
+            reason,
+          });
+          enrichmentPromoted++;
+        }
+      }
+
+      // Cache probe: enqueue or promote existing
+      if (probe) {
+        const existingProbe = getCacheProbeByHash(infoHash);
+        if (existingProbe && (existingProbe.status === 'pending' || existingProbe.status === 'checking')) {
+          // Promote existing probe (uses MAX to avoid demotion)
+          promoteCacheProbeStmt.run({ priority: demandPriority, now: Date.now(), info_hash: infoHash });
+        } else {
+          // No active probe - enqueue new
+          enqueueProbe(infoHash, {
+            priority: demandPriority,
+            reason,
+          });
+        }
+        probePromoted++;
+      }
+    }
+
+    return { enrichmentPromoted, probePromoted };
+  }
+
+  /**
+   * Aggregate cache-intelligence diagnostics.
+   * Read-only. Uses existing stores/database APIs.
+   * Safe for operator/debug inspection only — never exposes tokens.
+   */
+  function getCacheIntelligence() {
+    const now = Date.now();
+
+    // Provider observation history aggregates (TorBox only)
+    const historyAgg = db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN state = 'cached' THEN 1 ELSE 0 END) as cached,
+        SUM(CASE WHEN state = 'uncached' THEN 1 ELSE 0 END) as uncached,
+        SUM(CASE WHEN state = 'unknown' THEN 1 ELSE 0 END) as unknown,
+        SUM(CASE WHEN state = 'error' THEN 1 ELSE 0 END) as error,
+        MAX(observed_at) as latestObservedAt
+      FROM provider_observation_events
+      WHERE provider = 'torbox' AND kind = 'authoritative'
+    `).get();
+
+    // Current TorBox state (from projection)
+    const currentAgg = db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN state = 'cached' THEN 1 ELSE 0 END) as cached,
+        SUM(CASE WHEN state = 'uncached' THEN 1 ELSE 0 END) as uncached,
+        SUM(CASE WHEN state = 'unknown' THEN 1 ELSE 0 END) as unknown,
+        SUM(CASE WHEN state = 'error' THEN 1 ELSE 0 END) as error
+      FROM provider_observation_current
+      WHERE provider = 'torbox' AND kind = 'authoritative'
+    `).get();
+
+    // Fresh vs stale current observations (using expires_at)
+    const freshCount = db.prepare(`
+      SELECT COUNT(*) as c
+      FROM provider_observation_current
+      WHERE provider = 'torbox' AND kind = 'authoritative' AND expires_at IS NOT NULL AND expires_at > ?
+    `).get(now).c;
+
+    const staleCount = db.prepare(`
+      SELECT COUNT(*) as c
+      FROM provider_observation_current
+      WHERE provider = 'torbox' AND kind = 'authoritative' AND expires_at IS NOT NULL AND expires_at <= ?
+    `).get(now).c;
+
+    // Cache hit percentage
+    const totalHistorical = historyAgg.total || 0;
+    const cachedHistorical = historyAgg.cached || 0;
+    const cacheHitPercentage = totalHistorical > 0
+      ? Math.round((cachedHistorical / totalHistorical) * 1000) / 10
+      : 0;
+
+    // Recent observations (bounded, safe fields only)
+    const recentObservations = db.prepare(`
+      SELECT info_hash, state, observed_at, source, latency_ms, expires_at, scope
+      FROM provider_observation_events
+      WHERE provider = 'torbox' AND kind = 'authoritative'
+      ORDER BY observed_at DESC, id DESC
+      LIMIT 10
+    `).all().map(row => ({
+      infoHash: row.info_hash,
+      state: row.state,
+      observedAt: row.observed_at,
+      source: row.source,
+      latencyMs: row.latency_ms,
+      freshness: row.expires_at == null ? 'unbounded' : (row.expires_at > now ? 'fresh' : 'stale'),
+    }));
+
+    // Recent failed probe work
+    const recentFailed = db.prepare(`
+      SELECT info_hash, priority, reason, status, attempt_count, last_attempt, created_at, updated_at
+      FROM cache_probe_queue
+      WHERE status = 'failed'
+      ORDER BY updated_at DESC
+      LIMIT 10
+    `).all().map(row => ({
+      infoHash: row.info_hash,
+      priority: row.priority,
+      reason: row.reason,
+      attemptCount: row.attempt_count,
+      lastAttempt: row.last_attempt,
+    }));
+
+    // Queue depth stats
+    const queueStats = getCacheProbeStats();
+
+    // Oldest pending item and highest pending priority
+    const pendingEdge = db.prepare(`
+      SELECT priority, created_at FROM cache_probe_queue
+      WHERE status = 'pending'
+      ORDER BY priority DESC, created_at ASC
+      LIMIT 1
+    `).get();
+
+    return {
+      generatedAt: now,
+      providerObservations: {
+        total: totalHistorical,
+        cached: cachedHistorical,
+        uncached: historyAgg.uncached || 0,
+        unknown: historyAgg.unknown || 0,
+        error: historyAgg.error || 0,
+        cacheHitPercentage,
+        latestObservedAt: historyAgg.latestObservedAt,
+      },
+      currentTorBoxState: {
+        total: currentAgg.total || 0,
+        cached: currentAgg.cached || 0,
+        uncached: currentAgg.uncached || 0,
+        unknown: currentAgg.unknown || 0,
+        error: currentAgg.error || 0,
+        fresh: freshCount,
+        stale: staleCount,
+      },
+      probeQueue: {
+        pending: queueStats.pending,
+        checking: queueStats.checking,
+        complete: queueStats.complete,
+        failed: queueStats.failed,
+        total: queueStats.total,
+        ...(pendingEdge ? {
+          highestPendingPriority: pendingEdge.priority,
+          oldestPendingCreatedAt: pendingEdge.created_at,
+        } : {}),
+      },
+      recentObservations,
+      recentFailedProbes: recentFailed,
+    };
+  }
+
   let closed = false;
 
   function isClosed() {
@@ -2119,6 +2558,14 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     try { getUnresolvedCandidatesStmt.finalize(); } catch {}
     try { countUnresolvedCandidatesStmt.finalize(); } catch {}
     try { checkCandidateInQueueStmt.finalize(); } catch {}
+    try { insertCacheProbeStmt.finalize(); } catch {}
+    try { checkActiveProbeStmt.finalize(); } catch {}
+    try { claimCacheProbesStmt.finalize(); } catch {}
+    try { completeCacheProbeStmt.finalize(); } catch {}
+    try { failCacheProbeStmt.finalize(); } catch {}
+    try { getCacheProbeByHashStmt.finalize(); } catch {}
+    try { promoteCacheProbeStmt.finalize(); } catch {}
+    try { getCacheProbeStatsStmt.finalize(); } catch {}
     db.close();
   }
 
@@ -2158,6 +2605,16 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     countUnresolvedCandidates,
     isCandidateInQueue,
     enqueueUnresolvedCandidates,
+    // Cache probe queue
+    enqueueProbe,
+    claimProbeBatch,
+    completeProbe,
+    failProbe,
+    getCacheProbeByHash,
+    getCacheProbeStats,
+    hasFreshTorBoxObservation,
+    // Cache-intelligence diagnostics (read-only)
+    getCacheIntelligence,
     // Media intents
     upsertMediaIntent,
     getMediaIntent,
@@ -2180,6 +2637,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getStoredKnowledge,
     // Existing selection lookup boundary
     getExistingSelection,
+    // Demand promotion
+    promoteDemand,
     // Exposed for testing/inspection
     get db() { return db; },
   };

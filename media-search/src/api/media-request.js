@@ -19,6 +19,7 @@ import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
 import { createAvailabilityChecker } from '../lib/intents/availability.js';
 import { selectBestCandidate } from '../lib/discovery/selection.js';
 import { buildPlaybackHandoff } from '../lib/discovery/playback-handoff.js';
+import { DEMAND_PRIORITY } from '../lib/discovery/cache.js';
 
 /**
  * Minimum eligible corpus candidates before live discovery is triggered.
@@ -285,6 +286,29 @@ export async function searchByMedia(cache, request) {
       }
     }
 
+    // Stage 10: Demand-driven queue promotion
+    // Promote enrichment and probe work for requested candidates
+    // Selected release gets highest priority, others get explicit-request priority
+    const demandCandidates = explainable
+      .filter(r => r.identity?.eligible !== false && r.infoHash)
+      .map(r => ({ infoHash: r.infoHash, fileIndex: r.fileIndex }));
+
+    // Promote all candidates to explicit-request priority
+    const promotion = cache.promoteDemand(
+      demandCandidates,
+      DEMAND_PRIORITY.EXPLICIT_REQUEST,
+      { reason: `media-request:${mediaId}` }
+    );
+
+    // If there's a selected release, promote it further to selected-release priority
+    if (selection.selected && selection.selected.infoHash) {
+      cache.promoteDemand(
+        [{ infoHash: selection.selected.infoHash, fileIndex: selection.selected.fileIndex }],
+        DEMAND_PRIORITY.SELECTED_RELEASE,
+        { reason: `selected-release:${mediaId}` }
+      );
+    }
+
     return {
       requestId,
       intent,
@@ -297,6 +321,10 @@ export async function searchByMedia(cache, request) {
       availability: availabilityStats,
       selection,
       handoff,
+      demandPromotion: {
+        enrichmentPromoted: promotion.enrichmentPromoted,
+        probePromoted: promotion.probePromoted,
+      },
     };
   }
 
@@ -623,6 +651,28 @@ export async function searchByMedia(cache, request) {
     }
   }
 
+  // Stage 9: Demand-driven queue promotion
+  // Promote enrichment and probe work for requested candidates
+  const demandCandidates = explainable
+    .filter(r => r.identity?.eligible !== false && r.infoHash)
+    .map(r => ({ infoHash: r.infoHash, fileIndex: r.fileIndex }));
+
+  // Promote all candidates to explicit-request priority
+  const promotion = cache.promoteDemand(
+    demandCandidates,
+    DEMAND_PRIORITY.EXPLICIT_REQUEST,
+    { reason: `media-request:${mediaId}` }
+  );
+
+  // If there's a selected release, promote it further to selected-release priority
+  if (selection.selected && selection.selected.infoHash) {
+    cache.promoteDemand(
+      [{ infoHash: selection.selected.infoHash, fileIndex: selection.selected.fileIndex }],
+      DEMAND_PRIORITY.SELECTED_RELEASE,
+      { reason: `selected-release:${mediaId}` }
+    );
+  }
+
   return {
     requestId,
     intent,
@@ -639,6 +689,10 @@ export async function searchByMedia(cache, request) {
     availability: availabilityStats,
     selection,
     handoff,
+    demandPromotion: {
+      enrichmentPromoted: promotion.enrichmentPromoted,
+      probePromoted: promotion.probePromoted,
+    },
   };
 }
 

@@ -143,7 +143,6 @@ export async function getSystemHealth(options = {}) {
 
   return {
     status: failed.length > 0 ? 'unhealthy' : warnings.length > 0 ? 'degraded' : 'healthy',
-    container: CONTAINER,
     checks,
     timestamp: new Date().toISOString(),
   };
@@ -429,6 +428,5 @@ function checkContainerHealth() {
     name: 'Runtime',
     status: 'ok',
     detail: CONTAINER ? 'container (node:alpine, no bash)' : 'host (bash available)',
-    container: CONTAINER,
   };
 }

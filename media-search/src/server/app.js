@@ -746,6 +746,11 @@ export function createRequestHandler(dependencies = {}) {
         }
         return sendJson(response, 200, diagnostics);
       }
+      // Cache-intelligence diagnostics — read-only operator visibility
+      // into provider observations, TorBox current state, and probe queue.
+      if (request.method === 'GET' && url.pathname === '/api/debug/cache-intelligence') {
+        return sendJson(response, 200, searchCache.getCacheIntelligence());
+      }
       const debugMatch = request.method === 'GET' && url.pathname.match(/^\/api\/debug\/request\/([0-9a-f-]{36})$/i);
       if (debugMatch) {
         const debug = await getRequestDebug(debugMatch[1], { env });
@@ -1386,27 +1391,14 @@ export function createRequestHandler(dependencies = {}) {
         return sendJson(response, 200, result);
       }
       if (request.method === 'GET' && url.pathname === '/api/operator/requests/inspect') {
-        const result = await inspectRequests({
-          requestsRoot: operatorRoot,
-          controlPlaneStore,
-          now: clock,
-        });
+        const result = await inspectRequests();
         return sendJson(response, 200, result);
       }
       const inspectMatch = request.method === 'GET'
         && url.pathname.match(/^\/api\/operator\/requests\/([0-9a-f-]{36})\/inspect$/i);
       if (inspectMatch) {
-        const reqId = inspectMatch[1];
-        const result = await inspectRequests({
-          requestsRoot: operatorRoot,
-          controlPlaneStore,
-          now: clock,
-        });
-        const request = result.requests.find(r => r.requestId === reqId);
-        if (!request) {
-          return sendJson(response, 404, { error: 'Request not found' });
-        }
-        return sendJson(response, 200, { request });
+        const result = await inspectRequests();
+        return sendJson(response, 200, result);
       }
       if (request.method === 'POST' && url.pathname === '/api/operator/requests/delete-orphan') {
         const body = await readBody(request);

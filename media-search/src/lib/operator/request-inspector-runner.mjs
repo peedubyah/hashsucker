@@ -1,20 +1,15 @@
 /**
  * Request inspector runner — invoked by the diagnostic system.
- * Outputs JSON with requests, recommendations, and summary.
+ *
+ * Filesystem-based inspection is unavailable in container-native
+ * environments. The endpoint now returns an unsupported structured
+ * result directing operators to the container-native alternatives.
  */
 
-import path from 'node:path';
 import { inspectRequests } from './request-inspector.js';
 
-const REQUESTS_ROOT = process.env.REQUESTS_ROOT || '/requests';
-
 async function main() {
-  const result = await inspectRequests({
-    requestsRoot: REQUESTS_ROOT,
-    now: () => Date.now(),
-  });
-
-  // Output as JSON for the diagnostic system
+  const result = await inspectRequests();
   console.log(JSON.stringify(result, null, 2));
 }
 

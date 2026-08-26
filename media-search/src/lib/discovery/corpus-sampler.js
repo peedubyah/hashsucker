@@ -78,7 +78,7 @@ export function sampleRandomRelease(options = {}) {
  */
 function getMediaIdentity(db, infoHash, fileIndexKey) {
   const row = db.prepare(`
-    SELECT media_id, confidence, resolution_state, evidence
+    SELECT media_id, confidence, evidence
     FROM candidate_media
     WHERE info_hash = ?
       AND file_index_key = ?
@@ -93,7 +93,7 @@ function getMediaIdentity(db, infoHash, fileIndexKey) {
   return {
     mediaId: row.media_id,
     confidence: row.confidence,
-    resolutionState: row.resolution_state || 'unresolved',
+    resolutionState: 'unresolved',
     evidence: row.evidence ? JSON.parse(row.evidence) : [],
   };
 }
