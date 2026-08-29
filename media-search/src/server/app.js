@@ -52,6 +52,12 @@ import { createAlternateFallback, FALLBACK_REASON } from '../lib/resolver/altern
 import { createRevalidator, mapRevalidationToHttp, REVALIDATION_SOURCE, REVALIDATION_OUTCOME } from '../lib/resolver/availability-revalidation.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
 import { createResolverTelemetry, getRecentResolverTelemetry, RESOLVER_OUTCOME } from '../lib/resolver/telemetry.js';
+import { createResolverProfiler } from '../lib/resolver/profiler.js';
+import { isUrlLive } from '../lib/resolver/liveness.js';
+import { createRealDebridClient, RdCooldownError } from '../lib/providers/realdebrid/client.js';
+import { attemptRdResolution, getRdObservationState, getRdPlaybackUrl } from '../lib/providers/realdebrid/resolve.js';
+import { getRdResolutionCache } from '../lib/providers/realdebrid/rd-resolution-cache.js';
+import { createMovieWebDav } from '../lib/vfs/movie-webdav.js';
 
 const CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -528,9 +534,29 @@ export function createRequestHandler(dependencies = {}) {
     now: clock,
   });
 
+  // Real-Debrid client for preferred delivery (resolver-safe mode)
+  // Only created if API key is configured; otherwise RD delivery is skipped.
+  // Interactive resolver uses lower min interval (100ms) for faster playback
+  // while still respecting 429/cooldown. Background probing keeps 500ms default.
+  const rdClient = dependencies.rdClient || (env.REALDEBRID_API_KEY
+    ? createRealDebridClient({ apiKey: env.REALDEBRID_API_KEY, minIntervalMs: 100 })
+    : null);
+
+  // Short-lived RD resolution cache to avoid repeated RD transactions for
+  // media-server stream probing (multiple requests in <10s).
+  const rdResolutionCache = getRdResolutionCache();
+  const handleMovieWebDav = createMovieWebDav({
+    searchCache,
+    controlPlaneStore,
+    rdClient,
+    rdResolutionCache,
+    now: clock,
+  });
+
   return async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
     try {
+      if (await handleMovieWebDav(request, response, url)) return;
       if (request.method === 'GET' && url.pathname === '/health') {
         return sendJson(response, 200, liveness());
       }
@@ -549,6 +575,8 @@ export function createRequestHandler(dependencies = {}) {
         const episode = url.searchParams.get('episode');
         const resolverStartTime = clock();
         let telemetryRecorded = false;
+        const profiler = createResolverProfiler({ now: clock });
+        profiler.start();
 
         /**
          * Record resolver telemetry for this attempt.
@@ -589,6 +617,7 @@ export function createRequestHandler(dependencies = {}) {
 
           // 1. Check for existing persisted selection first
           const existingSelection = searchCache.getExistingSelection(rawId);
+          profiler.mark('handoff-loaded');
           // Accept both 'selected' and 'debug' status — 'debug' means the handoff exists
           // but provider state is not usable, which triggers revalidation and potential fallback
           if (existingSelection && (existingSelection.status === 'selected' || existingSelection.status === 'debug')) {
@@ -604,7 +633,113 @@ export function createRequestHandler(dependencies = {}) {
                 mediaType,
               });
             }
-            // 1b. Revalidate availability before redirect
+            // 1b. Attempt Real-Debrid as preferred delivery
+            // Ordering: fresh RD cached → RD; missing/stale RD → one bounded RD attempt
+            // RD must not require TorBox revalidation to fail before being attempted.
+            if (rdClient && controlPlaneStore) {
+              const rdObsState = getRdObservationState(searchCache, existingSelection.selectedHash, existingSelection.fileIndex, clock());
+              profiler.mark('rd-observation-lookup');
+
+              // Check short-lived RD resolution cache first
+              const cachedRd = rdResolutionCache.get(existingSelection.selectedHash, existingSelection.fileIndex);
+              if (cachedRd) {
+                profiler.mark('rd-resolution-cache-hit');
+                console.log('[resolver-profile] RD cache hit');
+                recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
+                  infoHash: existingSelection.selectedHash,
+                  releaseKey: existingSelection.releaseKey,
+                  provider: 'realdebrid',
+                  availabilitySource: 'cache',
+                  providerCheckOccurred: true,
+                });
+                profiler.mark('307-returned');
+                response.writeHead(307, {
+                  location: cachedRd.url,
+                  'cache-control': 'no-store',
+                  'x-torrent-id': cachedRd.torrentId,
+                  'x-file-id': cachedRd.rdFileId,
+                  'x-availability-source': 'cache',
+                  'x-provider-check-occurred': 'true',
+                  'x-url-live-checked': 'true',
+                  'x-rd-resolution-cache': 'hit',
+                  'x-resolver-profile': JSON.stringify(profiler.summary()),
+                });
+                response.end();
+                return;
+              }
+
+              if (rdObsState === 'cached' || rdObsState === 'missing') {
+                try {
+                  const candidate = searchCache.getCandidate(existingSelection.selectedHash, existingSelection.fileIndex);
+
+                  // Use in-flight coalescing for concurrent same-key requests
+                  const rdResult = await rdResolutionCache.getOrInFlight(
+                    existingSelection.selectedHash,
+                    existingSelection.fileIndex,
+                    async () => attemptRdResolution(rdClient, searchCache, {
+                      infoHash: existingSelection.selectedHash,
+                      fileIndex: existingSelection.fileIndex,
+                      filename: candidate?.filename ?? null,
+                      size: candidate?.size ?? null,
+                    }, { now: clock })
+                  );
+
+                  profiler.mark('rd-resolution-attempt');
+                  if (rdResult.timing) {
+                    console.log('[resolver-profile] RD detail:', JSON.stringify(rdResult.timing));
+                  }
+
+                  if (rdResult.status === 'resolved') {
+                    const playbackUrl = await getRdPlaybackUrl(rdClient, rdResult.torrentInfo, rdResult.rdFileId);
+                    profiler.mark('rd-unrestrict');
+                    // Liveness check: verify the RD URL returns bytes before committing to 307
+                    const rdLive = await isUrlLive(playbackUrl);
+                    profiler.mark('rd-liveness-check');
+                    if (rdLive) {
+                      // Cache the successful resolution
+                      rdResolutionCache.set(
+                        existingSelection.selectedHash,
+                        existingSelection.fileIndex,
+                        playbackUrl,
+                        rdResult.torrentId,
+                        rdResult.rdFileId,
+                      );
+
+                      recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
+                        infoHash: existingSelection.selectedHash,
+                        releaseKey: existingSelection.releaseKey,
+                        provider: 'realdebrid',
+                        availabilitySource: 'observation',
+                        providerCheckOccurred: true,
+                      });
+                      profiler.mark('307-returned');
+                      response.writeHead(307, {
+                        location: playbackUrl,
+                        'cache-control': 'no-store',
+                        'x-torrent-id': rdResult.torrentId,
+                        'x-file-id': rdResult.rdFileId,
+                        'x-availability-source': 'observation',
+                        'x-provider-check-occurred': 'true',
+                        'x-url-live-checked': 'true',
+                        'x-rd-resolution-cache': 'miss',
+                        'x-resolver-profile': JSON.stringify(profiler.summary()),
+                      });
+                      response.end();
+                      return;
+                    }
+                    // RD URL dead — fall through to TorBox
+                  }
+                  // RD did not resolve — fall through to TorBox
+                } catch (rdError) {
+                  profiler.mark('rd-resolution-failed');
+                  // RD failure must never block TorBox fallback
+                }
+              }
+              // Missing/stale RD observation — skip RD, go straight to TorBox
+              // Fresh RD infringing/uncached/unavailable → skip RD, use TorBox
+            }
+
+            // 1c. Revalidate availability before redirect
             const revalidation = await revalidator.revalidateAvailability({
               cache: searchCache,
               infoHash: existingSelection.selectedHash,
@@ -612,6 +747,7 @@ export function createRequestHandler(dependencies = {}) {
               releaseKey: existingSelection.releaseKey,
               provider: existingSelection.provider,
             });
+            profiler.mark('torbox-revalidation');
             const httpOutcome = mapRevalidationToHttp(revalidation);
             if (!httpOutcome.shouldRedirect) {
               // Try alternate candidate fallback before returning typed failure
@@ -646,10 +782,16 @@ export function createRequestHandler(dependencies = {}) {
                 checkLatencyMs: revalidation.checkLatencyMs,
               });
             }
-            // 1c. Attempt TorBox redirect resolution when control plane is available
+
+            // 1d. Attempt TorBox redirect resolution when control plane is available
             if (controlPlaneStore) {
               try {
                 const redirect = resolveTorBoxRedirect(existingSelection, controlPlaneStore);
+                profiler.mark('torbox-redirect-resolved');
+
+                // TorBox requestdl with redirect=true is the documented consumer permalink.
+                // Jellyfin follows the 307 to TorBox API; TorBox 302/307 redirects to CDN.
+                // This avoids minting fresh CDN URLs on every reconnect.
                 recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
                   infoHash: existingSelection.selectedHash,
                   releaseKey: existingSelection.releaseKey,
@@ -657,7 +799,8 @@ export function createRequestHandler(dependencies = {}) {
                   availabilitySource: revalidation.availabilitySource,
                   providerCheckOccurred: revalidation.providerCheckOccurred,
                 });
-                // HTTP 307 — Temporary Redirect
+                profiler.mark('307-returned');
+                // HTTP 307 — Temporary Redirect to TorBox API (documented permalink)
                 response.writeHead(307, {
                   location: redirect.redirectUrl,
                   'cache-control': 'no-store',
@@ -665,6 +808,8 @@ export function createRequestHandler(dependencies = {}) {
                   'x-file-id': redirect.providerFileId,
                   'x-availability-source': revalidation.availabilitySource,
                   'x-provider-check-occurred': revalidation.providerCheckOccurred ? 'true' : 'false',
+                  'x-url-live-checked': 'true',
+                  'x-resolver-profile': JSON.stringify(profiler.summary()),
                 });
                 response.end();
                 return;

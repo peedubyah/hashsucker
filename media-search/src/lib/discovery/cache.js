@@ -306,6 +306,22 @@ CREATE TABLE IF NOT EXISTS playback_handoffs (
 CREATE INDEX IF NOT EXISTS idx_playback_handoffs_request ON playback_handoffs(request_id);
 CREATE INDEX IF NOT EXISTS idx_playback_handoffs_media ON playback_handoffs(media_id, created_at);
 
+-- Stable, movies-only virtual filesystem metadata. Provider playback URLs are
+-- deliberately excluded: backing URLs remain short-lived process state.
+CREATE TABLE IF NOT EXISTS vfs_movie_entries (
+  media_id TEXT PRIMARY KEY,
+  release_key TEXT NOT NULL,
+  info_hash TEXT NOT NULL,
+  file_index INTEGER,
+  canonical_path TEXT NOT NULL UNIQUE,
+  size INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vfs_movie_entries_release
+ON vfs_movie_entries(release_key);
+
 -- FTS5 full-text search index over release_attributes
 -- Stores its own copy of searchable fields (simpler than external content)
 CREATE VIRTUAL TABLE IF NOT EXISTS release_search USING fts5(
@@ -756,6 +772,14 @@ function migrateCacheProbeQueue(db) {
 export function createDiscoveryCache({ dbPath = ':memory:', database = null } = {}) {
   const db = database || new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
+
+  // Ensure schema_migrations exists BEFORE any migration queries it
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      name TEXT PRIMARY KEY,
+      applied_at INTEGER NOT NULL
+    );
+  `);
 
   // Run migrations that need to alter tables before SCHEMA is applied
   migrateIdentityEnrichmentQueuePriority(db);
@@ -1636,9 +1660,63 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     SELECT * FROM playback_handoffs WHERE id = @id;
   `;
 
+  const GET_PLAYBACK_HANDOFF_BY_MEDIA = `
+    SELECT * FROM playback_handoffs
+    WHERE media_id = @media_id
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1;
+  `;
+
   const insertPlaybackHandoffStmt = db.prepare(INSERT_PLAYBACK_HANDOFF);
   const getPlaybackHandoffByRequestStmt = db.prepare(GET_PLAYBACK_HANDOFF_BY_REQUEST);
   const getPlaybackHandoffByIdStmt = db.prepare(GET_PLAYBACK_HANDOFF_BY_ID);
+  const getPlaybackHandoffByMediaStmt = db.prepare(GET_PLAYBACK_HANDOFF_BY_MEDIA);
+  const listMoviePlaybackHandoffsStmt = db.prepare(`
+    SELECT h.*
+    FROM playback_handoffs h
+    WHERE h.media_type = 'movie'
+      AND h.release_key = h.info_hash || ':' || COALESCE(CAST(h.file_index AS TEXT), 'torrent')
+      AND h.id = (
+        SELECT latest.id
+        FROM playback_handoffs latest
+        WHERE latest.media_id = h.media_id
+          AND latest.media_type = 'movie'
+          AND latest.release_key = latest.info_hash || ':' || COALESCE(CAST(latest.file_index AS TEXT), 'torrent')
+        ORDER BY latest.created_at DESC, latest.id DESC
+        LIMIT 1
+      )
+    ORDER BY h.media_id
+  `);
+  const getPlaybackHandoffByReleaseStmt = db.prepare(`
+    SELECT * FROM playback_handoffs
+    WHERE media_id = @media_id
+      AND release_key = @release_key
+      AND media_type = 'movie'
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  `);
+  const getVfsMovieEntryStmt = db.prepare(`
+    SELECT * FROM vfs_movie_entries WHERE media_id = @media_id
+  `);
+  const listVfsMovieEntriesStmt = db.prepare(`
+    SELECT * FROM vfs_movie_entries ORDER BY canonical_path
+  `);
+  const insertVfsMovieEntryStmt = db.prepare(`
+    INSERT INTO vfs_movie_entries (
+      media_id, release_key, info_hash, file_index, canonical_path,
+      size, created_at, updated_at
+    ) VALUES (
+      @media_id, @release_key, @info_hash, @file_index, @canonical_path,
+      @size, @created_at, @updated_at
+    )
+  `);
+  const updateVfsMovieEntrySizeStmt = db.prepare(`
+    UPDATE vfs_movie_entries
+    SET size = @size, updated_at = @updated_at
+    WHERE media_id = @media_id
+      AND release_key = @release_key
+      AND size IS NULL
+  `);
 
   function persistPlaybackHandoff(handoff) {
     const info = insertPlaybackHandoffStmt.run({
@@ -1667,6 +1745,67 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
   function getPlaybackHandoffById(id) {
     return getPlaybackHandoffByIdStmt.get({ id });
+  }
+
+  function getPlaybackHandoffByMediaId(mediaId) {
+    return rowToPlaybackHandoff(getPlaybackHandoffByMediaStmt.get({ media_id: mediaId }));
+  }
+
+  function listMoviePlaybackHandoffs() {
+    return listMoviePlaybackHandoffsStmt.all().map(rowToPlaybackHandoff);
+  }
+
+  function getPlaybackHandoffByReleaseKey(mediaId, releaseKey) {
+    return rowToPlaybackHandoff(getPlaybackHandoffByReleaseStmt.get({
+      media_id: mediaId,
+      release_key: releaseKey,
+    }));
+  }
+
+  function getVfsMovieEntry(mediaId) {
+    return rowToVfsMovieEntry(getVfsMovieEntryStmt.get({ media_id: mediaId }));
+  }
+
+  function listVfsMovieEntries() {
+    return listVfsMovieEntriesStmt.all().map(rowToVfsMovieEntry);
+  }
+
+  function createVfsMovieEntry(entry) {
+    insertVfsMovieEntryStmt.run({
+      media_id: entry.mediaId,
+      release_key: entry.releaseKey,
+      info_hash: entry.infoHash,
+      file_index: entry.fileIndex ?? null,
+      canonical_path: entry.canonicalPath,
+      size: entry.size ?? null,
+      created_at: entry.createdAt,
+      updated_at: entry.updatedAt,
+    });
+    return getVfsMovieEntry(entry.mediaId);
+  }
+
+  function setVfsMovieEntrySize(mediaId, releaseKey, size, updatedAt) {
+    const info = updateVfsMovieEntrySizeStmt.run({
+      media_id: mediaId,
+      release_key: releaseKey,
+      size,
+      updated_at: updatedAt,
+    });
+    return info.changes === 1 ? getVfsMovieEntry(mediaId) : null;
+  }
+
+  function rowToVfsMovieEntry(row) {
+    if (!row) return null;
+    return {
+      mediaId: row.media_id,
+      releaseKey: row.release_key,
+      infoHash: row.info_hash,
+      fileIndex: row.file_index,
+      canonicalPath: row.canonical_path,
+      size: row.size,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
   }
 
   function rowToPlaybackHandoff(row) {
@@ -1983,14 +2122,16 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     if (!handoff) return null;
 
     // Check provider availability for the selected hash
+    // Only consider observations from the selected provider (not all providers)
     const observations = getProviderObservations(handoff.info_hash, handoff.file_index, {
       includeStale: true,
     });
+    const providerObservations = observations.filter(o => o.provider === handoff.provider);
 
-    // Find the most recent observation to determine current state
+    // Find the most recent observation from the selected provider
     let providerState = 'unknown';
-    if (observations.length > 0) {
-      const latest = observations.reduce((a,b) => (b.observedAt > a.observedAt ? b : a));
+    if (providerObservations.length > 0) {
+      const latest = providerObservations.reduce((a,b) => (b.observedAt > a.observedAt ? b : a));
       providerState = latest.state || 'unknown';
     }
 
@@ -2014,11 +2155,13 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     return {
       status: 'selected',
       mediaId,
+      mediaType: handoff.media_type,
       releaseKey: handoff.release_key,
       selectedHash: handoff.info_hash,
       fileIndex: handoff.file_index,
       provider: handoff.provider,
       providerState,
+      filename: handoff.filename,
       reason: handoff.selection_reason || 'existing persisted selection',
     };
   }
@@ -2632,6 +2775,13 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     persistPlaybackHandoff,
     getPlaybackHandoffByRequestId,
     getPlaybackHandoffById,
+    getPlaybackHandoffByMediaId,
+    listMoviePlaybackHandoffs,
+    getPlaybackHandoffByReleaseKey,
+    getVfsMovieEntry,
+    listVfsMovieEntries,
+    createVfsMovieEntry,
+    setVfsMovieEntrySize,
     rowToPlaybackHandoff,
     // Stored knowledge lookup for resolver debug
     getStoredKnowledge,

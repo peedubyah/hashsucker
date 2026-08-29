@@ -102,11 +102,14 @@ export function resolveTorBoxRedirect(selection, controlPlane, options = {}) {
 
   const providerFileId = mapping.providerFileId;
 
-  // Step 3: Build the stable TorBox requestdl permalink
+  // Step 3: Build the TorBox requestdl permalink with redirect=true
+  // TorBox recommends redirect=true for consumer permalinks.
+  // This avoids minting fresh CDN URLs on every reconnect.
   const params = new URLSearchParams({
     token: apiKey,
     torrent_id: torrentId,
     file_id: providerFileId,
+    redirect: 'true',
   });
   const permalink = `${apiBase}/torrents/requestdl?${params.toString()}`;
 

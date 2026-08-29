@@ -11,6 +11,7 @@ export const PROVIDER_ERROR_CATEGORIES = Object.freeze([
   'temporarily-unavailable',
   'unsupported',
   'unsafe-operation',
+  'infringing',
   'unknown',
 ]);
 
