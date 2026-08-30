@@ -19,7 +19,8 @@
     "media-request": "node src/scripts/media-request.js",
     "media-request-batch": "node src/scripts/media-request-batch.js",
     "intents": "node src/scripts/intents.js",
-    "availability": "node src/scripts/availability.js"
+    "availability": "node src/scripts/availability.js",
+    "realdebrid": "node src/scripts/realdebrid.js"
   },
   "allowScripts": {
     "better-sqlite3@11.10.0": true
