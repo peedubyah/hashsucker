@@ -267,15 +267,15 @@ test('registry: findBySource returns undefined for unknown', async () => {
 });
 
 test('registry: findBySource respects supports() method', async () => {
-  class PlexProvider extends MediaIntentProvider {
-    supports(source) { return source === 'plex' || source === 'plex_watchlist'; }
+  class MultiSourceProvider extends MediaIntentProvider {
+    supports(source) { return source === 'alpha' || source === 'beta'; }
   }
 
   const registry = new MediaIntentProviderRegistry();
-  await registry.register(new PlexProvider('plex', 'watchlist'));
+  await registry.register(new MultiSourceProvider('alpha', 'beta'));
 
-  assert.ok(registry.findBySource('plex'), 'Should match plex');
-  assert.ok(registry.findBySource('plex_watchlist'), 'Should match plex_watchlist');
+  assert.ok(registry.findBySource('alpha'), 'Should match alpha');
+  assert.ok(registry.findBySource('beta'), 'Should match beta');
   assert.equal(registry.findBySource('cli'), undefined, 'Should not match cli');
 });
 
@@ -491,7 +491,7 @@ test('cli-provider: supports returns true for cli', () => {
   const provider = new CliIntentProvider();
   assert.equal(provider.supports('cli'), true);
   assert.equal(provider.supports('manual'), true);
-  assert.equal(provider.supports('plex'), false);
+  assert.equal(provider.supports('alpha'), false);
 });
 
 // =============================================================================

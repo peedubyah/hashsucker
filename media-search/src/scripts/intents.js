@@ -15,7 +15,6 @@ import { createDiscoveryCache } from '../lib/discovery/cache.js';
 import {
   MediaIntentProviderRegistry,
   CliIntentProvider,
-  PlexIntentProvider,
   MediaIntentIngestionService,
   MediaIntentProcessor,
   getIntentStatus,
@@ -96,7 +95,7 @@ Commands:
 
 Options:
   --source <name>       Provider source to fetch from (for fetch command)
-  --provider <name>     Provider to use (cli, plex) - for sync command
+  --provider <name>     Provider to use (cli) - for sync command
   --intents <json>      JSON array of intents (for fetch command)
   --limit <N>           Max intents to process (for process command)
   --dry-run             Don't persist results (for process command)
@@ -110,7 +109,6 @@ Examples:
   npm run intents -- stats
   npm run intents -- fetch --source cli --intents '[{"mediaId":"tt0182576","mediaType":"series","season":5,"episode":12}]'
   npm run intents -- sync --provider cli --intents '[{"mediaId":"tt0182576","mediaType":"series","season":5,"episode":12}]'
-  npm run intents -- sync --provider plex
   npm run intents -- process --limit 10
   npm run intents -- process --dry-run
   npm run intents -- status
@@ -459,20 +457,7 @@ async function main() {
     await registry.register(cliProvider, { cache });
 
     // Register Plex provider if configured or requested
-    const plexUrl = process.env.PLEX_URL;
-    const plexToken = process.env.PLEX_TOKEN;
-    if (plexUrl && plexToken) {
-      const plexProvider = new PlexIntentProvider({
-        url: plexUrl,
-        token: plexToken,
-        username: process.env.PLEX_USERNAME,
-        enabled: true,
-      });
-      await registry.register(plexProvider, { cache });
-   }
-
-    // Execute command
-    switch (args.command) {
+    contch (args.command) {
       case 'list':
         await cmdList(registry);
         break;
