@@ -42,13 +42,45 @@ const DEFAULT_LIVE_DISCOVERY_THRESHOLD = 1;
  *
  * @param {Object} cache - Discovery cache instance
  * @param {string} mediaId - Media identifier
+ * @param {string} mediaType - 'movie' or 'episode'
+ * @param {number|null} season - Season number (episodes only)
+ * @param {number|null} episode - Episode number (episodes only)
  * @returns {Promise<{ strmPath: string|null, handoff: Object|null }>} Result
  */
-async function ensureStrmForExistingHandoff(cache, mediaId) {
-  // Look up existing handoff (if any)
-  const handoff = cache.getExistingSelection(mediaId);
-  if (!handoff || handoff.status !== 'selected') {
-    return { strmPath: null, handoff: null };
+async function ensureStrmForExistingHandoff(cache, mediaId, mediaType, season = null, episode = null) {
+  // Look up existing handoff (if any). Movies key by mediaId only; episodes
+  // must use exact season/episode identity to avoid ambiguity when a series
+  // has multiple episode handoffs.
+  let handoff;
+  if (mediaType === 'episode') {
+    handoff = cache.getTvPlaybackHandoff(mediaId, season, episode);
+    if (!handoff) {
+      return { strmPath: null, handoff: null };
+    }
+    // Normalize rowToPlaybackHandoff shape to the selection shape expected below
+    handoff = {
+      status: 'selected',
+      requestId: handoff.requestId,
+      mediaId: handoff.mediaId,
+      mediaType: handoff.mediaType,
+      season: handoff.season ?? null,
+      episode: handoff.episode ?? null,
+      releaseKey: handoff.releaseKey,
+      selectedHash: handoff.infoHash,
+      fileIndex: handoff.fileIndex,
+      filename: handoff.filename,
+      provider: handoff.provider,
+      providerState: handoff.providerState,
+      identityTier: handoff.identityTier,
+      resolutionState: handoff.resolutionState,
+      reason: handoff.selectionReason,
+      selectedAt: handoff.selectedAt,
+    };
+  } else {
+    handoff = cache.getExistingSelection(mediaId);
+    if (!handoff || handoff.status !== 'selected') {
+      return { strmPath: null, handoff: null };
+    }
   }
 
   // Transform to camelCase shape expected by publishStrm
@@ -225,7 +257,7 @@ export async function searchByMedia(cache, request) {
     if (liveCandidates.length === 0) {
       // No candidates from corpus or live discovery — but an existing durable
       // handoff may still need its STRM materialized (idempotence invariant).
-      const { strmPath } = await ensureStrmForExistingHandoff(cache, mediaId);
+      const { strmPath } = await ensureStrmForExistingHandoff(cache, mediaId, mediaType, season, episode);
       return {
         requestId,
         intent,
@@ -427,7 +459,7 @@ export async function searchByMedia(cache, request) {
   if (candidates.length === 0) {
     // No corpus candidates — but an existing durable handoff may still need
     // its STRM materialized (idempotence invariant).
-    const { strmPath } = await ensureStrmForExistingHandoff(cache, mediaId);
+    const { strmPath } = await ensureStrmForExistingHandoff(cache, mediaId, mediaType, season, episode);
     return {
       requestId: null,
       intent,
