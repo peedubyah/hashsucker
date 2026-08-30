@@ -19,6 +19,8 @@ import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
 import { createAvailabilityChecker } from '../lib/intents/availability.js';
 import { selectBestCandidate } from '../lib/discovery/selection.js';
 import { buildPlaybackHandoff } from '../lib/discovery/playback-handoff.js';
+import { publishStrm } from '../lib/requests/strm-publisher.js';
+import { notifyJellyfin } from '../lib/requests/jellyfin-notifier.js';
 import { DEMAND_PRIORITY } from '../lib/discovery/cache.js';
 
 /**
@@ -26,6 +28,62 @@ import { DEMAND_PRIORITY } from '../lib/discovery/cache.js';
  * Configurable via request.liveDiscoveryThreshold.
  */
 const DEFAULT_LIVE_DISCOVERY_THRESHOLD = 1;
+
+/**
+ * Ensure the canonical STRM is materialized for an existing durable handoff.
+ *
+ * Idempotence invariant:
+ *   handoff exists + STRM missing → recreate STRM
+ *   handoff exists + STRM present → no-op
+ *
+ * This is called when no new candidates are produced (corpus empty, live discovery
+ * empty) but a durable handoff already exists from prior work. The STRM may have
+ * been deleted, or the handoff may predate STRM publisher integration.
+ *
+ * @param {Object} cache - Discovery cache instance
+ * @param {string} mediaId - Media identifier
+ * @returns {Promise<{ strmPath: string|null, handoff: Object|null }>} Result
+ */
+async function ensureStrmForExistingHandoff(cache, mediaId) {
+  // Look up existing handoff (if any)
+  const handoff = cache.getExistingSelection(mediaId);
+  if (!handoff || handoff.status !== 'selected') {
+    return { strmPath: null, handoff: null };
+  }
+
+  // Transform to camelCase shape expected by publishStrm
+  const handoffObj = {
+    requestId: handoff.requestId,
+    mediaId: handoff.mediaId,
+    mediaType: handoff.mediaType,
+    season: handoff.season ?? null,
+    episode: handoff.episode ?? null,
+    releaseKey: handoff.releaseKey,
+    infoHash: handoff.selectedHash,
+    fileIndex: handoff.fileIndex,
+    filename: handoff.filename,
+    provider: handoff.provider,
+    providerState: handoff.providerState,
+    identityTier: handoff.identityTier,
+    resolutionState: handoff.resolutionState,
+    selectionReason: handoff.reason,
+    selectedAt: handoff.selectedAt,
+  };
+
+  // Attempt STRM publication (idempotent - returns existing if present)
+  const strmResult = await publishStrm({ handoff: handoffObj });
+
+  if (strmResult.published && strmResult.path) {
+    // Notify Jellyfin (non-blocking)
+    notifyJellyfin({
+      strmPath: strmResult.path,
+      mediaId: handoff.mediaId,
+      mediaType: handoff.mediaType,
+    }).catch(() => {});
+  }
+
+  return { strmPath: strmResult.path || null, handoff: handoffObj };
+}
 
 /**
  * Get availability info for a candidate from stored observations.
@@ -165,6 +223,9 @@ export async function searchByMedia(cache, request) {
     }
 
     if (liveCandidates.length === 0) {
+      // No candidates from corpus or live discovery — but an existing durable
+      // handoff may still need its STRM materialized (idempotence invariant).
+      const { strmPath } = await ensureStrmForExistingHandoff(cache, mediaId);
       return {
         requestId,
         intent,
@@ -176,6 +237,7 @@ export async function searchByMedia(cache, request) {
         discovery: { liveDiscoveryTriggered, liveCandidates: 0, liveEligible: 0 },
         availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
         selection: { selected: null, reason: 'no candidates', alternates: [] },
+        strmPath,
       };
     }
 
@@ -280,6 +342,40 @@ export async function searchByMedia(cache, request) {
       if (handoff) {
         try {
           cache.persistPlaybackHandoff(handoff);
+
+          // After durable handoff, immediately publish .strm
+          // Idempotent: safe to call for repeated requests
+          try {
+            const strmResult = await publishStrm({
+              handoff,
+              selection,
+            });
+            if (strmResult.published) {
+              // Attach STRM path to handoff for downstream telemetry
+              handoff.strmPath = strmResult.path;
+            }
+
+            // Notify Jellyfin of the new media (non-blocking)
+            // Failure does NOT roll back the request/handoff/STRM
+            if (strmResult.path) {
+              notifyJellyfin({
+                strmPath: strmResult.path,
+                mediaId: handoff.mediaId,
+                mediaType: handoff.mediaType,
+              }).then((jfResult) => {
+                if (jfResult.notified) {
+                  console.log(`[Jellyfin] Notified via ${jfResult.method}: ${handoff.mediaId}`);
+                } else if (jfResult.error) {
+                  console.error(`[Jellyfin] Will be discovered on next scan: ${jfResult.error}`);
+                }
+              }).catch(() => {
+                // Jellyfin notification failure is non-fatal
+              });
+            }
+          } catch (strmError) {
+            // STRM publication failure must not fail the request
+            console.error(`STRM publication failed: ${strmError.message}`);
+          }
         } catch (error) {
           console.error(`Handoff persistence failed: ${error.message}`);
         }
@@ -329,6 +425,9 @@ export async function searchByMedia(cache, request) {
   }
 
   if (candidates.length === 0) {
+    // No corpus candidates — but an existing durable handoff may still need
+    // its STRM materialized (idempotence invariant).
+    const { strmPath } = await ensureStrmForExistingHandoff(cache, mediaId);
     return {
       requestId: null,
       intent,
@@ -340,6 +439,7 @@ export async function searchByMedia(cache, request) {
       discovery: { liveDiscoveryTriggered: false, liveCandidates: 0, liveEligible: 0 },
       availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
       selection: { selected: null, reason: 'no candidates', alternates: [] },
+      strmPath,
     };
   }
 

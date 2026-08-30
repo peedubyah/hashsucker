@@ -8,7 +8,6 @@ import {
 } from '../control-plane/canonical-path.js';
 import { attemptRdResolution, getRdPlaybackUrl } from '../providers/realdebrid/resolve.js';
 import { isUrlLive } from '../resolver/liveness.js';
-import { resolveTorBoxRedirect } from '../resolver/torbox-redirect.js';
 
 const DAV_ROOT = '/vfs';
 const MOVIES_PATH = `${DAV_ROOT}/Movies`;
@@ -260,17 +259,7 @@ function getEntries(tree, pathname, depth) {
   return depth === '0' ? [entry] : [entry, ...(tree.children.get(pathname) || [])];
 }
 
-function handoffToTorBoxSelection(handoff) {
-  return {
-    status: 'selected',
-    mediaId: handoff.mediaId,
-    mediaType: handoff.mediaType,
-    releaseKey: handoff.releaseKey,
-    selectedHash: handoff.infoHash,
-    fileIndex: handoff.fileIndex,
-    provider: 'torbox',
-  };
-}
+
 
 function sizeFromRdResult(result) {
   const file = result.torrentInfo?.files?.find((item) => String(item.id) === String(result.rdFileId));
@@ -298,9 +287,9 @@ export function createMovieWebDav({
   controlPlaneStore,
   rdClient,
   rdResolutionCache,
+  resolveTorBoxDelivery,
   now = () => Date.now(),
   fetchFn = fetch,
-  torBoxRedirectOptions,
 }) {
   const states = new Map();
 
@@ -369,24 +358,19 @@ export function createMovieWebDav({
       }
     }
 
-    if (!controlPlaneStore) {
-      throw new VfsError('No TorBox control-plane mapping is available', 503, 'TORBOX_MAPPING_UNAVAILABLE');
+    if (!resolveTorBoxDelivery) {
+      throw new VfsError('No TorBox delivery resolver is available', 503, 'TORBOX_DELIVERY_UNAVAILABLE');
     }
-    const redirect = resolveTorBoxRedirect(
-      handoffToTorBoxSelection(handoff),
-      controlPlaneStore,
-      torBoxRedirectOptions,
-    );
-    const placement = controlPlaneStore.findPlacementByInfoHash('torbox', handoff.infoHash);
-    const providerFile = placement
-      ? controlPlaneStore.listProviderFiles(placement.id).find(
-          (file) => String(file.providerFileId) === String(redirect.providerFileId),
-        )
-      : null;
+    const delivery = await resolveTorBoxDelivery({
+      infoHash: handoff.infoHash,
+      fileIndex: handoff.fileIndex,
+      releaseKey: handoff.releaseKey,
+      filename: handoff.filename,
+    });
     return {
       provider: 'torbox',
-      url: redirect.redirectUrl,
-      size: Number.isSafeInteger(providerFile?.size) && providerFile.size > 0 ? providerFile.size : null,
+      url: delivery.url,
+      size: delivery.size,
       resolution: forceFresh ? 'remapped' : 'mapped',
     };
   }
@@ -418,9 +402,11 @@ export function createMovieWebDav({
       await cancelBody(upstream);
       firstFailure ||= validationError;
       if (!forceFresh) {
-        const stale = STALE_PROVIDER_STATUSES.has(upstream.status) ? 'stale' : 'invalid';
-        console.warn(`[vfs] provider=${backing.provider} read=${stale} status=${upstream.status} release=${state.entry.releaseKey}`);
-        continue;
+        const readFailure = upstream.status === 429
+          ? 'rate-limited'
+          : STALE_PROVIDER_STATUSES.has(upstream.status) ? 'stale' : 'invalid';
+        console.warn(`[vfs] provider=${backing.provider} read=${readFailure} status=${upstream.status} release=${state.entry.releaseKey}`);
+        if (upstream.status !== 429) continue;
       }
       throw validationError;
     }

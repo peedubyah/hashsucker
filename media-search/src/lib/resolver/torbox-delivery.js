@@ -66,10 +66,13 @@ export async function ensureTorBoxDelivery({
   let placement = controlPlaneStore.findPlacementByInfoHash('torbox', infoHash);
 
   // Step 2: Passively recover an existing account placement before creating one.
+  // Scoped longer timeout for the missing-placement recovery lookup only.
+  // mylist?bypass_cache=true is authoritative but can exceed the default 5s timeout.
   if (!placement && torBoxInventoryProvider) {
+    const recoverySignal = AbortSignal.timeout(15_000);
     const observedPlacement = await torBoxInventoryProvider
       .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
-      .lookupPlacement({ infoHash });
+      .lookupPlacement({ infoHash }, { signal: recoverySignal });
     if (observedPlacement) {
       placement = controlPlaneStore.recordPlacement(observedPlacement);
       controlPlaneStore.recordPlacementLookupObservation({
@@ -98,23 +101,54 @@ export async function ensureTorBoxDelivery({
 
     const magnet = `magnet:?xt:urn:btih:${infoHash}`;
     const placementCapability = torBoxProvider.require(PROVIDER_CAPABILITIES.PLACEMENT_CREATE);
-    const placementResult = await placementCapability.createPlacement({
-      magnet,
-      addOnlyIfCached: true,
-    });
-    const observedAt = now();
-    placement = controlPlaneStore.recordPlacement({
-      provider: 'torbox',
-      accountScope: 'default',
-      infoHash,
-      providerResourceId: placementResult.providerResourceId,
-      state: 'ready',
-      ownership: 'owned',
-      ownerKey: `vfs-${observedAt}`,
-      provenance: 'torbox-delivery-resolver',
-      observedAt,
-      expiresAt: observedAt + 5 * 60 * 1000,
-    });
+    let placementResult;
+    try {
+      placementResult = await placementCapability.createPlacement({
+        magnet,
+        addOnlyIfCached: true,
+      });
+    } catch (createError) {
+      // Ambiguous timeout: createtorrent may have succeeded remotely.
+      // Perform a fresh recovery lookup before retrying creation.
+      if (torBoxInventoryProvider) {
+        const recoverySignal = AbortSignal.timeout(15_000);
+        const observedPlacement = await torBoxInventoryProvider
+          .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
+          .lookupPlacement({ infoHash }, { signal: recoverySignal });
+        if (observedPlacement) {
+          placement = controlPlaneStore.recordPlacement(observedPlacement);
+          controlPlaneStore.recordPlacementLookupObservation({
+            provider: observedPlacement.provider,
+            accountScope: observedPlacement.accountScope,
+            infoHash,
+            observationState: 'present',
+            placementId: placement.id,
+            observedAt: observedPlacement.observedAt,
+            expiresAt: observedPlacement.expiresAt,
+            source: observedPlacement.provenance,
+          });
+        }
+      }
+      if (!placement) {
+        throw createError;
+      }
+    }
+
+    if (!placement) {
+      const observedAt = now();
+      placement = controlPlaneStore.recordPlacement({
+        provider: 'torbox',
+        accountScope: 'default',
+        infoHash,
+        providerResourceId: placementResult.providerResourceId,
+        state: 'ready',
+        ownership: 'owned',
+        ownerKey: `vfs-${observedAt}`,
+        provenance: 'torbox-delivery-resolver',
+        observedAt,
+        expiresAt: observedAt + 5 * 60 * 1000,
+      });
+    }
   }
 
   // Step 4: Find or establish the exact provider-file mapping.
