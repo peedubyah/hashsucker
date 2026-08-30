@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 /**
  * Health checks for the media-search service.
@@ -114,7 +115,6 @@ function checkMigrations(env) {
 
   try {
     // Check if schema_migrations table exists and has entries
-    const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(dbPath, { readOnly: true });
 
     try {

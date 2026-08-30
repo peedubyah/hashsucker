@@ -31,43 +31,27 @@ declare module '@api/client' {
     invalid: Array<{ requestId: string; state: string; reason: string; action: string }>;
     healthyCount: number;
   }>;
-  export async function inspectAllRequests(): Promise<{
+  export async function inspectAllRequests(opts?: { filter?: string }): Promise<{
     requests: Array<{
       requestId: string;
-      state: string;
-      created_at: string;
-      updated_at: string;
-      last_event: string;
-      queue_location: string;
-      failure_reason: string | null;
-      retry_count: number;
-      timeline: Array<{ label: string; timestamp: string; status: string }>;
+      status: string;
+      createdAt: string | null;
+      handlingMode: string | null;
+      mediaTitle: string | null;
+      mediaId: string | null;
+      releaseTitle: string | null;
+      provider: string | null;
+      lastError: string | null;
     }>;
-    recommendations: Array<{
-      type: string;
-      severity: string;
-      requestId?: string;
-      reason: string;
-      suggestion: string;
-    }>;
-    summary: {
-      total: number;
-      queued: number;
-      processing: number;
-      done: number;
-      failed: number;
-      recommendations: number;
+    total: number;
+  }>;
+  export async function inspectRequest(requestId: string): Promise<{
+    requestId: string;
+    status: string;
+    request: Record<string, unknown>;
+    trace: {
+      current: { state: string; owner: string | null; nextAction: string };
+      timeline: Array<{ timestamp: string | null; label: string; status: string }>;
     };
   }>;
-  export async function inspectRequest(requestId: string): Promise<{ request: {
-    requestId: string;
-    state: string;
-    created_at: string;
-    updated_at: string;
-    last_event: string;
-    queue_location: string;
-    failure_reason: string | null;
-    retry_count: number;
-    timeline: Array<{ label: string; timestamp: string; status: string }>;
-  } }>;
 }

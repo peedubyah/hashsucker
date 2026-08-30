@@ -323,8 +323,8 @@ export async function getRequestHealth() {
  * @returns {Promise<{ requests: Array, recommendations: Array, summary: Object }>}
  * @throws {Error} On network failure
  */
-export async function inspectAllRequests() {
-  const response = await fetch(`${BASE}/api/operator/requests/inspect`);
+export async function inspectAllRequests({ filter = 'all' } = {}) {
+  const response = await fetch(`${BASE}/api/operator/requests?filter=${encodeURIComponent(filter)}`);
   if (!response.ok) throw new Error(`Request inspection failed: ${response.status}`);
   return response.json();
 }
@@ -336,7 +336,7 @@ export async function inspectAllRequests() {
  * @throws {Error} On network failure or 404
  */
 export async function inspectRequest(requestId) {
-  const response = await fetch(`${BASE}/api/operator/requests/${requestId}/inspect`);
+  const response = await fetch(`${BASE}/api/operator/requests/${encodeURIComponent(requestId)}`);
   if (!response.ok) throw new Error(`Request inspection failed: ${response.status}`);
   return response.json();
 }

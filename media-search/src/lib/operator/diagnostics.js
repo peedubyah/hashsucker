@@ -6,7 +6,9 @@
  */
 
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { sampleRandomRelease } from '../discovery/corpus-sampler.js';
 
 /**
@@ -14,7 +16,7 @@ import { sampleRandomRelease } from '../discovery/corpus-sampler.js';
  */
 function isContainerEnvironment() {
   try {
-    require('node:fs').accessSync('/bin/bash');
+    fsSync.accessSync('/bin/bash');
     return false;
   } catch {
     return true;
@@ -210,7 +212,6 @@ async function runEnrichmentCheck() {
   }
 
   try {
-    const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(discoveryDb, { readOnly: true });
 
     try {
@@ -246,7 +247,6 @@ async function runSearchEngineCheck() {
   }
 
   try {
-    const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(discoveryDb, { readOnly: true });
 
     try {
@@ -324,7 +324,7 @@ function runRequestInspector() {
   }
 
   try {
-    const entries = require('node:fs').readdirSync(operatorRoot, { withFileTypes: true });
+    const entries = fsSync.readdirSync(operatorRoot, { withFileTypes: true });
     const dirs = entries.filter(e => e.isDirectory()).map(e => e.name);
     const expected = ['incoming', 'processing', 'done', 'failed'];
     const present = expected.filter(d => dirs.includes(d));
@@ -382,7 +382,6 @@ async function checkEnrichmentHealth(env) {
   }
 
   try {
-    const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(discoveryDb, { readOnly: true });
 
     try {
@@ -406,7 +405,6 @@ async function checkSearchHealth(env) {
   }
 
   try {
-    const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(discoveryDb, { readOnly: true });
 
     try {

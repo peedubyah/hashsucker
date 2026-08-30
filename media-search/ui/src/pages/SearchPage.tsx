@@ -10,8 +10,24 @@ import type {
   ReleaseSearchResult,
   ReleaseResult,
 } from '@/types/api';
+import { readQuery, updateQuery, getStoredPreference, storePreference } from '@/lib/url-state';
 
 type View = 'titles' | 'releases';
+
+type Fulfillment = 'download' | 'stream';
+
+const FULFILLMENT_OPTIONS: { value: Fulfillment; label: string; description: string }[] = [
+  {
+    value: 'stream',
+    label: 'Virtual Library',
+    description: 'Publishes the release through the VFS / STRM layer. No local acquisition.',
+  },
+  {
+    value: 'download',
+    label: 'Download & Import',
+    description: 'Acquires the release locally and feeds the existing Sonarr/Radarr import path.',
+  },
+];
 
 interface SearchPageProps {
   onNavigateRequests?: () => void;
@@ -29,8 +45,20 @@ interface SearchPageProps {
  */
 export function SearchPage({ onNavigateRequests }: SearchPageProps) {
   // Search input
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(() => readQuery().get('q') ?? '');
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Fulfillment policy for subsequent submissions.
+  // Precedence: URL ?handlingMode → saved local preference → 'download'.
+  const fulfillment: Fulfillment = (() => {
+    const fromUrl = readQuery().get('handlingMode');
+    if (fromUrl === 'download' || fromUrl === 'stream') return fromUrl;
+    return getStoredPreference<Fulfillment>('hashsucker:fulfillment', 'download', ['download', 'stream']);
+  })();
+  const setFulfillment = (next: Fulfillment) => {
+    storePreference('hashsucker:fulfillment', next);
+    updateQuery({ handlingMode: next === 'download' ? null : next }, { replace: true });
+  };
 
   // Title search state
   const [titleResult, setTitleResult] = useState<TitleSearchResult | null>(null);
@@ -60,6 +88,9 @@ export function SearchPage({ onNavigateRequests }: SearchPageProps) {
   const handleTitleSearch = useCallback(async () => {
     const q = query.trim();
     if (!q) return;
+
+    // Keep ?q= in sync with the submitted query so refresh deep-links survive.
+    updateQuery({ q }, { replace: true });
 
     setTitleLoading(true);
     setTitleError(null);
@@ -124,6 +155,7 @@ export function SearchPage({ onNavigateRequests }: SearchPageProps) {
       await submitRequest({
         type: selectedMedia.type,
         mediaId: selectedMedia.id,
+        handlingMode: fulfillment,
         release: {
           infoHash: release.infoHash,
           fileIndex: release.fileIndex,
@@ -134,7 +166,7 @@ export function SearchPage({ onNavigateRequests }: SearchPageProps) {
     } catch {
       setRequestStatus(prev => ({ ...prev, [key]: 'error' }));
     }
-  }, [selectedMedia]);
+  }, [selectedMedia, fulfillment]);
 
   // ── Derived: filtered + sorted releases ───────────────────────────────────
   const filteredReleases = (releaseResult?.results ?? [])
@@ -318,6 +350,9 @@ export function SearchPage({ onNavigateRequests }: SearchPageProps) {
           {/* Release Results */}
           {!releaseLoading && !releaseError && releaseResult && releaseResult.results.length > 0 && (
             <>
+              {/* Fulfillment selector — URL → localStorage → 'download' default */}
+              <FulfillmentPicker value={fulfillment} onChange={setFulfillment} />
+
               {/* Filter Bar */}
               <div className="filter-bar">
                 <div className="filter-row">
@@ -516,6 +551,32 @@ function ScoreSeg({ label, value }: { label: string; value: number }) {
       <div className="score-track">
         <div className="score-fill" style={{ width: `${Math.min(100, value * 100)}%` }} />
       </div>
+    </div>
+  );
+}
+
+function FulfillmentPicker({
+  value,
+  onChange,
+}: {
+  value: Fulfillment;
+  onChange: (v: Fulfillment) => void;
+}) {
+  return (
+    <div className="fulfillment-picker" role="radiogroup" aria-label="Fulfillment mode">
+      {FULFILLMENT_OPTIONS.map(option => (
+        <button
+          key={option.value}
+          type="button"
+          role="radio"
+          aria-checked={value === option.value}
+          className={`fulfillment-option ${value === option.value ? 'active' : ''}`}
+          onClick={() => onChange(option.value)}
+        >
+          <strong>{option.label}</strong>
+          <span className="muted small">{option.description}</span>
+        </button>
+      ))}
     </div>
   );
 }

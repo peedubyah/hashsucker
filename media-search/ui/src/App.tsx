@@ -1,12 +1,27 @@
-import { useState } from 'react';
+import { useEffect } from 'react';
 import { SearchPage } from '@/pages/SearchPage';
 import { DebugConsole } from '@/pages/DebugConsole';
 import { RequestConsole } from '@/pages/RequestConsole';
+import { readQuery, useUrlState } from '@/lib/url-state';
 
 type Tab = 'search' | 'debug' | 'requests';
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>('search');
+  const [params, setParams] = useUrlState();
+  const requested = params.get('tab') as Tab | null;
+  const tab: Tab = requested === 'debug' || requested === 'requests' || requested === 'search' ? requested : 'search';
+
+  // Pick up changes triggered outside React (popstate already handled by
+  // useUrlState). Kept as a no-op listener to document the contract.
+  useEffect(() => {
+    const onPop = () => readQuery();
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  const setTab = (next: Tab) => {
+    setParams({ tab: next === 'search' ? null : next, sub: null, id: null, filter: null }, { replace: true });
+  };
 
   return (
     <div className="app">

@@ -100,6 +100,11 @@ export function DebugConsole() {
           break;
         }
         case 'trace': {
+          if (!traceId.trim()) {
+            setOutput([{ text: 'Error: enter a request ID to trace.', timestamp: ts }]);
+            setLoading(false);
+            return;
+          }
           result = await getRequestDebug(traceId.trim());
           break;
         }

@@ -392,6 +392,7 @@ describe('SearchPage', () => {
     expect(mockSubmitRequest).toHaveBeenCalledWith({
       type: 'series',
       mediaId: 'tt0944947',
+      handlingMode: 'download',
       release: {
         infoHash: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
         fileIndex: 5,
