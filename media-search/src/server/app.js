@@ -53,11 +53,15 @@ import { createRevalidator, mapRevalidationToHttp, REVALIDATION_SOURCE, REVALIDA
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
 import { createResolverTelemetry, getRecentResolverTelemetry, RESOLVER_OUTCOME } from '../lib/resolver/telemetry.js';
 import { createResolverProfiler } from '../lib/resolver/profiler.js';
+import { createTorBoxProvider } from '../lib/providers/torbox.js';
+import { createTorBoxInventoryProvider } from '../lib/providers/torbox-inventory.js';
+import { ensureTorBoxDelivery } from '../lib/resolver/torbox-delivery.js';
 import { isUrlLive } from '../lib/resolver/liveness.js';
 import { createRealDebridClient, RdCooldownError } from '../lib/providers/realdebrid/client.js';
 import { attemptRdResolution, getRdObservationState, getRdPlaybackUrl } from '../lib/providers/realdebrid/resolve.js';
 import { getRdResolutionCache } from '../lib/providers/realdebrid/rd-resolution-cache.js';
 import { createMovieWebDav } from '../lib/vfs/movie-webdav.js';
+import { createTvWebDav } from '../lib/vfs/tv-webdav.js';
 
 const CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -545,18 +549,94 @@ export function createRequestHandler(dependencies = {}) {
   // Short-lived RD resolution cache to avoid repeated RD transactions for
   // media-server stream probing (multiple requests in <10s).
   const rdResolutionCache = getRdResolutionCache();
+
+  // TorBox delivery owns placement creation and passive account-inventory recovery.
+  const torBoxProvider = dependencies.torBoxProvider || createTorBoxProvider({
+    apiKey: env.TORBOX_API_KEY,
+  });
+  const torBoxInventoryProvider = dependencies.torBoxInventoryProvider
+    || (env.TORBOX_API_KEY ? createTorBoxInventoryProvider({
+      apiKey: env.TORBOX_API_KEY,
+      apiBase: env.TORBOX_API_URL,
+      now: clock,
+    }) : null);
+
+  // Single entry point for TorBox delivery resolution (owns placement lifecycle)
+  async function resolveTorBoxDelivery({ infoHash, fileIndex, releaseKey, filename }) {
+    return ensureTorBoxDelivery({
+      infoHash,
+      fileIndex,
+      releaseKey,
+      filename,
+      controlPlaneStore,
+      torBoxProvider,
+      torBoxInventoryProvider,
+      now: clock,
+    });
+  }
+
   const handleMovieWebDav = createMovieWebDav({
     searchCache,
     controlPlaneStore,
     rdClient,
     rdResolutionCache,
+    resolveTorBoxDelivery,
     now: clock,
   });
+  const handleTvWebDav = createTvWebDav({
+    searchCache,
+    controlPlaneStore,
+    rdClient,
+    rdResolutionCache,
+    resolveTorBoxDelivery,
+    now: clock,
+  });
+
+  // Root VFS handler — lists Movies and TV collections
+  async function handleVfsRoot(request, response, url) {
+    const pathname = decodeURIComponent(url.pathname);
+    if (pathname !== '/vfs' && pathname !== '/vfs/') return false;
+    const method = request.method?.toUpperCase();
+    if (method === 'OPTIONS') {
+      response.writeHead(200, {
+        allow: 'OPTIONS, PROPFIND, HEAD, GET',
+        dav: '1',
+        'content-length': '0',
+      });
+      response.end();
+      return true;
+    }
+    if (method === 'PROPFIND') {
+      const now = Date.now();
+      const entries = [
+        { path: '/vfs/Movies', name: 'Movies', type: 'collection' },
+        { path: '/vfs/TV', name: 'TV', type: 'collection' },
+      ];
+      const body = '<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:">' +
+        entries.map(e => '<d:response><d:href>' + e.path + '/</d:href><d:propstat><d:prop>' +
+          '<d:displayname>' + e.name + '</d:displayname>' +
+          '<d:resourcetype><d:collection/></d:resourcetype>' +
+          '<d:getlastmodified>' + new Date(now).toUTCString() + '</d:getlastmodified>' +
+          '</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>').join('') +
+        '</d:multistatus>';
+      response.writeHead(207, {
+        'content-type': 'application/xml; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+        dav: '1',
+        'cache-control': 'no-store',
+      });
+      response.end(body);
+      return true;
+    }
+    return false;
+  }
 
   return async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
     try {
+      if (await handleVfsRoot(request, response, url)) return;
       if (await handleMovieWebDav(request, response, url)) return;
+      if (await handleTvWebDav(request, response, url)) return;
       if (request.method === 'GET' && url.pathname === '/health') {
         return sendJson(response, 200, liveness());
       }

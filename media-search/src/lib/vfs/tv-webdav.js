@@ -1,3 +1,16 @@
+/**
+ * TV Episode WebDAV Catalog
+ *
+ * Extends the proven movies-only VFS pattern to TV episodes with correct
+ * Plex filesystem semantics:
+ *
+ *   /TV Shows/<Series Name>/Season 01/<Series Name> - S01E01.mkv
+ *
+ * Identity: mediaId + season + episode backed by durable (infoHash, fileIndex).
+ * Reuses movie VFS behavior for provider resolution, ranged reads, and
+ * ephemeral provider URL handling.
+ */
+
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
@@ -8,10 +21,8 @@ import {
 } from '../control-plane/canonical-path.js';
 import { attemptRdResolution, getRdPlaybackUrl } from '../providers/realdebrid/resolve.js';
 import { isUrlLive } from '../resolver/liveness.js';
-import { resolveTorBoxRedirect } from '../resolver/torbox-redirect.js';
 
 const DAV_ROOT = '/vfs';
-const MOVIES_PATH = `${DAV_ROOT}/Movies`;
 const CONTENT_TYPE = 'video/x-matroska';
 const STALE_PROVIDER_STATUSES = new Set([401, 403, 404, 410]);
 
@@ -63,19 +74,19 @@ function responseXml(entry, metadata) {
     ? '<d:resourcetype><d:collection/></d:resourcetype>'
     : [
         '<d:resourcetype/>',
-        `<d:getcontentlength>${metadata.size}</d:getcontentlength>`,
-        `<d:getcontenttype>${CONTENT_TYPE}</d:getcontenttype>`,
-        `<d:getetag>${escapeXml(metadata.etag)}</d:getetag>`,
+        '<d:getcontentlength>' + metadata.size + '</d:getcontentlength>',
+        '<d:getcontenttype>' + CONTENT_TYPE + '</d:getcontenttype>',
+        '<d:getetag>' + escapeXml(metadata.etag) + '</d:getetag>',
       ].join('');
 
   return [
     '<d:response>',
-    `<d:href>${escapeXml(encodeDavPath(entry.path, collection))}</d:href>`,
+    '<d:href>' + escapeXml(encodeDavPath(entry.path, collection)) + '</d:href>',
     '<d:propstat><d:prop>',
-    `<d:displayname>${escapeXml(entry.name)}</d:displayname>`,
+    '<d:displayname>' + escapeXml(entry.name) + '</d:displayname>',
     properties,
-    `<d:getlastmodified>${escapeXml(httpDate(metadata.modifiedAt))}</d:getlastmodified>`,
-    `<d:creationdate>${escapeXml(isoDate(metadata.modifiedAt))}</d:creationdate>`,
+    '<d:getlastmodified>' + escapeXml(httpDate(metadata.modifiedAt)) + '</d:getlastmodified>',
+    '<d:creationdate>' + escapeXml(isoDate(metadata.modifiedAt)) + '</d:creationdate>',
     '</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>',
     '</d:response>',
   ].join('');
@@ -86,7 +97,7 @@ async function sendDavXml(response, entries, metadataForEntry) {
   for (const entry of entries) {
     responses.push(responseXml(entry, await metadataForEntry(entry)));
   }
-  const body = `<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:">${responses.join('')}</d:multistatus>`;
+  const body = '<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:">' + responses.join('') + '</d:multistatus>';
   response.writeHead(207, {
     'content-type': 'application/xml; charset=utf-8',
     'content-length': Buffer.byteLength(body),
@@ -112,7 +123,7 @@ function sendError(response, error) {
   response.end(body);
 }
 
-export function parseContentRange(value) {
+function parseContentRange(value) {
   const match = value?.match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
   if (!match) return null;
   return {
@@ -122,98 +133,22 @@ export function parseContentRange(value) {
   };
 }
 
-export function normalizeRange(rangeHeader, size) {
+function normalizeRange(rangeHeader, size) {
   if (!rangeHeader) return null;
   const match = rangeHeader.match(/^bytes=(\d*)-(\d*)$/i);
-  if (!match) throw new VfsError('Only one byte range is supported', 416, 'INVALID_RANGE');
-
+  if (!match) throw new VfsError('Only byte ranges are supported', 416, 'INVALID_RANGE');
   const [, startText, endText] = match;
   if (!startText && !endText) throw new VfsError('Malformed byte range', 416, 'INVALID_RANGE');
-
-  let start;
-  let end;
-  if (!startText) {
-    const suffixLength = Number(endText);
-    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
-      throw new VfsError('Malformed suffix range', 416, 'INVALID_RANGE');
-    }
-    start = Math.max(0, size - suffixLength);
-    end = size - 1;
-  } else {
-    start = Number(startText);
-    end = endText ? Number(endText) : size - 1;
+  if (startText && endText && Number(startText) > Number(endText)) {
+    throw new VfsError('Malformed byte range', 416, 'INVALID_RANGE');
   }
-
-  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= size || start > end) {
+  if (!size) throw new VfsError('Byte range requires known content length', 416, 'RANGE_NOT_SATISFIABLE');
+  const start = startText ? Number(startText) : size - Number(endText);
+  const end = endText ? Math.min(Number(endText), size - 1) : size - 1;
+  if (start >= size) {
     throw new VfsError('Byte range is outside the file', 416, 'RANGE_NOT_SATISFIABLE');
   }
-  end = Math.min(end, size - 1);
-  return { start, end, header: `bytes=${start}-${end}` };
-}
-
-function releaseKeyFor(handoff) {
-  return `${handoff.infoHash.toLowerCase()}:${handoff.fileIndex == null ? 'torrent' : handoff.fileIndex}`;
-}
-
-function validateHandoff(handoff) {
-  if (handoff.releaseKey !== releaseKeyFor(handoff)) {
-    throw new VfsError(
-      `Durable movie handoff identity is inconsistent for ${handoff.mediaId}`,
-      500,
-      'HANDOFF_INVALID',
-    );
-  }
-}
-
-function movieNameFromFilename(filename, mediaId) {
-  const basename = path.posix.basename(String(filename || '').replaceAll('\\', '/'));
-  const parsed = path.posix.parse(basename);
-  const stem = parsed.name || basename || mediaId;
-  const yearMatch = stem.match(/(?:^|[. _-])((?:19|20)\d{2})(?=$|[. _-])/);
-  const year = yearMatch ? Number(yearMatch[1]) : null;
-  const titlePart = yearMatch ? stem.slice(0, yearMatch.index).trim() : stem.trim();
-  const title = titlePart
-    .replace(/[._-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim() || mediaId;
-  const extension = /^\.[a-z0-9]{1,10}$/i.test(parsed.ext) ? parsed.ext : '.mkv';
-  return { title, year, extension };
-}
-
-function materializeMissingEntries(searchCache, now) {
-  const handoffs = searchCache.listMoviePlaybackHandoffs();
-  const existing = searchCache.listVfsMovieEntries();
-  const byMediaId = new Map(existing.map((entry) => [entry.mediaId, entry]));
-  const usedPaths = new Set(existing.map((entry) => entry.canonicalPath));
-
-  for (const handoff of handoffs) {
-    if (byMediaId.has(handoff.mediaId)) continue;
-    validateHandoff(handoff);
-    const movie = movieNameFromFilename(handoff.filename, handoff.mediaId);
-    let canonicalPath = buildPreferredCanonicalPath({
-      mediaType: 'movie',
-      mediaId: handoff.mediaId,
-      title: movie.title,
-      year: movie.year,
-    }, { extension: movie.extension });
-    if (usedPaths.has(canonicalPath)) {
-      canonicalPath = addDeterministicCollisionSuffix(canonicalPath, handoff.releaseKey);
-    }
-    const timestamp = now();
-    const created = searchCache.createVfsMovieEntry({
-      mediaId: handoff.mediaId,
-      releaseKey: handoff.releaseKey,
-      infoHash: handoff.infoHash,
-      fileIndex: handoff.fileIndex,
-      canonicalPath,
-      size: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    });
-    byMediaId.set(created.mediaId, created);
-    usedPaths.add(created.canonicalPath);
-    console.log(`[vfs] materialized media=${created.mediaId} path="${created.canonicalPath}" release=${created.releaseKey}`);
-  }
+  return { start, end, header: 'bytes=' + start + '-' + end };
 }
 
 function buildTree(states) {
@@ -231,7 +166,7 @@ function buildTree(states) {
     const segments = state.entry.canonicalPath.split('/');
     let parentPath = DAV_ROOT;
     segments.forEach((segment, index) => {
-      const entryPath = `${parentPath}/${segment}`;
+      const entryPath = parentPath + '/' + segment;
       const isFile = index === segments.length - 1;
       let treeEntry = entries.get(entryPath);
       if (!treeEntry) {
@@ -260,18 +195,6 @@ function getEntries(tree, pathname, depth) {
   return depth === '0' ? [entry] : [entry, ...(tree.children.get(pathname) || [])];
 }
 
-function handoffToTorBoxSelection(handoff) {
-  return {
-    status: 'selected',
-    mediaId: handoff.mediaId,
-    mediaType: handoff.mediaType,
-    releaseKey: handoff.releaseKey,
-    selectedHash: handoff.infoHash,
-    fileIndex: handoff.fileIndex,
-    provider: 'torbox',
-  };
-}
-
 function sizeFromRdResult(result) {
   const file = result.torrentInfo?.files?.find((item) => String(item.id) === String(result.rdFileId));
   return Number.isSafeInteger(file?.bytes) && file.bytes > 0 ? file.bytes : null;
@@ -289,39 +212,102 @@ function metadataFromState(state) {
   return {
     size: state.entry.size,
     modifiedAt: state.handoff.selectedAt,
-    etag: `"${state.entry.releaseKey}-${state.entry.size}"`,
+    etag: '"' + state.entry.releaseKey + '-' + state.entry.size + '"',
   };
 }
 
-export function createMovieWebDav({
+function episodeNameFromFilename(filename, mediaId) {
+  const parsed = path.posix.parse(filename || '');
+  const base = parsed.name || mediaId;
+  // Extract series title by removing SxxExx and everything after
+  const titlePart = base
+    .replace(/[._-]+/g, ' ')
+    .replace(/\s+S\d+E\d+.*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim() || mediaId;
+  const extension = /^\.[a-z0-9]{1,10}$/i.test(parsed.ext) ? parsed.ext : '.mkv';
+  return { title: titlePart, extension };
+}
+
+function materializeMissingEntries(searchCache, now) {
+  const handoffs = searchCache.listTvPlaybackHandoffs();
+  const existing = searchCache.listVfsTvEntries();
+  const byIdentity = new Map(
+    existing.map((entry) => [entry.mediaId + ':' + entry.season + ':' + entry.episode, entry]),
+  );
+  const usedPaths = new Set(existing.map((entry) => entry.canonicalPath));
+
+  for (const handoff of handoffs) {
+    const identityKey = handoff.mediaId + ':' + handoff.season + ':' + handoff.episode;
+    if (byIdentity.has(identityKey)) continue;
+    const ep = episodeNameFromFilename(handoff.filename, handoff.mediaId);
+    let canonicalPath = buildPreferredCanonicalPath({
+      mediaType: 'episode',
+      mediaId: handoff.mediaId,
+      title: ep.title,
+      season: handoff.season,
+      episode: handoff.episode,
+    }, { extension: ep.extension });
+    if (usedPaths.has(canonicalPath)) {
+      canonicalPath = addDeterministicCollisionSuffix(canonicalPath, handoff.releaseKey);
+    }
+    const timestamp = now();
+    const created = searchCache.createVfsTvEntry({
+      mediaId: handoff.mediaId,
+      season: handoff.season,
+      episode: handoff.episode,
+      releaseKey: handoff.releaseKey,
+      infoHash: handoff.infoHash,
+      fileIndex: handoff.fileIndex,
+      canonicalPath,
+      size: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    byIdentity.set(identityKey, created);
+    usedPaths.add(created.canonicalPath);
+    console.log('[vfs-tv] materialized media=' + created.mediaId + ' S' + created.season + 'E' + created.episode + ' path="' + created.canonicalPath + '" release=' + created.releaseKey);
+  }
+}
+
+export function createTvWebDav({
   searchCache,
   controlPlaneStore,
   rdClient,
   rdResolutionCache,
+  resolveTorBoxDelivery,
   now = () => Date.now(),
   fetchFn = fetch,
-  torBoxRedirectOptions,
 }) {
   const states = new Map();
 
   function getCatalog() {
     materializeMissingEntries(searchCache, now);
     const nextStates = [];
-    for (const entry of searchCache.listVfsMovieEntries()) {
-      let state = states.get(entry.releaseKey);
+    for (const entry of searchCache.listVfsTvEntries()) {
+      const stateKey = entry.mediaId + ':' + entry.season + ':' + entry.episode;
+      let state = states.get(stateKey);
       if (!state) {
-        const handoff = searchCache.getPlaybackHandoffByReleaseKey(entry.mediaId, entry.releaseKey);
+        const handoff = searchCache.getTvPlaybackHandoff(entry.mediaId, entry.season, entry.episode);
         if (!handoff) {
           throw new VfsError(
-            `Durable handoff is missing for VFS movie ${entry.mediaId}`,
+            'Durable handoff is missing for VFS episode ' + entry.mediaId + ' S' + entry.season + 'E' + entry.episode,
             503,
             'HANDOFF_MISSING',
           );
         }
-        validateHandoff(handoff);
+        if (entry.releaseKey !== handoff.releaseKey
+          || entry.infoHash !== handoff.infoHash
+          || entry.fileIndex !== handoff.fileIndex) {
+          throw new VfsError(
+            'Durable TV entry and playback handoff identify different releases',
+            503,
+            'HANDOFF_RELEASE_MISMATCH',
+          );
+        }
         state = { entry, handoff, metadataPromise: null };
-        states.set(entry.releaseKey, state);
-        console.log(`[vfs] bound media=${entry.mediaId} release=${entry.releaseKey}`);
+        states.set(stateKey, state);
+        console.log('[vfs-tv] bound media=' + entry.mediaId + ' S' + entry.season + 'E' + entry.episode + ' release=' + entry.releaseKey);
       } else if (state.entry.size == null && entry.size != null) {
         state.entry = entry;
       }
@@ -362,31 +348,24 @@ export function createMovieWebDav({
             resolution: 'fresh',
           };
         }
-        console.warn(`[vfs] provider=realdebrid resolution=fresh failure=dead-url release=${handoff.releaseKey}`);
+        console.warn('[vfs-tv] provider=realdebrid resolution=fresh failure=dead-url release=' + handoff.releaseKey);
       } else {
         const reason = result.error?.code || result.reason || 'unavailable';
-        console.warn(`[vfs] provider=realdebrid resolution=failed failure=${reason} release=${handoff.releaseKey}`);
+        console.warn('[vfs-tv] provider=realdebrid resolution=failed failure=' + reason + ' release=' + handoff.releaseKey);
       }
     }
 
-    if (!controlPlaneStore) {
-      throw new VfsError('No TorBox control-plane mapping is available', 503, 'TORBOX_MAPPING_UNAVAILABLE');
-    }
-    const redirect = resolveTorBoxRedirect(
-      handoffToTorBoxSelection(handoff),
-      controlPlaneStore,
-      torBoxRedirectOptions,
-    );
-    const placement = controlPlaneStore.findPlacementByInfoHash('torbox', handoff.infoHash);
-    const providerFile = placement
-      ? controlPlaneStore.listProviderFiles(placement.id).find(
-          (file) => String(file.providerFileId) === String(redirect.providerFileId),
-        )
-      : null;
+    // TorBox fallback: use generic delivery resolver which owns placement lifecycle.
+    const delivery = await resolveTorBoxDelivery({
+      infoHash: handoff.infoHash,
+      fileIndex: handoff.fileIndex,
+      releaseKey: handoff.releaseKey,
+      filename: handoff.filename,
+    });
     return {
       provider: 'torbox',
-      url: redirect.redirectUrl,
-      size: Number.isSafeInteger(providerFile?.size) && providerFile.size > 0 ? providerFile.size : null,
+      url: delivery.url,
+      size: delivery.size,
       resolution: forceFresh ? 'remapped' : 'mapped',
     };
   }
@@ -418,9 +397,11 @@ export function createMovieWebDav({
       await cancelBody(upstream);
       firstFailure ||= validationError;
       if (!forceFresh) {
-        const stale = STALE_PROVIDER_STATUSES.has(upstream.status) ? 'stale' : 'invalid';
-        console.warn(`[vfs] provider=${backing.provider} read=${stale} status=${upstream.status} release=${state.entry.releaseKey}`);
-        continue;
+        const readFailure = upstream.status === 429
+          ? 'rate-limited'
+          : STALE_PROVIDER_STATUSES.has(upstream.status) ? 'stale' : 'invalid';
+        console.warn('[vfs-tv] provider=' + backing.provider + ' read=' + readFailure + ' status=' + upstream.status + ' release=' + state.entry.releaseKey);
+        if (upstream.status !== 429) continue;
       }
       throw validationError;
     }
@@ -453,8 +434,10 @@ export function createMovieWebDav({
       backing = opened.backing;
     }
 
-    const persisted = searchCache.setVfsMovieEntrySize(
+    const persisted = searchCache.setVfsTvEntrySize(
       state.entry.mediaId,
+      state.entry.season,
+      state.entry.episode,
       state.entry.releaseKey,
       size,
       now(),
@@ -463,7 +446,7 @@ export function createMovieWebDav({
       throw new VfsError('Durable VFS size conflicts with provider metadata', 502, 'PROVIDER_SIZE_MISMATCH');
     }
     state.entry = persisted;
-    console.log(`[vfs] stat path="${DAV_ROOT}/${state.entry.canonicalPath}" size=${size} release=${state.entry.releaseKey} provider=${backing.provider}`);
+    console.log('[vfs-tv] stat path="' + DAV_ROOT + '/' + state.entry.canonicalPath + '" size=' + size + ' release=' + state.entry.releaseKey + ' provider=' + backing.provider);
     return metadataFromState(state);
   }
 
@@ -503,100 +486,73 @@ export function createMovieWebDav({
             return new VfsError('Provider returned inconsistent range metadata', 502, 'PROVIDER_RANGE_MISMATCH');
           }
         } else if (upstream.status !== 200) {
-          return new VfsError(`Provider returned HTTP ${upstream.status}`, 502, 'PROVIDER_READ_FAILED');
+          return new VfsError('Provider returned HTTP ' + upstream.status, 502, 'PROVIDER_READ_FAILED');
         }
-        return upstream.body
-          ? null
-          : new VfsError('Provider response had no body', 502, 'PROVIDER_EMPTY_BODY');
+        return null;
       },
     );
-    const { backing, upstream } = opened;
 
-    const contentLength = requestedRange
-      ? requestedRange.end - requestedRange.start + 1
-      : metadata.size;
-    const headers = {
-      'content-type': CONTENT_TYPE,
-      'content-length': String(contentLength),
-      'accept-ranges': 'bytes',
-      'cache-control': 'no-store',
-      etag: metadata.etag,
-      'last-modified': httpDate(metadata.modifiedAt),
-    };
-    if (requestedRange) {
-      headers['content-range'] = `bytes ${requestedRange.start}-${requestedRange.end}/${metadata.size}`;
-    }
-
-    const filePath = `${DAV_ROOT}/${state.entry.canonicalPath}`;
-    console.log(`[vfs] open path="${filePath}" range=${requestedRange?.header || 'full'} length=${contentLength} provider=${backing.provider} resolution=${backing.resolution}`);
-    response.writeHead(requestedRange ? 206 : 200, headers);
-
-    if (!upstream.body) {
-      throw new VfsError('Provider response had no body', 502, 'PROVIDER_EMPTY_BODY');
-    }
-    const stream = Readable.fromWeb(upstream.body);
-    const abort = () => stream.destroy();
-    request.once('aborted', abort);
-    response.once('close', abort);
     try {
-      stream.pipe(response);
-      await finished(stream);
-    } finally {
-      request.removeListener('aborted', abort);
-      response.removeListener('close', abort);
+      response.writeHead(requestedRange ? 206 : 200, {
+        'content-type': CONTENT_TYPE,
+        'content-length': requestedRange
+          ? requestedRange.end - requestedRange.start + 1
+          : metadata.size,
+        'content-range': requestedRange
+          ? 'bytes ' + requestedRange.start + '-' + requestedRange.end + '/' + metadata.size
+          : undefined,
+        'accept-ranges': 'bytes',
+        'cache-control': 'no-store',
+        etag: metadata.etag,
+        'last-modified': httpDate(metadata.modifiedAt),
+      });
+      await finished(Readable.fromWeb(opened.upstream.body).pipe(response));
+    } catch (error) {
+      response.destroy(error);
     }
   }
 
-  return async function handleMovieWebDav(request, response, url) {
-    if (!url.pathname.startsWith(`${DAV_ROOT}/Movies`)) return false;
+  function findEpisode(tree, pathname) {
+    const entry = tree.entries.get(pathname);
+    if (!entry || entry.type !== 'file') return null;
+    return entry.state;
+  }
 
-    try {
-      const pathname = normalizePath(url.pathname);
-      const method = request.method?.toUpperCase();
+  return async function handleTvWebDav(request, response, url) {
+    if (!url.pathname.startsWith('/vfs/TV')) return false;
+    const tree = getCatalog();
+    const pathname = normalizePath(url.pathname);
 
-      if (method === 'OPTIONS') {
-        response.writeHead(200, {
-          allow: 'OPTIONS, PROPFIND, HEAD, GET',
-          dav: '1',
-          'ms-author-via': 'DAV',
-          'content-length': '0',
-        });
-        response.end();
+    if (request.method === 'PROPFIND') {
+      const depth = request.headers.depth || '1';
+      const entries = getEntries(tree, pathname, depth);
+      if (!entries) {
+        response.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+        response.end(JSON.stringify({ error: 'Not found', code: 'NOT_FOUND' }));
         return true;
       }
-
-      const tree = getCatalog();
-      if (method === 'PROPFIND') {
-        const depth = request.headers.depth ?? '1';
-        if (depth !== '0' && depth !== '1') {
-          throw new VfsError('Only WebDAV Depth 0 and 1 are supported', 403, 'UNSUPPORTED_DEPTH');
+      await sendDavXml(response, entries, (entry) => {
+        if (entry.type === 'collection') {
+          return { size: 0, modifiedAt: now(), etag: '"0"' };
         }
-        const entries = getEntries(tree, pathname, depth);
-        if (!entries) throw new VfsError('WebDAV path not found', 404, 'PATH_NOT_FOUND');
-        const collectionModifiedAt = Math.max(
-          0,
-          ...Array.from(tree.entries.values())
-            .filter((entry) => entry.type === 'file')
-            .map((entry) => entry.state.handoff.selectedAt),
-        );
-        await sendDavXml(response, entries, (entry) => entry.type === 'file'
-          ? getDurableMetadata(entry.state)
-          : { size: 0, modifiedAt: collectionModifiedAt, etag: '"collection"' });
+        // Durable metadata only — no provider resolution during Plex scans
+        return getDurableMetadata(entry.state);
+      });
+      return true;
+    }
+
+    if (request.method === 'GET' || request.method === 'HEAD') {
+      const state = findEpisode(tree, pathname);
+      if (!state) {
+        response.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+        response.end(JSON.stringify({ error: 'Not found', code: 'NOT_FOUND' }));
         return true;
       }
-
-      const entry = tree.entries.get(pathname);
-      if (!entry) throw new VfsError('WebDAV path not found', 404, 'PATH_NOT_FOUND');
-      if (entry.type !== 'file') {
-        throw new VfsError('Collections are read-only', 405, 'COLLECTION_READ_ONLY');
-      }
-
-      const metadata = await ensureMetadata(entry.state);
-      if (method === 'HEAD') {
-        console.log(`[vfs] stat path="${entry.path}" size=${metadata.size} release=${entry.state.entry.releaseKey}`);
+      const metadata = await ensureMetadata(state);
+      if (request.method === 'HEAD') {
         response.writeHead(200, {
           'content-type': CONTENT_TYPE,
-          'content-length': String(metadata.size),
+          'content-length': metadata.size,
           'accept-ranges': 'bytes',
           'cache-control': 'no-store',
           etag: metadata.etag,
@@ -605,23 +561,21 @@ export function createMovieWebDav({
         response.end();
         return true;
       }
-      if (method === 'GET') {
-        await streamFile(request, response, entry.state, metadata);
-        return true;
-      }
+      await streamFile(request, response, state, metadata);
+      return true;
+    }
 
-      response.writeHead(405, {
-        allow: 'OPTIONS, PROPFIND, HEAD, GET',
-        'content-length': '0',
+    if (request.method === 'OPTIONS') {
+      response.writeHead(200, {
+        allow: 'GET, HEAD, OPTIONS, PROPFIND',
+        dav: '1',
+        'content-length': 0,
       });
       response.end();
       return true;
-    } catch (error) {
-      console.error(`[vfs] failure method=${request.method} path="${url.pathname}" code=${error.code || 'INTERNAL_ERROR'} message=${error.message}`);
-      sendError(response, error);
-      return true;
     }
+
+    sendError(response, new VfsError('Unsupported method ' + request.method, 405, 'METHOD_NOT_ALLOWED'));
+    return true;
   };
 }
-
-export const MOVIE_VFS_ROOT = MOVIES_PATH;

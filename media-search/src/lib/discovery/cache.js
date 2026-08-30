@@ -322,6 +322,25 @@ CREATE TABLE IF NOT EXISTS vfs_movie_entries (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vfs_movie_entries_release
 ON vfs_movie_entries(release_key);
 
+-- Stable TV episode virtual filesystem metadata. Same invariants as movies:
+-- provider playback URLs remain ephemeral process state.
+CREATE TABLE IF NOT EXISTS vfs_tv_entries (
+  media_id TEXT NOT NULL,
+  season INTEGER NOT NULL,
+  episode INTEGER NOT NULL,
+  release_key TEXT NOT NULL,
+  info_hash TEXT NOT NULL,
+  file_index INTEGER,
+  canonical_path TEXT NOT NULL UNIQUE,
+  size INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (media_id, season, episode)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vfs_tv_entries_release
+ON vfs_tv_entries(release_key);
+
 -- FTS5 full-text search index over release_attributes
 -- Stores its own copy of searchable fields (simpler than external content)
 CREATE VIRTUAL TABLE IF NOT EXISTS release_search USING fts5(
@@ -1808,6 +1827,129 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     };
   }
 
+  // TV episode VFS repository
+  const listTvPlaybackHandoffsStmt = db.prepare(`
+    SELECT h.*
+    FROM playback_handoffs h
+    WHERE h.media_type IN ('series', 'tv')
+      AND h.season IS NOT NULL
+      AND h.episode IS NOT NULL
+      AND h.release_key = h.info_hash || ':' || COALESCE(CAST(h.file_index AS TEXT), 'torrent')
+      AND h.id = (
+        SELECT latest.id
+        FROM playback_handoffs latest
+        WHERE latest.media_id = h.media_id
+          AND latest.season = h.season
+          AND latest.episode = h.episode
+          AND latest.media_type IN ('series', 'tv')
+          AND latest.release_key = latest.info_hash || ':' || COALESCE(CAST(latest.file_index AS TEXT), 'torrent')
+        ORDER BY latest.created_at DESC, latest.id DESC
+        LIMIT 1
+      )
+    ORDER BY h.media_id, h.season, h.episode
+  `);
+  const getTvPlaybackHandoffStmt = db.prepare(`
+    SELECT * FROM playback_handoffs
+    WHERE media_id = @media_id
+      AND season = @season
+      AND episode = @episode
+      AND media_type IN ('series', 'tv')
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  `);
+  const getVfsTvEntryStmt = db.prepare(`
+    SELECT * FROM vfs_tv_entries WHERE media_id = @media_id AND season = @season AND episode = @episode
+  `);
+  const listVfsTvEntriesStmt = db.prepare(`
+    SELECT * FROM vfs_tv_entries ORDER BY canonical_path
+  `);
+  const insertVfsTvEntryStmt = db.prepare(`
+    INSERT INTO vfs_tv_entries (
+      media_id, season, episode, release_key, info_hash, file_index,
+      canonical_path, size, created_at, updated_at
+    ) VALUES (
+      @media_id, @season, @episode, @release_key, @info_hash, @file_index,
+      @canonical_path, @size, @created_at, @updated_at
+    )
+  `);
+  const updateVfsTvEntrySizeStmt = db.prepare(`
+    UPDATE vfs_tv_entries
+    SET size = @size, updated_at = @updated_at
+    WHERE media_id = @media_id
+      AND season = @season
+      AND episode = @episode
+      AND release_key = @release_key
+      AND size IS NULL
+  `);
+
+  function listTvPlaybackHandoffs() {
+    return listTvPlaybackHandoffsStmt.all().map(rowToPlaybackHandoff);
+  }
+
+  function getTvPlaybackHandoff(mediaId, season, episode) {
+    return rowToPlaybackHandoff(getTvPlaybackHandoffStmt.get({
+      media_id: mediaId,
+      season,
+      episode,
+    }));
+  }
+
+  function getVfsTvEntry(mediaId, season, episode) {
+    return rowToVfsTvEntry(getVfsTvEntryStmt.get({
+      media_id: mediaId,
+      season,
+      episode,
+    }));
+  }
+
+  function listVfsTvEntries() {
+    return listVfsTvEntriesStmt.all().map(rowToVfsTvEntry);
+  }
+
+  function createVfsTvEntry(entry) {
+    insertVfsTvEntryStmt.run({
+      media_id: entry.mediaId,
+      season: entry.season,
+      episode: entry.episode,
+      release_key: entry.releaseKey,
+      info_hash: entry.infoHash,
+      file_index: entry.fileIndex ?? null,
+      canonical_path: entry.canonicalPath,
+      size: entry.size ?? null,
+      created_at: entry.createdAt,
+      updated_at: entry.updatedAt,
+    });
+    return getVfsTvEntry(entry.mediaId, entry.season, entry.episode);
+  }
+
+  function setVfsTvEntrySize(mediaId, season, episode, releaseKey, size, updatedAt) {
+    const info = updateVfsTvEntrySizeStmt.run({
+      media_id: mediaId,
+      season,
+      episode,
+      release_key: releaseKey,
+      size,
+      updated_at: updatedAt,
+    });
+    return info.changes === 1 ? getVfsTvEntry(mediaId, season, episode) : null;
+  }
+
+  function rowToVfsTvEntry(row) {
+    if (!row) return null;
+    return {
+      mediaId: row.media_id,
+      season: row.season,
+      episode: row.episode,
+      releaseKey: row.release_key,
+      infoHash: row.info_hash,
+      fileIndex: row.file_index,
+      canonicalPath: row.canonical_path,
+      size: row.size,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
   function rowToPlaybackHandoff(row) {
     if (!row) return null;
     return {
@@ -2782,6 +2924,12 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     listVfsMovieEntries,
     createVfsMovieEntry,
     setVfsMovieEntrySize,
+    listTvPlaybackHandoffs,
+    getTvPlaybackHandoff,
+    getVfsTvEntry,
+    listVfsTvEntries,
+    createVfsTvEntry,
+    setVfsTvEntrySize,
     rowToPlaybackHandoff,
     // Stored knowledge lookup for resolver debug
     getStoredKnowledge,
