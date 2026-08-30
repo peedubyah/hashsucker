@@ -203,7 +203,31 @@ test('seerr ingress: same payload twice → still one intent (idempotent)', asyn
 });
 
 test('seerr ingress: IMDb/TMDB/TVDB bundle is preserved through persistence', async () => {
+  // Local Seerr stub serving both /api/v1/tv/<id> (identity, unused here
+  // because IMDb is already known) and /api/v1/tv/<id>/season/<n> so the
+  // TV fan-out path can enumerate episodes.
+  const seerrStub = http.createServer((req, res) => {
+    if (req.url.startsWith('/api/v1/tv/95396/season/1')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        seasonNumber: 1,
+        episodes: [
+          { episodeNumber: 1, name: 'Good News About Hell', airDate: '2022-02-18', id: 1 },
+          { episodeNumber: 2, name: 'Half Loop', airDate: '2022-02-25', id: 2 },
+        ],
+      }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ imdbId: 'tt11280740' }));
+  });
+  await new Promise((r) => seerrStub.listen(0, '127.0.0.1', r));
+
   setSeerrToken();
+  const prevUrl = process.env.SEERR_URL;
+  const prevKey = process.env.SEERR_API_KEY;
+  process.env.SEERR_URL = `http://127.0.0.1:${seerrStub.address().port}`;
+  process.env.SEERR_API_KEY = 'k';
   try {
     const cache = buildCache();
     const handler = buildHandler(cache);
@@ -217,7 +241,7 @@ test('seerr ingress: IMDb/TMDB/TVDB bundle is preserved through persistence', as
         tvdbId: '305288',
       },
       request: { request_id: 'req-bundle-002' },
-      extra: [{ name: 'requestedSeasons', value: '[1]' }],
+      extra: [{ name: 'Requested Seasons', value: '1' }],
     };
     const res = await postJson(
       handler,
@@ -227,17 +251,23 @@ test('seerr ingress: IMDb/TMDB/TVDB bundle is preserved through persistence', as
     );
     assert.equal(res.status, 200, res.text);
     const body = JSON.parse(res.text);
-    assert.equal(body.imdbId, 'tt11280740');
-    assert.equal(body.tmdbId, '95396');
-    assert.equal(body.tvdbId, '305288');
+    // The fan-out path returns the resolved IMDb as mediaId and includes
+    // child results; the parent intent row preserves the full bundle.
     assert.equal(body.mediaId, 'tt11280740', 'IMDb is preferred when present');
+    assert.ok(body.parentIntentId > 0);
 
-    const stored = cache.getMediaIntent(body.intentId);
-    assert.equal(stored.imdbId, 'tt11280740');
-    assert.equal(stored.tmdbId, '95396');
-    assert.equal(stored.tvdbId, '305288');
+    const parent = cache.getMediaIntent(body.parentIntentId);
+    assert.equal(parent.imdbId, 'tt11280740');
+    assert.equal(parent.tmdbId, '95396');
+    assert.equal(parent.tvdbId, '305288');
+    assert.equal(parent.mediaType, 'series');
   } finally {
+    if (prevUrl === undefined) delete process.env.SEERR_URL;
+    else process.env.SEERR_URL = prevUrl;
+    if (prevKey === undefined) delete process.env.SEERR_API_KEY;
+    else process.env.SEERR_API_KEY = prevKey;
     clearSeerrToken();
+    seerrStub.close();
   }
 });
 

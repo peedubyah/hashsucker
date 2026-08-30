@@ -25,7 +25,12 @@ import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { searchTitles, getMediaById, getCacheMetrics } from '../lib/metadata/unified-search.js';
 import { createHandoff, HANDLING_MODES } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
-import { buildSeerrIntent, checkSeerrAuth } from '../lib/intents/providers/seerr.js';
+import {
+  buildSeerrIntent,
+  checkSeerrAuth,
+  parseRequestedSeasons,
+  resolveSeerrSeasonEpisodes,
+} from '../lib/intents/providers/seerr.js';
 import { fulfillVirtualSelection } from '../lib/requests/virtual-library.js';
 import { searchReleases, combinedSearch, searchTrace, getSearchStats } from '../lib/discovery/search-engine.js';
 import { runLiveDiscovery, runLiveDiscoveryWithCounts } from '../lib/discovery/live-bridge.js';
@@ -458,40 +463,54 @@ async function handleSeerrIngress(request, response, searchCache) {
   }
   const { intent, notificationType } = built;
 
-  // 3. Idempotency by Seerr request_id (source_id)
+  // 3. Idempotency by Seerr request_id (source_id).
+  //    A parent counts as successfully completed/idempotent only when
+  //    last_processed_at IS NOT NULL AND last_error IS NULL. If an
+  //    earlier attempt created the parent but failed during season
+  //    enumeration/fan-out, a subsequent webhook with the same request
+  //    ID must be allowed to retry rather than being permanently
+  //    poisoned by the parent row.
   const existing = searchCache.db.prepare(
-    'SELECT id, request_count FROM media_intents WHERE source = ? AND source_id = ? LIMIT 1'
+    'SELECT id, last_processed_at, last_error FROM media_intents WHERE source = ? AND source_id = ? LIMIT 1'
   ).get('seerr', intent.sourceId);
-  if (existing) {
+  if (existing && existing.last_processed_at != null && existing.last_error == null) {
     return sendJson(response, 200, {
       status: 'duplicate',
       notificationType,
       intentId: existing.id,
-      requestCount: existing.request_count,
     });
   }
 
-  // 4. Translate TMDB → IMDb at the Seerr boundary.
-  //    Skip when the inbound intent already carries a valid IMDb.
+  // 4. Parse requested seasons BEFORE resolving identity so we can fail
+  //    fast on a malformed/missing Requested Seasons entry (movies skip
+  //    this entirely).
+  const seasonParse = intent.mediaType === 'series'
+    ? parseRequestedSeasons(built.extra)
+    : { valid: true, seasons: [] };
+  const isTvFanout = intent.mediaType === 'series' && seasonParse.valid && seasonParse.seasons.length > 0;
+
+  // 5. Translate TMDB → IMDb at the Seerr boundary (movies always, TV
+  //    when we have a TMDB to resolve). For TV fan-out we need IMDb to
+  //    drive the parent and child media_id; for movies the same path
+  //    continues to apply. When IMDb is already present we skip Seerr.
   let operationalIntent = intent;
   let identityStatus = 'imdb-already-known';
-  let canonicalMediaTitle = null; // threaded into searchByMedia when Seerr resolves
+  let canonicalMediaTitle = null;
   if (!intent.imdbId && intent.tmdbId) {
     const resolved = await resolveSeerrIdentity(
       { tmdbId: intent.tmdbId, mediaType: intent.mediaType },
       process.env,
     );
     if (!resolved.ok) {
-      // Persist the unresolved intent with explicit last_error so the
-      // operator can see it; do NOT call searchByMedia with `tmdb:*`.
       const intentId = searchCache.upsertMediaIntent({
         ...intent,
         imdbId: null,
         tmdbId: intent.tmdbId,
       });
+      const failureMsg = `seerr-identity-unresolved: tmdb=${intent.tmdbId} reason=${resolved.reason}`;
       searchCache.db.prepare(
         'UPDATE media_intents SET last_error = ?, last_processed_at = ? WHERE id = ?'
-      ).run(`seerr-identity-unresolved: tmdb=${intent.tmdbId} reason=${resolved.reason}`, Date.now(), intentId);
+      ).run(failureMsg, Date.now(), intentId);
       const httpStatus = resolved.reason === 'identity-misconfigured' ? 503 : 500;
       return sendJson(response, httpStatus, {
         status: 'identity-unresolved',
@@ -509,38 +528,270 @@ async function handleSeerrIngress(request, response, searchCache) {
       mediaId: resolved.imdbId,
     };
     identityStatus = 'imdb-resolved';
-    // Reuse the already-fetched Seerr detail response to thread the
-    // canonical title into searchByMedia. Seerr's MovieDetails / TvDetails
-    // payload carries originalTitle/title (and the TV analog) on the same
-    // body we just parsed for IMDb — no second I/O, no new metadata
-    // service, no schema change. This activates the existing ranking /
-    // identity-eligibility code paths that already consume mediaTitle.
-    // The unmatched-keyword guard ensures we never poison the pipeline
-    // with a non-string value.
     if (typeof resolved.canonicalTitle === 'string' && resolved.canonicalTitle.length > 0) {
       canonicalMediaTitle = resolved.canonicalTitle;
     }
   }
 
-  // 5. Persist the durable intent (with IMDb when resolved)
-  const intentId = searchCache.upsertMediaIntent({
-    mediaId: operationalIntent.mediaId,
-    mediaType: operationalIntent.mediaType,
-    season: operationalIntent.season,
-    episode: operationalIntent.episode,
-    source: operationalIntent.source,
-    sourceType: operationalIntent.sourceType,
-    sourceId: operationalIntent.sourceId,
-    sourceLabel: operationalIntent.sourceLabel,
-    status: operationalIntent.status,
-    priority: operationalIntent.priority,
-    requestedBy: null,
-    imdbId: operationalIntent.imdbId,
-    tmdbId: operationalIntent.tmdbId,
-    tvdbId: operationalIntent.tvdbId,
-  });
+  // 6. Movie / single-episode path. Skipped entirely when this is a TV
+  //    fan-out (handled in the branch below).
+  if (!isTvFanout) {
+    // For series with a missing/malformed Requested Seasons entry we
+    // still persist the parent so the operator can see the parse
+    // failure in last_error, but we never expand to "all seasons" and
+    // we never call searchByMedia on the parent.
+    const intentId = searchCache.upsertMediaIntent({
+      mediaId: operationalIntent.mediaId,
+      mediaType: operationalIntent.mediaType,
+      season: operationalIntent.season,
+      episode: operationalIntent.episode,
+      source: operationalIntent.source,
+      sourceType: operationalIntent.sourceType,
+      sourceId: operationalIntent.sourceId,
+      sourceLabel: operationalIntent.sourceLabel,
+      status: operationalIntent.status,
+      priority: operationalIntent.priority,
+      requestedBy: null,
+      imdbId: operationalIntent.imdbId,
+      tmdbId: operationalIntent.tmdbId,
+      tvdbId: operationalIntent.tvdbId,
+    });
 
-  // 6. Advance through the existing pipeline
+    if (intent.mediaType === 'series' && !seasonParse.valid) {
+      searchCache.db.prepare(
+        'UPDATE media_intents SET last_error = ?, last_processed_at = ? WHERE id = ?'
+      ).run(`extra-season-parse-failed:${seasonParse.reason}`, Date.now(), intentId);
+    }
+
+    // For non-TV (movies) the existing single-intent pipeline continues.
+    if (intent.mediaType !== 'series') {
+      return await runSingleSearchByMedia({
+        searchCache, operationalIntent, canonicalMediaTitle, intentId,
+        identityStatus, notificationType, response,
+      });
+    }
+    // For series with parse failure, we stop here — the parent is durable
+    // and last_error is recorded, but we never invoke searchByMedia.
+    return sendJson(response, 200, {
+      status: 'parse-failed',
+      identityStatus,
+      notificationType,
+      intentId,
+      mediaId: operationalIntent.mediaId,
+      mediaType: operationalIntent.mediaType,
+      reason: seasonParse.valid ? null : seasonParse.reason,
+    });
+  }
+
+  // ── 7. TV fan-out: parent + concrete episode children ───────────────────
+  // Persist / reuse the parent media_intent. If an earlier attempt left
+  // a parent with last_error != null, we reset the parent to retry;
+  // existing children with successful media_request rows are skipped
+  // below to avoid re-processing episodes that already succeeded.
+  let parentIntentId = existing ? existing.id : null;
+  if (parentIntentId == null) {
+    parentIntentId = searchCache.upsertMediaIntent({
+      mediaId: operationalIntent.mediaId,
+      mediaType: 'series',
+      season: null,
+      episode: null,
+      source: operationalIntent.source,
+      sourceType: operationalIntent.sourceType,
+      sourceId: operationalIntent.sourceId,
+      sourceLabel: operationalIntent.sourceLabel,
+      status: 'active',
+      priority: operationalIntent.priority,
+      requestedBy: null,
+      imdbId: operationalIntent.imdbId,
+      tmdbId: operationalIntent.tmdbId,
+      tvdbId: operationalIntent.tvdbId,
+    });
+  } else {
+    // Reset parent processing state so the next attempt can mark it again.
+    searchCache.db.prepare(
+      'UPDATE media_intents SET last_error = NULL, last_processed_at = NULL WHERE id = ?'
+    ).run(parentIntentId);
+  }
+
+  // 8. Enumerate requested seasons via the Seerr TV API. The first season
+  //    that fails structurally (env missing, network, 5xx) aborts the
+  //    whole attempt; per-episode failures below are isolated.
+  const childResults = [];
+  let structurallyFailed = null;
+  for (const seasonNum of seasonParse.seasons) {
+    let episodes;
+    try {
+      episodes = await resolveSeerrSeasonEpisodes(
+        Number(operationalIntent.tmdbId),
+        seasonNum,
+        process.env,
+      );
+    } catch (seasonErr) {
+      structurallyFailed = { season: seasonNum, error: seasonErr.message };
+      break;
+    }
+
+    // 9. Per-episode children.
+    for (const ep of episodes) {
+      const childSourceId = `${operationalIntent.sourceId}:s${seasonNum}:e${ep.episodeNumber}`;
+
+      // Skip already-successful children on retry. A child counts as
+      // successfully completed when it has a media_request row whose
+      // status='completed' (existing pipeline writes this when
+      // searchByMedia returns successfully).
+      const priorChild = searchCache.db.prepare(
+        "SELECT id FROM media_intents WHERE source = ? AND source_id = ? LIMIT 1"
+      ).get('seerr', childSourceId);
+      if (priorChild) {
+        const priorDone = searchCache.db.prepare(
+          "SELECT 1 FROM media_requests WHERE intent_id = ? AND status = 'completed' LIMIT 1"
+        ).get(priorChild.id);
+        if (priorDone) {
+          childResults.push({
+            season: seasonNum,
+            episode: ep.episodeNumber,
+            childIntentId: priorChild.id,
+            skipped: true,
+            reason: 'already-successful',
+          });
+          continue;
+        }
+      }
+
+      const childIntentId = searchCache.upsertMediaIntent({
+        mediaId: operationalIntent.mediaId,
+        mediaType: 'tv',
+        season: seasonNum,
+        episode: ep.episodeNumber,
+        source: operationalIntent.source,
+        sourceType: 'request',
+        sourceId: childSourceId,
+        sourceLabel: operationalIntent.sourceLabel
+          ? `${operationalIntent.sourceLabel} S${String(seasonNum).padStart(2, '0')}E${String(ep.episodeNumber).padStart(2, '0')}`
+          : null,
+        status: 'active',
+        priority: operationalIntent.priority,
+        requestedBy: null,
+        imdbId: operationalIntent.imdbId,
+        tmdbId: operationalIntent.tmdbId,
+        tvdbId: operationalIntent.tvdbId,
+      });
+
+      try {
+        const result = await searchByMedia(searchCache, {
+          mediaId: operationalIntent.mediaId,
+          // searchByMedia's intent factory accepts only 'movie' or 'series'
+          // (it maps to streamType internally as 'tv' for episodes). The
+          // media_intents row stores 'tv' for episode children; the
+          // searchByMedia parameter is the streamType discriminator.
+          mediaType: 'series',
+          mediaTitle: canonicalMediaTitle,
+          season: seasonNum,
+          episode: ep.episodeNumber,
+          source: operationalIntent.source,
+          sourceType: 'request',
+          sourceId: childSourceId,
+          sourceLabel: operationalIntent.sourceLabel
+            ? `${operationalIntent.sourceLabel} S${String(seasonNum).padStart(2, '0')}E${String(ep.episodeNumber).padStart(2, '0')}`
+            : null,
+          requestedBy: null,
+          priority: operationalIntent.priority,
+          intentId: childIntentId,
+          persist: true,
+        });
+        childResults.push({
+          season: seasonNum,
+          episode: ep.episodeNumber,
+          childIntentId,
+          // searchByMedia returns its candidate count as `total`, not
+          // `resultCount`. (Look at the return object in
+          // src/api/media-request.js — there is no `resultCount` field.)
+          resultCount: result?.total ?? 0,
+        });
+        // Clear any stale error from a prior failed attempt on this
+        // child — successful processing supersedes the earlier failure.
+        searchCache.db.prepare(
+          'UPDATE media_intents SET last_error = NULL, last_processed_at = ? WHERE id = ?'
+        ).run(Date.now(), childIntentId);
+      } catch (episodeErr) {
+        // Per-episode failure isolation: record on this child and
+        // continue with remaining episodes in the season.
+        searchCache.db.prepare(
+          'UPDATE media_intents SET last_error = ?, last_processed_at = ? WHERE id = ?'
+        ).run(`searchByMedia-failed:s${seasonNum}e${ep.episodeNumber} ${episodeErr.message}`, Date.now(), childIntentId);
+        childResults.push({
+          season: seasonNum,
+          episode: ep.episodeNumber,
+          childIntentId,
+          error: episodeErr.message,
+        });
+      }
+    }
+  }
+
+  // 10. Mark parent processing outcome.
+  if (structurallyFailed) {
+    searchCache.db.prepare(
+      'UPDATE media_intents SET last_error = ?, last_processed_at = ? WHERE id = ?'
+    ).run(
+      `seerr-season-enumeration-failed:s${structurallyFailed.season} ${structurallyFailed.error}`,
+      Date.now(),
+      parentIntentId,
+    );
+    return sendJson(response, 500, {
+      status: 'tv-fan-out-enumeration-failed',
+      identityStatus,
+      notificationType,
+      parentIntentId,
+      mediaId: operationalIntent.mediaId,
+      mediaType: 'series',
+      failedSeason: structurallyFailed.season,
+      childResults,
+      error: structurallyFailed.error,
+    });
+  }
+
+  // If any child errored, the parent is NOT successfully completed —
+  // a subsequent webhook with the same request ID must be allowed to
+  // retry the failed children. We record the failure on the parent so
+  // the duplicate short-circuit (last_processed_at IS NOT NULL AND
+  // last_error IS NULL) does not poison the parent row.
+  const failedChildren = childResults.filter((r) => r.error);
+  if (failedChildren.length > 0) {
+    const summary = failedChildren
+      .map((r) => `s${r.season}e${r.episode}:${r.error}`)
+      .join(',');
+    searchCache.db.prepare(
+      'UPDATE media_intents SET last_processed_at = ?, last_error = ? WHERE id = ?'
+    ).run(Date.now(), `tv-fan-out-children-failed:${summary}`, parentIntentId);
+  } else {
+    searchCache.db.prepare(
+      'UPDATE media_intents SET last_processed_at = ?, last_error = NULL WHERE id = ?'
+    ).run(Date.now(), parentIntentId);
+  }
+
+  return sendJson(response, 200, {
+    status: 'tv-fan-out',
+    identityStatus,
+    notificationType,
+    parentIntentId,
+    childCount: childResults.filter((r) => r.episode != null).length,
+    failedCount: failedChildren.length,
+    childResults,
+    mediaId: operationalIntent.mediaId,
+    mediaType: 'series',
+    canonicalTitle: canonicalMediaTitle,
+  });
+}
+
+/**
+ * Single-intent searchByMedia path used by movies (and series with a
+ * missing/malformed Requested Seasons entry, which never reach here).
+ */
+async function runSingleSearchByMedia({
+  searchCache, operationalIntent, canonicalMediaTitle, intentId,
+  identityStatus, notificationType, response,
+}) {
   try {
     const result = await searchByMedia(searchCache, {
       mediaId: operationalIntent.mediaId,

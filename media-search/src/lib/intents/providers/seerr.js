@@ -241,6 +241,172 @@ export function buildSeerrIntent(body) {
 }
 
 /**
+ * Parse the requested-season list from a Seerr webhook extra field.
+ *
+ * Seerr emits:
+ *   extra: [{ name: 'Requested Seasons', value: '1, 3' }]
+ *
+ * Contract:
+ *  - find the entry whose name is 'Requested Seasons' (case-insensitive)
+ *  - split its string value on comma
+ *  - trim each token
+ *  - accept only positive integers
+ *  - dedupe
+ *  - numeric sort ascending
+ *
+ * Failure modes (return { valid: false, reason }):
+ *  - extra is not an array                       → 'extra-not-an-array'
+ *  - entry's value is not a string               → 'extra-season-value-not-a-string'
+ *  - entry's value is empty or whitespace-only   → 'extra-season-value-empty'
+ *  - any token is not a positive integer         → 'extra-season-value-not-integer:<token>'
+ *  - any token is zero/negative                  → 'extra-season-value-not-positive:<token>'
+ *
+ * Pass 1: this helper does NOT touch app.js, the handler, searchByMedia,
+ * the DB, or production. It only parses; the caller decides what to do
+ * with the result.
+ *
+ * @param {any} extra
+ * @returns {{ valid: true, seasons: number[] } | { valid: false, reason: string }}
+ */
+export function parseRequestedSeasons(extra) {
+  if (!Array.isArray(extra)) {
+    return { valid: false, reason: 'extra-not-an-array' };
+  }
+
+  const entry = extra.find(
+    (e) =>
+      e &&
+      typeof e === 'object' &&
+      typeof e.name === 'string' &&
+      e.name.trim().toLowerCase() === 'requested seasons',
+  );
+
+  if (!entry) {
+    // No 'Requested Seasons' entry is present. Missing season
+    // information is treated as an explicit failure — we never
+    // interpret a missing entry as "all seasons" or "no seasons".
+    return { valid: false, reason: 'requested-seasons-missing' };
+  }
+
+  const rawValue = entry.value;
+  if (typeof rawValue !== 'string') {
+    return { valid: false, reason: 'extra-season-value-not-a-string' };
+  }
+  if (!rawValue.trim()) {
+    return { valid: false, reason: 'extra-season-value-empty' };
+  }
+
+  const tokens = rawValue.split(',');
+  const seen = new Set();
+  const seasons = [];
+
+  for (const raw of tokens) {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      // Empty segment from a stray comma — not malformed, just skip.
+      continue;
+    }
+    if (!/^[1-9][0-9]*$/.test(trimmed)) {
+      return { valid: false, reason: `extra-season-value-not-positive-integer:${trimmed}` };
+    }
+    const num = Number(trimmed);
+    if (!Number.isInteger(num) || num <= 0) {
+      // Defensive: the regex above already guarantees positive, but keep
+      // the explicit guard in case the regex is ever loosened.
+      return { valid: false, reason: `extra-season-value-not-positive:${trimmed}` };
+    }
+    if (!seen.has(num)) {
+      seen.add(num);
+      seasons.push(num);
+    }
+  }
+
+  seasons.sort((a, b) => a - b);
+  return { valid: true, seasons };
+}
+
+/**
+ * Fetch concrete episodes for one TV season via the Seerr TV API.
+ *
+ *   GET {SEERR_URL}/api/v1/tv/{tmdbId}/season/{seasonNumber}
+ *
+ * Reuses the same env seam (SEERR_URL, SEERR_API_KEY, fetch) and the
+ * same 5–8s abort pattern as `resolveSeerrIdentity`. Returns only the
+ * fields the caller needs to drive episode-level searchByMedia.
+ *
+ * Failure modes (rejected promise with .code):
+ *  - missing env (no SEERR_URL or no SEERR_API_KEY) → 'identity-misconfigured'
+ *  - non-OK response                                → 'identity-not-found' (404)
+ *                                                    or 'identity-unavailable' (other)
+ *  - non-JSON body                                  → 'identity-unparseable'
+ *  - abort / network                                → 'identity-unavailable'
+ *
+ * @param {number|string} tmdbId
+ * @param {number} seasonNumber
+ * @param {{ SEERR_URL: string, SEERR_API_KEY: string, fetch?: typeof fetch }} env
+ * @returns {Promise<Array<{ episodeNumber: number, name: string, airDate: string|null, id: number }>>}
+ */
+export async function resolveSeerrSeasonEpisodes(tmdbId, seasonNumber, env = process.env) {
+  const baseUrl = String(env.SEERR_URL || '').trim();
+  const apiKey = String(env.SEERR_API_KEY || '').trim();
+  if (!baseUrl || !apiKey) {
+    const err = new Error('seerr-env-missing');
+    err.code = 'identity-misconfigured';
+    throw err;
+  }
+
+  const endpoint = `${baseUrl.replace(/\/$/, '')}/api/v1/tv/${encodeURIComponent(String(tmdbId))}/season/${encodeURIComponent(String(seasonNumber))}`;
+  const f = typeof env.fetch === 'function' ? env.fetch : fetch;
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 8000);
+  let resp;
+  try {
+    resp = await f(endpoint, {
+      method: 'GET',
+      headers: {
+        'X-Api-Key': apiKey,
+        Accept: 'application/json',
+        'User-Agent': 'hashsucker-seerr-ingress/1.0',
+      },
+      signal: ac.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!resp.ok) {
+    const code = resp.status === 404 ? 'identity-not-found' : 'identity-unavailable';
+    const err = new Error(`seerr-season-api-${code}:${resp.status}`);
+    err.code = code;
+    err.status = resp.status;
+    throw err;
+  }
+
+  let body;
+  try {
+    body = await resp.json();
+  } catch {
+    const err = new Error('seerr-season-api-unparseable');
+    err.code = 'identity-unparseable';
+    throw err;
+  }
+
+  if (!body || !Array.isArray(body.episodes)) {
+    return [];
+  }
+
+  return body.episodes
+    .filter((e) => e && typeof e.episodeNumber === 'number' && e.episodeNumber > 0)
+    .map((e) => ({
+      episodeNumber: e.episodeNumber,
+      name: typeof e.name === 'string' ? e.name : '',
+      airDate: e.airDate != null ? String(e.airDate) : null,
+      id: typeof e.id === 'number' ? e.id : 0,
+    }));
+}
+
+/**
  * Constant-time string equality for bearer token validation. Uses
  * node:crypto.timingSafeEqual with equal-length buffers.
  *
