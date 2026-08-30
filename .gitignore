@@ -8,3 +8,17 @@ media-search/test/ENRICHMENT-EVALUATION.md
 
 # External 303 MiB Stage 3 regression corpus; verify with artifacts/stage3/Checksums.txt.
 artifacts/stage3/dmm-stage3-ranking.db
+
+# SQLite auxiliary files (WAL/SHM)
+*.db-shm
+*.db-wal
+
+# Generated corpus builds (authoritative artifacts, not fixtures)
+artifacts/dmm-rebuild/*.db
+artifacts/dmm-rebuild/*.db-shm
+artifacts/dmm-rebuild/*.db-wal
+
+# Generated enrichment debug/test DBs (regenerated on demand)
+artifacts/stage3/enrichment-*.db
+artifacts/stage3/enrichment-*.db-shm
+artifacts/stage3/enrichment-*.db-wal
