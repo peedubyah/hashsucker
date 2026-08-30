@@ -304,3 +304,50 @@ test('RedirectResolutionError: has correct name and properties', () => {
   assert.equal(err.code, 'TEST_CODE');
   assert.equal(err.status, 400);
 });
+
+/**
+ * Regression test: TorBox consumer redirects must use the supported
+ * `redirect=true` permalink form. The JSON-returning non-redirect form
+ * causes Fatal Player Error when Jellyfin re-enters /stream for audio
+ * switch (companion tt26598588).
+ *
+ * Before fix: CDN URL was extracted in Hashsucker via torbox-cdn.js.
+ * After fix: TorBox permalink with redirect=true is the 307 Location.
+ */
+test('resolveTorBoxRedirect: uses redirect=true permalink (regression for companion audio switch)', () => {
+  const placement = {
+    id: 'pl_test',
+    provider: 'torbox',
+    providerResourceId: '85546005',
+    infoHash: HASH,
+  };
+  const mapping = {
+    id: 'fm_test',
+    releaseKey: `${HASH}:2`,
+    placementId: 'pl_test',
+    providerFileId: '2',
+    state: 'mapped',
+    method: 'test',
+  };
+
+  const selection = {
+    status: 'selected',
+    mediaId: 'tt26598588',
+    mediaType: 'movie',
+    releaseKey: `${HASH}:2`,
+    selectedHash: HASH,
+    fileIndex: 2,
+    provider: 'torbox',
+    providerState: 'cached',
+    reason: 'companion test',
+  };
+
+  const cp = createMockControlPlane(placement, mapping);
+  const result = resolveTorBoxRedirect(selection, cp);
+
+  // CRITICAL: redirect=true must be in the permalink.
+  // Without this, TorBox returns JSON and Jellyfin fails with Fatal Player Error.
+  assert.match(result.redirectUrl, /redirect=true/);
+  // Must NOT contain CDN URL (no more CDN extraction)
+  assert.doesNotMatch(result.redirectUrl, /nexus\.erth\.tb-cdn\.earth/);
+});
