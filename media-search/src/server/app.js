@@ -376,7 +376,19 @@ async function resolveSeerrIdentity(identity, env = process.env) {
     if (!body || typeof body !== 'object') {
       return { ok: false, reason: 'identity-unparseable' };
     }
-    const raw = body.imdbId ?? body.imdb_id ?? null;
+    // Movie detail responses include `imdbId` at the root; TV detail
+    // responses do NOT — the IMDb id lives on the nested `externalIds`
+    // object (`{ imdbId, tvdbId, ... }`). The nested fallback is
+    // considered only for series so movie identity behaviour remains
+    // structurally unchanged rather than merely unchanged for the
+    // observed movie response shape.
+    const externalIds = identity.mediaType === 'series'
+      && body && typeof body.externalIds === 'object' && body.externalIds !== null
+      ? body.externalIds
+      : null;
+    const raw = body.imdbId ?? body.imdb_id
+      ?? externalIds?.imdbId ?? externalIds?.imdb_id
+      ?? null;
     const imdbId = raw == null ? null : String(raw).trim();
     if (!imdbId || !/^tt[0-9]{7,}$/.test(imdbId)) {
       return { ok: false, reason: 'identity-unresolved' };

@@ -615,3 +615,184 @@ test('TV handler: multiple requested seasons → episodes enumerated per season 
     seerrStub.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// TV externalIds fallback (production contract)
+//
+// Real Seerr TV detail responses do NOT carry `imdbId` on the root
+// object — the IMDb id lives under `externalIds.imdbId`. The handler
+// must fall back to that shape so a real Seerr TV request resolves
+// the same way a movie request does.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a Seerr stub that mirrors the real Seerr TV detail payload
+ * shape: no root `imdbId`, IMDb lives on `externalIds.imdbId`.
+ */
+function makeSeerrStubTvExternalIds({ seasonEpisodes = 3 } = {}) {
+  return http.createServer((req, res) => {
+    const seasonMatch = /^\/api\/v1\/tv\/(\d+)\/season\/(\d+)$/.exec(req.url);
+    if (seasonMatch) {
+      const seasonNum = Number(seasonMatch[2]);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        seasonNumber: seasonNum,
+        episodes: Array.from({ length: seasonEpisodes }, (_, i) => ({
+          episodeNumber: i + 1,
+          name: `S${seasonNum}E${i + 1}`,
+          airDate: '2020-01-01',
+          id: i + 1,
+        })),
+      }));
+      return;
+    }
+    if (/^\/api\/v1\/tv\/\d+$/.test(req.url)) {
+      // Real-world Seerr TV detail: root imdbId absent; IMDb id is on
+      // the nested `externalIds` object.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 1396,
+        name: 'Breaking Bad',
+        originalName: 'Breaking Bad',
+        firstAirDate: '2008-01-20',
+        externalIds: {
+          imdbId: 'tt0903747',
+          tvdbId: 81189,
+          facebookId: null,
+          instagramId: null,
+          twitterId: null,
+        },
+      }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+}
+
+test('TV handler: TV detail with externalIds.imdbId (no root imdbId) resolves and fans out', async () => {
+  const seerrStub = makeSeerrStubTvExternalIds({ seasonEpisodes: 3 });
+  await new Promise((r) => seerrStub.listen(0, '127.0.0.1', r));
+  setSeerrToken();
+  const prevUrl = process.env.SEERR_URL;
+  const prevKey = process.env.SEERR_API_KEY;
+  process.env.SEERR_URL = `http://127.0.0.1:${seerrStub.address().port}`;
+  process.env.SEERR_API_KEY = 'k';
+  try {
+    const cache = buildCache();
+    const handler = buildHandler(cache);
+    const payload = {
+      notification_type: 'MEDIA_AUTO_APPROVED',
+      subject: 'TV externalIds',
+      media: { media_type: 'series', imdbId: null, tmdbId: '1396', tvdbId: null },
+      request: { request_id: 'req-tv-external-ids-008' },
+      extra: [{ name: 'Requested Seasons', value: '1' }],
+    };
+    const res = await postJson(handler, '/api/ingress/seerr', payload, { authorization: `Bearer ${TOKEN}` });
+    assert.equal(res.status, 200, res.text);
+    const body = JSON.parse(res.text);
+    assert.equal(body.status, 'tv-fan-out');
+    assert.equal(body.childCount, 3, '3 episodes for the single requested season');
+    // Every child must carry the IMDb id resolved from externalIds,
+    // and the parent must be the series-level intent with that IMDb.
+    const parent = cache.getMediaIntent(body.parentIntentId);
+    assert.ok(parent, 'parent intent must exist');
+    assert.equal(parent.imdbId, 'tt0903747');
+    const children = cache.db.prepare(
+      "SELECT * FROM media_intents WHERE source='seerr' AND media_type='tv' ORDER BY season, episode"
+    ).all();
+    assert.equal(children.length, 3);
+    for (const c of children) {
+      assert.equal(c.imdb_id, 'tt0903747', `child ${c.id} imdb_id`);
+      assert.equal(c.season, 1);
+    }
+    // The parent's last_error must be null and last_processed_at set,
+    // proving identity was resolved (not the prior production failure).
+    assert.equal(parent.lastError, null);
+    assert.notEqual(parent.lastProcessedAt, null);
+  } finally {
+    if (prevUrl === undefined) delete process.env.SEERR_URL;
+    else process.env.SEERR_URL = prevUrl;
+    if (prevKey === undefined) delete process.env.SEERR_API_KEY;
+    else process.env.SEERR_API_KEY = prevKey;
+    clearSeerrToken();
+    seerrStub.close();
+  }
+});
+
+test('TV handler: TV detail with no usable IMDb (no root, no externalIds) is an explicit identity failure, not a silent search', async () => {
+  const seerrStub = http.createServer((req, res) => {
+    const seasonMatch = /^\/api\/v1\/tv\/(\d+)\/season\/(\d+)$/.exec(req.url);
+    if (seasonMatch) {
+      const seasonNum = Number(seasonMatch[2]);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        seasonNumber: seasonNum,
+        episodes: [{ episodeNumber: 1, name: 'E1', airDate: '2020-01-01', id: 1 }],
+      }));
+      return;
+    }
+    if (/^\/api\/v1\/tv\/\d+$/.test(req.url)) {
+      // Detail returns successfully but carries no IMDb anywhere.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 9999,
+        name: 'No IMDb Show',
+        originalName: 'No IMDb Show',
+        firstAirDate: '2020-01-01',
+        externalIds: { tvdbId: 12345 },
+      }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((r) => seerrStub.listen(0, '127.0.0.1', r));
+  setSeerrToken();
+  const prevUrl = process.env.SEERR_URL;
+  const prevKey = process.env.SEERR_API_KEY;
+  process.env.SEERR_URL = `http://127.0.0.1:${seerrStub.address().port}`;
+  process.env.SEERR_API_KEY = 'k';
+  try {
+    const cache = buildCache();
+    const handler = buildHandler(cache);
+    const payload = {
+      notification_type: 'MEDIA_AUTO_APPROVED',
+      subject: 'TV no imdb',
+      media: { media_type: 'series', imdbId: null, tmdbId: '9999', tvdbId: null },
+      request: { request_id: 'req-tv-no-imdb-009' },
+      extra: [{ name: 'Requested Seasons', value: '1' }],
+    };
+    const res = await postJson(handler, '/api/ingress/seerr', payload, { authorization: `Bearer ${TOKEN}` });
+    // Resolver returns identity-unresolved → handler returns 500 with
+    // status 'identity-unresolved'. A retry must remain possible.
+    assert.equal(res.status, 500, res.text);
+    const body = JSON.parse(res.text);
+    assert.equal(body.status, 'identity-unresolved');
+    assert.equal(body.reason, 'identity-unresolved');
+    // The parent must be persisted with an explicit last_error so a
+    // operator can diagnose, and it must NOT have a media_request row
+    // (we never reached searchByMedia).
+    const parent = cache.db.prepare(
+      "SELECT * FROM media_intents WHERE source='seerr' AND source_id=?"
+    ).get('req-tv-no-imdb-009');
+    assert.ok(parent, 'parent intent must be persisted');
+    assert.match(parent.last_error, /seerr-identity-unresolved/);
+    const mediaReqs = cache.db.prepare(
+      "SELECT * FROM media_requests WHERE source='seerr'"
+    ).all();
+    assert.equal(mediaReqs.length, 0, 'parent must never own a media_request row');
+    // No TV children were created because identity failed before fan-out.
+    const tvChildren = cache.db.prepare(
+      "SELECT COUNT(*) AS c FROM media_intents WHERE source='seerr' AND media_type='tv'"
+    ).get().c;
+    assert.equal(tvChildren, 0, 'no children when identity fails');
+  } finally {
+    if (prevUrl === undefined) delete process.env.SEERR_URL;
+    else process.env.SEERR_URL = prevUrl;
+    if (prevKey === undefined) delete process.env.SEERR_API_KEY;
+    else process.env.SEERR_API_KEY = prevKey;
+    clearSeerrToken();
+    seerrStub.close();
+  }
+});
