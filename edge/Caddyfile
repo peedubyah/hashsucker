@@ -12,23 +12,6 @@
 # Single site block — all routing in one place
 :{$EDGE_PORT} {
     # -----------------------------------------------------------------------
-    # /media/*  →  Media Gateway
-    # Bytes must stream without buffering. Range headers preserved.
-    # -----------------------------------------------------------------------
-    @media path /media/*
-    reverse_proxy @media media-search:3000 {
-        # Do not buffer response bodies for media streaming
-        flush_interval -1
-        # Forward Range and conditional headers unchanged
-        header_up Range {http.request.header.Range}
-        header_up If-Range {http.request.header.If-Range}
-        header_up If-Modified-Since {http.request.header.If-Modified-Since}
-        # Strip internal headers from upstream responses
-        header_down -X-Resolver-*
-        header_down -X-Internal-*
-    }
-
-    # -----------------------------------------------------------------------
     # /api/*  →  Control Plane
     # -----------------------------------------------------------------------
     @api path /api/*
@@ -39,9 +22,22 @@
     }
 
     # -----------------------------------------------------------------------
-    # /*  →  UI / Static
+    # /*  →  Resolver (stream redirects only — no media bytes)
+    # Caddy fronts the /stream resolver which returns 307 redirects.
+    # Media bytes flow directly from provider to client, never through Caddy.
     # -----------------------------------------------------------------------
     reverse_proxy media-search:3000 {
+        # Active health checking against the existing /health endpoint.
+        # Uses the actual response status; no separate health service.
+        health_uri /health
+        health_interval 2s
+        health_timeout 1s
+        health_status 2xx
+        # Require 2 successes before marking healthy again
+        health_passes 2
+        # Passive health: require 2 consecutive failures before marking unhealthy
+        max_fails 2
+
         header_down -X-Resolver-*
         header_down -X-Internal-*
     }

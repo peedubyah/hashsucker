@@ -18,11 +18,20 @@ services:
       TORRENTIO_TORBOX_MANIFEST_URL: ${TORRENTIO_TORBOX_MANIFEST_URL:-}
       TORRENTIO_REALDEBRID_MANIFEST_URL: ${TORRENTIO_REALDEBRID_MANIFEST_URL:-}
       TORZNAB_URLS: ${TORZNAB_URLS:-}
+      STRM_OUTPUT_PATH: "${STRM_OUTPUT_PATH:-/strm}"
+      RESOLVER_BASE_URL: "${HASHSUCKER_BASE_URL:-http://localhost:8080}"
+      JELLYFIN_URL: ${JELLYFIN_URL:-}
+      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
+      JELLYFIN_MEDIA_ROOT: ${JELLYFIN_MEDIA_ROOT:-}
+      RESOLVER_PROFILE: ${RESOLVER_PROFILE:-0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${MEDIA_SEARCH_BIND_ADDRESS:-127.0.0.1}:${MEDIA_SEARCH_PORT:-3000}:3000"
     volumes:
       - /home/patrick/hashsucker-data/discovery:/data
       - ${REQUESTS_HOST_PATH:?Set REQUESTS_HOST_PATH in .env}:/requests
+      - ${STRM_HOST_PATH:-/home/patrick/hashsucker-data/strm}:/strm
     group_add:
       - "${MEDIA_SEARCH_QUEUE_GID:-100}"
     security_opt:
