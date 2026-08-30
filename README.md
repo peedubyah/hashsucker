@@ -1,110 +1,67 @@
-# Hashsucker
+# HashSucker
 
-## Media release discovery, indexing, and ranking system
+Media release discovery, indexing, ranking, and playback handoff.
 
-Hashsucker is an experimental system for discovering and ranking media
-release candidates from multiple external sources.
+HashSucker answers three questions and keeps the answers apart:
 
-It focuses on the engineering problems involved in:
+1. **Which release is this?** — exact identity from `(infoHash, fileIndex)`, never from a
+   provider resource ID, a CDN URL, or a filesystem path.
+2. **Is it worth asking for?** — a deterministic six-component score over evidence, not over
+   source origin.
+3. **Where should the player look?** — a stable URL that never needs rewriting when the
+   provider, binding, or mount changes underneath it.
 
--   Aggregating release candidate data
--   Normalizing inconsistent release metadata
--   Resolving candidate identity
--   Ranking results using multiple signals
--   Maintaining historical observations
+The separation that matters most: **media metadata** (what a title represents), **release
+candidates** (individual files or torrents), and **availability observations** (what a provider
+said, and when). Conflating these is the failure mode the whole design is arranged against.
 
-The system is designed around a separation between:
+## Topology at a glance
 
--   **Media metadata** --- what the requested title represents
--   **Release candidates** --- individual files/releases associated with
-    that media
--   **Availability sources** --- external services that report candidate
-    availability
+Three containers, one public port:
 
-------------------------------------------------------------------------
+| Service | Role | Port |
+|---|---|---|
+| `media-search` | API, corpus, ranking, control plane, WebDAV, resolver, UI | `127.0.0.1:3000` |
+| `torbox-importer` | Physical acquisition worker; drains the filesystem queue | none |
+| `edge` | Caddy reverse proxy; the only public listener | `0.0.0.0:8080` |
 
-# Core Problem
+```sh
+cp .env.example .env    # fill in the required keys
+docker compose up -d --build
+scripts/smoke-test.sh   # eight first-boot probes
+```
 
-Media release discovery is difficult because the available signals are
-incomplete and sometimes contradictory.
+Requires Node 24+ for local development; Compose is not required to run tests.
 
-A candidate may have:
+## Documentation
 
--   A matching title but incorrect identity
--   Excellent quality but uncertain provenance
--   Confirmed identity but unavailable sources
--   Provider availability but weak metadata
+| Document | Contents |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | Components, identity model, data model, HTTP surface, invariants |
+| [`docs/discovery-ranking.md`](docs/discovery-ranking.md) | Sources, canonicalization, score model, confidence tiers, request pipeline |
+| [`docs/playback-delivery.md`](docs/playback-delivery.md) | Resolver, `.strm`, redirect vs proxy, mounts, WebDAV, physical import |
+| [`docs/operations.md`](docs/operations.md) | Deployment, environment reference, health, operator routes, open risks |
 
-Hashsucker explores how to represent and rank these conflicting signals.
+Start with `architecture.md` for the model, then the two pipeline docs, then `operations.md`
+when you are actually running it.
 
-------------------------------------------------------------------------
+## Reading the code
 
-# Corpus
+`media-search/src/server/app.js` is the whole HTTP surface in one file — read it first. The two
+files that carry the most weight are `media-search/src/lib/discovery/ranking.js` (scoring and
+identity tiers) and `media-search/src/api/media-request.js` (`searchByMedia`, the request
+pipeline every ingress converges on).
 
-The corpus is an internal index of previously observed release
-candidates.
+## Status
 
-It contains:
+Implemented: canonical candidate pipeline, multi-source ingestion, release parsing, identity
+classification, tier-aware ranking, Seerr and Plex Watchlist ingress, multi-ID persistence
+(IMDb/TMDB/TVDB), durable playback handoff, redirect resolver with availability revalidation and
+alternate fallback, WebDAV virtual filesystem, `.strm` publishing, control-plane store and
+read-only reconciliation.
 
--   Release identifiers
--   Hashes
--   Filenames
--   Parsed attributes
--   Media associations
--   Historical observations
-
-The corpus is not a replacement for general media metadata databases.
-
-Instead, it represents accumulated knowledge about release candidates
-encountered by the system.
-
-------------------------------------------------------------------------
-
-# Identity and Ranking
-
-A central design goal is avoiding the assumption:
-
-> "A source returned this candidate, therefore it is correct."
-
-Candidates are evaluated using evidence such as:
-
--   Explicit media associations
--   Filename parsing
--   Title matching
--   Season/episode information
--   Historical observations
--   Availability information
-
-The system currently models multiple confidence levels:
-
-    Verified
-        |
-    ProviderConfirmed
-        |
-    ProviderScoped
-        |
-    Probable
-        |
-    TextOnly
-
-------------------------------------------------------------------------
-
-# Current Status
-
-## Implemented
-
--   Canonical candidate pipeline
--   Multi-source ingestion
--   Release metadata parsing
--   Identity classification
--   Tier-aware ranking
--   Ranking diagnostics
--   Shadow ranking analysis
--   Operator tracing
-
-## In Progress
-
--   Improved identity validation
--   Historical candidate reputation
--   Long-term corpus growth strategies
--   Production observability
+Not implemented: automatic repair execution (`repair-planner.js` and `repair-executor.js` have no
+runtime callers), provider-driven acquisition decisions (`src/lib/acquisition/**` has no runtime
+callers outside tests), and application authentication on mutation routes. See
+[`docs/operations.md`](docs/operations.md#7-known-operational-risks) for the resulting operational
+risks.

@@ -1,179 +1,257 @@
 # Architecture
 
-**Verified baseline:** 2026-08-21. This document deliberately separates current implementation from target architecture.
+Components, identity model, data model, HTTP surface, and the invariants that hold the system
+together. For scoring and the request pipeline see
+[`discovery-ranking.md`](discovery-ranking.md); for delivery see
+[`playback-delivery.md`](playback-delivery.md); for running it see
+[`operations.md`](operations.md).
 
-## System purpose
+## 1. Services
 
-HashSucker is evolving from a discovery-plus-local-import prototype into a control plane that turns a large hash corpus into provider-backed, stable virtual-library items. It should decide what media and release are wanted, minimize costly provider checks, own placements and canonical bindings, and observe fulfillment health. Mature external systems should transport bytes.
+| Service | Image | Listens | Owns |
+|---|---|---|---|
+| `media-search` | built from `./media-search` | `127.0.0.1:3000` by default | API, corpus SQLite, ranking, control plane, resolver, WebDAV, static UI |
+| `torbox-importer` | built from `./torbox-importer` | none | Physical acquisition: drains the filesystem queue, places with TorBox, imports via Radarr/Sonarr |
+| `edge` | `caddy:2-alpine` | `0.0.0.0:8080` | Only public listener; reverse proxy; strips `X-Resolver-*` and `X-Internal-*` |
 
-## Current implementation
+`media-search` serves the built React UI from the same origin, so there is no second origin in
+production. The two containers communicate through a bind-mounted filesystem queue at
+`/requests` (`incoming/`, `processing/`, `done/`, `failed/`) — that directory, not the database,
+is the authority for physical-acquisition ownership.
 
-```mermaid
-flowchart LR
-    UI["React/Vite UI\nbuilt into media-search image"]
-    API["media-search Node API\nloopback default, no application auth"]
-    META["Cinemeta metadata"]
-    LOCAL["SQLite FTS retrieval\nnot selected-media scoped"]
-    SCORE["Local six-part rank"]
-    LIVE["Torrentio / Comet / Torznab"]
-    MERGE["Exact releaseKey merge\nlive score = 0"]
-    DB[("Discovery SQLite\npersistent Compose volume")]
-    DMM["DMM fragments"]
-    INGEST["HTTP ingestion\nwrapper mismatch"]
-    QUEUE["Filesystem queue"]
-    IMPORTER["torbox-importer"]
-    TORBOX["TorBox"]
-    ARR["Sonarr / Radarr"]
+`edge` is transport only. It forwards `Range`, `If-Range`, `If-Modified-Since`, and `Accept`
+unchanged, must not buffer media, must not set `Content-Length`, `Content-Type`, `Content-Range`,
+`Accept-Ranges`, or `Cache-Control`, and must not parse ranges, touch SQLite, read mounts, or call
+provider APIs. In practice media bytes never traverse Caddy, because the resolver answers with a
+307 redirect.
 
-    UI --> API
-    API --> META
-    API --> LOCAL --> SCORE --> MERGE
-    LOCAL --> DB
-    API --> LIVE --> MERGE
-    DMM --> INGEST --> DB
-    API --> QUEUE --> IMPORTER --> TORBOX
-    IMPORTER --> ARR
+## 2. Identity
+
+Two independent identity layers coexist and must not be collapsed.
+
+**Release identity** — the exact thing that was requested or observed:
+
+```text
+releaseKey = "<lowercase 40-hex infoHash>" + ":" + (fileIndex === null ? "torrent" : fileIndex)
 ```
 
-### Current components
+Null is torrent-level evidence and is deliberately distinct from file index `0`. Storage uses
+`file_index_key = -1` for null for the same reason. Within a tier, ordering never crosses that
+distinction.
 
-- **`media-search`** owns metadata lookup, discovery storage, local retrieval/ranking, live-source normalization, request publication, operator-triggered ingestion/attribute work, and same-origin static UI serving in production.
-- **Discovery SQLite** separates exact candidates, parsed release evidence, media associations, append-only provider observation history/current projection, and FTS data. Root deployment persists it at `/data/discovery-cache.db` on the `discovery-data` volume.
-- **Provider capability foundation** exposes cache observation, placement lookup/create, readiness, file inventory, explicit known-file selection, explicit repair requests, exposure, and removal as independent optional capabilities with typed errors. TorBox currently implements authoritative cache observation plus a fixture-verified account inventory boundary; Real-Debrid has injected observation and controlled-mutation boundaries but no fabricated direct HTTP implementation.
-- **Stage 4 acquisition foundation** is a pure downstream boundary: an explicit ordered provider/account policy combines with an unchanged Stage 3 ranked candidate set and current exact-candidate observations to return `selected`, `deferred`, or `unavailable` with per-target explanations. Only fresh authoritative `cached`/`uncached` evidence is decisive; unknown, error, stale, unbounded, inferred, and missing evidence remain unresolved. The foundation performs no provider calls, placement, request publication, or fulfillment.
-- **Read-only transport observation foundations** include exact filesystem-path observers for externally managed Zurg/rclone and TorBox WebDAV/rclone mounts. A separate explicit-path Zurg `.zurgtorrent` observer exposes sanitized torrent/file repair metadata without claiming Real-Debrid placement authority or mount visibility. Neither observer is wired to a live deployment.
-- **Stage 6 repair control plane** detects degraded exact bindings from scoped evidence, creates durable deterministic ordered repair plans, requires separate action authorization, records durable step attempts/results, and invokes only injected mockable capabilities. Successful steps resume after restart; an in-flight operation with unknown outcome fails closed for manual resolution rather than being replayed. It does not automatically delete provider resources, mutate catalog/playback state, or construct a live credentialed gateway.
-- **`ui`** is a React/Vite prototype built into the production `media-search` image; Vite remains separate for local development.
-- **`torbox-importer`** starts its worker by default and owns physical TorBox acquisition, staging, provider/hash reconciliation, file selection, Arr validation/import, settlement, and conservative cleanup.
-- **Filesystem queue** is the authority for physical-acquisition ownership and terminal movement.
+**Library identity** — the desired media, independent of any file instance:
 
-### Current strengths
-
-- Candidate storage and public request flow use exact `(infoHash, fileIndex)` identity with canonical `releaseKey`; null file index remains distinct from zero.
-- Release evidence, media associations, and provider observations are separate tables.
-- FTS synchronization is trigger-driven.
-- Live source failures are isolated.
-- Queue publication and claiming are atomic filesystem operations.
-- The importer persists exact release provenance while retaining provider-authoritative file mapping, and validates explicit intent, provider identity, file size, Arr identity, and post-import state.
-
-### Current divergence
-
-- Selected media identity reaches live discovery but not local corpus filtering.
-- SQL limits local candidates before composite ranking.
-- Only local candidates receive the six-component score; there is no global rerank after merging.
-- Provider observations now carry scope, authority kind, TTL/freshness, source, typed error/retry metadata, append-only history, and a current projection. Only fresh authoritative observations can affect the legacy provider ranking component; the active API path does not yet expose the full model consistently.
-- The legacy active search path still calls the direct TorBox checker instead of the new capability adapter; no fixture-verified direct Real-Debrid HTTP gateway exists.
-- Zurg static evidence confirms mutable repair resource IDs, durable `.zurgtorrent` state, restart cleanup, and rename side effects, but no pinned live Zurg/rclone deployment or controlled provider experiment exists. See [`evaluation/ZURG-REPAIR-EVIDENCE-2026-08-22.md`](evaluation/ZURG-REPAIR-EVIDENCE-2026-08-22.md).
-- DMM source compatibility exists in an unwired module, not in the API-reachable ingestion runner.
-- No current component models virtual placement through playable catalog state.
-
-## Target architecture
-
-```mermaid
-flowchart LR
-    INTENT["Canonical movie/episode intent"]
-    CORPUS["Large persistent hash corpus"]
-    INTEL["Release/media intelligence\ndesirability + evidence"]
-    PROBE["Provider-specific cache prior\nminimal authoritative probes"]
-    CONTROL["HashSucker control plane\nplacement + file map + binding + reconcile"]
-    RD["Real-Debrid placement"]
-    TB["TorBox placement"]
-    ZURG["Zurg WebDAV"]
-    TBWEB["TorBox WebDAV\nafter validation"]
-    MOUNTS["Hidden read-only rclone VFS mounts"]
-    LIB["Stable provider-independent\ncanonical library"]
-    CATALOG["Plex / players"]
-    PHYSICAL["Local download + Arr import\nsecondary policy"]
-
-    INTENT --> INTEL
-    CORPUS --> INTEL --> PROBE --> CONTROL
-    CONTROL --> RD --> ZURG --> MOUNTS
-    CONTROL --> TB --> TBWEB --> MOUNTS
-    MOUNTS --> LIB --> CATALOG
-    CONTROL --> LIB
-    CONTROL -. explicit fallback .-> PHYSICAL
+```text
+identity_key = "<type>:<mediaId>[:<editionKey>]"
 ```
+
+Library paths are derived deterministically from it:
+`Movies/<Title (Year)>/<Title (Year)>.<ext>` and
+`TV/<Title (Year)>/Season NN/<Title> - SNNENN.<ext>`. Collisions get a deterministic
+`[sha256-10]` suffix. Paths are normalized (no absolute, `.`, or `..` segments) and length-capped.
+
+**Identity is never** a provider resource ID, a CDN URL, a filesystem path, a mount path, or a
+surrogate UUID. All of those are replaceable observations. Renaming a file, re-adding a torrent,
+or moving a mount must not change identity.
+
+## 3. Data model
+
+Two independent SQLite databases. Neither is a general metadata store.
+
+### Discovery SQLite — `DISCOVERY_DB`
+
+WAL mode. FTS5 over `release_attributes`, synchronised by triggers.
+
+| Table | Holds |
+|---|---|
+| `candidates` | Exact releases, PK `(info_hash, file_index_key)` |
+| `release_attributes` | Parsed filename attributes; FTS5-backed corpus search |
+| `candidate_media` | Media associations; drives the `Verified` / `Rejected` tiers |
+| `provider_observations` | Per-provider cached-state observations |
+| `media_intents` | Durable ingress intents; carries `imdb_id`, `tmdb_id`, `tvdb_id` |
+| `media_requests` | One row per processed request; FK to `media_intents(id)` |
+| `media_request_results` | Per-rank results including `identity_tier` and score breakdown |
+| `playback_handoffs` | The resolved selection a `.strm` points at |
+
+`media_metadata` is defined in source but never created at runtime — no module that defines it is
+imported.
+
+### Control-plane SQLite — `CONTROL_PLANE_DB`
+
+WAL mode, `foreign_keys=ON`. 13 tables. The ones that carry state:
+
+| Table | State vocabulary |
+|---|---|
+| `library_items` | `desired_state`: `present` \| `absent` |
+| `library_paths` | one active canonical path per item (partial unique index) |
+| `provider_placements` | `pending` \| `ready` \| `degraded` \| `error` \| `removed` \| `unknown` |
+| `provider_readiness_observations` | same six values |
+| `provider_files`, `provider_inventory_snapshots` | provider-authoritative file inventory |
+| `candidate_file_mappings` | `mapped` \| `ambiguous` \| `missing` \| `stale` |
+| `exposures` | `pending` \| `visible` \| `missing` \| `degraded` \| `error` \| `unknown` |
+| `bindings` | `active` \| `superseded` \| `degraded` \| `failed`; one active per item |
+| `repair_transactions` | `planned` \| `authorized` \| `executing` \| `failed` \| `succeeded` |
+| `repair_steps` | `running` \| `succeeded` \| `failed` |
+| `lifecycle_events` | append-only event log (also used for resolver telemetry) |
+
+Placements are **torrent-level** and have no file index; file-level mapping lives entirely in
+`candidate_file_mappings`. Never assume a placement is per-file.
+
+Observations are append-only and monotonic: an observation older than the stored one is rejected,
+and nothing is deleted. Freshness is a pure function of `expiresAt` against an injected `now` —
+`fresh | stale | unbounded | missing`. Stale degrades effective state to `unknown`, except
+`error` and `missing`, which stay terminal signals.
+
+## 4. HTTP surface
+
+Every route lives in `media-search/src/server/app.js`. There is no application authentication on
+any route; the loopback default and the trusted reverse proxy are the whole access-control story.
+
+### Health and static
+
+| Route | Purpose |
+|---|---|
+| `GET /health` | Liveness |
+| `GET /health/ready` | Readiness; 200 or 503 |
+| `GET /*` | Static UI when `STATIC_ROOT` is set |
+
+### Playback and VFS
+
+| Route | Purpose |
+|---|---|
+| `GET /stream/:type/:id` | Resolver; `307` to the provider. `:id` may be `tt0944947:1:1` with `?season=&episode=` |
+| `GET /media/:infoHash/:fileIndex` | Byte proxy from a mounted filesystem; `200`/`206` |
+| `GET /media/lookup/:hash/:idx` | Projection as JSON, no bytes |
+| `/vfs`, `/vfs/Movies/...`, `/vfs/TV Shows/...` | WebDAV: `PROPFIND` plus ranged `GET`/`HEAD` |
+
+### Discovery and requests
+
+| Route | Purpose |
+|---|---|
+| `GET /api/search?mediaId&type&...` | Combined corpus + live search (UI path) |
+| `GET /api/search?q=` | Title search via Cinemeta |
+| `GET /api/search/internal` | Corpus FTS5 only, no live discovery |
+| `GET /api/search/stats`, `GET /api/search/cache/metrics` | Corpus and cache statistics |
+| `GET /api/media?type&id` | Cinemeta media details |
+| `POST /api/ingest/dmm` | DMM corpus ingestion |
+| `POST /api/attributes/run` | Attribute parsing pass |
+| `POST /api/requests` | Physical acquisition: queue + virtual fulfilment |
+| `POST /api/media-request` | `searchByMedia` — the canonical request pipeline |
+| `POST /api/ingress/seerr` | Seerr webhook ingress (bearer token) |
 
 ### Control plane
 
-HashSucker should own:
+| Route | Purpose |
+|---|---|
+| `GET /api/control-plane/health` | Mount reachability; reports `mode: read-only-shadow` |
+| `GET /api/control-plane/items` | Library items |
+| `GET /api/control-plane/items/:id` | Reconciliation **plan** projection |
 
-- canonical media intent and exact release identity;
-- release parsing, desirability, evidence, and conservative release-family relationships;
-- provider-specific cache priors and authoritative observation policy;
-- placement lookup/creation and ownership provenance;
-- provider-authoritative file inventories and exact candidate mapping;
-- canonical library items, paths, binding versions, and reconciliation;
-- catalog/playback milestones and typed outcome telemetry;
-- explicit dispatch to physical acquisition when that policy is chosen.
+### Operator
 
-Keep these logical capabilities in `media-search` initially. Run DMM synchronization as a one-shot command from the same image. Split reconciliation into a worker only when mount namespace, independent scheduling, fault isolation, or privilege separation requires it.
+Read-only console plus queue control over the filesystem spool and the lifecycle event store:
+`/api/operator/requests` (with `?filter=`), `/api/operator/requests/{uuid}` (GET detail, DELETE),
+`/api/operator/requests/{uuid}/retry`, `/api/operator/requests/{uuid}/reset`,
+`/api/operator/requests/retry`, `/api/operator/requests/reset`,
+`/api/operator/requests/delete-orphan`, `/api/operator/requests/inspect`,
+`/api/operator/requests/{uuid}/inspect`, `/api/operator/requests/health`,
+`/api/operator/health`, `/api/operator/workers`, `/api/operator/logs`,
+`/api/operator/search-debug`, `/api/operator/events/recent`,
+`/api/operator/events/request/{uuid}`, `/api/operator/events/failed`,
+`/api/operator/events/stats`, `/api/operator/diagnostics`,
+`/api/operator/diagnostics/run/{name}`.
 
-### Data plane
+### Debug
 
-- Real-Debrid placement → Zurg WebDAV → rclone VFS.
-- TorBox placement → native TorBox WebDAV → rclone VFS, only after its current contract is validated.
-- Provider mounts remain hidden implementation details.
-- HashSucker publishes a deterministic read-only canonical projection above those mounts.
-- Plex or other players consume stable canonical paths.
+`/api/metrics` (plain JSON counters and ranking distribution — **not** Prometheus),
+`/api/debug/enrichment`, `/api/debug/cache-intelligence`, `/api/debug/search-trace`,
+`/api/debug/search-decisions`, `/api/debug/resolver-telemetry`.
 
-Zurg, provider WebDAV, and rclone own byte delivery, seeking, buffering, and transport caching. `media-search` should not become a routine media relay.
+## 5. Invariants
 
-### Canonical projection
+These are the rules code cannot express on its own.
 
-The first implementation may use atomic symlink projection if filesystem/container/catalog tests prove it safe. A custom virtual filesystem is justified only if simple projection cannot provide atomic rebinding, stable paths, correct metadata, and acceptable scanner behavior.
+**Identity and ownership**
 
-Do not use rclone union as semantic identity. Union conflict and path-selection policies cannot enforce exact release choice, edition handling, placement preference, or provider failover.
-
-### Lifecycle semantics
-
-```text
-requested → checked → placed → provider-ready → exposed
-          → exact-file-mapped → bound → cataloged → playable
-```
-
-Each state needs its own status, timestamp, and failure category. Temporary provider or mount absence triggers bounded re-observation, not immediate deletion or an `uncached` label.
-
-### Observation, repair, and reconciliation boundaries
-
-1. **Observation** records scoped, expiring facts without side effects: placement lookup/readiness, authoritative file inventory, sanitized Zurg metadata, and exact read-only exposure.
-2. **Repair planning** deterministically explains which evidence degraded an existing exact binding, which action types are permitted, and the required postconditions. Producing or persisting a plan performs no provider mutation.
-3. **Repair execution** is a separate durable transaction. An operator/controller explicitly authorizes an order-preserving subset of permitted actions; each injected provider mutation must return a durable-idempotency guarantee and is followed by a separately ordered re-observation action. Failed attempts retain prior evidence and binding history; unknown in-flight outcomes require manual resolution.
-4. **Reconciliation** validates fresh authoritative postconditions and may version the logical exact binding. It cannot rewrite `(infoHash,fileIndex)`, infer provider deletion from mount absence, or mutate catalog/playback milestones.
-
-The Stage 6 executor is a controlled dependency-injected boundary, not active automation. No current server route or startup worker invokes it, and no live credentials are consumed by it.
-
-## Stable boundaries
-
-- Exact candidate identity survives every control-plane boundary.
 - Provider state never becomes candidate identity.
-- Desirability and cache likelihood are predictions/decisions; confirmed cache is an observation.
-- A placement is not exposure; exposure is not a canonical binding; a binding is not catalog or playback success.
-- Provider file inventory is authoritative for physical mapping after placement.
-- HashSucker owns canonical virtual identity. Sonarr/Radarr own final identity in physical-import mode.
-- Cleanup is disabled for unowned or ambiguously owned resources.
-- Virtual state is transactional control-plane data, not shell queue state.
+- Never use a provider resource ID, CDN URL, filesystem path, or mount path as identity.
+- Never store consumer paths (Plex, WebDAV, `.strm`) in the control plane.
+- Never store CDN URLs as permanent records — there is no `resolved_urls` table.
+- Never store corpus metadata (title, year, resolution, codec) or quality scores in the control
+  plane.
+- `fileIndex: null` is not `0`. No fuzzy matching, ever.
 
-## External boundaries
+**Lifecycle separation**
+
+A placement is not exposure; exposure is not a binding; a binding is not catalog visibility;
+catalog visibility is not playback success. Cached, placed, exposed, bound, cataloged, and
+playable are never synonyms. Each boundary gets its own state, timestamp, and failure category.
+
+**Observation**
+
+- Never treat a stale observation as evidence of current state.
+- Never treat a *missing* observation as evidence of absence — a miss triggers re-observation, not
+  repair.
+- Never infer one observation kind from another: present does not imply ready, ready does not imply
+  visible, visible does not imply bound.
+- Never treat a missing filesystem exposure as provider deletion. Mount absence is exposure
+  absence only.
+- Never treat Zurg metadata as authoritative for Real-Debrid placement state. Zurg's
+  `.zurgtorrent` is Zurg's local truth, not the provider's.
+- Never write to provider mounts. All filesystem observers are strictly read-only.
+- Never observe or join across provider, account, instance, or mount scope boundaries.
+- Freshness is always computed against an injected `now`; never call `Date.now()` internally.
+
+**Binding and repair**
+
+- Bindings are mutated only through `store.activateBinding()`. Activation requires an active
+  canonical path owned by the item, a placement whose info hash matches the release identity, a
+  fresh readiness observation, an authoritative and complete inventory snapshot, an authoritative
+  exact file mapping, and an exposure that is `visible` **and** `read_only=1`.
+- Never create, degrade, or repair a binding in response to playback success or failure.
+- Never delete or reactivate a superseded or failed binding; never reuse a binding version.
+- Never allow destructive repair by default — the planner runs with `destructive:false`. Resource
+  removal requires proven ownership, a fresh observation, and zero dependent bindings.
+- Repair is never triggered automatically. The server calls only `planReconciliation`, in
+  `mode:'shadow'`; `executeReconciliation` has no runtime caller.
+
+**Resolver and gateway**
+
+- The resolver never picks a provider. The binding determines the provider.
+- The resolver never makes an acquisition decision, never calls a provider API on the read path,
+  and never implements WebDAV, `PROPFIND`, or `LOCK`.
+- Never bypass resolved-path containment under the mount root.
+- Never let the gateway, resolver, UI, or a consumer observe or write placement state.
+
+**Metadata**
+
+- Cinemeta `/meta/{type}/{id}.json` is trustworthy and is the only Cinemeta surface that is.
+  `/catalog/{type}/top/search={q}.json` returns static popular results regardless of query and
+  must never be used for identity resolution. It still backs `GET /api/search?q=`, which is a known
+  defect.
+- Never let API keys, database paths, or mount roots cross the edge boundary or reach browser code.
+
+## 6. External boundaries
 
 | System | Boundary |
 |---|---|
-| Cinemeta | Current metadata provider behind an adapter |
-| DMM | Corpus source; synchronization must become resumable and revision-aware |
-| Torrentio/Comet/Torznab | Discovery evidence, not placement/file authority |
-| TorBox/Real-Debrid | Provider-specific cache, placement, resource, and file capabilities |
-| Zurg/provider WebDAV/rclone | Data-plane exposure and transport with explicit health/config contracts |
-| Sonarr/Radarr | Physical-import authority; optional parsing/advice in virtual mode |
-| Plex/players | Consumers of stable canonical paths; catalog/playback state remains observable |
+| Cinemeta | Metadata lookup only; `/meta/` endpoint only |
+| DMM | Corpus source; ingestion is operator-triggered and not resumable |
+| Torrentio, Comet, Torznab | Discovery evidence, never placement or file authority |
+| TorBox | Placement, cache checks, file inventory, `requestdl` links |
+| Real-Debrid | Preferred delivery; unrestricted links expire and are rate-limited |
+| Zurg | Real-Debrid-only WebDAV; state read from `.zurgtorrent` sidecars, never via HTTP |
+| rclone | Transport bridge to local filesystems; not called by HashSucker code |
+| Radarr, Sonarr | Physical-import authority only |
+| Plex, Jellyfin | Consumers of stable `.strm` URLs; never learn provider or binding state |
+| Seerr | Request ingress via webhook |
+| Plex Watchlist | Request ingress via a manually run host script |
 
-## Explicit non-goals
+## 7. Non-goals
 
-- Database replacement before measurement.
-- A graph database merely because relationships form a graph.
-- Premature microservices.
-- Hash/family-level candidate deduplication.
-- Provider paths as library identity.
+- A custom HTTP byte proxy as the default data plane; the resolver answers with a `307` redirect so
+  media bytes reach the player over mature transports.
+- `rclone` union as semantic identity — union conflict and path-selection policy cannot enforce
+  exact release choice, edition handling, placement preference, or provider failover.
+- Hash-level or release-family deduplication. Family is evidence, never identity.
 - Sonarr/Radarr completed-download import as a mandatory virtual path.
-- A custom HTTP byte proxy as the default data plane.
-
-See [`pipeline.md`](pipeline.md), [`data-model.md`](data-model.md), and [`roadmap.md`](roadmap.md) for flow, state, and implementation order.
