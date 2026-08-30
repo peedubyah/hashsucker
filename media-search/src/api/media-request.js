@@ -180,6 +180,7 @@ export async function searchByMedia(cache, request) {
   const requestedBy = request.requestedBy || null;
   const priority = request.priority ?? null;
   const mediaTitle = request.mediaTitle || null; // Optional: human-readable media name for identity verification
+  const intentId = request.intentId != null ? request.intentId : null; // Optional: pre-existing media_intents.id (skips implicit upsert)
 
   if (!mediaId) {
     throw new Error('mediaId is required');
@@ -353,6 +354,7 @@ export async function searchByMedia(cache, request) {
           sourceLabel,
           requestedBy,
           priority,
+          intentId,
         },
         explainable
       );
@@ -753,6 +755,7 @@ export async function searchByMedia(cache, request) {
         sourceLabel,
         requestedBy,
         priority,
+        intentId,
       },
       explainable
     );

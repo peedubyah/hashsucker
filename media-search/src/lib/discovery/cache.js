@@ -206,9 +206,6 @@ CREATE TABLE IF NOT EXISTS media_intents (
 CREATE INDEX IF NOT EXISTS idx_media_intents_media_id ON media_intents(media_id, last_requested_at);
 CREATE INDEX IF NOT EXISTS idx_media_intents_source ON media_intents(source, source_type, last_requested_at);
 CREATE INDEX IF NOT EXISTS idx_media_intents_status ON media_intents(status, priority DESC);
-CREATE INDEX IF NOT EXISTS idx_media_intents_imdb ON media_intents(imdb_id) WHERE imdb_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_media_intents_tmdb ON media_intents(tmdb_id) WHERE tmdb_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_media_intents_tvdb ON media_intents(tvdb_id) WHERE tvdb_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS media_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -660,46 +657,12 @@ function migrateMediaIntents(db) {
   ).get(MEDIA_INTENTS_SCHEMA);
   if (applied) return;
 
-  // Check if media_intents table exists
-  const tableExists = db.prepare(
-    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_intents'"
-  ).get();
-
-  if (!tableExists) {
-    db.exec(`
-      CREATE TABLE media_intents (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        media_id TEXT NOT NULL,
-        media_type TEXT NOT NULL,
-        season INTEGER,
-        episode INTEGER,
-        source TEXT NOT NULL DEFAULT 'api',
-        source_type TEXT,
-        source_id TEXT,
-        source_label TEXT,
-        status TEXT NOT NULL DEFAULT 'active',
-        priority INTEGER NOT NULL DEFAULT 0,
-        requested_by TEXT,
-        request_count INTEGER NOT NULL DEFAULT 1,
-        last_requested_at INTEGER NOT NULL,
-        last_processed_at INTEGER,
-        last_result_count INTEGER,
-        last_error TEXT,
-        created_at INTEGER NOT NULL,
-        imdb_id TEXT,
-        tmdb_id TEXT,
-        tvdb_id TEXT
-      )
-    `);
-    db.exec('CREATE INDEX idx_media_intents_media_id ON media_intents(media_id, last_requested_at)');
-    db.exec('CREATE INDEX idx_media_intents_source ON media_intents(source, source_type, last_requested_at)');
-    db.exec('CREATE INDEX idx_media_intents_status ON media_intents(status, priority DESC)');
-    db.exec('CREATE INDEX idx_media_intents_imdb ON media_intents(imdb_id) WHERE imdb_id IS NOT NULL');
-    db.exec('CREATE INDEX idx_media_intents_tmdb ON media_intents(tmdb_id) WHERE tmdb_id IS NOT NULL');
-    db.exec('CREATE INDEX idx_media_intents_tvdb ON media_intents(tvdb_id) WHERE tvdb_id IS NOT NULL');
-  }
-
-  // Add processing columns to media_intents if missing
+  // Note: the media_intents table is created by SCHEMA. The identity bundle
+  // columns (imdb_id, tmdb_id, tvdb_id) on a pre-SCHEMA database are
+  // added by ensureMediaIntentIdentityColumns before SCHEMA runs.
+  // SCHEMA itself does not cover the processing columns below, so
+  // they are added here for legacy databases that pre-date the
+  // processing-state additions.
   const intentInfo = db.prepare('PRAGMA table_info(media_intents)').all();
   const hasLastProcessedAt = intentInfo.some(col => col.name === 'last_processed_at');
   if (!hasLastProcessedAt) {
@@ -712,21 +675,6 @@ function migrateMediaIntents(db) {
   const hasLastError = intentInfo.some(col => col.name === 'last_error');
   if (!hasLastError) {
     db.exec('ALTER TABLE media_intents ADD COLUMN last_error TEXT');
-  }
-  const hasImdbId = intentInfo.some(col => col.name === 'imdb_id');
-  if (!hasImdbId) {
-    db.exec('ALTER TABLE media_intents ADD COLUMN imdb_id TEXT');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_media_intents_imdb ON media_intents(imdb_id) WHERE imdb_id IS NOT NULL');
-  }
-  const hasTmdbId = intentInfo.some(col => col.name === 'tmdb_id');
-  if (!hasTmdbId) {
-    db.exec('ALTER TABLE media_intents ADD COLUMN tmdb_id TEXT');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_media_intents_tmdb ON media_intents(tmdb_id) WHERE tmdb_id IS NOT NULL');
-  }
-  const hasTvdbId = intentInfo.some(col => col.name === 'tvdb_id');
-  if (!hasTvdbId) {
-    db.exec('ALTER TABLE media_intents ADD COLUMN tvdb_id TEXT');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_media_intents_tvdb ON media_intents(tvdb_id) WHERE tvdb_id IS NOT NULL');
   }
 
   // Add intent_id column to media_requests if missing
@@ -2158,9 +2106,14 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     const now = Date.now();
     const intentLength = results.length;
 
-    // Upsert intent and get intent_id
+    // Resolve the linked media_intents row. Callers that already created
+    // the intent (e.g. the Seerr ingress) pass `intent.intentId` to skip
+    // the implicit upsert. Callers without an existing row fall back to
+    // the original behaviour: upsert keyed on the dedupe tuple.
     let intentId = null;
-    if (intent.source || intent.sourceType || intent.sourceId || intent.sourceLabel) {
+    if (intent.intentId != null) {
+      intentId = intent.intentId;
+    } else if (intent.source || intent.sourceType || intent.sourceId || intent.sourceLabel) {
       intentId = upsertMediaIntent({
         mediaId: intent.mediaId,
         mediaType: intent.mediaType,

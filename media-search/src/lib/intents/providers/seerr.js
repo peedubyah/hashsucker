@@ -1,14 +1,11 @@
 /**
- * Seerr (Overseerr/Jellyseerr) Webhook Intent Provider
+ * Seerr (Overseerr/Jellyseerr) Webhook — pure helpers
  *
- * Inbound webhook source. Translates an approved Seerr request into a
- * MediaIntent and inserts it through the existing media_intents pipeline.
- *
- * This provider is NOT registered with the registry pollers — it is
- * invoked directly by the /api/ingress/seerr HTTP endpoint when a
- * Seerr webhook is received. The provider object exists primarily so
- * we reuse the existing MediaIntentProvider contract for validation
- * and consistent field semantics.
+ * Inbound webhook source. The HTTP handler at /api/ingress/seerr
+ * translates an approved Seerr request into a MediaIntent and
+ * inserts it through the existing media_intents pipeline. This
+ * module owns the pure functions for that translation; it does NOT
+ * register a provider with the intent registry (Seerr is push-only).
  *
  * Source semantics:
  * - source:      'seerr'
@@ -30,7 +27,6 @@
  */
 
 import { timingSafeEqual } from 'node:crypto';
-import { MediaIntentProvider } from '../types.js';
 
 /**
  * Notification types we treat as actionable approvals.
@@ -97,7 +93,7 @@ function normalizeNumericIdString(value) {
  * @param {Object} body
  * @returns {{media: Object|null, request: Object|null, extra: any, notificationType: string|null, subject: string|null}}
  */
-export function extractSeerrEnvelope(body) {
+function extractSeerrEnvelope(body) {
   if (!body || typeof body !== 'object') {
     return { media: null, request: null, extra: null, notificationType: null, subject: null };
   }
@@ -149,7 +145,7 @@ export function deriveMediaIdentity(mediaObj) {
  * @param {string|null} mediaType
  * @returns {'movie'|'series'|null}
  */
-export function deriveMediaType(mediaType) {
+function deriveMediaType(mediaType) {
   const t = normalizeIdString(mediaType);
   if (!t) return null;
   const lower = t.toLowerCase();
@@ -252,7 +248,7 @@ export function buildSeerrIntent(body) {
  * @param {string} b
  * @returns {boolean}
  */
-export function safeEqualString(a, b) {
+function safeEqualString(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   const aBuf = Buffer.from(a, 'utf8');
   const bBuf = Buffer.from(b, 'utf8');
@@ -283,35 +279,6 @@ export function checkSeerrAuth(authHeader, configuredToken) {
     return { ok: false, status: 401, reason: 'invalid-token' };
   }
   return { ok: true };
-}
-
-/**
- * Provider instance placeholder. Seerr does not poll — the webhook
- * endpoint builds intents directly via buildSeerrIntent(). This
- * exists only so future code (e.g. reconcilers) can recognize the
- * Seerr source by provider contract.
- */
-export class SeerrIntentProvider extends MediaIntentProvider {
-  constructor(config = {}) {
-    super(SEERR_PROVIDER_NAME, SEERR_PROVIDER_TYPE, config);
-  }
-
-  supports(source) {
-    return source === SEERR_PROVIDER_NAME;
-  }
-
-  // fetchIntents is intentionally a no-op: Seerr is push-only.
-  async fetchIntents() {
-    return [];
-  }
-}
-
-/**
- * Create a SeerrIntentProvider from environment variables.
- * @returns {SeerrIntentProvider}
- */
-export function createSeerrProvider() {
-  return new SeerrIntentProvider({ enabled: Boolean(process.env.SEERR_WEBHOOK_TOKEN) });
 }
 
 export const SEERR_CONSTANTS = Object.freeze({

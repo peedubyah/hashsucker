@@ -192,10 +192,11 @@ test('seerr ingress: same payload twice → still one intent (idempotent)', asyn
 
     const intents = cache.getMediaIntentsBySource('seerr', 100);
     assert.equal(intents.length, 1, 'duplicate deliveries must not create additional intent rows');
-    // request_count reflects both the ingress upsert (1) and the immediate
-    // downstream processing event (1). Duplicate webhooks take the duplicate
-    // path and never reach either, so the count is stable across deliveries.
-    assert.equal(intents[0].requestCount, 2, 'duplicate deliveries must not increment request_count');
+    // The Seerr ingress writes the intent once; persistMediaRequest reuses
+    // the same intentId without a second upsert. Duplicate webhooks take
+    // the duplicate path and never reach either writer, so the count is
+    // stable across deliveries.
+    assert.equal(intents[0].requestCount, 1, 'first request produces request_count=1; duplicates do not increment');
   } finally {
     clearSeerrToken();
   }
@@ -655,7 +656,11 @@ test('seerr ingress: duplicate webhook → one intent and one media request (no 
 
     const intents = cache.getMediaIntentsBySource('seerr', 100);
     assert.equal(intents.length, 1, 'duplicate must not create a second intent');
-    assert.equal(intents[0].requestCount, 2, 'request_count reflects ingress+processing bumps');
+    assert.equal(
+      intents[0].requestCount,
+      1,
+      'first Seerr request must produce exactly one media_intents row with request_count=1 (no double upsert)',
+    );
 
     // Exactly one media_request, not two
     const requests = cache.db.prepare(
@@ -664,6 +669,11 @@ test('seerr ingress: duplicate webhook → one intent and one media request (no 
     assert.equal(requests.length, 1, 'duplicate must not create a second media_request');
     assert.equal(requests[0].id, firstRequestId, 'duplicate returns same requestId');
     assert.equal(requests[0].source, 'seerr');
+    assert.equal(
+      requests[0].intent_id,
+      intents[0].id,
+      'media_requests.intent_id must equal the media_intents row id',
+    );
   } finally {
     clearSeerrToken();
   }

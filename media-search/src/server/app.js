@@ -521,6 +521,7 @@ async function handleSeerrIngress(request, response, searchCache) {
       sourceLabel: operationalIntent.sourceLabel,
       requestedBy: null,
       priority: operationalIntent.priority,
+      intentId,
       persist: true,
     });
     searchCache.db.prepare(
