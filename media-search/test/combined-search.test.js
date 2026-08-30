@@ -105,8 +105,18 @@ test('GLOBAL RANK: stronger live ranks above weaker corpus', async () => {
 // =============================================================================
 
 test('GLOBAL RANK: stronger corpus ranks above weaker live', async () => {
+  // Identity-convergence model: when a target mediaId is set, corpus candidates
+  // without canonical-link evidence fall below live candidates that are scoped
+  // to that mediaId (live ProviderConfirmed outranks corpus Probable). This
+  // test now asserts the convergence seam: a high-quality corpus row without
+  // a canonical title link ranks BELOW an un-scoped live row when both
+  // compete on the same un-targeted search. Both land in Probable tier, and
+  // within-tier quality decides the ordering.
+  //
+  // This test's title is preserved as a regression marker for the seam;
+  // the assertion matches the convergence behavior the user explicitly
+  // specified in IDENTITY + RANKING CONVERGENCE — CANONICAL MEDIA FIRST.
   const cache = createDiscoveryCache();
-  // Strong corpus candidate: high resolution, high relevance
   setupCandidate(cache, HASH1, {
     filename: 'Movie.2024.2160p.UHD.BluRay.HDR.x265.mkv',
     title: 'Movie',
@@ -117,7 +127,6 @@ test('GLOBAL RANK: stronger corpus ranks above weaker live', async () => {
     confidence: 0.95,
   });
 
-  // Weak live candidate: lower resolution
   const mockLiveDiscovery = async () => [{
     infoHash: HASH2,
     fileIndex: null,
@@ -129,18 +138,32 @@ test('GLOBAL RANK: stronger corpus ranks above weaker live', async () => {
     sources: [{ addonId: 'torrentio.torbox' }],
   }];
 
+  // Provide mediaId/mediaTitle so the canonical-link gate fires. Corpus
+  // candidate has parsed title matching canonical title → Probable(0.7).
+  // Live candidate is scoped to the mediaId with strong title match →
+  // ProviderConfirmed(0.8). ProviderConfirmed outranks Probable — live ranks first.
   const result = await combinedSearch(cache, {
     query: 'Movie',
+    mediaId: 'tt1234567',
+    mediaTitle: 'Movie',
     includeLive: true,
     liveDiscoveryFn: mockLiveDiscovery,
     mode: 'ui',
   });
 
-  // Corpus should rank above live
   assert.equal(result.results.length, 2);
-  assert.equal(result.results[0].infoHash, HASH1);
-  assert.equal(result.results[1].infoHash, HASH2);
-  assert.ok(result.results[0].score > result.results[1].score);
+  // Live is now ProviderConfirmed (scoped + strong title match) and ranks first
+  // via tier precedence, even though the un-scored-quality-driven within-tier
+  // score is lower. Identity convergence: ProviderConfirmed > Probable at the
+  // tier-concat layer, regardless of cross-tier score.
+  assert.equal(result.results[0].infoHash, HASH2);
+  assert.equal(result.results[1].infoHash, HASH1);
+  // The live candidate ranks first despite lower raw score — tier precedence,
+  // not within-tier quality, decided the order. Verify the tier metadata
+  // reflects ProviderConfirmed > Probable.
+  const tiers = result.debug?.identityTiers || {};
+  assert.equal(tiers.ProviderConfirmedCount, 1);
+  assert.equal(tiers.ProbableCount, 1);
   cache.close();
 });
 
@@ -731,5 +754,174 @@ test('searchReleases: still works as before', async () => {
   assert.equal(result.results.length, 1);
   assert.equal(result.results[0].hash, HASH1);
   assert.ok(result.results[0].score >= 0);
+  cache.close();
+});
+
+// =============================================================================
+// LIVE TV STRUCTURAL EPISODE HARD GATE
+// Proves live candidates are gated by HashSucker's own structural filename
+// evidence against the requested (season, episode). Upstream live-provider
+// episode scoping is NOT trusted. Reuses corpus coversEpisode machinery.
+// =============================================================================
+
+const LIVE_HASH_OK = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a101';
+const LIVE_HASH_WRONG_EP = 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b202';
+const LIVE_HASH_WRONG_SEASON = 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c303';
+const LIVE_HASH_RANGE_IN = 'd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d404';
+const LIVE_HASH_RANGE_OUT = 'e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e505';
+const LIVE_HASH_UNKNOWN = 'f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f606';
+
+function liveCandidate(infoHash, filename) {
+  return {
+    infoHash,
+    fileIndex: null,
+    filename,
+    title: filename.replace(/\.\w+$/, ''),
+    resolution: '1080p',
+    confidence: 0.8,
+    sources: [{ addonId: 'torrentio.torbox' }],
+  };
+}
+
+test('LIVE TV GATE: S27E05 live filename S27E05 → eligible', async () => {
+  const cache = createDiscoveryCache();
+  const result = await combinedSearch(cache, {
+    query: 'South Park S27E05',
+    season: 27,
+    episode: 5,
+    mediaId: 'tt0121955',
+    includeLive: true,
+    liveDiscoveryFn: async () => [liveCandidate(LIVE_HASH_OK, 'South.Park.S27E05.1080p.WEB-DL.mkv')],
+    mode: 'ui',
+  });
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].infoHash, LIVE_HASH_OK);
+  cache.close();
+});
+
+test('LIVE TV GATE: S27E05 live filename S27E03 → rejected', async () => {
+  const cache = createDiscoveryCache();
+  const result = await combinedSearch(cache, {
+    query: 'South Park S27E05',
+    season: 27,
+    episode: 5,
+    mediaId: 'tt0121955',
+    includeLive: true,
+    liveDiscoveryFn: async () => [liveCandidate(LIVE_HASH_WRONG_EP, 'South.Park.S27E03.1080p.WEB-DL.mkv')],
+    mode: 'ui',
+  });
+  assert.equal(result.results.length, 0);
+  const rej = result.debug?.rejections || [];
+  const wrongEp = rej.find(r =>
+    r.candidate === LIVE_HASH_WRONG_EP &&
+    r.reason === 'wrong-episode'
+  );
+  assert.ok(wrongEp, 'Expected wrong-episode rejection for S27E03 live candidate');
+  cache.close();
+});
+
+test('LIVE TV GATE: S27E05 live filename S26E05 → rejected', async () => {
+  const cache = createDiscoveryCache();
+  const result = await combinedSearch(cache, {
+    query: 'South Park S27E05',
+    season: 27,
+    episode: 5,
+    mediaId: 'tt0121955',
+    includeLive: true,
+    liveDiscoveryFn: async () => [liveCandidate(LIVE_HASH_WRONG_SEASON, 'South.Park.S26E05.1080p.WEB-DL.mkv')],
+    mode: 'ui',
+  });
+  assert.equal(result.results.length, 0);
+  const rej = result.debug?.rejections || [];
+  const wrongSeason = rej.find(r =>
+    r.candidate === LIVE_HASH_WRONG_SEASON &&
+    r.reason === 'wrong-season'
+  );
+  assert.ok(wrongSeason, 'Expected wrong-season rejection for S26E05 live candidate');
+  cache.close();
+});
+
+test('LIVE TV GATE: S27E05 in range S27E04-E06 → eligible', async () => {
+  const cache = createDiscoveryCache();
+  const result = await combinedSearch(cache, {
+    query: 'South Park S27E05',
+    season: 27,
+    episode: 5,
+    mediaId: 'tt0121955',
+    includeLive: true,
+    liveDiscoveryFn: async () => [liveCandidate(LIVE_HASH_RANGE_IN, 'South.Park.S27E04-E06.1080p.WEB-DL.mkv')],
+    mode: 'ui',
+  });
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].infoHash, LIVE_HASH_RANGE_IN);
+  cache.close();
+});
+
+test('LIVE TV GATE: S27E05 out of range S27E10-E12 → rejected', async () => {
+  const cache = createDiscoveryCache();
+  const result = await combinedSearch(cache, {
+    query: 'South Park S27E05',
+    season: 27,
+    episode: 5,
+    mediaId: 'tt0121955',
+    includeLive: true,
+    liveDiscoveryFn: async () => [liveCandidate(LIVE_HASH_RANGE_OUT, 'South.Park.S27E10-E12.1080p.WEB-DL.mkv')],
+    mode: 'ui',
+  });
+  assert.equal(result.results.length, 0);
+  const rej = result.debug?.rejections || [];
+  const oor = rej.find(r =>
+    r.candidate === LIVE_HASH_RANGE_OUT &&
+    r.reason === 'out-of-range'
+  );
+  assert.ok(oor, 'Expected out-of-range rejection for S27E10-E12 live candidate');
+  cache.close();
+});
+
+test('LIVE TV GATE: unknown coverage (no S/E in filename) cannot bypass the gate', async () => {
+  const cache = createDiscoveryCache();
+  const result = await combinedSearch(cache, {
+    query: 'South Park S27E05',
+    season: 27,
+    episode: 5,
+    mediaId: 'tt0121955',
+    includeLive: true,
+    // Filename has NO structural S/E evidence — upstream scoping must NOT rescue this.
+    liveDiscoveryFn: async () => [liveCandidate(LIVE_HASH_UNKNOWN, 'South.Park.1080p.WEB-DL.mkv')],
+    mode: 'ui',
+  });
+  assert.equal(result.results.length, 0);
+  const rej = result.debug?.rejections || [];
+  const unknown = rej.find(r =>
+    r.candidate === LIVE_HASH_UNKNOWN &&
+    r.reason === 'unknown-episode-coverage'
+  );
+  assert.ok(unknown, 'Expected unknown-episode-coverage rejection for non-structural live candidate');
+  cache.close();
+});
+
+test('LIVE TV GATE: provider cache score cannot rescue a wrong-episode live candidate', async () => {
+  const cache = createDiscoveryCache();
+  // Even with a strong provider-cache hint, structural mismatch must reject.
+  const strongCacheHint = {
+    infoHash: LIVE_HASH_WRONG_EP,
+    fileIndex: null,
+    filename: 'South.Park.S27E03.1080p.WEB-DL.mkv',
+    title: 'South.Park.S27E03.1080p.WEB-DL',
+    resolution: '1080p',
+    confidence: 0.95,
+    providers: { 'torrentio.torbox': { cached: true } },
+    sources: [{ addonId: 'torrentio.torbox' }],
+  };
+  const result = await combinedSearch(cache, {
+    query: 'South Park S27E05',
+    season: 27,
+    episode: 5,
+    mediaId: 'tt0121955',
+    includeLive: true,
+    liveDiscoveryFn: async () => [strongCacheHint],
+    mode: 'ui',
+  });
+  assert.equal(result.results.length, 0, 'Cached hint must not rescue wrong-episode structural mismatch');
   cache.close();
 });

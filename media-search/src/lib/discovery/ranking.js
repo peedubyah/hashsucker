@@ -26,25 +26,120 @@ function normalizeTitle(title) {
 }
 
 /**
+ * Stopwords excluded from title overlap scoring. Without this filter, the
+ * 60%-overlap heuristic is dominated by common English articles/prepositions
+ * ("the", "of") and accepts unrelated shows whenever both titles share them
+ * — e.g. "House of the Dragon" and "The Lord of the Rings: The Fellowship of
+ * the Ring" share 6 stopwords and would otherwise pass as the same show.
+ */
+const TITLE_STOPWORDS = new Set([
+  'a', 'an', 'the', 'of', 'and', 'or', 'in', 'on', 'at', 'to', 'for',
+  'with', 'by', 'from', 'is', 'it', 'as', 'be', 'this', 'that', 's',
+]);
+
+function meaningfulTokens(title) {
+  return title.split(' ').filter(Boolean).filter(t => !TITLE_STOPWORDS.has(t));
+}
+
+/**
+ * Classify a parsed title (or filename fallback) as low-information parser junk.
+ *
+ * A parsed title is low-information when it carries no usable identity
+ * evidence for comparison: pure stopword residue, a leftover Season/Episode
+ * label, or a tokenless punctuation/digit string. Real foreign-language
+ * titles (Cyrillic, CJK, etc.) carry non-Latin letters and are NEVER
+ * classified as low-information — this helper is intentionally narrow
+ * and only flags known parser failure shapes.
+ *
+ * When parsedTitle is null (parser failed to extract a title), filename is
+ * checked as a fallback so the gate can still catch rows like bare "Season 02"
+ * that the parser left with title=NULL and filename="Season 02".
+ *
+ * @param {string|null} parsedTitle - The parsed title (may be null)
+ * @param {string} [filename] - Raw filename fallback when parsedTitle is null
+ * @returns {boolean} True if the evidence is parser junk
+ */
+function isLowInformationParsedTitle(parsedTitle, filename = null) {
+  // Check parsed title first
+  if (parsedTitle != null) {
+    if (isLowInformationTitleValue(parsedTitle)) return true;
+  }
+
+  // Fallback: when the parser failed to extract a title, the raw filename
+  // may still expose the failure shape (e.g. "Season 02" bare filename).
+  if (filename != null && isLowInformationTitleValue(filename)) return true;
+
+  return false;
+}
+
+/**
+ * Core low-information classification for a single string value.
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isLowInformationTitleValue(value) {
+  // Raw pattern: leftover Season/Episode label that the stripper missed
+  // (e.g. filenames like "Season 02" with no extension or title prefix).
+  if (/^season\s*\d+(\s*[-~]\s*\d+)?$/i.test(value)) return true;
+  if (/^episode\s*\d+(\s*[-~]\s*\d+)?$/i.test(value)) return true;
+
+  const normalized = normalizeTitle(value);
+  if (!normalized) return false;
+
+  // Any non-Latin letter (Cyrillic, CJK, Greek, Arabic, etc.) is real
+  // title content — not parser junk. We classify "Покаяние" as credible
+  // even though titlesMatch returns null for it (no comparable tokens).
+  if (/[^\u0000-\u007f]/.test(value)) return false;
+
+  const tokens = normalized.split(' ').filter(Boolean);
+  if (tokens.length === 0) return false;
+
+  // All-stopword residue: e.g. parser stripped the real title and only
+  // left "The", "Of", "A" — no token carries meaning.
+  if (tokens.every(t => TITLE_STOPWORDS.has(t))) return true;
+
+  return false;
+}
+
+/**
  * Check if parsed title matches the requested media title.
  * Returns:
  *   true  - titles match (same show)
  *   false - titles clearly differ (different show)
  *   null  - insufficient data to determine (missing title)
  */
-function titlesMatch(requestedTitle, parsedTitle) {
+export function titlesMatch(requestedTitle, parsedTitle) {
   const r = normalizeTitle(requestedTitle);
   const p = normalizeTitle(parsedTitle);
 
   if (!r || !p) return null;
 
-  // Exact match or substring containment
-  if (r === p || r.includes(p) || p.includes(r)) return true;
+  // Exact match always wins.
+  if (r === p) return true;
 
-  // Token overlap: at least 60% of requested tokens present in parsed
-  const rTokens = r.split(' ').filter(Boolean);
-  const pTokens = p.split(' ').filter(Boolean);
-  const overlap = rTokens.filter(t => pTokens.includes(t)).length;
+  // Requested title has no meaningful tokens (e.g. "Up", "It", "Her",
+  // all-stopword titles). Token overlap is meaningless here, and
+  // substring containment is dangerous — "up" is a substring of
+  // "stargate collection upscale ai" and would falsely accept unrelated
+  // entries. Return null (insufficient evidence to filter) so the gate
+  // does not reject legitimate short-title corpus entries (e.g. "Up
+  // 2009" for an "Up" request). For short-title requests, live results
+  // from the media-scoped live-discovery path are the authoritative
+  // source and will rank correctly above noise.
+  const rTokens = meaningfulTokens(r);
+  if (rTokens.length === 0) return null;
+
+  // Substring containment only counts as a match when the parsed title
+  // carries at least one meaningful token — otherwise a stopword-only
+  // parsed title ("the", "of", "a") would match almost any English
+  // request.
+  const pMeaningful = meaningfulTokens(p);
+  if (pMeaningful.length > 0 && (r.includes(p) || p.includes(r))) return true;
+
+  // Token overlap on MEANINGFUL tokens (stopwords excluded) so common
+  // articles/prepositions do not falsely correlate unrelated shows.
+  const pTokens = new Set(pMeaningful);
+  const overlap = rTokens.filter(t => pTokens.has(t)).length;
   return overlap / rTokens.length >= 0.6;
 }
 
@@ -80,23 +175,54 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
   const seasonOnly = releaseAttributes.seasonOnly ?? false;
   const parsedMediaType = releaseAttributes.mediaType || null;
   const parsedTitle = releaseAttributes.title || null;
+  const filename = releaseAttributes.filename || hit.filename || null;
+
+  // Title cross-check: if requested title and parsed title both exist,
+  // reject candidates from a clearly different show. Runs for BOTH movies
+  // and series — it is the only meaningful identity signal for movies
+  // (which have no season/episode constraints to fall back on).
+  if (requestedMediaTitle) {
+    if (parsedTitle) {
+      const titleResult = titlesMatch(requestedMediaTitle, parsedTitle);
+      if (titleResult === false) {
+        return {
+          eligible: false,
+          reason: `title_mismatch: parsed title "${parsedTitle}" does not match requested "${requestedMediaTitle}"`,
+          code: 'title_mismatch',
+        };
+      }
+
+      // Low-information parsed title (parser junk such as leftover "The",
+      // "Season 02", or tokenless punctuation) cannot establish identity.
+      // Reject so the candidate cannot rank above verified results. This
+      // deliberately runs ONLY when a mediaTitle is requested and a parsed
+      // title exists — it does not affect unfiltered or series queries.
+      if (titleResult === null && isLowInformationParsedTitle(parsedTitle)) {
+        return {
+          eligible: false,
+          reason: `low_information_parsed_title: parsed title "${parsedTitle}" is parser residue with no comparable title evidence`,
+          code: 'low_information_parsed_title',
+        };
+      }
+    } else {
+      // No parsed title at all (parser failed to extract one). If the
+      // raw filename itself is parser residue (e.g. "Season 02" bare
+      // filename with no extension and no real title text), the candidate
+      // cannot establish identity either. Use filename as the fallback
+      // evidence for the low-information check.
+      if (isLowInformationParsedTitle(null, filename)) {
+        return {
+          eligible: false,
+          reason: `low_information_parsed_title: filename "${filename || ''}" is parser residue with no comparable title evidence`,
+          code: 'low_information_parsed_title',
+        };
+      }
+    }
+  }
 
   // Movies: no episode constraints possible
   if (mediaType === 'movie' || !querySeason) {
     return { eligible: true, reason: null, code: null };
-  }
-
-  // Title cross-check: if requested title and parsed title both exist,
-  // reject candidates from a clearly different show
-  if (requestedMediaTitle && parsedTitle) {
-    const titleResult = titlesMatch(requestedMediaTitle, parsedTitle);
-    if (titleResult === false) {
-      return {
-        eligible: false,
-        reason: `title_mismatch: parsed title "${parsedTitle}" does not match requested "${requestedMediaTitle}"`,
-        code: 'title_mismatch',
-      };
-    }
   }
 
   // Series with specific season+episode requested
@@ -730,9 +856,53 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
     };
   }
 
-  // No explicit media association from here on
+  // No explicit media association from here on.
+  //
+  // Identity evidence priority (corpus branch):
+  //   1. Explicit candidate_media row → already classified above (Verified / Rejected)
+  //   2. Strong canonical title match (parsed title tokens compare against the
+  //      requested canonical title from queryIntent.mediaTitle) → Probable
+  //   3. Weak/indeterminate text-only evidence → TextOnly
+  //
+  // A parsed title that the parser produced but that has NO comparable tokens
+  // against the canonical title (titlesMatch returns null — e.g. non-Latin
+  // characters that normalize to nothing, or a short canonical title with no
+  // meaningful tokens) is NOT canonical-identity evidence. It must not be
+  // promoted to Probable just because a parse succeeded; that path lets
+  // unrelated corpus rows (Покаяние, foreign-language noise, parser junk that
+  // happens to be a real non-Latin word) outrank live candidates that are
+  // scoped to the canonical IMDb ID.
   const hasTitleMatch = textRelevance >= 0.6;
   const hasParsedMetadata = parsedTitle || parsedSeason != null || parsedEpisode != null;
+
+  // Canonical title cross-check: when the request carries an explicit
+  // canonical title, the parsed title must actually compare against it. A
+  // null return from titlesMatch means no comparable Latin tokens on either
+  // side (e.g. Cyrillic-only parsed title vs Latin canonical, or short
+  // canonical title with no meaningful tokens) — that's indeterminate, not
+  // confirming, evidence.
+  const canonicalTitle = queryIntent?.mediaTitle || null;
+  let canonicalTitleLink = null; // true | false | null
+  if (canonicalTitle && parsedTitle) {
+    canonicalTitleLink = titlesMatch(canonicalTitle, parsedTitle);
+  }
+
+  // Identity-convergence demotion: when the caller asserted a canonical
+  // title and the parsed title has no token link to it (Cyrillic vs
+  // Latin, or short canonical title with no comparable tokens), demote to
+  // TextOnly. This MUST run BEFORE the hasTitleMatch block below — BM25
+  // text relevance is corpus-only and may be high (1.0) for the single
+  // corpus row that matched a sparse query even when that row is a
+  // completely different show (e.g. Cyrillic "Покаяние" matching against
+  // an empty query while user requested "The Lord of the Rings").
+  if (canonicalTitle && canonicalTitleLink === null) {
+    return {
+      IdentityTier: 'TextOnly',
+      IdentityConfidence: 0.2,
+      IdentityEvidence: ['text-similarity-only'],
+      RejectionReason: 'no_canonical_title_link: parsed title has no comparable tokens to the canonical title',
+    };
+  }
 
   // Probable: strong title match but no media association
   if (hasTitleMatch) {
@@ -756,10 +926,54 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
     };
   }
 
-  // Probable: partial metadata evidence
-  if (hasParsedMetadata) {
+  // Probable: parsed title links back to the canonical title.
+  // titlesMatch === true means the parsed title is the same show (token
+  // overlap, substring containment, or exact match). This is the path that
+  // lets a legitimate alternate-language corpus release (whose parsed
+  // title passes through titlesMatch because the parser extracted Latin
+  // tokens) rank as Probable. Crucially: titlesMatch returns true for
+  // titles that share at least 60% of meaningful tokens, including
+  // releases whose filename also carries the English title alongside the
+  // localized one.
+  if (canonicalTitleLink === true) {
+    const evidence = ['canonical-title-link'];
+    let confidence = 0.7;
+
+    if (parsedSeason != null) {
+      evidence.push('parsed-season');
+      confidence += 0.1;
+    }
+    if (parsedEpisode != null) {
+      evidence.push('parsed-episode');
+      confidence += 0.1;
+    }
+
+    return {
+      IdentityTier: 'Probable',
+      IdentityConfidence: Math.min(0.8, confidence),
+      IdentityEvidence: evidence,
+      RejectionReason: null,
+    };
+  }
+
+  // When the caller asserted a canonical title, the demotion block above
+  // (before hasTitleMatch) has already handled canonicalTitleLink === null.
+  // By the time we reach this point, canonicalTitle is null OR
+  // canonicalTitleLink === true. The remaining paths are:
+  //   - hasTitleMatch (BM25-based "strong title match" path)
+  //   - canonicalTitleLink === true (parsed title token link to canonical)
+  //   - hasParsedMetadata with parsed season/episode (legacy loose fallback)
+  //   - final TextOnly default
+
+  // Probable: partial metadata evidence (parser ran, no parsed title, just season/episode)
+  // These are corpus rows where the parser succeeded but found no title.
+  // This is the legacy loose fallback: only fires when the caller did NOT
+  // pass a canonical title (so we can't make a negative identity assertion)
+  // AND the hit has parsed season/episode metadata. Preserved for
+  // media-association-only TV lookups where the route contract is just
+  // (mediaId, season, episode) without mediaTitle.
+  if (hasParsedMetadata && !parsedTitle) {
     const evidence = [];
-    if (parsedTitle) evidence.push('parsed-title');
     if (parsedSeason != null) evidence.push('parsed-season');
     if (parsedEpisode != null) evidence.push('parsed-episode');
 
@@ -1223,6 +1437,7 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     hash,
     fileIndex,
     filename,
+    relevance,
     score: roundedScore,
     components: {
       relevance: Math.round(effectiveRelevance * 1000) / 1000,

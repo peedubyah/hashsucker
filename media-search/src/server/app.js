@@ -25,6 +25,7 @@ import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { searchTitles, getMediaById, getCacheMetrics } from '../lib/metadata/unified-search.js';
 import { createHandoff, HANDLING_MODES } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
+import { buildSeerrIntent, checkSeerrAuth } from '../lib/intents/providers/seerr.js';
 import { fulfillVirtualSelection } from '../lib/requests/virtual-library.js';
 import { searchReleases, combinedSearch, searchTrace, getSearchStats } from '../lib/discovery/search-engine.js';
 import { runLiveDiscovery, runLiveDiscoveryWithCounts } from '../lib/discovery/live-bridge.js';
@@ -303,6 +304,255 @@ async function readBody(request) {
     return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
   } catch {
     throw new Error('Request body must be valid JSON');
+  }
+}
+
+/**
+ * Seerr identity translation at the Seerr ingress boundary.
+ *
+ * Seerr may report a media identity using only TMDB. The rest of the
+ * HashSucker discovery pipeline is keyed on IMDb (and TVDB for series).
+ * This helper resolves TMDB → IMDb by calling the Seerr detail endpoint
+ * once at the boundary and returns the resolved IMDb; the persisted
+ * media_intents row then carries the IMDb form as the operational
+ * mediaId, with tmdb_id preserved alongside for traceability.
+ *
+ * Translation NEVER happens inside the generic discovery pipeline. If
+ * a TMDB-only intent arrives without a configured SEERR_URL/API_KEY,
+ * the resolver returns `{ ok: false, reason: 'identity-misconfigured' }`
+ * and the caller records an explicit identity-unresolved last_error
+ * instead of silently feeding `tmdb:*` to an IMDb-keyed search.
+ *
+ * @param {{ tmdbId: string, mediaType: 'movie'|'series' }} identity
+ * @param {{ fetch?: typeof fetch, SEERR_URL?: string, SEERR_API_KEY?: string, logger?: Console }} env
+ * @returns {Promise<{ok: true, imdbId: string} | {ok: false, reason: string, status?: number}>}
+ */
+async function resolveSeerrIdentity(identity, env = process.env) {
+  const tmdbId = String(identity.tmdbId || '').trim();
+  if (!/^[0-9]+$/.test(tmdbId)) {
+    return { ok: false, reason: 'identity-bad-tmdb' };
+  }
+  const baseUrl = String(env.SEERR_URL || '').trim();
+  const apiKey = String(env.SEERR_API_KEY || '').trim();
+  if (!baseUrl || !apiKey) {
+    return { ok: false, reason: 'identity-misconfigured' };
+  }
+  const path = identity.mediaType === 'series' ? 'tv' : 'movie';
+  const endpoint = `${baseUrl.replace(/\/$/, '')}/api/v1/${path}/${encodeURIComponent(tmdbId)}`;
+  const f = typeof env.fetch === 'function' ? env.fetch : fetch;
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 5000);
+  try {
+    const resp = await f(endpoint, {
+      method: 'GET',
+      headers: {
+        'X-Api-Key': apiKey,
+        Accept: 'application/json',
+        'User-Agent': 'hashsucker-seerr-ingress/1.0',
+      },
+      signal: ac.signal,
+    });
+    if (resp.status === 401 || resp.status === 403) {
+      return { ok: false, reason: 'identity-unauthorized', status: resp.status };
+    }
+    if (resp.status === 404) {
+      return { ok: false, reason: 'identity-not-found', status: 404 };
+    }
+    if (!resp.ok) {
+      return { ok: false, reason: 'identity-unavailable', status: resp.status };
+    }
+    let body;
+    try {
+      body = await resp.json();
+    } catch {
+      return { ok: false, reason: 'identity-unparseable' };
+    }
+    if (!body || typeof body !== 'object') {
+      return { ok: false, reason: 'identity-unparseable' };
+    }
+    const raw = body.imdbId ?? body.imdb_id ?? null;
+    const imdbId = raw == null ? null : String(raw).trim();
+    if (!imdbId || !/^tt[0-9]{7,}$/.test(imdbId)) {
+      return { ok: false, reason: 'identity-unresolved' };
+    }
+    return { ok: true, imdbId };
+  } catch (err) {
+    const reason = err && err.name === 'AbortError' ? 'identity-timeout' : 'identity-unavailable';
+    return { ok: false, reason };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Exported for testability only; production callers go through
+// handleSeerrIngress.
+export { resolveSeerrIdentity };
+
+/**
+ * Handle a Seerr webhook at the boundary.
+ *
+ * Flow:
+ *   1. Bearer auth via SEERR_WEBHOOK_TOKEN
+ *   2. Build intent (pure function, no I/O)
+ *   3. Idempotency check on (source, source_id) — exact request_id
+ *   4. If TMDB-only and SEERR_URL/API_KEY are configured, resolve to IMDb
+ *      once. On unresolved identity, persist a durable intent with
+ *      last_error set and return 500 — NOT zero candidates.
+ *   5. Persist the durable intent (idempotent on media_id+type+source+season+episode)
+ *   6. Invoke the existing single-intent searchByMedia() pipeline. The
+ *      intent row is durable; a searchByMedia failure is recorded as
+ *      last_error and re-thrown so the caller can decide.
+ *
+ * @param {http.IncomingMessage} request
+ * @param {http.ServerResponse} response
+ * @param {Object} searchCache
+ */
+async function handleSeerrIngress(request, response, searchCache) {
+  // 1. Auth
+  const authHeader = request.headers && typeof request.headers.authorization === 'string'
+    ? request.headers.authorization
+    : (request.headers && Array.isArray(request.headers.authorization) ? request.headers.authorization[0] : null);
+  const auth = checkSeerrAuth(authHeader, process.env.SEERR_WEBHOOK_TOKEN);
+  if (!auth.ok) {
+    return sendJson(response, auth.status || 401, { error: 'unauthorized', message: auth.reason });
+  }
+
+  // 2. Build intent (pure)
+  let body;
+  try {
+    body = await readBody(request);
+  } catch (err) {
+    return sendJson(response, 400, { error: 'malformed-body', message: err.message });
+  }
+  const built = buildSeerrIntent(body);
+  if (built.ignored) {
+    return sendJson(response, 200, {
+      status: 'ignored',
+      reason: built.reason,
+      notificationType: built.notificationType,
+    });
+  }
+  if (built.error) {
+    return sendJson(response, 400, { error: 'malformed-payload', message: built.error });
+  }
+  const { intent, notificationType } = built;
+
+  // 3. Idempotency by Seerr request_id (source_id)
+  const existing = searchCache.db.prepare(
+    'SELECT id, request_count FROM media_intents WHERE source = ? AND source_id = ? LIMIT 1'
+  ).get('seerr', intent.sourceId);
+  if (existing) {
+    return sendJson(response, 200, {
+      status: 'duplicate',
+      notificationType,
+      intentId: existing.id,
+      requestCount: existing.request_count,
+    });
+  }
+
+  // 4. Translate TMDB → IMDb at the Seerr boundary.
+  //    Skip when the inbound intent already carries a valid IMDb.
+  let operationalIntent = intent;
+  let identityStatus = 'imdb-already-known';
+  if (!intent.imdbId && intent.tmdbId) {
+    const resolved = await resolveSeerrIdentity(
+      { tmdbId: intent.tmdbId, mediaType: intent.mediaType },
+      process.env,
+    );
+    if (!resolved.ok) {
+      // Persist the unresolved intent with explicit last_error so the
+      // operator can see it; do NOT call searchByMedia with `tmdb:*`.
+      const intentId = searchCache.upsertMediaIntent({
+        ...intent,
+        imdbId: null,
+        tmdbId: intent.tmdbId,
+      });
+      searchCache.db.prepare(
+        'UPDATE media_intents SET last_error = ?, last_processed_at = ? WHERE id = ?'
+      ).run(`seerr-identity-unresolved: tmdb=${intent.tmdbId} reason=${resolved.reason}`, Date.now(), intentId);
+      const httpStatus = resolved.reason === 'identity-misconfigured' ? 503 : 500;
+      return sendJson(response, httpStatus, {
+        status: 'identity-unresolved',
+        notificationType,
+        intentId,
+        mediaId: intent.mediaId,
+        mediaType: intent.mediaType,
+        tmdbId: intent.tmdbId,
+        reason: resolved.reason,
+      });
+    }
+    operationalIntent = {
+      ...intent,
+      imdbId: resolved.imdbId,
+      mediaId: resolved.imdbId,
+    };
+    identityStatus = 'imdb-resolved';
+  }
+
+  // 5. Persist the durable intent (with IMDb when resolved)
+  const intentId = searchCache.upsertMediaIntent({
+    mediaId: operationalIntent.mediaId,
+    mediaType: operationalIntent.mediaType,
+    season: operationalIntent.season,
+    episode: operationalIntent.episode,
+    source: operationalIntent.source,
+    sourceType: operationalIntent.sourceType,
+    sourceId: operationalIntent.sourceId,
+    sourceLabel: operationalIntent.sourceLabel,
+    status: operationalIntent.status,
+    priority: operationalIntent.priority,
+    requestedBy: null,
+    imdbId: operationalIntent.imdbId,
+    tmdbId: operationalIntent.tmdbId,
+    tvdbId: operationalIntent.tvdbId,
+  });
+
+  // 6. Advance through the existing pipeline
+  try {
+    const result = await searchByMedia(searchCache, {
+      mediaId: operationalIntent.mediaId,
+      mediaType: operationalIntent.mediaType,
+      season: operationalIntent.season,
+      episode: operationalIntent.episode,
+      source: operationalIntent.source,
+      sourceType: operationalIntent.sourceType,
+      sourceId: operationalIntent.sourceId,
+      sourceLabel: operationalIntent.sourceLabel,
+      requestedBy: null,
+      priority: operationalIntent.priority,
+      persist: true,
+    });
+    searchCache.db.prepare(
+      'UPDATE media_intents SET last_processed_at = ?, last_result_count = ?, last_error = NULL WHERE id = ?'
+    ).run(Date.now(), result.total ?? 0, intentId);
+    return sendJson(response, 200, {
+      status: 'created',
+      identityStatus,
+      notificationType,
+      intentId,
+      requestId: result.requestId ?? null,
+      resultCount: result.total ?? 0,
+      mediaId: operationalIntent.mediaId,
+      mediaType: operationalIntent.mediaType,
+      imdbId: operationalIntent.imdbId,
+      tmdbId: operationalIntent.tmdbId,
+      tvdbId: operationalIntent.tvdbId,
+    });
+  } catch (err) {
+    searchCache.db.prepare(
+      'UPDATE media_intents SET last_processed_at = ?, last_error = ? WHERE id = ?'
+    ).run(Date.now(), err.message, intentId);
+    return sendJson(response, 500, {
+      status: 'processing-failed',
+      identityStatus,
+      notificationType,
+      intentId,
+      mediaId: operationalIntent.mediaId,
+      mediaType: operationalIntent.mediaType,
+      error: 'seerr-processing-failed',
+      message: err.message,
+    });
   }
 }
 
@@ -1193,6 +1443,11 @@ export function createRequestHandler(dependencies = {}) {
           limit: body.limit ? parseInt(body.limit, 10) : undefined,
         });
         return sendJson(response, 200, stats);
+      }
+      // Seerr ingress: webhook → durable intent → TMDB→IMDb translation →
+      // existing single-intent discovery pipeline.
+      if (request.method === 'POST' && url.pathname === '/api/ingress/seerr') {
+        return handleSeerrIngress(request, response, searchCache);
       }
       if (request.method === 'GET' && url.pathname === '/api/search') {
         const startedAt = performance.now();

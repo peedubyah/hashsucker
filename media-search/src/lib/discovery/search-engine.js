@@ -40,10 +40,11 @@
 import { createReleaseIdentity, createReleaseKey } from '../../api/release-contract.js';
 import { emit, EVENTS } from '../../lib/trace/events.js';
 import { inc, recordScore, recordTopNCacheState } from '../../lib/metrics.js';
-import { rankHits, countIdentityEligibility, aggregateIdentityTiers, shadowRankComparison, rankHitsTiered, diagnoseTopCandidates } from './ranking.js';
+import { rankHits, countIdentityEligibility, aggregateIdentityTiers, shadowRankComparison, rankHitsTiered, diagnoseTopCandidates, evaluateIdentityEligibility } from './ranking.js';
 import { isEpisodeCovered } from './episode-coverage.js';
 import { evaluateEligibility } from './rejection.js';
-import { RejectionReason, RejectionTracker, createRejection } from './rejection-tracker.js';
+import { RejectionReason, RejectionTracker, createRejection, describeRejection } from './rejection-tracker.js';
+import { parseFilename } from './parser-adapter.js';
 import { RequestTiming } from '../requests/timing.js';
 import {
   toCanonicalLocal,
@@ -130,6 +131,35 @@ function _parseQuery(query) {
     match: matchParts.length > 0 ? matchParts.join(' AND ') : '*',
     filters,
     titleQuery: titleQuery || null,
+  };
+}
+
+/**
+ * Derive transient release attributes for a live candidate's filename.
+ *
+ * Reuses the same parser proven for corpus ingestion. Returns the shape
+ * coversEpisode() expects ({ season, episode, episodeRange, seasonOnly,
+ * mediaType }), or null when the filename carries no usable structural
+ * season/episode evidence. The caller treats null as
+ * "unknown episode coverage" and rejects fail-closed.
+ *
+ * @param {string|null|undefined} filename
+ * @returns {Object|null}
+ */
+function deriveLiveReleaseAttributes(filename) {
+  if (!filename || typeof filename !== 'string') return null;
+  const parsed = parseFilename(filename);
+  if (!parsed || !parsed.parsed) return null;
+  const p = parsed.parsed;
+  if (p.season == null && p.episode == null && !p.episodeRange && p.mediaType !== 'season') {
+    return null;
+  }
+  return {
+    season: p.season ?? null,
+    episode: p.episode ?? null,
+    episodeRange: p.episodeRange ?? null,
+    seasonOnly: p.seasonOnly === true || p.mediaType === 'season',
+    mediaType: p.mediaType ?? null,
   };
 }
 
@@ -703,47 +733,128 @@ export async function combinedSearch(cache, options = {}) {
     pipelineDebug.dedupedCandidates = deduped.length;
     timing.end('candidate.dedup', 'completed');
 
-    // Build query intent for ranking
+    // Build query intent for ranking. Merge explicit searchOptions fields
+    // (route-passed intent.season / intent.episodes[0] from /api/search)
+    // with text-parsed filters so the Stage 2 episode gate and identity
+    // tier classifier both see the same constraints the SQL filter applied.
+    // Without this merge, the gate silently no-ops for TV requests where
+    // the caller passes season/episode via the route contract rather than
+    // embedding them in the search query string.
     const parsed = _parseQuery(searchOptions.query || '');
     const queryIntent = {};
-    if (parsed.filters.season != null) queryIntent.season = parsed.filters.season;
-    if (parsed.filters.episode != null) queryIntent.episode = parsed.filters.episode;
+    if (searchOptions.season != null) queryIntent.season = searchOptions.season;
+    else if (parsed.filters.season != null) queryIntent.season = parsed.filters.season;
+    if (searchOptions.episode != null) queryIntent.episode = searchOptions.episode;
+    else if (parsed.filters.episode != null) queryIntent.episode = parsed.filters.episode;
+    if (searchOptions.mediaTitle) queryIntent.mediaTitle = searchOptions.mediaTitle;
+    else if (parsed.filters.mediaTitle) queryIntent.mediaTitle = parsed.filters.mediaTitle;
 
     // Apply Stage 2 episode-coverage eligibility gate for LOCAL candidates.
-    // Live candidates are already scoped by selected-media/live-discovery intent
-    // and must NOT be rejected merely for lacking a persisted candidate_media row.
+    // Live candidates are also gated against the requested episode. Structural
+    // filename evidence must unambiguously cover the requested (season, episode)
+    // — upstream live-provider scoping is not trusted. This reuses the same
+    // coversEpisode() machinery proven for corpus candidates; for live rows the
+    // releaseAttributes are derived transiently from the live candidate's
+    // per-file filename via the existing parser. A live candidate whose
+    // filename cannot establish requested-episode coverage (unknown) is
+    // rejected fail-closed, mirroring corpus identity philosophy.
+    //
+    // Season-pack deferral is intentionally NOT enabled here: the downstream
+    // provider file-mapping path requires a candidate filename to perform the
+    // exact-match against provider file inventory. A season-pack candidate
+    // without an episode-specific filename cannot be resolved to a single
+    // physical episode file today, so allowing it through this gate would
+    // silently break file mapping. Rejection is correct; building the
+    // downstream season-pack → episode-file resolution is a separate slice.
     //
     // Produce typed rejection reasons for diagnostics (not part of public results).
     timing.start('candidate.eligibility');
     eligibleCandidates = deduped;
     if (queryIntent.season != null && queryIntent.episode != null) {
       eligibleCandidates = deduped.filter(candidate => {
-        // Local corpus: apply episode-coverage hard gate.
-        if (candidate.sources.some(s => s.origin === 'corpus')) {
-          const evaluation = evaluateEligibility(
-            candidate,
-            queryIntent.season,
-            queryIntent.episode
-          );
-          if (!evaluation.eligible) {
-            rejectionTracker.record(createRejection({
-              hash: candidate.hash,
-              fileIndex: candidate.fileIndex,
-              releaseKey: candidate.releaseKey,
-              reason: evaluation.reason,
-              description: evaluation.description,
-            }));
-            pipelineDebug.rejections.push({
-              candidate: { hash: candidate.hash, fileIndex: candidate.fileIndex, releaseKey: candidate.releaseKey },
-              stage: 'eligibility',
-              reason: evaluation.reason,
-              description: evaluation.description,
-            });
-          }
-          return evaluation.eligible;
+        // Resolve release attributes for the gate.
+        // Corpus: already persisted via storeReleaseAttributes.
+        // Live: derive transiently from per-file filename via the existing parser.
+        let attrs = candidate.releaseAttributes || null;
+        const isCorpus = candidate.sources.some(s => s.origin === 'corpus');
+        if (!isCorpus) {
+          attrs = deriveLiveReleaseAttributes(candidate.filename);
         }
-        // Live: already scoped by selected-media/live-discovery intent.
-        return true;
+        if (!attrs) {
+          // No structural filename evidence for a TV episode request → reject.
+          const reason = RejectionReason.UNKNOWN_EPISODE_COVERAGE;
+          const description = describeRejection(reason);
+          rejectionTracker.record(createRejection({
+            hash: candidate.hash,
+            fileIndex: candidate.fileIndex,
+            releaseKey: candidate.releaseKey,
+            reason,
+            description,
+          }));
+          pipelineDebug.rejections.push({
+            candidate: { hash: candidate.hash, fileIndex: candidate.fileIndex, releaseKey: candidate.releaseKey },
+            stage: 'eligibility',
+            reason,
+            description,
+          });
+          return false;
+        }
+        const evaluation = evaluateEligibility(
+          { ...candidate, releaseAttributes: attrs },
+          queryIntent.season,
+          queryIntent.episode
+        );
+        if (!evaluation.eligible) {
+          rejectionTracker.record(createRejection({
+            hash: candidate.hash,
+            fileIndex: candidate.fileIndex,
+            releaseKey: candidate.releaseKey,
+            reason: evaluation.reason,
+            description: evaluation.description,
+          }));
+          pipelineDebug.rejections.push({
+            candidate: { hash: candidate.hash, fileIndex: candidate.fileIndex, releaseKey: candidate.releaseKey },
+            stage: 'eligibility',
+            reason: evaluation.reason,
+            description: evaluation.description,
+          });
+        }
+        return evaluation.eligible;
+      });
+    }
+    pipelineDebug.eligibleCandidates = eligibleCandidates.length;
+
+    // Stage 2b: Identity-eligibility gate (title cross-check) for corpus
+    // candidates when the query carries an explicit mediaTitle. The POST
+    // /api/media-request path uses this same gate (see media-request.js) —
+    // we mirror it here so the GET /api/search discovery path also rejects
+    // unrelated corpus rows (e.g. a candidate whose parsed title is a
+    // completely different show from the user-selected media).
+    //
+    // Live candidates are already scoped by selected-media/live-discovery
+    // intent and must NOT be rejected for lacking a parsed title match.
+    const mediaTitleForGate = queryIntent.mediaTitle || null;
+    if (mediaTitleForGate) {
+      const titleGateIntent = { ...queryIntent, mediaTitle: mediaTitleForGate };
+      eligibleCandidates = eligibleCandidates.filter(candidate => {
+        if (!candidate.sources.some(s => s.origin === 'corpus')) return true;
+        const evaluation = evaluateIdentityEligibility(candidate, titleGateIntent);
+        if (!evaluation.eligible) {
+          rejectionTracker.record(createRejection({
+            hash: candidate.hash,
+            fileIndex: candidate.fileIndex,
+            releaseKey: candidate.releaseKey,
+            reason: evaluation.reason,
+            description: evaluation.description,
+          }));
+          pipelineDebug.rejections.push({
+            candidate: { hash: candidate.hash, fileIndex: candidate.fileIndex, releaseKey: candidate.releaseKey },
+            stage: 'identity-eligibility',
+            reason: evaluation.reason,
+            description: evaluation.description,
+          });
+        }
+        return evaluation.eligible;
       });
     }
     pipelineDebug.eligibleCandidates = eligibleCandidates.length;
@@ -1031,6 +1142,29 @@ export async function searchTrace(cache, options = {}) {
         return true;
       });
     }
+    pipelineDebug.eligibleCandidates = eligibleCandidates.length;
+
+    // Stage 2b: Identity-eligibility gate (title cross-check) for corpus
+    // candidates when the query carries an explicit mediaTitle.
+    const mediaTitleForGate2 = searchOptions.mediaTitle || queryIntent.mediaTitle || null;
+    if (mediaTitleForGate2) {
+      const titleGateIntent2 = { ...queryIntent, mediaTitle: mediaTitleForGate2 };
+      eligibleCandidates = eligibleCandidates.filter(candidate => {
+        if (!candidate.sources.some(s => s.origin === 'corpus')) return true;
+        const evaluation = evaluateIdentityEligibility(candidate, titleGateIntent2);
+        if (!evaluation.eligible) {
+          rejectionTracker.record(createRejection({
+            hash: candidate.hash,
+            fileIndex: candidate.fileIndex,
+            releaseKey: candidate.releaseKey,
+            reason: evaluation.reason,
+            description: evaluation.description,
+          }));
+        }
+        return evaluation.eligible;
+      });
+    }
+    pipelineDebug.eligibleCandidates = eligibleCandidates.length;
     timing.end('candidate.eligibility', 'completed');
 
     // Identity eligibility diagnostic — measure only, no filtering

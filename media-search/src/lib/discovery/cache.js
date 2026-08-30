@@ -197,12 +197,18 @@ CREATE TABLE IF NOT EXISTS media_intents (
   last_processed_at INTEGER,
   last_result_count INTEGER,
   last_error TEXT,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  imdb_id TEXT,
+  tmdb_id TEXT,
+  tvdb_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_media_intents_media_id ON media_intents(media_id, last_requested_at);
 CREATE INDEX IF NOT EXISTS idx_media_intents_source ON media_intents(source, source_type, last_requested_at);
 CREATE INDEX IF NOT EXISTS idx_media_intents_status ON media_intents(status, priority DESC);
+CREATE INDEX IF NOT EXISTS idx_media_intents_imdb ON media_intents(imdb_id) WHERE imdb_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_media_intents_tmdb ON media_intents(tmdb_id) WHERE tmdb_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_media_intents_tvdb ON media_intents(tvdb_id) WHERE tvdb_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS media_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -679,12 +685,18 @@ function migrateMediaIntents(db) {
         last_processed_at INTEGER,
         last_result_count INTEGER,
         last_error TEXT,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        imdb_id TEXT,
+        tmdb_id TEXT,
+        tvdb_id TEXT
       )
     `);
     db.exec('CREATE INDEX idx_media_intents_media_id ON media_intents(media_id, last_requested_at)');
     db.exec('CREATE INDEX idx_media_intents_source ON media_intents(source, source_type, last_requested_at)');
     db.exec('CREATE INDEX idx_media_intents_status ON media_intents(status, priority DESC)');
+    db.exec('CREATE INDEX idx_media_intents_imdb ON media_intents(imdb_id) WHERE imdb_id IS NOT NULL');
+    db.exec('CREATE INDEX idx_media_intents_tmdb ON media_intents(tmdb_id) WHERE tmdb_id IS NOT NULL');
+    db.exec('CREATE INDEX idx_media_intents_tvdb ON media_intents(tvdb_id) WHERE tvdb_id IS NOT NULL');
   }
 
   // Add processing columns to media_intents if missing
@@ -700,6 +712,21 @@ function migrateMediaIntents(db) {
   const hasLastError = intentInfo.some(col => col.name === 'last_error');
   if (!hasLastError) {
     db.exec('ALTER TABLE media_intents ADD COLUMN last_error TEXT');
+  }
+  const hasImdbId = intentInfo.some(col => col.name === 'imdb_id');
+  if (!hasImdbId) {
+    db.exec('ALTER TABLE media_intents ADD COLUMN imdb_id TEXT');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_media_intents_imdb ON media_intents(imdb_id) WHERE imdb_id IS NOT NULL');
+  }
+  const hasTmdbId = intentInfo.some(col => col.name === 'tmdb_id');
+  if (!hasTmdbId) {
+    db.exec('ALTER TABLE media_intents ADD COLUMN tmdb_id TEXT');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_media_intents_tmdb ON media_intents(tmdb_id) WHERE tmdb_id IS NOT NULL');
+  }
+  const hasTvdbId = intentInfo.some(col => col.name === 'tvdb_id');
+  if (!hasTvdbId) {
+    db.exec('ALTER TABLE media_intents ADD COLUMN tvdb_id TEXT');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_media_intents_tvdb ON media_intents(tvdb_id) WHERE tvdb_id IS NOT NULL');
   }
 
   // Add intent_id column to media_requests if missing
@@ -774,6 +801,33 @@ function migrateIdentityEnrichmentQueuePriority(db) {
   ).run(IDENTITY_ENRICHMENT_QUEUE_PRIORITY, Date.now());
 }
 
+/**
+ * Add nullable identity bundle columns (imdb_id, tmdb_id, tvdb_id) to a
+ * pre-existing media_intents table BEFORE the main SCHEMA runs. The SCHEMA
+ * contains `CREATE INDEX` statements that reference these columns; if the
+ * table was created by an older HashSucker version without the columns,
+ * those indexes would fail without this pre-migration.
+ *
+ * No-op on fresh databases (table does not yet exist) — the main SCHEMA
+ * creates the table with the columns in that case.
+ */
+function ensureMediaIntentIdentityColumns(db) {
+  const tableExists = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_intents'"
+  ).get();
+  if (!tableExists) return; // main SCHEMA will create with columns
+
+  const cols = db.prepare('PRAGMA table_info(media_intents)').all();
+  const addIfMissing = (name) => {
+    if (!cols.some(col => col.name === name)) {
+      db.exec(`ALTER TABLE media_intents ADD COLUMN ${name} TEXT`);
+    }
+  };
+  addIfMissing('imdb_id');
+  addIfMissing('tmdb_id');
+  addIfMissing('tvdb_id');
+}
+
 const CACHE_PROBE_QUEUE_SCHEMA = 'cache-probe-queue-v1';
 
 function migrateCacheProbeQueue(db) {
@@ -802,6 +856,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
   // Run migrations that need to alter tables before SCHEMA is applied
   migrateIdentityEnrichmentQueuePriority(db);
+  ensureMediaIntentIdentityColumns(db);
 
   db.exec(SCHEMA);
 
@@ -1997,7 +2052,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       if (existing) {
         // Update existing
         db.prepare(
-          'UPDATE media_intents SET request_count = request_count + 1, last_requested_at = ?, source_label = COALESCE(?, source_label), source_type = COALESCE(?, source_type), source_id = COALESCE(?, source_id), requested_by = COALESCE(?, requested_by), priority = MAX(priority, ?) WHERE id = ?'
+          'UPDATE media_intents SET request_count = request_count + 1, last_requested_at = ?, source_label = COALESCE(?, source_label), source_type = COALESCE(?, source_type), source_id = COALESCE(?, source_id), requested_by = COALESCE(?, requested_by), priority = MAX(priority, ?), imdb_id = COALESCE(?, imdb_id), tmdb_id = COALESCE(?, tmdb_id), tvdb_id = COALESCE(?, tvdb_id) WHERE id = ?'
         ).run(
           now,
           input.sourceLabel || null,
@@ -2005,6 +2060,9 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
           input.sourceId || null,
           input.requestedBy || null,
           input.priority ?? 0,
+          input.imdbId || null,
+          input.tmdbId || null,
+          input.tvdbId || null,
           existing.id
         );
         db.exec('COMMIT');
@@ -2012,7 +2070,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       } else {
         // Insert new
         const info = db.prepare(
-          'INSERT INTO media_intents (media_id, media_type, season, episode, source, source_type, source_id, source_label, status, priority, requested_by, request_count, last_requested_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)'
+          'INSERT INTO media_intents (media_id, media_type, season, episode, source, source_type, source_id, source_label, status, priority, requested_by, request_count, last_requested_at, created_at, imdb_id, tmdb_id, tvdb_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)'
         ).run(
           input.mediaId,
           input.mediaType || 'movie',
@@ -2026,7 +2084,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
           input.priority ?? 0,
           input.requestedBy || null,
           now,
-          now
+          now,
+          input.imdbId || null,
+          input.tmdbId || null,
+          input.tvdbId || null
         );
         db.exec('COMMIT');
         return info.lastInsertRowid;
@@ -2083,6 +2144,9 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       lastResultCount: row.last_result_count,
       lastError: row.last_error,
       createdAt: row.created_at,
+      imdbId: row.imdb_id ?? null,
+      tmdbId: row.tmdb_id ?? null,
+      tvdbId: row.tvdb_id ?? null,
     };
   }
 

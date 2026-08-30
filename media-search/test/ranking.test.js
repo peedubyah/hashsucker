@@ -1239,6 +1239,16 @@ test('classifyIdentityTier: strong title match without media association is Prob
 });
 
 test('classifyIdentityTier: partial metadata without title match is Probable', () => {
+  // Legacy behavior preserved: when the caller does not pass a canonical
+  // title (no mediaTitle in queryIntent), a corpus row with parsed
+  // season/episode but no parsed title still gets Probable(0.4). This is
+  // the loose fallback for media-association-only TV lookups where the
+  // route contract is just (mediaId, season, episode).
+  //
+  // The identity-convergence demotion only fires when the caller asserts
+  // a canonical title AND the parsed title has no token link to it (e.g.
+  // Cyrillic title against Latin canonical, or the Покаяние case). It does
+  // not apply to the no-title case — that's a different code path.
   const hit = {
     hash: HASH1,
     filename: 'some_release.mkv',
@@ -1747,8 +1757,9 @@ test('rankHitsTiered: four-tier ordering ProviderConfirmed-Probable-ProviderScop
 });
 
 test('rankHitsTiered: fallback when no verified candidates exist', () => {
+  // Corpus candidates with a canonical title link get Probable tier.
+  // Without mediaTitle in queryIntent they fall to TextOnly (no verifiable link).
   const hits = [
-    // Only probable candidates
     {
       hash: HASH1,
       filename: 'NCIS.S01E01.2160p.mkv',
@@ -1767,7 +1778,7 @@ test('rankHitsTiered: fallback when no verified candidates exist', () => {
     },
   ];
 
-  const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1 }, 'tt0364845');
+  const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1, mediaTitle: 'NCIS' }, 'tt0364845');
   assert.equal(ranked.length, 2);
   assert.equal(tierMeta.TierCounts.Verified, 0);
   assert.equal(tierMeta.TierCounts.Probable, 2);
@@ -1983,8 +1994,8 @@ test('rankHitsTiered: five-tier ordering verified-providerconfirmed-providerscop
 });
 
 test('rankHitsTiered: fallback when no verified or provider-matched exist', () => {
+  // Corpus candidates with canonical title link get Probable when mediaTitle is provided.
   const hits = [
-    // Only probable candidates
     {
       hash: HASH1,
       filename: 'NCIS.S01E01.2160p.mkv',
@@ -2003,7 +2014,7 @@ test('rankHitsTiered: fallback when no verified or provider-matched exist', () =
     },
   ];
 
-  const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1 }, 'tt0364845');
+  const { ranked, tierMeta } = rankHitsTiered(hits, { season: 1, episode: 1, mediaTitle: 'NCIS' }, 'tt0364845');
   assert.equal(ranked.length, 2);
   assert.equal(tierMeta.TierCounts.Verified, 0);
   assert.equal(tierMeta.TierCounts.ProviderConfirmed, 0);

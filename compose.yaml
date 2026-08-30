@@ -24,6 +24,9 @@ services:
       JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
       JELLYFIN_MEDIA_ROOT: ${JELLYFIN_MEDIA_ROOT:-}
       RESOLVER_PROFILE: ${RESOLVER_PROFILE:-0}
+      SEERR_WEBHOOK_TOKEN: ${SEERR_WEBHOOK_TOKEN:-}
+      SEERR_URL: ${SEERR_URL:-}
+      SEERR_API_KEY: ${SEERR_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
