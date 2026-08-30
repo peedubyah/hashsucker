@@ -43,19 +43,32 @@ export class HashListSource {
  * Implementation: GitHub Pages → HTML → LZString-compressed JSON
  *
  * Each fragment is a separate HTML page containing compressed payload.
+ *
+ * Discovery uses Git Trees API (recursive) to enumerate the full repository
+ * tree. The GitHub Contents API is capped at 1000 entries and cannot enumerate
+ * the complete DMM hashlist (14,532+ fragments).
  */
 export class DMMHashListSource extends HashListSource {
-  constructor({ baseUrl, githubToken } = {}) {
+  constructor({ baseUrl, githubToken, repo = 'debridmediamanager/hashlists' } = {}) {
     super();
     this.baseUrl = baseUrl || 'https://hashlists.debridmediamanager.com';
-    this.apiBase = 'https://api.github.com/repos/debridmediamanager/hashlists/contents';
+    this.repo = repo;
     this.githubToken = githubToken || null;
+    this.rawBase = `https://raw.githubusercontent.com/${repo}`;
   }
 
   /**
-   * List available hashlist fragments from GitHub API.
+   * List available hashlist fragments using Git Trees API.
+   * Enumerates the full repository tree (uncapped).
+   * Throws if tree is truncated (cannot enumerate completely).
+   *
+   * @param {Object} [options]
+   * @param {string} [options.treeSha] - Pin to a specific Git tree SHA. If provided,
+   *   this exact tree is enumerated instead of the default branch HEAD.
+   * @returns {Promise<{fragments: Array, treeSha: string, branch: string}>}
+   *   Fragments plus the resolved tree SHA and branch used.
    */
-  async listFragments() {
+  async listFragments(options = {}) {
     const headers = {
       'Accept': 'application/vnd.github.v3+json',
       'User-Agent': 'HashSucker/1.0',
@@ -64,21 +77,108 @@ export class DMMHashListSource extends HashListSource {
       headers['Authorization'] = `token ${this.githubToken}`;
     }
 
-    const response = await fetch(this.apiBase, { headers });
-    if (!response.ok) {
-      throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
+    // Get default branch
+    const repoUrl = `https://api.github.com/repos/${this.repo}`;
+    const repoResp = await fetch(repoUrl, { headers });
+    if (!repoResp.ok) {
+      throw new Error(`GitHub repo API error: ${repoResp.status} ${repoResp.statusText}`);
+    }
+    const repoData = await repoResp.json();
+    const defaultBranch = repoData.default_branch || 'main';
+
+    // Resolve tree SHA: use pinned SHA if provided, otherwise use branch HEAD
+    let treeSha = options.treeSha;
+    let tree;
+
+    if (treeSha) {
+      // Fetch the pinned tree directly by SHA
+      const treeUrl = `https://api.github.com/repos/${this.repo}/git/trees/${treeSha}?recursive=1`;
+      const treeResp = await fetch(treeUrl, { headers });
+      if (!treeResp.ok) {
+        throw new Error(`GitHub tree API error for pinned SHA ${treeSha}: ${treeResp.status} ${treeResp.statusText}`);
+      }
+      tree = await treeResp.json();
+    } else {
+      // Fetch current branch HEAD tree
+      const treeUrl = `https://api.github.com/repos/${this.repo}/git/trees/${defaultBranch}?recursive=1`;
+      const treeResp = await fetch(treeUrl, { headers });
+      if (!treeResp.ok) {
+        throw new Error(`GitHub tree API error: ${treeResp.status} ${treeResp.statusText}`);
+      }
+      tree = await treeResp.json();
+      treeSha = tree.sha;
     }
 
-    const contents = await response.json();
-    const fragments = contents
-      .filter(item => item.name.endsWith('.html'))
+    // Fail loudly if tree is truncated — silent acceptance of incomplete corpus
+    if (tree.truncated) {
+      throw new Error(`Git tree truncated: cannot enumerate complete DMM fragment set. Tree reports truncated=true. SHA: ${treeSha}`);
+    }
+
+    // Filter for .html blob entries only
+    const fragments = tree.tree
+      .filter(item => item.type === 'blob' && item.path.endsWith('.html'))
       .map(item => ({
-        url: item.download_url,
-        name: item.name,
-        size: item.size,
+        url: `${this.rawBase}/${defaultBranch}/${item.path}`,
+        name: item.path,
+        size: item.size || 0,
       }));
 
-    return fragments;
+    return { fragments, treeSha, branch: defaultBranch };
+  }
+
+  /**
+   * Fetch with timeout and retry logic.
+   * @param {string} url - URL to fetch
+   * @param {Object} [options] - Fetch options
+   * @param {number} [options.timeoutMs] - Timeout in milliseconds (default: 30000)
+   * @param {number} [options.maxRetries] - Max retry attempts (default: 3)
+   * @returns {Promise<Response>} Fetch response
+   */
+  async fetchWithRetry(url, options = {}) {
+    const { timeoutMs = 30000, maxRetries = 3 } = options;
+    const headers = {
+      'User-Agent': 'HashSucker/1.0',
+    };
+    if (this.githubToken) {
+      headers['Authorization'] = `token ${this.githubToken}`;
+    }
+
+    let lastError;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+        const response = await fetch(url, {
+          headers,
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        // Handle rate limiting
+        if (response.status === 403) {
+          const rateLimitRemaining = response.headers.get('x-ratelimit-remaining');
+          if (rateLimitRemaining === '0') {
+            const resetTime = response.headers.get('x-ratelimit-reset');
+            const waitMs = resetTime ? (parseInt(resetTime) * 1000) - Date.now() : 60000;
+            if (attempt < maxRetries && waitMs < 120000) {
+              console.log(`  Rate limited, waiting ${Math.ceil(waitMs / 1000)}s...`);
+              await new Promise(r => setTimeout(r, waitMs));
+              continue;
+            }
+          }
+        }
+
+        return response;
+      } catch (err) {
+        lastError = err;
+        if (attempt < maxRetries) {
+          const backoff = Math.min(1000 * Math.pow(2, attempt), 10000);
+          await new Promise(r => setTimeout(r, backoff));
+        }
+      }
+    }
+    throw lastError;
   }
 
   /**
@@ -86,11 +186,7 @@ export class DMMHashListSource extends HashListSource {
    * Returns the raw HTML with embedded LZString payload.
    */
   async fetchFragment(url) {
-    const headers = {
-      'User-Agent': 'HashSucker/1.0',
-    };
-
-    const response = await fetch(url, { headers });
+    const response = await this.fetchWithRetry(url, { timeoutMs: 30000, maxRetries: 3 });
     if (!response.ok) {
       throw new Error(`Fragment fetch error: ${response.status} ${response.statusText}`);
     }
@@ -101,15 +197,20 @@ export class DMMHashListSource extends HashListSource {
 
 /**
  * Parse HTML and extract LZString-compressed JSON payload.
+ * Handles both legacy <script> format and current iframe src format.
  */
 export function extractPayload(html) {
   if (!html) return null;
 
-  // Find the LZString compressed payload
-  const scriptMatch = html.match(/decompressFromEncodedURIComponent\(['"]([^'"]+)['"]\)/);
-  if (!scriptMatch) return null;
+  // Current format: iframe src with hash fragment
+  const iframeMatch = html.match(/src="https:\/\/(?:beta\.)?debridmediamanager\.com\/hashlist#([^"]+)"/);
+  if (iframeMatch) return iframeMatch[1];
 
-  return scriptMatch[1];
+  // Legacy format: decompressFromEncodedURIComponent() call
+  const scriptMatch = html.match(/decompressFromEncodedURIComponent\(['"]([^'"]+)['"]\)/);
+  if (scriptMatch) return scriptMatch[1];
+
+  return null;
 }
 
 /**

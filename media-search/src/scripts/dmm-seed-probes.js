@@ -134,12 +134,14 @@ function inspectCorpus(dbPath, limit) {
       "SELECT COUNT(*) as c FROM candidates WHERE info_hash IS NOT NULL AND info_hash != ''"
     ).get().c;
 
-    // Fetch candidate hashes (bounded)
+    // Fetch candidate hashes (bounded), ordered by DMM prevalence (fragment_count DESC)
+    // Prefer hashes that appear in more fragments — weak probe-ordering signal only.
     const candidates = db.prepare(`
-      SELECT DISTINCT info_hash
-      FROM candidates
-      WHERE info_hash IS NOT NULL AND info_hash != ''
-      ORDER BY first_seen ASC
+      SELECT DISTINCT c.info_hash, COALESCE(p.fragment_count, 0) as fragment_count
+      FROM candidates c
+      LEFT JOIN dmm_hash_prevalence p ON c.info_hash = p.info_hash
+      WHERE c.info_hash IS NOT NULL AND c.info_hash != ''
+      ORDER BY fragment_count DESC, c.first_seen ASC
       LIMIT ?
     `).all(limit);
 
@@ -154,7 +156,7 @@ function inspectCorpus(dbPath, limit) {
         if (hasIdentity && hasMetadata) { priority = 30; reason = 'corpus:identity+metadata'; }
         else if (hasIdentity) { priority = 20; reason = 'corpus:identity'; }
         else if (hasMetadata) { priority = 10; reason = 'corpus:metadata'; }
-        hashes.push({ hash, priority, reason });
+        hashes.push({ hash, priority, reason, fragment_count: c.fragment_count || 0 });
       }
     }
 
@@ -224,7 +226,7 @@ async function main() {
         if (!args.dryRun) {
           cache.enqueueProbe(h.hash, { priority: h.priority, reason: h.reason });
         }
-        if (args.verbose) console.log(`  [${args.dryRun ? 'would-add' : 'add'}] ${h.hash} — priority=${h.priority} reason=${h.reason}`);
+        if (args.verbose) console.log(`  [${args.dryRun ? 'would-add' : 'add'}] ${h.hash} — priority=${h.priority} reason=${h.reason} fragment_count=${h.fragment_count || 0}`);
       }
     }
 
