@@ -113,7 +113,7 @@ const mockReleaseResult = {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 async function typeAndSearch(user: ReturnType<typeof userEvent.setup>, query: string) {
-  const input = screen.getByPlaceholderText('Search movies & series...');
+  const input = screen.getByPlaceholderText('Search movies & series…');
   await user.clear(input);
   await user.type(input, query);
   await user.click(screen.getByRole('button', { name: /search/i }));
@@ -128,7 +128,7 @@ describe('SearchPage', () => {
 
   it('renders search input and button on mount', () => {
     render(<SearchPage />);
-    expect(screen.getByPlaceholderText('Search movies & series...')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Search movies & series…')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Search' })).toBeInTheDocument();
   });
 
@@ -140,7 +140,7 @@ describe('SearchPage', () => {
   it('search button enables when query has text', async () => {
     const user = userEvent.setup();
     render(<SearchPage />);
-    const input = screen.getByPlaceholderText('Search movies & series...');
+    const input = screen.getByPlaceholderText('Search movies & series…');
     await user.type(input, 'dragon');
     expect(screen.getByRole('button', { name: 'Search' })).toBeEnabled();
   });
@@ -151,9 +151,8 @@ describe('SearchPage', () => {
     mockSearchTitles.mockReturnValue(new Promise(() => {})); // never resolves
     render(<SearchPage />);
     await typeAndSearch(user, 'dragon');
-    // Loading state: the button shows "Searching…" and the loading div shows "Searching…"
-    // Use the status role to disambiguate.
-    expect(screen.getByRole('status')).toHaveTextContent('Searching…');
+    // Loading state: the search button shows "Searching…".
+    expect(screen.getByRole('button', { name: 'Searching…' })).toBeInTheDocument();
   });
 
   it('parses search response and maps results into UI items', async () => {
@@ -166,7 +165,7 @@ describe('SearchPage', () => {
       expect(screen.getByText('Game of Thrones')).toBeInTheDocument();
     });
     expect(screen.getByText('Dragon')).toBeInTheDocument();
-    expect(screen.getByText('2 results')).toBeInTheDocument();
+    expect(screen.getByText('Titles (2)')).toBeInTheDocument();
   });
 
   it('loading state clears after results arrive', async () => {
@@ -193,7 +192,7 @@ describe('SearchPage', () => {
     await typeAndSearch(user, 'zzzznonexistent');
 
     await waitFor(() => {
-      expect(screen.getByText(/no results for/i)).toBeInTheDocument();
+      expect(screen.getByText(/no titles for/i)).toBeInTheDocument();
     });
   });
 
@@ -299,7 +298,7 @@ describe('SearchPage', () => {
     await user.click(screen.getByRole('button', { name: /view releases for game of thrones/i }));
 
     await waitFor(() => {
-      expect(screen.getByText('No releases found for this title')).toBeInTheDocument();
+      expect(screen.getByText(/No releases found for/)).toBeInTheDocument();
     });
   });
 
@@ -329,7 +328,7 @@ describe('SearchPage', () => {
     await user.click(screen.getByRole('button', { name: '← Back' }));
 
     await waitFor(() => {
-      expect(screen.getByText('2 results')).toBeInTheDocument();
+      expect(screen.getByText('Titles (2)')).toBeInTheDocument();
     });
     expect(screen.queryByText('Finding releases…')).not.toBeInTheDocument();
   });
@@ -352,7 +351,7 @@ describe('SearchPage', () => {
     });
 
     // Type in filter
-    const filterInput = screen.getByPlaceholderText('Filter releases...');
+    const filterInput = screen.getByPlaceholderText('filename, group, codec…');
     await user.type(filterInput, '720p');
 
     expect(screen.getByText('Game.of.Thrones.S01E1.720p.WEB-DL')).toBeInTheDocument();
@@ -381,9 +380,10 @@ describe('SearchPage', () => {
     const expandButtons = screen.getAllByRole('button', { name: 'Expand' });
     await user.click(expandButtons[0]);
 
-    // Click the request button
-    const requestButton = screen.getByRole('button', { name: 'Request' });
-    await user.click(requestButton);
+    // Click the Request button inside the expanded row (primary class, not the nav link)
+    const allRequestButtons = screen.getAllByRole('button', { name: 'Request' });
+    const primaryRequestBtn = allRequestButtons.find(btn => btn.classList.contains('btn-primary'));
+    await user.click(primaryRequestBtn!);
 
     await waitFor(() => {
       expect(screen.getByText('✓ Queued')).toBeInTheDocument();

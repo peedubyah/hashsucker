@@ -302,3 +302,232 @@ export interface OperatorHealth {
   };
   generatedAt: string;
 }
+
+// ----- Operator / control-plane / resolver surfaces -----
+
+export interface ControlPlaneMount {
+  name: string;
+  configured: boolean;
+  status: string;
+  readOnly: boolean | null;
+  errorCategory: string | null;
+}
+
+export interface ControlPlaneStorage {
+  name: string;
+  configured: boolean;
+  status: string;
+  errorCategory: string | null;
+}
+
+export interface ControlPlaneHealth {
+  generatedAt: number;
+  ok: boolean;
+  mode: string;
+  storage: ControlPlaneStorage;
+  mounts: ControlPlaneMount[];
+  providerCapabilities: Record<string, string>;
+  errors: unknown[];
+}
+
+export interface ControlPlaneItemSummaryVm {
+  id: string;
+  mediaId: string;
+  mediaTitle: string;
+  mediaType: 'movie' | 'tv';
+  year: number | null;
+  handlingMode: 'stream' | 'download';
+  canonicalPath: string | null;
+  bindingsCount: number;
+  lifecycleState: string;
+  lifecycleOwner: string | null;
+  updatedAt: number | null;
+  releaseKeys: string[];
+}
+
+export interface ControlPlaneItemListVm {
+  generatedAt: number;
+  items: ControlPlaneItemSummaryVm[];
+}
+
+export interface ControlPlaneBindingVm {
+  id: string;
+  canonicalPath: string;
+  releaseKey: string;
+  provider: string;
+  state: string;
+  boundAt: number;
+}
+
+export interface ControlPlaneLifecycleEventVm {
+  stage: string;
+  status: string;
+  durationMs: number;
+  timestamp: number;
+  details?: Record<string, unknown>;
+}
+
+export interface ControlPlaneLifecycleVm {
+  state: string;
+  owner: string | null;
+  nextAction: string;
+  events: ControlPlaneLifecycleEventVm[];
+  updatedAt: number | null;
+}
+
+export interface ControlPlaneProviderObservationVm {
+  provider: string;
+  accountScope: string;
+  state: string;
+  ownership: string;
+  observedAt: number;
+  expiresAt: number | null;
+  failureCategory: string | null;
+  errorCategory?: string | null;
+  retryable: boolean | null;
+  dependentBindingCount: number;
+}
+
+export interface ControlPlaneItemDetailVm {
+  generatedAt: number;
+  item: {
+    id: string;
+    mediaId: string;
+    mediaTitle: string;
+    mediaType: 'movie' | 'tv';
+    year: number | null;
+    handlingMode: 'stream' | 'download';
+    createdAt: number;
+    updatedAt: number;
+  };
+  canonicalPath: string | null;
+  bindings: ControlPlaneBindingVm[];
+  lifecycle: ControlPlaneLifecycleVm;
+  providerObservations?: ControlPlaneProviderObservationVm[];
+  snapshot?: unknown;
+  stage6?: unknown;
+  shadowPlan?: unknown;
+}
+
+export interface ResolverTelemetryRecord {
+  requestId: string;
+  mediaId: string;
+  mediaType: string;
+  outcome: string;
+  code: string | null;
+  provider: string | null;
+  releaseKey: string | null;
+  infoHash: string | null;
+  fallbackUsed: boolean;
+  fallbackRank: number | null;
+  selectedProvider: string | null;
+  selectedReleaseKey: string | null;
+  availabilitySource: string | null;
+  providerCheckOccurred: boolean;
+  durationMs: number;
+  timestamp: number;
+  details?: Record<string, unknown>;
+}
+
+export interface ResolverTelemetry {
+  total: number;
+  records: ResolverTelemetryRecord[];
+}
+
+export interface CacheIntelligence {
+  generatedAt: number;
+  observationCount: number;
+  byProvider: Record<string, number>;
+  byState: Record<string, number>;
+  byFreshness: Record<string, number>;
+  probeQueue: {
+    depth: number;
+    inFlight: number;
+    scheduled: number;
+    oldestEnqueuedAt: number | null;
+  };
+  torboxCurrent?: {
+    state: string;
+    detail?: string;
+  };
+}
+
+export interface SearchCacheMetrics {
+  hits: number;
+  misses: number;
+  evictions: number;
+  size: number;
+  maxEntries: number;
+  hitRatio: number;
+}
+
+export interface ProcessMetricEntry {
+  name: string;
+  value: number;
+  tags?: Record<string, string>;
+}
+
+export interface ProcessMetrics {
+  generatedAt?: number;
+  counters?: ProcessMetricEntry[];
+  gauges?: ProcessMetricEntry[];
+  histograms?: ProcessMetricEntry[];
+}
+
+export interface RecentRun {
+  requestId: string;
+  finalStatus: string;
+  startedAt: number | null;
+  completedAt: number | null;
+  durationMs: number | null;
+  mediaId: string | null;
+  releaseKey: string | null;
+  provider: string | null;
+  handlingMode: string | null;
+  lastError: string | null;
+  stageCount: number;
+}
+
+export interface RecentRuns {
+  runs: RecentRun[];
+  total: number;
+}
+
+export interface FailedRuns {
+  runs: RecentRun[];
+  total: number;
+}
+
+export interface EventStats {
+  totalRuns: number;
+  totalEvents: number;
+  byStatus: Record<string, number>;
+}
+
+export interface WorkerStatus {
+  requests: {
+    incoming: number;
+    processing: number;
+    failed: number;
+    done: number;
+  };
+  workers: Array<{
+    id: string;
+    status: string;
+    lastSeenAt: number | null;
+    currentRequestId: string | null;
+  }>;
+}
+
+export interface RequestsHealth {
+  ok: boolean;
+  warning?: boolean;
+  queues: {
+    incoming: { name: string; count: number; status: string };
+    processing: { name: string; count: number; status: string };
+    failed: { name: string; count: number; status: string };
+    done: { name: string; count: number; status: string };
+  };
+  controlPlane?: { ok: boolean; status: string };
+  generatedAt: string;
+}

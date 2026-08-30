@@ -17,7 +17,7 @@
     "isolatedModules": true,
     "noEmit": true,
     "paths": {
-      "@api/*": ["../media-search/src/api/*"],
+      "@api/*": ["../src/api/*"],
       "@/*": ["./src/*"]
     }
   },

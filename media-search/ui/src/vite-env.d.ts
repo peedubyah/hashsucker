@@ -54,4 +54,13 @@ declare module '@api/client' {
       timeline: Array<{ timestamp: string | null; label: string; status: string }>;
     };
   }>;
+  // ── 2026-08-30 additions ─────────────────────────────────────────────
+  export async function getSearchStats(): Promise<import('@/types/api').SearchStats>;
+  export async function listControlPlaneItems(options: { mediaId: string; limit?: number }): Promise<import('@/types/api').ControlPlaneItemList>;
+  export async function getControlPlaneItemDetail(itemId: string, release?: { infoHash?: string; fileIndex?: number | null } | null): Promise<import('@/types/api').ControlPlaneItemDetail>;
+  export async function getOperatorSearchDebug(query: string): Promise<import('@/types/api').OperatorSearchDebug>;
+  export async function getResolverTelemetry(options?: { limit?: number }): Promise<import('@/types/api').ResolverTelemetry>;
+  export async function getCacheIntelligence(): Promise<import('@/types/api').CacheIntelligence>;
+  export async function getSearchCacheMetrics(): Promise<import('@/types/api').SearchCacheMetrics>;
+  export async function getControlPlaneHealth(): Promise<import('@/types/api').ControlPlaneHealth>;
 }

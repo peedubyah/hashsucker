@@ -354,3 +354,159 @@ export async function searchDmmCorpus(query, limit = 50, offset = 0) {
   if (!response.ok) throw new Error(`Internal search failed: ${response.status}`);
   return response.json();
 }
+
+// ----- Operator surfaces (added 2026-08-30) -----
+// All consumers must use these narrow functions; do not add raw fetch() calls.
+// Note: legacy getControlPlaneItems(mediaId, options) and getControlPlaneItem(itemId, release)
+// above remain for compatibility with existing consumers.
+
+/**
+ * List virtual library items (broader signature than the legacy positional form).
+ * GET /api/control-plane/items
+ * @param {{ mediaId?: string, limit?: number }} [options]
+ */
+export async function listControlPlaneItems({ mediaId, limit = 100 } = {}) {
+  const params = new URLSearchParams();
+  if (mediaId) params.set('mediaId', mediaId);
+  params.set('limit', String(limit));
+  const response = await fetch(`${BASE}/api/control-plane/items?${params}`);
+  if (!response.ok) throw new Error(`Control-plane list failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Virtual library item detail (bindings, lifecycle, optional snapshot).
+ * GET /api/control-plane/items/:id
+ * @param {string} itemId
+ * @param {{ infoHash?: string, fileIndex?: number|null }} [release]
+ */
+export async function getControlPlaneItemDetail(itemId, release = null) {
+  const params = new URLSearchParams();
+  if (release?.infoHash) {
+    params.set('infoHash', release.infoHash);
+    params.set('fileIndex', release.fileIndex == null ? 'null' : String(release.fileIndex));
+  }
+  const qs = params.toString();
+  const response = await fetch(`${BASE}/api/control-plane/items/${encodeURIComponent(itemId)}${qs ? `?${qs}` : ''}`);
+  if (!response.ok) throw new Error(`Control-plane detail failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Operator search-debug view (corpus ranked candidates for a query).
+ * GET /api/operator/search-debug?q=
+ * @param {string} query
+ */
+export async function getOperatorSearchDebug(query) {
+  const response = await fetch(`${BASE}/api/operator/search-debug?q=${encodeURIComponent(query)}`);
+  if (!response.ok) throw new Error(`Search debug failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Resolver telemetry (recent /stream/:type/:id resolution attempts).
+ * GET /api/debug/resolver-telemetry
+ * @param {{ limit?: number }} [options]
+ */
+export async function getResolverTelemetry({ limit = 50 } = {}) {
+  const response = await fetch(`${BASE}/api/debug/resolver-telemetry?limit=${limit}`);
+  if (!response.ok) throw new Error(`Resolver telemetry failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Cache intelligence (provider observations, TorBox current state, probe queue).
+ * GET /api/debug/cache-intelligence
+ */
+export async function getCacheIntelligence() {
+  const response = await fetch(`${BASE}/api/debug/cache-intelligence`);
+  if (!response.ok) throw new Error(`Cache intelligence failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Request lifecycle health snapshot.
+ * GET /api/operator/requests/health
+ */
+export async function getRequestsHealth() {
+  const response = await fetch(`${BASE}/api/operator/requests/health`);
+  if (!response.ok) throw new Error(`Requests health failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Recent lifecycle runs (event store).
+ * GET /api/operator/events/recent
+ * @param {{ limit?: number, format?: 'json'|'text' }} [options]
+ */
+export async function getRecentEvents({ limit = 50, format = 'json' } = {}) {
+  if (format === 'text') {
+    const response = await fetch(`${BASE}/api/operator/events/recent?limit=${limit}&format=text`);
+    if (!response.ok) throw new Error(`Recent events failed: ${response.status}`);
+    return response.text();
+  }
+  const response = await fetch(`${BASE}/api/operator/events/recent?limit=${limit}`);
+  if (!response.ok) throw new Error(`Recent events failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Failed runs (event store).
+ * GET /api/operator/events/failed
+ * @param {{ limit?: number }} [options]
+ */
+export async function getFailedEvents({ limit = 50 } = {}) {
+  const response = await fetch(`${BASE}/api/operator/events/failed?limit=${limit}`);
+  if (!response.ok) throw new Error(`Failed events failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Event store aggregate stats.
+ * GET /api/operator/events/stats
+ */
+export async function getEventStats() {
+  const response = await fetch(`${BASE}/api/operator/events/stats`);
+  if (!response.ok) throw new Error(`Event stats failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Worker queue visibility.
+ * GET /api/operator/workers
+ */
+export async function getWorkerStatus() {
+  const response = await fetch(`${BASE}/api/operator/workers`);
+  if (!response.ok) throw new Error(`Worker status failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Search cache metrics.
+ * GET /api/search/cache/metrics
+ */
+export async function getSearchCacheMetrics() {
+  const response = await fetch(`${BASE}/api/search/cache/metrics`);
+  if (!response.ok) throw new Error(`Cache metrics failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Process-level metrics.
+ * GET /api/metrics
+ */
+export async function getProcessMetrics() {
+  const response = await fetch(`${BASE}/api/metrics`);
+  if (!response.ok) throw new Error(`Process metrics failed: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Enrichment diagnostics.
+ * GET /api/debug/enrichment
+ */
+export async function getEnrichmentDiagnostics() {
+  const response = await fetch(`${BASE}/api/debug/enrichment`);
+  if (!response.ok) throw new Error(`Enrichment diagnostics failed: ${response.status}`);
+  return response.json();
+}

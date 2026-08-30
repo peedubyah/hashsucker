@@ -2,14 +2,40 @@ import { useEffect } from 'react';
 import { SearchPage } from '@/pages/SearchPage';
 import { DebugConsole } from '@/pages/DebugConsole';
 import { RequestConsole } from '@/pages/RequestConsole';
+import { LibraryPage } from '@/pages/LibraryPage';
+import { ProvidersPage } from '@/pages/ProvidersPage';
+import { ResolverPage } from '@/pages/ResolverPage';
+import { CorpusPage } from '@/pages/CorpusPage';
 import { readQuery, useUrlState } from '@/lib/url-state';
 
-type Tab = 'search' | 'debug' | 'requests';
+type Tab =
+  | 'search'
+  | 'requests'
+  | 'library'
+  | 'providers'
+  | 'resolver'
+  | 'corpus'
+  | 'debug';
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: 'search', label: 'Search' },
+  { id: 'requests', label: 'Requests' },
+  { id: 'library', label: 'Library / VFS' },
+  { id: 'providers', label: 'Providers' },
+  { id: 'resolver', label: 'Resolver' },
+  { id: 'corpus', label: 'Corpus / Discovery' },
+  { id: 'debug', label: 'Diagnostics' },
+];
+
+const TAB_IDS: Tab[] = TABS.map((t) => t.id);
+
+function normalizeTab(value: string | null): Tab {
+  return TAB_IDS.includes(value as Tab) ? (value as Tab) : 'search';
+}
 
 export default function App() {
   const [params, setParams] = useUrlState();
-  const requested = params.get('tab') as Tab | null;
-  const tab: Tab = requested === 'debug' || requested === 'requests' || requested === 'search' ? requested : 'search';
+  const tab = normalizeTab(params.get('tab'));
 
   // Pick up changes triggered outside React (popstate already handled by
   // useUrlState). Kept as a no-op listener to document the contract.
@@ -25,48 +51,37 @@ export default function App() {
 
   return (
     <div className="app">
-      <nav className="app-nav" style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem', borderBottom: '1px solid var(--border)', paddingBottom: '0.75rem' }}>
-        <button
-          className={`nav-tab ${tab === 'search' ? 'active' : ''}`}
-          onClick={() => setTab('search')}
-          style={navStyle(tab === 'search')}
-        >
-          Search
-        </button>
-        <button
-          className={`nav-tab ${tab === 'requests' ? 'active' : ''}`}
-          onClick={() => setTab('requests')}
-          style={navStyle(tab === 'requests')}
-        >
-          Requests
-        </button>
-        <button
-          className={`nav-tab ${tab === 'debug' ? 'active' : ''}`}
-          onClick={() => setTab('debug')}
-          style={navStyle(tab === 'debug')}
-        >
-          Debug
-        </button>
-      </nav>
+      <header className="app-topbar">
+        <div className="app-brand">
+          <span className="app-brand-mark">HS</span>
+          <span className="app-brand-text">Hashsucker Operator</span>
+        </div>
+        <nav className="app-nav" role="tablist" aria-label="Operator surfaces">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={tab === t.id}
+              className={`nav-tab ${tab === t.id ? 'active' : ''}`}
+              onClick={() => setTab(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
+      </header>
 
-      {tab === 'search' && (
-        <SearchPage onNavigateRequests={() => setTab('requests')} />
-      )}
-      {tab === 'requests' && <RequestConsole />}
-      {tab === 'debug' && <DebugConsole />}
+      <main className="app-main">
+        {tab === 'search' && (
+          <SearchPage onNavigateRequests={() => setTab('requests')} />
+        )}
+        {tab === 'requests' && <RequestConsole />}
+        {tab === 'library' && <LibraryPage />}
+        {tab === 'providers' && <ProvidersPage />}
+        {tab === 'resolver' && <ResolverPage />}
+        {tab === 'corpus' && <CorpusPage />}
+        {tab === 'debug' && <DebugConsole />}
+      </main>
     </div>
   );
-}
-
-function navStyle(active: boolean): React.CSSProperties {
-  return {
-    padding: '0.4rem 1rem',
-    background: active ? 'var(--accent)' : 'var(--bg-surface)',
-    color: active ? '#000' : 'var(--text)',
-    border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-    borderRadius: '6px',
-    cursor: 'pointer',
-    fontSize: '0.85rem',
-    fontWeight: active ? 600 : 400,
-  };
 }
