@@ -25,6 +25,7 @@ import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { searchTitles, getMediaById, getCacheMetrics } from '../lib/metadata/unified-search.js';
 import { createHandoff, HANDLING_MODES } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
+import { fulfillVirtualSelection } from '../lib/requests/virtual-library.js';
 import { searchReleases, combinedSearch, searchTrace, getSearchStats } from '../lib/discovery/search-engine.js';
 import { runLiveDiscovery, runLiveDiscoveryWithCounts } from '../lib/discovery/live-bridge.js';
 import { formatSearchTrace } from '../lib/discovery/search-trace-formatter.js';
@@ -502,6 +503,7 @@ export function createRequestHandler(dependencies = {}) {
   const catalogSearch = dependencies.searchCatalog || searchCatalog;
   const mediaLookup = dependencies.getMedia || getMedia;
   const combinedSearchFn = dependencies.combinedSearch || combinedSearch;
+  const virtualFulfillment = dependencies.fulfillVirtualSelection || fulfillVirtualSelection;
   // Internal search uses a persistent discovery cache.
   // dbPath can be injected via dependencies or DISCOVERY_DB env var.
   // Defaults to in-memory for testing (when no dbPath provided).
@@ -1318,12 +1320,38 @@ export function createRequestHandler(dependencies = {}) {
             handlingMode,
           });
 
-          timing.start('request.queued');
-          const result = await importer.submitRequest(handoff, { timing: timing.summary() });
-          timing.end('request.queued', 'completed', {
-            status: result.status,
-            path: result.path,
-          });
+          let result;
+          let finalStatus;
+          if (handlingMode === 'stream') {
+            timing.start('virtual-library.committed');
+            const fulfillment = await virtualFulfillment({
+              cache: searchCache,
+              intent,
+              release,
+            });
+            result = {
+              requestId: handoff.requestId,
+              status: 'completed',
+              handlingMode,
+              mediaRequestId: fulfillment.mediaRequestId,
+              releaseKey: fulfillment.handoff.releaseKey,
+              strmPath: fulfillment.strm.path,
+            };
+            finalStatus = 'completed';
+            timing.end('virtual-library.committed', 'completed', {
+              mediaRequestId: fulfillment.mediaRequestId,
+              releaseKey: fulfillment.handoff.releaseKey,
+              strmPath: fulfillment.strm.path,
+            });
+          } else {
+            timing.start('request.queued');
+            result = await importer.submitRequest(handoff, { timing: timing.summary() });
+            finalStatus = 'queued';
+            timing.end('request.queued', 'completed', {
+              status: result.status,
+              path: result.path,
+            });
+          }
 
           timing.complete();
 
@@ -1334,7 +1362,7 @@ export function createRequestHandler(dependencies = {}) {
               mediaId: intent.mediaId,
               releaseKey: handoff.release.releaseKey,
               provider: 'torbox',
-              finalStatus: 'queued',
+              finalStatus,
               timingJson: timing.summary(),
             });
             eventStore.recordEvents(timing.getStages().map(s => ({
