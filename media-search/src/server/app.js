@@ -325,7 +325,7 @@ async function readBody(request) {
  *
  * @param {{ tmdbId: string, mediaType: 'movie'|'series' }} identity
  * @param {{ fetch?: typeof fetch, SEERR_URL?: string, SEERR_API_KEY?: string, logger?: Console }} env
- * @returns {Promise<{ok: true, imdbId: string} | {ok: false, reason: string, status?: number}>}
+ * @returns {Promise<{ok: true, imdbId: string, canonicalTitle: string|null, releaseDate: string|null} | {ok: false, reason: string, status?: number}>}
  */
 async function resolveSeerrIdentity(identity, env = process.env) {
   const tmdbId = String(identity.tmdbId || '').trim();
@@ -376,7 +376,27 @@ async function resolveSeerrIdentity(identity, env = process.env) {
     if (!imdbId || !/^tt[0-9]{7,}$/.test(imdbId)) {
       return { ok: false, reason: 'identity-unresolved' };
     }
-    return { ok: true, imdbId };
+    // The same Seerr detail response used for TMDB→IMDb resolution also
+    // carries canonical title and release date (Seerr MovieDetails: title,
+    // originalTitle, releaseDate; TvDetails: name, originalName,
+    // firstAirDate). Surface them on the ok result so the caller can
+    // thread the canonical title into the search path without a second
+    // I/O. Trivially-cheap string normalization only — no schema/storage
+    // effects.
+    const canonicalTitleRaw =
+      body.originalTitle ?? body.original_title ??
+      body.originalName ?? body.original_name ??
+      body.title ?? body.name ?? null;
+    const canonicalTitle = canonicalTitleRaw == null
+      ? null
+      : String(canonicalTitleRaw).trim() || null;
+    const releaseDateRaw =
+      body.releaseDate ?? body.release_date ??
+      body.firstAirDate ?? body.first_air_date ?? null;
+    const releaseDate = releaseDateRaw == null
+      ? null
+      : String(releaseDateRaw).trim() || null;
+    return { ok: true, imdbId, canonicalTitle, releaseDate };
   } catch (err) {
     const reason = err && err.name === 'AbortError' ? 'identity-timeout' : 'identity-unavailable';
     return { ok: false, reason };
@@ -455,6 +475,7 @@ async function handleSeerrIngress(request, response, searchCache) {
   //    Skip when the inbound intent already carries a valid IMDb.
   let operationalIntent = intent;
   let identityStatus = 'imdb-already-known';
+  let canonicalMediaTitle = null; // threaded into searchByMedia when Seerr resolves
   if (!intent.imdbId && intent.tmdbId) {
     const resolved = await resolveSeerrIdentity(
       { tmdbId: intent.tmdbId, mediaType: intent.mediaType },
@@ -488,6 +509,17 @@ async function handleSeerrIngress(request, response, searchCache) {
       mediaId: resolved.imdbId,
     };
     identityStatus = 'imdb-resolved';
+    // Reuse the already-fetched Seerr detail response to thread the
+    // canonical title into searchByMedia. Seerr's MovieDetails / TvDetails
+    // payload carries originalTitle/title (and the TV analog) on the same
+    // body we just parsed for IMDb — no second I/O, no new metadata
+    // service, no schema change. This activates the existing ranking /
+    // identity-eligibility code paths that already consume mediaTitle.
+    // The unmatched-keyword guard ensures we never poison the pipeline
+    // with a non-string value.
+    if (typeof resolved.canonicalTitle === 'string' && resolved.canonicalTitle.length > 0) {
+      canonicalMediaTitle = resolved.canonicalTitle;
+    }
   }
 
   // 5. Persist the durable intent (with IMDb when resolved)
@@ -513,6 +545,7 @@ async function handleSeerrIngress(request, response, searchCache) {
     const result = await searchByMedia(searchCache, {
       mediaId: operationalIntent.mediaId,
       mediaType: operationalIntent.mediaType,
+      mediaTitle: canonicalMediaTitle,
       season: operationalIntent.season,
       episode: operationalIntent.episode,
       source: operationalIntent.source,
