@@ -20,6 +20,7 @@ type OutputSource = 'health' | 'logs' | 'trace' | 'diagnostics' | 'requests';
 interface OutputLine {
   text: string;
   timestamp: string;
+  json?: boolean;
 }
 
 const SOURCES: { id: OutputSource; label: string }[] = [
@@ -112,7 +113,7 @@ export function DebugConsole() {
           return;
       }
 
-      setOutput([{ text: JSON.stringify(result, null, 2), timestamp: ts }]);
+      setOutput([{ text: JSON.stringify(result, null, 2), timestamp: ts, json: true }]);
     } catch (err) {
       setOutput([{ text: `Error: ${(err as Error).message}`, timestamp: ts }]);
     } finally {
@@ -242,7 +243,7 @@ export function DebugConsole() {
         {output.map((line, i) => (
           <div key={i} className="console-line">
             <span className="console-ts">{new Date(line.timestamp).toLocaleTimeString()}</span>
-            <pre className="console-text">{line.text}</pre>
+            <pre className={`console-text${line.json ? ' json-payload' : ''}`}>{line.text}</pre>
           </div>
         ))}
         {loading && <div className="console-loading">Loading...</div>}

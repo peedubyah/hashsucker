@@ -174,14 +174,17 @@ export function RequestConsole() {
   return (
     <div className="request-console">
       <div className="request-console-bar">
-        <select
-          value={filter}
-          onChange={e => updateUrl({ filter: e.target.value === 'all' ? null : e.target.value, id: null })}
-        >
-          {FILTERS.map(f => (
-            <option key={f.value} value={f.value}>{f.label}</option>
-          ))}
-        </select>
+        <label className="filter-select compact">
+          <span className="filter-label">Filter</span>
+          <select
+            value={filter}
+            onChange={e => updateUrl({ filter: e.target.value === 'all' ? null : e.target.value, id: null })}
+          >
+            {FILTERS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </label>
         <button type="button" onClick={reloadList} disabled={listLoading}>Refresh</button>
         <span className="muted small">
           Total {formatNumber(list?.total ?? 0)} ·
@@ -240,7 +243,7 @@ export function RequestConsole() {
                   <h3>Request {detail.requestId.slice(0, 8)}</h3>
                   <span className="muted small"><StatusBadge value={detail.status} /></span>
                 </div>
-                <div className="card-row">
+                <div className="card-actions">
                   <button
                     type="button"
                     onClick={() => runAction('retry', detail.requestId)}

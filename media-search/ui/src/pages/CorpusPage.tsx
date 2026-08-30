@@ -173,9 +173,9 @@ export function CorpusPage() {
               getRowKey={(r) => r.hash}
               columns={[
                 { key: 'title', header: 'Title', render: (r) => (
-                  <div>
-                    <div className="strong">{r.title || r.filename}</div>
-                    <div className="muted small mono">{r.hash.slice(0, 16)}…</div>
+                  <div className="corpus-row-title">
+                    <div className="strong" title={r.title || r.filename}>{r.title || r.filename}</div>
+                    <div className="muted small mono" title={r.hash}>{r.hash.slice(0, 14)}…{r.hash.slice(-6)}</div>
                   </div>
                 ) },
                 { key: 'resolution', header: 'Res', width: '80px', render: (r) => r.resolution ?? '—' },

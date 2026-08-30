@@ -66,8 +66,8 @@ export function LibraryPage() {
           className="library-lookup"
           onSubmit={(e) => { e.preventDefault(); void loadList(); }}
         >
-          <label className="filter-input">
-            <span>mediaId</span>
+          <label className="filter-input compact">
+            <span className="filter-label">mediaId</span>
             <input
               type="text"
               value={mediaId}
@@ -77,8 +77,8 @@ export function LibraryPage() {
               spellCheck={false}
             />
           </label>
-          <label className="filter-input" style={{ maxWidth: 120 }}>
-            <span>Limit</span>
+          <label className="filter-input compact limit">
+            <span className="filter-label">Limit</span>
             <input
               type="number"
               min={1}
@@ -99,15 +99,15 @@ export function LibraryPage() {
             {list.items.map((it) => (
               <li key={it.item.id}>
                 <button type="button" className="library-item-row" onClick={() => loadDetail(it.item.id)}>
-                  <div>
-                    <div className="strong">{it.item.title}</div>
-                    <div className="muted small">
+                  <div className="library-item-row-main">
+                    <span className="strong">{it.item.title}</span>
+                    <span className="muted small">
                       {it.item.mediaType === 'episode' ? 'Episode' : 'Movie'}
                       {it.item.year ? ` · ${it.item.year}` : ''}
                       {it.item.season != null && it.item.episode != null ? ` · S${it.item.season}E${it.item.episode}` : ''}
-                    </div>
+                    </span>
                   </div>
-                  <code className="mono small">{it.item.id}</code>
+                  <code className="item-id">{it.item.id}</code>
                 </button>
               </li>
             ))}
@@ -153,7 +153,7 @@ export function LibraryPage() {
             />
           </MetricGrid>
 
-          <div className="library-detail-grid">
+          <div className="detail-grid">
             <div>
               <h4>Canonical path</h4>
               {detail.canonicalPath ? (

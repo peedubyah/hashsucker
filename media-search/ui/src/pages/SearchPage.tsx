@@ -361,12 +361,17 @@ export function SearchPage({ onNavigateRequests }: SearchPageProps) {
 
               {rankAnomaly && (
                 <div className="defect-banner" role="status">
-                  <strong>Backend identity defect</strong>
-                  <p>
-                    {rankAnomaly.count} of the top {Math.min(10, releaseResult?.results.length ?? 0)} candidate{rankAnomaly.count !== 1 ? 's' : ''} on this mediaId {rankAnomaly.description}.
-                    Identity confidence averages {Math.round(rankAnomaly.avgIdentity * 100)}% — the backend is returning parser-level corpus matches instead of semantic matches and does not currently rerank unrelated releases against the selected mediaId.
-                  </p>
-                  <button type="button" className="btn btn-secondary" onClick={loadIdentityDebug}>
+                  <div className="defect-banner-head">
+                    <span className="defect-banner-mark" aria-hidden="true">!</span>
+                    <div>
+                      <strong>Backend identity defect</strong>
+                      <p>
+                        {rankAnomaly.count} of the top {Math.min(10, releaseResult?.results.length ?? 0)} candidate{rankAnomaly.count !== 1 ? 's' : ''} {rankAnomaly.description}.
+                        {' '}Avg identity <strong>{Math.round(rankAnomaly.avgIdentity * 100)}%</strong> — parser-level corpus matches, not semantic.
+                      </p>
+                    </div>
+                  </div>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={loadIdentityDebug}>
                     Inspect with /api/operator/search-debug
                   </button>
                 </div>
@@ -382,8 +387,9 @@ export function SearchPage({ onNavigateRequests }: SearchPageProps) {
                     />
                     <span>Eligible only</span>
                   </label>
-                  <label className="filter-select">
-                    <span>Resolution</span>
+                  <div className="filter-divider" aria-hidden="true" />
+                  <label className="filter-select compact">
+                    <span className="filter-label">Res</span>
                     <select
                       value={filters.resolution}
                       onChange={e => setFilters(f => ({ ...f, resolution: e.target.value }))}
@@ -394,8 +400,8 @@ export function SearchPage({ onNavigateRequests }: SearchPageProps) {
                       ))}
                     </select>
                   </label>
-                  <label className="filter-select">
-                    <span>Source</span>
+                  <label className="filter-select compact">
+                    <span className="filter-label">Source</span>
                     <select
                       value={sourceFilter}
                       onChange={e => setSourceFilter(e.target.value as SourceFilter)}
@@ -406,8 +412,8 @@ export function SearchPage({ onNavigateRequests }: SearchPageProps) {
                       <option value="merged">Merged</option>
                     </select>
                   </label>
-                  <label className="filter-select">
-                    <span>Provider</span>
+                  <label className="filter-select compact">
+                    <span className="filter-label">Provider</span>
                     <select
                       value={filters.providerState}
                       onChange={e => setFilters(f => ({ ...f, providerState: e.target.value as CandidateFilters['providerState'] }))}
@@ -418,8 +424,8 @@ export function SearchPage({ onNavigateRequests }: SearchPageProps) {
                       <option value="unknown">Unknown</option>
                     </select>
                   </label>
-                  <label className="filter-select">
-                    <span>Size</span>
+                  <label className="filter-select compact">
+                    <span className="filter-label">Size</span>
                     <select
                       value={filters.sizeBucket}
                       onChange={e => setFilters(f => ({ ...f, sizeBucket: e.target.value as CandidateFilters['sizeBucket'] }))}
@@ -431,18 +437,18 @@ export function SearchPage({ onNavigateRequests }: SearchPageProps) {
                       <option value="gt15">{'> 15 GB'}</option>
                     </select>
                   </label>
-                  <label className="filter-input">
-                    <span>Filter</span>
+                  <div className="filter-divider" aria-hidden="true" />
+                  <label className="filter-input compact">
                     <input
                       type="search"
-                      placeholder="filename, group, codec…"
+                      placeholder="Filter filename, group, codec…"
                       value={filters.text}
                       onChange={e => setFilters(f => ({ ...f, text: e.target.value }))}
                     />
                   </label>
                 </div>
                 <div className="candidate-sort">
-                  <span className="muted small">Sort</span>
+                  <span className="filter-label">Sort</span>
                   <select value={sortBy} onChange={e => setSortBy(e.target.value as SortKey)}>
                     <option value="rank">Backend rank</option>
                     <option value="score">Score</option>
@@ -543,7 +549,7 @@ function ReleaseRow({ release, rank, expanded, onToggle, onRequest, requestStatu
             {release.title || release.filename}
           </div>
           <div className="candidate-filename" title={release.filename}>
-            {release.filename}
+            <span className="filename-text">{release.filename}</span>
           </div>
           <div className="candidate-tags">
             {release.resolution && <span className="badge badge-default">{release.resolution}</span>}
@@ -552,22 +558,27 @@ function ReleaseRow({ release, rank, expanded, onToggle, onRequest, requestStatu
             {release.hdr && <span className="badge badge-info">{release.hdr}</span>}
             {release.audio && <span className="badge badge-default">{release.audio}</span>}
             {release.releaseGroup && <span className="badge badge-default">{release.releaseGroup}</span>}
-            {release._source === 'corpus' && <span className="badge badge-corpus">Corpus</span>}
-            {release._source === 'live' && <span className="badge badge-live">Live</span>}
-            {release._source === 'merged' && <span className="badge badge-default">Merged</span>}
+            <span className={`badge badge-source-${release._source}`}>{release._source === 'corpus' ? 'Corpus' : release._source === 'live' ? 'Live' : 'Merged'}</span>
             {cachedObservation && <span className="badge badge-success">Cached</span>}
-            {identityDefect && <span className="badge badge-warning">Identity suspect</span>}
+            {identityDefect && <span className="badge badge-warning" title="Identity confidence below parser threshold">Low identity</span>}
           </div>
         </div>
 
         <div className="candidate-metrics">
           <div className="candidate-metric">
             <span className="metric-label">Identity</span>
-            <span className="metric-value">{Math.round((release.components?.identityConfidence ?? release.confidence) * 100)}%</span>
+            <span
+              className={`metric-value ${(release.components?.identityConfidence ?? release.confidence) < 0.5 ? 'metric-value-warn' : ''}`}
+              title={`Identity confidence ${Math.round((release.components?.identityConfidence ?? release.confidence) * 100)}%`}
+            >
+              {Math.round((release.components?.identityConfidence ?? release.confidence) * 100)}%
+            </span>
           </div>
           <div className="candidate-metric">
             <span className="metric-label">Provider</span>
-            <span className="metric-value">{cachedObservation ? 'cached' : release.providers && Object.keys(release.providers).length ? 'observed' : 'unknown'}</span>
+            <span className={`metric-value ${cachedObservation ? 'metric-value-good' : ''}`}>
+              {cachedObservation ? 'cached' : release.providers && Object.keys(release.providers).length ? 'observed' : 'unknown'}
+            </span>
           </div>
           <div className="candidate-metric">
             <span className="metric-label">Size</span>
@@ -606,14 +617,22 @@ function ReleaseRow({ release, rank, expanded, onToggle, onRequest, requestStatu
         <div className="candidate-row-details">
           <RankingExplanation components={release.components} />
 
-          <dl className="kv-grid">
+          <dl className="kv-grid kv-grid-2">
             <div className="kv-row">
               <dt className="kv-key">Info hash</dt>
-              <dd className="kv-val mono">{release.infoHash}</dd>
+              <dd className="kv-val mono truncate-mono" title={release.infoHash}>
+                <span className="truncate-mono-head">{release.infoHash.slice(0, 12)}</span>
+                <span className="truncate-mono-ellipsis">…</span>
+                <span className="truncate-mono-tail">{release.infoHash.slice(-8)}</span>
+              </dd>
             </div>
             <div className="kv-row">
               <dt className="kv-key">Release key</dt>
-              <dd className="kv-val mono">{release.releaseKey}</dd>
+              <dd className="kv-val mono truncate-mono" title={release.releaseKey}>
+                <span className="truncate-mono-head">{release.releaseKey.slice(0, 16)}</span>
+                <span className="truncate-mono-ellipsis">…</span>
+                <span className="truncate-mono-tail">{release.releaseKey.slice(-10)}</span>
+              </dd>
             </div>
             <div className="kv-row">
               <dt className="kv-key">File index</dt>
@@ -627,7 +646,7 @@ function ReleaseRow({ release, rank, expanded, onToggle, onRequest, requestStatu
               <dt className="kv-key">Confidence</dt>
               <dd className="kv-val">{(release.confidence * 100).toFixed(0)}%</dd>
             </div>
-            {release.year && (
+            {release.year != null && (
               <div className="kv-row">
                 <dt className="kv-key">Year</dt>
                 <dd className="kv-val">{release.year}</dd>
