@@ -31,6 +31,8 @@ services:
       PLEX_TOKEN: ${PLEX_TOKEN:-}
       PLEX_MOVIES_SECTION_ID: ${PLEX_MOVIES_SECTION_ID:-}
       PLEX_TV_SECTION_ID: ${PLEX_TV_SECTION_ID:-}
+      PLEX_MOVIES_ROOT: ${PLEX_MOVIES_ROOT:-}
+      PLEX_TV_ROOT: ${PLEX_TV_ROOT:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

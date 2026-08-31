@@ -1,13 +1,9 @@
-import path from 'node:path';
 import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
 
-import {
-  addDeterministicCollisionSuffix,
-  buildPreferredCanonicalPath,
-} from '../control-plane/canonical-path.js';
 import { attemptRdResolution, getRdPlaybackUrl } from '../providers/realdebrid/resolve.js';
 import { isUrlLive } from '../resolver/liveness.js';
+import { materializeVfsEntry } from './materialize.js';
 
 const DAV_ROOT = '/vfs';
 const MOVIES_PATH = `${DAV_ROOT}/Movies`;
@@ -164,57 +160,6 @@ function validateHandoff(handoff) {
   }
 }
 
-function movieNameFromFilename(filename, mediaId) {
-  const basename = path.posix.basename(String(filename || '').replaceAll('\\', '/'));
-  const parsed = path.posix.parse(basename);
-  const stem = parsed.name || basename || mediaId;
-  const yearMatch = stem.match(/(?:^|[. _-])((?:19|20)\d{2})(?=$|[. _-])/);
-  const year = yearMatch ? Number(yearMatch[1]) : null;
-  const titlePart = yearMatch ? stem.slice(0, yearMatch.index).trim() : stem.trim();
-  const title = titlePart
-    .replace(/[._-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim() || mediaId;
-  const extension = /^\.[a-z0-9]{1,10}$/i.test(parsed.ext) ? parsed.ext : '.mkv';
-  return { title, year, extension };
-}
-
-function materializeMissingEntries(searchCache, now) {
-  const handoffs = searchCache.listMoviePlaybackHandoffs();
-  const existing = searchCache.listVfsMovieEntries();
-  const byMediaId = new Map(existing.map((entry) => [entry.mediaId, entry]));
-  const usedPaths = new Set(existing.map((entry) => entry.canonicalPath));
-
-  for (const handoff of handoffs) {
-    if (byMediaId.has(handoff.mediaId)) continue;
-    validateHandoff(handoff);
-    const movie = movieNameFromFilename(handoff.filename, handoff.mediaId);
-    let canonicalPath = buildPreferredCanonicalPath({
-      mediaType: 'movie',
-      mediaId: handoff.mediaId,
-      title: movie.title,
-      year: movie.year,
-    }, { extension: movie.extension });
-    if (usedPaths.has(canonicalPath)) {
-      canonicalPath = addDeterministicCollisionSuffix(canonicalPath, handoff.releaseKey);
-    }
-    const timestamp = now();
-    const created = searchCache.createVfsMovieEntry({
-      mediaId: handoff.mediaId,
-      releaseKey: handoff.releaseKey,
-      infoHash: handoff.infoHash,
-      fileIndex: handoff.fileIndex,
-      canonicalPath,
-      size: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    });
-    byMediaId.set(created.mediaId, created);
-    usedPaths.add(created.canonicalPath);
-    console.log(`[vfs] materialized media=${created.mediaId} path="${created.canonicalPath}" release=${created.releaseKey}`);
-  }
-}
-
 function buildTree(states) {
   const root = { path: DAV_ROOT, name: 'vfs', type: 'collection' };
   const entries = new Map([[DAV_ROOT, root]]);
@@ -294,7 +239,9 @@ export function createMovieWebDav({
   const states = new Map();
 
   function getCatalog() {
-    materializeMissingEntries(searchCache, now);
+    for (const handoff of searchCache.listMoviePlaybackHandoffs()) {
+      materializeVfsEntry(searchCache, handoff, now);
+    }
     const nextStates = [];
     for (const entry of searchCache.listVfsMovieEntries()) {
       let state = states.get(entry.releaseKey);

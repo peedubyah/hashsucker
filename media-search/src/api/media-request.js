@@ -22,6 +22,7 @@ import { buildPlaybackHandoff } from '../lib/discovery/playback-handoff.js';
 import { publishStrm } from '../lib/requests/strm-publisher.js';
 import { notifyJellyfin } from '../lib/requests/jellyfin-notifier.js';
 import { notifyPlex } from '../lib/requests/plex-notifier.js';
+import { materializeVfsEntry } from '../lib/vfs/materialize.js';
 import { DEMAND_PRIORITY } from '../lib/discovery/cache.js';
 
 /**
@@ -377,6 +378,12 @@ export async function searchByMedia(cache, request) {
       if (handoff) {
         try {
           cache.persistPlaybackHandoff(handoff);
+          let vfsEntry = null;
+          try {
+            vfsEntry = materializeVfsEntry(cache, handoff);
+          } catch (error) {
+            console.error(`VFS materialization failed: ${error.message}`);
+          }
 
           // After durable handoff, immediately publish .strm
           // Idempotent: safe to call for repeated requests
@@ -409,21 +416,21 @@ export async function searchByMedia(cache, request) {
 
               // Request Plex partial scan of the VFS directory that contains
               // the new file. Failure does not invalidate the fulfillment.
-              notifyPlex({
-                mediaId: handoff.mediaId,
-                mediaType: handoff.mediaType,
-                season: handoff.season,
-                episode: handoff.episode,
-                filename: handoff.filename,
-              }).then((plResult) => {
-                if (plResult.notified) {
-                  console.log(`[Plex] Notified via ${plResult.method}: ${handoff.mediaId}`);
-                } else if (plResult.error) {
-                  console.error(`[Plex] Will be discovered on next scan: ${plResult.error}`);
-                }
-              }).catch(() => {
-                // Plex notification failure is non-fatal
-              });
+              if (vfsEntry) {
+                notifyPlex({
+                  mediaId: handoff.mediaId,
+                  mediaType: handoff.mediaType,
+                  canonicalPath: vfsEntry.canonicalPath,
+                }).then((plResult) => {
+                  if (plResult.notified) {
+                    console.log(`[Plex] Notified via ${plResult.method}: ${handoff.mediaId}`);
+                  } else if (plResult.error) {
+                    console.error(`[Plex] Will be discovered on next scan: ${plResult.error}`);
+                  }
+                }).catch(() => {
+                  // Plex notification failure is non-fatal
+                });
+              }
             }
           } catch (strmError) {
             // STRM publication failure must not fail the request

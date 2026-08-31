@@ -11,16 +11,12 @@
  * ephemeral provider URL handling.
  */
 
-import path from 'node:path';
 import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
 
-import {
-  addDeterministicCollisionSuffix,
-  buildPreferredCanonicalPath,
-} from '../control-plane/canonical-path.js';
 import { attemptRdResolution, getRdPlaybackUrl } from '../providers/realdebrid/resolve.js';
 import { isUrlLive } from '../resolver/liveness.js';
+import { materializeVfsEntry } from './materialize.js';
 
 const DAV_ROOT = '/vfs';
 const CONTENT_TYPE = 'video/x-matroska';
@@ -216,60 +212,6 @@ function metadataFromState(state) {
   };
 }
 
-function episodeNameFromFilename(filename, mediaId) {
-  const parsed = path.posix.parse(filename || '');
-  const base = parsed.name || mediaId;
-  // Extract series title by removing SxxExx and everything after
-  const titlePart = base
-    .replace(/[._-]+/g, ' ')
-    .replace(/\s+S\d+E\d+.*$/i, '')
-    .replace(/\s+/g, ' ')
-    .trim() || mediaId;
-  const extension = /^\.[a-z0-9]{1,10}$/i.test(parsed.ext) ? parsed.ext : '.mkv';
-  return { title: titlePart, extension };
-}
-
-function materializeMissingEntries(searchCache, now) {
-  const handoffs = searchCache.listTvPlaybackHandoffs();
-  const existing = searchCache.listVfsTvEntries();
-  const byIdentity = new Map(
-    existing.map((entry) => [entry.mediaId + ':' + entry.season + ':' + entry.episode, entry]),
-  );
-  const usedPaths = new Set(existing.map((entry) => entry.canonicalPath));
-
-  for (const handoff of handoffs) {
-    const identityKey = handoff.mediaId + ':' + handoff.season + ':' + handoff.episode;
-    if (byIdentity.has(identityKey)) continue;
-    const ep = episodeNameFromFilename(handoff.filename, handoff.mediaId);
-    let canonicalPath = buildPreferredCanonicalPath({
-      mediaType: 'episode',
-      mediaId: handoff.mediaId,
-      title: ep.title,
-      season: handoff.season,
-      episode: handoff.episode,
-    }, { extension: ep.extension });
-    if (usedPaths.has(canonicalPath)) {
-      canonicalPath = addDeterministicCollisionSuffix(canonicalPath, handoff.releaseKey);
-    }
-    const timestamp = now();
-    const created = searchCache.createVfsTvEntry({
-      mediaId: handoff.mediaId,
-      season: handoff.season,
-      episode: handoff.episode,
-      releaseKey: handoff.releaseKey,
-      infoHash: handoff.infoHash,
-      fileIndex: handoff.fileIndex,
-      canonicalPath,
-      size: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    });
-    byIdentity.set(identityKey, created);
-    usedPaths.add(created.canonicalPath);
-    console.log('[vfs-tv] materialized media=' + created.mediaId + ' S' + created.season + 'E' + created.episode + ' path="' + created.canonicalPath + '" release=' + created.releaseKey);
-  }
-}
-
 export function createTvWebDav({
   searchCache,
   controlPlaneStore,
@@ -282,7 +224,9 @@ export function createTvWebDav({
   const states = new Map();
 
   function getCatalog() {
-    materializeMissingEntries(searchCache, now);
+    for (const handoff of searchCache.listTvPlaybackHandoffs()) {
+      materializeVfsEntry(searchCache, handoff, now);
+    }
     const nextStates = [];
     for (const entry of searchCache.listVfsTvEntries()) {
       const stateKey = entry.mediaId + ':' + entry.season + ':' + entry.episode;
