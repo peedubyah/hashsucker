@@ -62,7 +62,7 @@ import { createResolverTelemetry, getRecentResolverTelemetry, RESOLVER_OUTCOME }
 import { createResolverProfiler } from '../lib/resolver/profiler.js';
 import { createTorBoxProvider } from '../lib/providers/torbox.js';
 import { createTorBoxInventoryProvider } from '../lib/providers/torbox-inventory.js';
-import { ensureTorBoxDelivery, TorBoxDeliveryError } from '../lib/resolver/torbox-delivery.js';
+import { ensureTorBoxDelivery, TorBoxDeliveryError, resolveTorBoxDeliveryWithStaleRecovery } from '../lib/resolver/torbox-delivery.js';
 import {
   getTorBoxDownloadUrlCache,
   resolveTorBoxDownloadUrl,
@@ -950,10 +950,7 @@ async function tryAlternateCandidateFallback({
   alternateFallback,
   revalidator,
   controlPlaneStore,
-  resolveTorBoxDelivery,
-  torBoxDownloadUrlCache,
-  resolveTorBoxDownloadUrlFn,
-  isTorBoxDownloadUrlLive,
+  resolveTorBoxDeliverySeam,
   existingSelection,
   primaryRevalidation,
   rawId,
@@ -994,13 +991,14 @@ async function tryAlternateCandidateFallback({
 
   const { candidate, revalidation } = fallback;
 
-  // Alternate delivery seam: run the SAME authoritative TorBox lifecycle used
-  // by the primary path. This reuses an existing control-plane placement,
-  // passively recovers an account placement, or cached-only-creates a new one,
-  // then establishes the exact provider-file mapping. If the seam is not
-  // wired (test/legacy environments), fall through so the caller can surface
-  // the typed failure from the original revalidation.
-  if (!controlPlaneStore || typeof resolveTorBoxDelivery !== 'function') {
+  // Alternate delivery seam: run the SAME authoritative TorBox delivery
+  // seam used by the primary path. This reuses an existing control-plane
+  // placement, passively recovers an account placement, or cached-only-
+  // creates a new one, then establishes the exact provider-file mapping
+  // and resolves the requestdl URL through the short-lived CDN URL cache.
+  // If the seam is not wired (test/legacy environments), fall through so
+  // the caller can surface the typed failure from the original revalidation.
+  if (!controlPlaneStore || typeof resolveTorBoxDeliverySeam !== 'function') {
     return false;
   }
 
@@ -1015,46 +1013,12 @@ async function tryAlternateCandidateFallback({
   });
 
   try {
-    const delivery = await resolveTorBoxDelivery({
+    const delivery = await resolveTorBoxDeliverySeam({
       infoHash: candidate.info_hash,
       fileIndex: candidate.fileIndex,
       releaseKey: candidate.releaseKey,
       filename: candidate.filename,
     });
-
-    // Resolve to a live CDN URL using the same short-lived cache the primary
-    // path uses. When the cache dependency is not provided (test path), fall
-    // back to the requestdl permalink — it carries `redirect=true` and is
-    // a valid 307 target on its own.
-    let downloadUrl = delivery.url;
-    let liveCheckPerformed = false;
-    if (torBoxDownloadUrlCache && typeof resolveTorBoxDownloadUrlFn === 'function') {
-      let cachedDownload = torBoxDownloadUrlCache.get(
-        candidate.releaseKey,
-        delivery.providerFileId,
-      );
-      if (cachedDownload && isTorBoxDownloadUrlLive && !await isTorBoxDownloadUrlLive(cachedDownload.url)) {
-        torBoxDownloadUrlCache.delete(
-          candidate.releaseKey,
-          delivery.providerFileId,
-        );
-        cachedDownload = null;
-      }
-      downloadUrl = cachedDownload?.url || await torBoxDownloadUrlCache.getOrInFlight(
-        candidate.releaseKey,
-        delivery.providerFileId,
-        async () => {
-          const url = await resolveTorBoxDownloadUrlFn(delivery.url);
-          torBoxDownloadUrlCache.set(
-            candidate.releaseKey,
-            delivery.providerFileId,
-            url,
-          );
-          return url;
-        },
-      );
-      liveCheckPerformed = true;
-    }
 
     recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
       infoHash: candidate.info_hash,
@@ -1065,7 +1029,7 @@ async function tryAlternateCandidateFallback({
       ...fallbackTelemetry,
     });
     const headers = {
-      location: downloadUrl,
+      location: delivery.url,
       'cache-control': 'no-store',
       'x-torrent-id': delivery.placementId,
       'x-file-id': delivery.providerFileId,
@@ -1075,19 +1039,18 @@ async function tryAlternateCandidateFallback({
       'x-fallback-rank': String(candidate.rank),
       'x-fallback-original-release-key': existingSelection.releaseKey,
       'x-fallback-selected-release-key': candidate.releaseKey,
+      'x-url-live-checked': 'true',
     };
-    if (liveCheckPerformed) {
-      headers['x-url-live-checked'] = 'true';
-    }
     response.writeHead(307, headers);
     response.end();
     return true;
   } catch (deliveryErr) {
     // The alternate-delivery seam raises the same error taxonomy as the
-    // primary seam (TorBoxDeliveryError). Surface it as a typed failure
-    // with the original alternate candidate's identity — never fall back
-    // to the legacy pure-redirect resolver, which cannot create placements.
-    if (deliveryErr instanceof TorBoxDeliveryError) {
+    // primary seam (TorBoxDeliveryError, TorBoxDownloadUrlError). Surface
+    // it as a typed failure with the original alternate candidate's
+    // identity — never fall back to the legacy pure-redirect resolver,
+    // which cannot create placements.
+    if (deliveryErr instanceof TorBoxDeliveryError || deliveryErr instanceof TorBoxDownloadUrlError) {
       recordTelemetry(RESOLVER_OUTCOME.FAILED, deliveryErr.code, null, {
         infoHash: candidate.info_hash,
         releaseKey: candidate.releaseKey,
@@ -1227,6 +1190,29 @@ export function createRequestHandler(dependencies = {}) {
   const torBoxDownloadUrlCache = dependencies.torBoxDownloadUrlCache || getTorBoxDownloadUrlCache();
   const resolveTorBoxDownloadUrlFn = dependencies.resolveTorBoxDownloadUrl || resolveTorBoxDownloadUrl;
   const isTorBoxDownloadUrlLive = dependencies.isTorBoxDownloadUrlLive || isUrlLive;
+
+  // Authoritative TorBox delivery seam that owns the requestdl step and
+  // the bounded stale-placement repair. The CDN URL cache is consulted
+  // by this seam so recovery and non-recovery paths share the same
+  // short-lived URL lifecycle.
+  const resolveTorBoxDeliverySeam = dependencies.resolveTorBoxDeliverySeam || (async ({
+    infoHash,
+    fileIndex,
+    releaseKey,
+    filename,
+  }) => resolveTorBoxDeliveryWithStaleRecovery({
+    infoHash,
+    fileIndex,
+    releaseKey,
+    filename,
+    controlPlaneStore,
+    torBoxProvider,
+    torBoxInventoryProvider,
+    torBoxDownloadUrlCache,
+    resolveTorBoxDownloadUrl: resolveTorBoxDownloadUrlFn,
+    isUrlLive: isTorBoxDownloadUrlLive,
+    now: clock,
+  }));
 
   const handleMovieWebDav = createMovieWebDav({
     searchCache,
@@ -1508,10 +1494,7 @@ export function createRequestHandler(dependencies = {}) {
                 alternateFallback,
                 revalidator,
                 controlPlaneStore,
-                resolveTorBoxDelivery,
-                torBoxDownloadUrlCache,
-                resolveTorBoxDownloadUrlFn,
-                isTorBoxDownloadUrlLive,
+                resolveTorBoxDeliverySeam,
                 existingSelection,
                 primaryRevalidation: revalidation,
                 rawId,
@@ -1539,45 +1522,21 @@ export function createRequestHandler(dependencies = {}) {
               });
             }
 
-            // 1d. Resolve TorBox delivery through the placement lifecycle when
-            // the control plane is available. This reuses or recovers placement,
-            // creates cached-only placement when needed, and maps the exact file.
+            // 1d. Resolve TorBox delivery through the authoritative seam when
+            // the control plane is available. The seam owns the placement
+            // lifecycle, the requestdl step, the short-lived CDN URL cache,
+            // and the bounded stale-placement repair for a requestdl failure
+            // that can represent a missing upstream resource.
             if (controlPlaneStore) {
               try {
-                const delivery = await resolveTorBoxDelivery({
+                const delivery = await resolveTorBoxDeliverySeam({
                   infoHash: existingSelection.selectedHash,
                   fileIndex: existingSelection.fileIndex,
                   releaseKey: existingSelection.releaseKey,
                   filename: existingSelection.filename,
                 });
                 profiler.mark('torbox-delivery-resolved');
-
-                let cachedDownload = torBoxDownloadUrlCache.get(
-                  existingSelection.releaseKey,
-                  delivery.providerFileId,
-                );
-                if (cachedDownload && !await isTorBoxDownloadUrlLive(cachedDownload.url)) {
-                  torBoxDownloadUrlCache.delete(
-                    existingSelection.releaseKey,
-                    delivery.providerFileId,
-                  );
-                  cachedDownload = null;
-                  profiler.mark('torbox-download-cache-stale');
-                }
-                const downloadUrl = cachedDownload?.url || await torBoxDownloadUrlCache.getOrInFlight(
-                  existingSelection.releaseKey,
-                  delivery.providerFileId,
-                  async () => {
-                    const url = await resolveTorBoxDownloadUrlFn(delivery.url);
-                    torBoxDownloadUrlCache.set(
-                      existingSelection.releaseKey,
-                      delivery.providerFileId,
-                      url,
-                    );
-                    return url;
-                  },
-                );
-                profiler.mark(cachedDownload ? 'torbox-download-cache-hit' : 'torbox-download-resolved');
+                if (delivery.recovered) profiler.mark('torbox-delivery-recovered');
 
                 recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
                   infoHash: existingSelection.selectedHash,
@@ -1588,7 +1547,7 @@ export function createRequestHandler(dependencies = {}) {
                 });
                 profiler.mark('307-returned');
                 response.writeHead(307, {
-                  location: downloadUrl,
+                  location: delivery.url,
                   'cache-control': 'no-store',
                   'x-torrent-id': delivery.placementId,
                   'x-file-id': delivery.providerFileId,

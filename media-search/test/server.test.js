@@ -1429,24 +1429,23 @@ test('GET /stream delegates missing placement recovery to TorBox delivery lifecy
   });
 
   let deliveryInput = null;
-  let requestdlResolutions = 0;
+  let seamCalls = 0;
   const downstreamUrl = 'https://download.example.test/movie.mkv?ephemeral=true';
   const handler = createRequestHandler({
     searchCache: cache,
     controlPlaneStore: controlPlane,
-    resolveTorBoxDelivery: async (input) => {
+    resolveTorBoxDeliverySeam: async (input) => {
       deliveryInput = input;
+      seamCalls += 1;
       return {
-        url: 'https://api.torbox.app/v1/api/torrents/requestdl?redacted=true',
+        url: downstreamUrl,
         placementId: 'placement-123',
         providerFileId: 'file-456',
         size: 1000000,
+        recovered: false,
       };
     },
-    resolveTorBoxDownloadUrl: async () => {
-      requestdlResolutions += 1;
-      return downstreamUrl;
-    },
+    resolveTorBoxDownloadUrl: async () => downstreamUrl,
     isTorBoxDownloadUrlLive: async () => true,
   });
 
@@ -1473,7 +1472,7 @@ test('GET /stream delegates missing placement recovery to TorBox delivery lifecy
     releaseKey: `${infoHash}:0`,
     filename: 'Movie.mkv',
   });
-  assert.equal(requestdlResolutions, 1);
+  assert.equal(seamCalls, 2, 'seam should be called once per /stream request');
   for (const response of [firstResponse, secondResponse]) {
     assert.equal(response.status, 307);
     assert.equal(response.headers.location, downstreamUrl);

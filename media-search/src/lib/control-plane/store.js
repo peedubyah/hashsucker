@@ -439,11 +439,40 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   }
 
   function findPlacementByInfoHash(provider, infoHash) {
+    // Removed placements must not be reused by delivery. They are retained for
+    // observability; recovery lifecycle is responsible for creating a new one.
     const row = db.prepare(`
       SELECT * FROM provider_placements
-      WHERE provider = ? AND info_hash = ?
+      WHERE provider = ? AND info_hash = ? AND state != 'removed'
     `).get(normalizeIdentifier(provider), normalizeInfoHash(infoHash));
     return row ? rowToPlacement(row) : null;
+  }
+
+  function markPlacementRemoved(placementId, options = {}) {
+    const reason = options.reason ?? 'stale-resource';
+    const observedAt = options.observedAt ?? now();
+    const timestamp = now();
+    return transaction(() => {
+      const placement = requirePlacement(placementId);
+      if (placement.state === 'removed') return placement;
+      db.prepare(`
+        UPDATE provider_placements
+        SET state = 'removed',
+            observed_at = ?,
+            updated_at = ?,
+            failure_category = ?
+        WHERE id = ? AND state != 'removed'
+      `).run(observedAt, timestamp, reason, placementId);
+      // Demote the candidate mappings anchored to this placement so the next
+      // call to findFileMapping (during recovery) cannot reuse them.
+      db.prepare(`
+        UPDATE candidate_file_mappings
+        SET state = 'stale',
+            failure_category = ?
+        WHERE placement_id = ? AND state = 'mapped'
+      `).run(reason, placementId);
+      return requirePlacement(placementId);
+    });
   }
 
   function findFileMapping(releaseKey, placementId) {
@@ -1318,6 +1347,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     findFileMapping,
     recordPlacementLookupObservation,
     recordReadinessObservation,
+    markPlacementRemoved,
     replaceProviderFileInventory,
     listProviderFiles,
     getProviderInventorySnapshot,

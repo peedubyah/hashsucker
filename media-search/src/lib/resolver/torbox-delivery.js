@@ -23,6 +23,7 @@ import path from 'node:path';
 
 import { PROVIDER_CAPABILITIES } from '../providers/capabilities.js';
 import { checkTorBoxCached } from '../providers/torbox.js';
+import { TorBoxDownloadUrlError } from './torbox-download-url-cache.js';
 
 const TORBOX_API_BASE = 'https://api.torbox.app/v1/api';
 
@@ -234,4 +235,231 @@ function findExactProviderFile(files, filename) {
     );
   }
   return matches[0];
+}
+
+/**
+ * Resolve a TorBox delivery URL with bounded stale-placement recovery.
+ *
+ * This is the authoritative TorBox delivery seam. It owns:
+ *   1. Placement reuse / passive mylist recovery / cached-only creation
+ *   2. Exact provider-file mapping
+ *   3. requestdl resolution through the short-lived CDN URL cache
+ *   4. Bounded repair when requestdl fails for a reused placement whose
+ *      upstream TorBox resource no longer exists in the user's mylist.
+ *
+ * Repair contract:
+ *   - A repair attempt is allowed only when the current call reused an
+ *     existing placement (i.e. a placement was already persisted before
+ *     the call entered step 1 of `ensureTorBoxDelivery`).
+ *   - A repair attempt is suppressed for HTTP 429 (throttling) and for
+ *     timeout-class failures (transient network).
+ *   - The repair is bounded to ONE attempt per resolver request. After
+ *     a repair is attempted — regardless of outcome — the result of the
+ *     re-entered lifecycle is the final answer; no further repair is
+ *     permitted.
+ *   - Recovery is scoped to the SAME (releaseKey, infoHash, fileIndex,
+ *     filename). No rediscovery, reranking, or playback_handoff mutation
+ *     is permitted.
+ *
+ * @param {Object} params
+ * @param {string} params.infoHash
+ * @param {number|null} params.fileIndex
+ * @param {string} params.releaseKey
+ * @param {string} params.filename
+ * @param {Object} params.controlPlaneStore
+ * @param {Object} params.torBoxProvider
+ * @param {Object} params.torBoxInventoryProvider
+ * @param {Object} params.torBoxDownloadUrlCache
+ * @param {Function} params.resolveTorBoxDownloadUrl
+ * @param {Function} [params.isUrlLive]
+ * @param {Function} [params.fetchFn]
+ * @param {Function} [params.now]
+ * @returns {Promise<{ url: string, placementId: string, providerFileId: string, size: number|null, recovered: boolean }>}
+ */
+export async function resolveTorBoxDeliveryWithStaleRecovery({
+  infoHash,
+  fileIndex,
+  releaseKey,
+  filename,
+  controlPlaneStore,
+  torBoxProvider,
+  torBoxInventoryProvider,
+  torBoxDownloadUrlCache,
+  resolveTorBoxDownloadUrl,
+  isUrlLive,
+  fetchFn = fetch,
+  now = () => Date.now(),
+}) {
+  // Detect whether the current call will reuse an existing placement.
+  // If the call enters the creation path (no existing placement) and
+  // requestdl fails, there is nothing to recover — the placement was
+  // created in this same call and any failure should surface as-is.
+  const existingPlacement = controlPlaneStore.findPlacementByInfoHash('torbox', infoHash);
+  const reusedExistingPlacementId = existingPlacement?.id ?? null;
+
+  const delivery = await ensureTorBoxDelivery({
+    infoHash,
+    fileIndex,
+    releaseKey,
+    filename,
+    controlPlaneStore,
+    torBoxProvider,
+    torBoxInventoryProvider,
+    fetchFn,
+    now,
+  });
+
+  try {
+    const downloadUrl = await resolveCachedDownloadUrl({
+      releaseKey,
+      delivery,
+      torBoxDownloadUrlCache,
+      resolveTorBoxDownloadUrl,
+      isUrlLive,
+    });
+    return { ...downloadUrl, recovered: false };
+  } catch (error) {
+    const recovered = await recoverStalePlacement({
+      originalError: error,
+      infoHash,
+      fileIndex,
+      releaseKey,
+      filename,
+      reusedExistingPlacementId,
+      controlPlaneStore,
+      torBoxProvider,
+      torBoxInventoryProvider,
+      torBoxDownloadUrlCache,
+      resolveTorBoxDownloadUrl,
+      isUrlLive,
+      fetchFn,
+      now,
+    });
+    return { ...recovered, recovered: true };
+  }
+}
+
+async function resolveCachedDownloadUrl({
+  releaseKey,
+  delivery,
+  torBoxDownloadUrlCache,
+  resolveTorBoxDownloadUrl,
+  isUrlLive,
+}) {
+  let cachedDownload = torBoxDownloadUrlCache.get(releaseKey, delivery.providerFileId);
+  if (cachedDownload && isUrlLive && !await isUrlLive(cachedDownload.url)) {
+    torBoxDownloadUrlCache.delete(releaseKey, delivery.providerFileId);
+    cachedDownload = null;
+  }
+  if (cachedDownload?.url) {
+    return {
+      url: cachedDownload.url,
+      placementId: delivery.placementId,
+      providerFileId: delivery.providerFileId,
+      size: delivery.size,
+    };
+  }
+  const url = await torBoxDownloadUrlCache.getOrInFlight(
+    releaseKey,
+    delivery.providerFileId,
+    async () => {
+      const resolved = await resolveTorBoxDownloadUrl(delivery.url);
+      torBoxDownloadUrlCache.set(releaseKey, delivery.providerFileId, resolved);
+      return resolved;
+    },
+  );
+  return {
+    url,
+    placementId: delivery.placementId,
+    providerFileId: delivery.providerFileId,
+    size: delivery.size,
+  };
+}
+
+async function recoverStalePlacement({
+  originalError,
+  infoHash,
+  fileIndex,
+  releaseKey,
+  filename,
+  reusedExistingPlacementId,
+  controlPlaneStore,
+  torBoxProvider,
+  torBoxInventoryProvider,
+  torBoxDownloadUrlCache,
+  resolveTorBoxDownloadUrl,
+  isUrlLive,
+  fetchFn,
+  now,
+}) {
+  // Recovery is bounded and selective. The seam never re-creates on
+  // 429 (throttling) or for timeout-class failures. The seam only
+  // repairs when the failing call had reused an existing placement.
+  if (!reusedExistingPlacementId) throw originalError;
+  if (originalError instanceof TorBoxDownloadUrlError && originalError.status === 429) {
+    throw originalError;
+  }
+  if (originalError instanceof TorBoxDownloadUrlError && originalError.code === 'TORBOX_REQUESTDL_TIMEOUT') {
+    throw originalError;
+  }
+  if (!(originalError instanceof TorBoxDownloadUrlError)) throw originalError;
+  if (!torBoxInventoryProvider) throw originalError;
+  if (typeof controlPlaneStore.markPlacementRemoved !== 'function') throw originalError;
+
+  // One authoritative mylist lookup scoped to the SAME (provider, infoHash).
+  // This is the seam that asks the only TorBox endpoint that actually
+  // represents whether the user still owns this resource.
+  let observedPlacement = null;
+  try {
+    const lookupSignal = AbortSignal.timeout(15_000);
+    observedPlacement = await torBoxInventoryProvider
+      .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
+      .lookupPlacement({ infoHash }, { signal: lookupSignal });
+  } catch {
+    // Best-effort: if the lookup itself errors, surface the original
+    // requestdl failure unchanged.
+    throw originalError;
+  }
+
+  if (observedPlacement) {
+    // Resource still exists upstream — the requestdl failure is
+    // transient or otherwise not lifecycle-related. Surface unchanged.
+    throw originalError;
+  }
+
+  // Resource is absent upstream. Invalidate the stale local placement
+  // and re-enter the lifecycle ONCE for the SAME (releaseKey, infoHash,
+  // fileIndex, filename). findPlacementByInfoHash now returns null
+  // (the placement is state='removed'), so ensureTorBoxDelivery will
+  // execute the cached-only creation path against a fresh resource.
+  try {
+    controlPlaneStore.markPlacementRemoved(reusedExistingPlacementId, {
+      reason: 'upstream-resource-absent',
+      observedAt: now(),
+    });
+  } catch {
+    // If the placement was already invalidated by a concurrent path,
+    // proceed to the re-entered lifecycle anyway.
+  }
+
+  const recoveredDelivery = await ensureTorBoxDelivery({
+    infoHash,
+    fileIndex,
+    releaseKey,
+    filename,
+    controlPlaneStore,
+    torBoxProvider,
+    torBoxInventoryProvider,
+    fetchFn,
+    now,
+  });
+
+  const recoveredUrl = await resolveCachedDownloadUrl({
+    releaseKey,
+    delivery: recoveredDelivery,
+    torBoxDownloadUrlCache,
+    resolveTorBoxDownloadUrl,
+    isUrlLive,
+  });
+  return recoveredUrl;
 }
