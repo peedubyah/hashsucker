@@ -70,7 +70,9 @@ function responseXml(entry, metadata) {
     ? '<d:resourcetype><d:collection/></d:resourcetype>'
     : [
         '<d:resourcetype/>',
-        '<d:getcontentlength>' + metadata.size + '</d:getcontentlength>',
+        ...(Number.isSafeInteger(metadata.size)
+          ? ['<d:getcontentlength>' + metadata.size + '</d:getcontentlength>']
+          : []),
         '<d:getcontenttype>' + CONTENT_TYPE + '</d:getcontenttype>',
         '<d:getetag>' + escapeXml(metadata.etag) + '</d:getetag>',
       ].join('');

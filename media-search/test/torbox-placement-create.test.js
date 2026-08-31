@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { PROVIDER_CAPABILITIES } from '../src/lib/providers/capabilities.js';
 import { createTorBoxProvider } from '../src/lib/providers/torbox.js';
+import { ensureTorBoxDelivery } from '../src/lib/resolver/torbox-delivery.js';
 import {
   HASH,
   OTHER_HASH,
@@ -67,6 +68,48 @@ test('cached-only creation (add_only_if_cached=true) → success', async () => {
   assert.equal(result.provider, 'torbox');
   assert.equal(result.providerResourceId, '12345');
   assert.equal(result.infoHash, HASH);
+});
+
+test('VFS delivery constructs a valid magnet for cached-only placement', async () => {
+  let requestBody;
+  const torBoxProvider = createTorBoxProvider({
+    apiKey: 'token',
+    now: () => NOW,
+    fetchFn: async (_url, options) => {
+      requestBody = options.body;
+      return response(createTorrentSuccess(12345, HASH));
+    },
+  });
+  const controlPlaneStore = {
+    findPlacementByInfoHash: () => null,
+    recordPlacement: (placement) => ({ id: 'placement-1', ...placement }),
+    findFileMapping: () => null,
+  };
+  const previousApiKey = process.env.TORBOX_API_KEY;
+  process.env.TORBOX_API_KEY = 'token';
+
+  try {
+    await assert.rejects(
+      ensureTorBoxDelivery({
+        infoHash: HASH,
+        fileIndex: null,
+        releaseKey: `${HASH}:torrent`,
+        filename: 'Movie.mkv',
+        controlPlaneStore,
+        torBoxProvider,
+        fetchFn: async () => response({ success: true, data: { [HASH]: {} } }),
+        now: () => NOW,
+      }),
+      (error) => error.code === 'INVENTORY_UNAVAILABLE',
+    );
+  } finally {
+    if (previousApiKey == null) delete process.env.TORBOX_API_KEY;
+    else process.env.TORBOX_API_KEY = previousApiKey;
+  }
+
+  const body = new URLSearchParams(requestBody);
+  assert.equal(body.get('magnet'), `magnet:?xt=urn:btih:${HASH}`);
+  assert.equal(body.get('add_only_if_cached'), 'true');
 });
 
 test('successful creation preserves provider/account scope', async () => {

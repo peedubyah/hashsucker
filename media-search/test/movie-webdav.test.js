@@ -156,6 +156,8 @@ test('movie VFS materializes two durable handoffs without movie-specific branche
   ]);
   assert.ok(entries.every((entry) => entry.size == null));
   assert.ok(entries.every((entry) => !Object.hasOwn(entry, 'url')));
+  assert.doesNotMatch(xml, /<d:getcontentlength>null<\/d:getcontentlength>/);
+  assert.doesNotMatch(xml, /<d:getcontentlength>/);
 });
 
 test('movie VFS ignores malformed legacy handoffs instead of failing the catalog', async (t) => {

@@ -99,7 +99,7 @@ export async function ensureTorBoxDelivery({
       );
     }
 
-    const magnet = `magnet:?xt:urn:btih:${infoHash}`;
+    const magnet = `magnet:?xt=urn:btih:${infoHash}`;
     const placementCapability = torBoxProvider.require(PROVIDER_CAPABILITIES.PLACEMENT_CREATE);
     let placementResult;
     try {
