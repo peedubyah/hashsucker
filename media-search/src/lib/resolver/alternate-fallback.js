@@ -62,8 +62,11 @@ export function createAlternateFallback(dependencies = {}) {
    * @param {string} mediaId - Media identifier
    * @returns {Array<Object>} Persisted results ordered by rank
    */
-  function loadPersistedResults(mediaId) {
-    const request = searchCache.getMediaRequestsByMediaId(mediaId);
+  function loadPersistedResults(mediaId, season = null, episode = null) {
+    // Scope the request lookup to (mediaId, season, episode) when provided so
+    // series episodes get the matching episode request — not the latest
+    // request for the media_id (which would be the wrong episode).
+    const request = searchCache.getMediaRequestsByMediaId(mediaId, season, episode);
     if (!request) return [];
 
     const results = searchCache.getMediaRequestResults(request.id);
@@ -204,7 +207,12 @@ export function createAlternateFallback(dependencies = {}) {
    * @returns {Promise<Object|null>} First usable alternate or null
    */
   async function findUsableAlternate({ mediaId, primaryReleaseKey, expectedScope, additionalAttemptedKeys = new Set() }) {
-    const results = loadPersistedResults(mediaId);
+    // Scope the persisted-results load to the same episode the caller is
+    // resolving. expectedScope is the source of truth: when it carries
+    // season/episode, only that episode's request is relevant.
+    const season = expectedScope?.season ?? null;
+    const episode = expectedScope?.episode ?? null;
+    const results = loadPersistedResults(mediaId, season, episode);
     if (results.length === 0) return null;
 
     const attemptedReleaseKeys = new Set([primaryReleaseKey, ...additionalAttemptedKeys]);

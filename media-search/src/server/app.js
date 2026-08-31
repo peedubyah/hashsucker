@@ -910,6 +910,35 @@ function parseOptionalStage6Scope(params) {
 }
 
 /**
+ * Adapt a `rowToPlaybackHandoff` shape (returned by `getTvPlaybackHandoff`)
+ * to the selection shape expected by the rest of the resolver route.
+ *
+ * The selection shape carries `selectedHash` (not `infoHash`) and adds
+ * `status: 'selected'`, `requestId`, `providerState`, etc. — all fields the
+ * resolver reads downstream. Mirrors the mapping in `getExistingSelection`.
+ */
+function adaptTvHandoffToSelection(handoff) {
+  return {
+    status: 'selected',
+    requestId: handoff.requestId,
+    mediaId: handoff.mediaId,
+    mediaType: handoff.mediaType,
+    season: handoff.season ?? null,
+    episode: handoff.episode ?? null,
+    releaseKey: handoff.releaseKey,
+    selectedHash: handoff.infoHash,
+    fileIndex: handoff.fileIndex,
+    filename: handoff.filename,
+    provider: handoff.provider,
+    providerState: handoff.providerState,
+    identityTier: handoff.identityTier,
+    resolutionState: handoff.resolutionState,
+    reason: handoff.selectionReason || 'existing tv handoff',
+    selectedAt: handoff.selectedAt,
+  };
+}
+
+/**
  * Try alternate candidate fallback when primary selection is unavailable.
  * Loads persisted request results, filters by eligibility and scope, and
  * checks availability in rank order until a usable candidate is found.
@@ -934,8 +963,17 @@ async function tryAlternateCandidateFallback({
   sendJson,
   clock,
 }) {
-  // Load persisted request to get expected scope and results
-  const persistedRequest = searchCache.getMediaRequestsByMediaId(rawId);
+  // Load persisted request to get expected scope and results. For series
+  // episodes, scope the request lookup to the exact (mediaId, season,
+  // episode) tuple so the persisted request — and therefore the persisted
+  // candidate list used as fallback pool — matches the current episode.
+  const fallbackEpisodeSeason = existingSelection?.season ?? null;
+  const fallbackEpisodeNum = existingSelection?.episode ?? null;
+  const persistedRequest = searchCache.getMediaRequestsByMediaId(
+    rawId,
+    fallbackEpisodeSeason,
+    fallbackEpisodeNum,
+  );
   if (!persistedRequest) return false;
 
   // Build expected scope from the original request
@@ -1311,7 +1349,23 @@ export function createRequestHandler(dependencies = {}) {
           });
 
           // 1. Check for existing persisted selection first
-          const existingSelection = searchCache.getExistingSelection(rawId);
+          // Series requests MUST be keyed on (mediaId, season, episode) because
+          // each episode has its own playback_handoffs row. Using
+          // getExistingSelection (mediaId-only) returns the latest handoff for
+          // the media_id regardless of episode, which is the wrong episode.
+          // Movies keep the mediaId-only lookup unchanged.
+          let existingSelection;
+          if (mediaType === 'series' && identity.season != null && identity.episode != null
+              && typeof searchCache.getTvPlaybackHandoff === 'function') {
+            const tvHandoff = searchCache.getTvPlaybackHandoff(
+              rawId,
+              identity.season,
+              identity.episode,
+            );
+            existingSelection = tvHandoff ? adaptTvHandoffToSelection(tvHandoff) : null;
+          } else {
+            existingSelection = searchCache.getExistingSelection(rawId);
+          }
           profiler.mark('handoff-loaded');
           // Accept both 'selected' and 'debug' status — 'debug' means the handoff exists
           // but provider state is not usable, which triggers revalidation and potential fallback

@@ -170,8 +170,18 @@ export async function publishStrm({ handoff, selection }) {
     // File doesn't exist — proceed to create
   }
 
-  // Build the stable resolver URL
-  const resolverUrl = `${RESOLVER_BASE_URL}/stream/${mediaType}/${mediaId}`;
+  // Build the stable resolver URL. Series URLs MUST carry exact season/episode
+  // identity so the resolver can load the matching playback handoff row.
+  // Without these query params the resolver falls back to the latest handoff
+  // for the media_id, which is the wrong episode for any series with more
+  // than one episode. Movies are unchanged.
+  const params = new URLSearchParams();
+  if (mediaType === 'series' && season != null && episode != null) {
+    params.set('season', String(season));
+    params.set('episode', String(episode));
+  }
+  const queryString = params.toString();
+  const resolverUrl = `${RESOLVER_BASE_URL}/stream/${mediaType}/${mediaId}${queryString ? `?${queryString}` : ''}`;
 
   // Atomic write: temp file → rename
   await fs.mkdir(dir, { recursive: true });

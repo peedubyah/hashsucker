@@ -2175,8 +2175,16 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     return getMediaRequestsStmt.all();
   }
 
-  function getMediaRequestsByMediaId(mediaId) {
-    return getMediaRequestsByMediaIdStmt.get({ media_id: mediaId }) || null;
+  function getMediaRequestsByMediaId(mediaId, season = null, episode = null) {
+    // When season+episode are provided, scope the lookup to the exact episode
+    // so series STRMs land on the matching persisted request rather than the
+    // latest one for the media_id (which is the wrong episode for any series
+    // with more than one episode).
+    return getMediaRequestsByMediaIdStmt.get({
+      media_id: mediaId,
+      season: season ?? null,
+      episode: episode ?? null,
+    }) || null;
   }
 
   function getMediaRequestResults(requestId) {
@@ -2190,6 +2198,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const GET_MEDIA_REQUESTS_BY_MEDIA_ID = `
     SELECT * FROM media_requests
     WHERE media_id = @media_id
+      AND (@season IS NULL OR season = @season)
+      AND (@episode IS NULL OR episode = @episode)
     ORDER BY created_at DESC
     LIMIT 1;
   `;
