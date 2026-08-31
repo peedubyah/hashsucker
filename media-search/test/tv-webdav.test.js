@@ -82,9 +82,16 @@ test('TV VFS does not amplify a TorBox range rate limit with a fresh retry', asy
         deletedRdResolutions.push(`${infoHash}:${fileIndex}`);
       },
     },
-    resolveTorBoxDelivery: async () => {
+    // Shared authoritative TorBox delivery seam — simulates what the seam
+    // returns: a resolved downstream URL (not the requestdl permalink).
+    resolveTorBoxDeliverySeam: async () => {
       deliveryResolutions += 1;
-      return { url: 'https://provider.test/file', size: 100 };
+      return { url: 'https://provider.test/file', size: 100, recovered: false };
+    },
+    torBoxDownloadUrlCache: {
+      delete() {},
+      get() { return null; },
+      getOrInFlight() { throw new Error('unexpected cache call'); },
     },
     fetchFn: async (_url, options) => {
       providerOpens += 1;

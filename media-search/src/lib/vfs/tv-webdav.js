@@ -219,7 +219,8 @@ export function createTvWebDav({
   controlPlaneStore,
   rdClient,
   rdResolutionCache,
-  resolveTorBoxDelivery,
+  resolveTorBoxDeliverySeam,
+  torBoxDownloadUrlCache,
   now = () => Date.now(),
   fetchFn = fetch,
 }) {
@@ -264,7 +265,15 @@ export function createTvWebDav({
 
   async function resolveBacking(state, { forceFresh = false } = {}) {
     const { handoff } = state;
-    if (forceFresh) rdResolutionCache.delete(handoff.infoHash, handoff.fileIndex);
+    if (forceFresh) {
+      rdResolutionCache.delete(handoff.infoHash, handoff.fileIndex);
+      // forceFresh only refreshes the ephemeral downstream URL through the
+      // shared seam. The seam owns placement lifecycle, mylist verification,
+      // and exact-file mapping; VFS must not duplicate that recovery path.
+      if (torBoxDownloadUrlCache && handoff.provider === 'torbox') {
+        torBoxDownloadUrlCache.delete(handoff.releaseKey, handoff.fileIndex ?? 'torrent');
+      }
+    }
 
     if (rdClient) {
       const cached = forceFresh ? null : rdResolutionCache.get(handoff.infoHash, handoff.fileIndex);
@@ -301,8 +310,13 @@ export function createTvWebDav({
       }
     }
 
-    // TorBox fallback: use generic delivery resolver which owns placement lifecycle.
-    const delivery = await resolveTorBoxDelivery({
+    if (!resolveTorBoxDeliverySeam) {
+      throw new VfsError('No TorBox delivery resolver is available', 503, 'TORBOX_DELIVERY_UNAVAILABLE');
+    }
+    // Shared authoritative TorBox delivery seam — owns placement reuse,
+    // stale-resource repair, bounded mylist verification, cached-only
+    // recreation, exact mapping, and ephemeral downstream URL cache.
+    const delivery = await resolveTorBoxDeliverySeam({
       infoHash: handoff.infoHash,
       fileIndex: handoff.fileIndex,
       releaseKey: handoff.releaseKey,
@@ -312,7 +326,7 @@ export function createTvWebDav({
       provider: 'torbox',
       url: delivery.url,
       size: delivery.size,
-      resolution: forceFresh ? 'remapped' : 'mapped',
+      resolution: delivery.recovered ? 'recovered' : (forceFresh ? 'remapped' : 'mapped'),
     };
   }
 

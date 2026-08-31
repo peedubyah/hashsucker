@@ -1219,7 +1219,8 @@ export function createRequestHandler(dependencies = {}) {
     controlPlaneStore,
     rdClient,
     rdResolutionCache,
-    resolveTorBoxDelivery,
+    resolveTorBoxDeliverySeam,
+    torBoxDownloadUrlCache,
     now: clock,
   });
   const handleTvWebDav = createTvWebDav({
@@ -1227,7 +1228,8 @@ export function createRequestHandler(dependencies = {}) {
     controlPlaneStore,
     rdClient,
     rdResolutionCache,
-    resolveTorBoxDelivery,
+    resolveTorBoxDeliverySeam,
+    torBoxDownloadUrlCache,
     now: clock,
   });
 

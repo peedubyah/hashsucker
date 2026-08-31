@@ -227,6 +227,10 @@ test('movie VFS persists exact provider range size and reuses it across handler 
     controlPlaneStore: createControlPlane(HASH_A),
     rdClient: null,
     rdResolutionCache: createRdResolutionCache(),
+    // Stub seam — these tests assert metadata probe / range read behavior,
+    // not the TorBox delivery lifecycle. The seam just returns a stub URL.
+    resolveTorBoxDeliverySeam: async () => ({ url: 'https://provider.test/file', size: null, recovered: false }),
+    torBoxDownloadUrlCache: { get() { return null; }, set() {}, delete() {}, async getOrInFlight() { throw new Error('unused'); } },
     fetchFn,
     torBoxRedirectOptions: { apiKey: 'test-token', apiBase: 'https://provider.test' },
   };
@@ -274,7 +278,9 @@ test('movie VFS retries once after stale range metadata and returns fresh bytes'
     searchCache: cache,
     controlPlaneStore: createControlPlane(HASH_A, 100),
     rdClient: null,
-    rdResolutionCache: resolutionCache,
+    rdResolutionCache: resolutionCache,    resolveTorBoxDeliverySeam: async () => ({ url: 'https://provider.test/file', size: null, recovered: false }),
+    torBoxDownloadUrlCache: { get() { return null; }, set() {}, delete() {}, async getOrInFlight() { throw new Error('unused'); } },    resolveTorBoxDeliverySeam: async () => ({ url: 'https://provider.test/file', size: null, recovered: false }),
+    torBoxDownloadUrlCache: { get() { return null; }, set() {}, delete() {}, async getOrInFlight() { throw new Error('unused'); } },
     torBoxRedirectOptions: { apiKey: 'test-token', apiBase: 'https://provider.test' },
     fetchFn: async (_url, options) => {
       calls += 1;
@@ -321,6 +327,8 @@ test('movie VFS coalesces concurrent initial metadata probes per entry', async (
     controlPlaneStore: createControlPlane(HASH_A),
     rdClient: null,
     rdResolutionCache: createRdResolutionCache(),
+    resolveTorBoxDeliverySeam: async () => ({ url: 'https://provider.test/file', size: null, recovered: false }),
+    torBoxDownloadUrlCache: { get() { return null; }, set() {}, delete() {}, async getOrInFlight() { throw new Error('unused'); } },
     torBoxRedirectOptions: { apiKey: 'test-token', apiBase: 'https://provider.test' },
     fetchFn: async () => {
       probeCount += 1;
