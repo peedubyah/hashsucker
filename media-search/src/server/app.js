@@ -921,6 +921,10 @@ async function tryAlternateCandidateFallback({
   alternateFallback,
   revalidator,
   controlPlaneStore,
+  resolveTorBoxDelivery,
+  torBoxDownloadUrlCache,
+  resolveTorBoxDownloadUrlFn,
+  isTorBoxDownloadUrlLive,
   existingSelection,
   primaryRevalidation,
   rawId,
@@ -952,29 +956,68 @@ async function tryAlternateCandidateFallback({
 
   const { candidate, revalidation } = fallback;
 
-  // Build a pseudo-selection object for redirect resolution
-  const fallbackSelection = {
-    status: 'selected',
-    mediaId: rawId,
-    releaseKey: candidate.releaseKey,
-    selectedHash: candidate.info_hash,
-    fileIndex: candidate.fileIndex,
-    provider: 'torbox',
-  };
+  // Alternate delivery seam: run the SAME authoritative TorBox lifecycle used
+  // by the primary path. This reuses an existing control-plane placement,
+  // passively recovers an account placement, or cached-only-creates a new one,
+  // then establishes the exact provider-file mapping. If the seam is not
+  // wired (test/legacy environments), fall through so the caller can surface
+  // the typed failure from the original revalidation.
+  if (!controlPlaneStore || typeof resolveTorBoxDelivery !== 'function') {
+    return false;
+  }
 
-  // Attempt TorBox redirect resolution
-  if (!controlPlaneStore) return false;
+  const fallbackReason = primaryRevalidation.cacheState === REVALIDATION_OUTCOME.UNCACHED
+    ? FALLBACK_REASON.PRIMARY_UNAVAILABLE
+    : FALLBACK_REASON.PRIMARY_PROVIDER_ERROR;
+  const fallbackTelemetry = alternateFallback.buildFallbackTelemetry({
+    originalReleaseKey: existingSelection.releaseKey,
+    selectedReleaseKey: candidate.releaseKey,
+    fallbackRank: candidate.rank,
+    reason: fallbackReason,
+  });
 
   try {
-    const redirect = resolveTorBoxRedirect(fallbackSelection, controlPlaneStore);
-    const fallbackTelemetry = alternateFallback.buildFallbackTelemetry({
-      originalReleaseKey: existingSelection.releaseKey,
-      selectedReleaseKey: candidate.releaseKey,
-      fallbackRank: candidate.rank,
-      reason: primaryRevalidation.cacheState === REVALIDATION_OUTCOME.UNCACHED
-        ? FALLBACK_REASON.PRIMARY_UNAVAILABLE
-        : FALLBACK_REASON.PRIMARY_PROVIDER_ERROR,
+    const delivery = await resolveTorBoxDelivery({
+      infoHash: candidate.info_hash,
+      fileIndex: candidate.fileIndex,
+      releaseKey: candidate.releaseKey,
+      filename: candidate.filename,
     });
+
+    // Resolve to a live CDN URL using the same short-lived cache the primary
+    // path uses. When the cache dependency is not provided (test path), fall
+    // back to the requestdl permalink — it carries `redirect=true` and is
+    // a valid 307 target on its own.
+    let downloadUrl = delivery.url;
+    let liveCheckPerformed = false;
+    if (torBoxDownloadUrlCache && typeof resolveTorBoxDownloadUrlFn === 'function') {
+      let cachedDownload = torBoxDownloadUrlCache.get(
+        candidate.releaseKey,
+        delivery.providerFileId,
+      );
+      if (cachedDownload && isTorBoxDownloadUrlLive && !await isTorBoxDownloadUrlLive(cachedDownload.url)) {
+        torBoxDownloadUrlCache.delete(
+          candidate.releaseKey,
+          delivery.providerFileId,
+        );
+        cachedDownload = null;
+      }
+      downloadUrl = cachedDownload?.url || await torBoxDownloadUrlCache.getOrInFlight(
+        candidate.releaseKey,
+        delivery.providerFileId,
+        async () => {
+          const url = await resolveTorBoxDownloadUrlFn(delivery.url);
+          torBoxDownloadUrlCache.set(
+            candidate.releaseKey,
+            delivery.providerFileId,
+            url,
+          );
+          return url;
+        },
+      );
+      liveCheckPerformed = true;
+    }
+
     recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
       infoHash: candidate.info_hash,
       releaseKey: candidate.releaseKey,
@@ -983,38 +1026,50 @@ async function tryAlternateCandidateFallback({
       providerCheckOccurred: revalidation.providerCheckOccurred,
       ...fallbackTelemetry,
     });
-    response.writeHead(307, {
-      location: redirect.redirectUrl,
+    const headers = {
+      location: downloadUrl,
       'cache-control': 'no-store',
-      'x-torrent-id': redirect.torrentId,
-      'x-file-id': redirect.providerFileId,
+      'x-torrent-id': delivery.placementId,
+      'x-file-id': delivery.providerFileId,
       'x-availability-source': revalidation.availabilitySource,
       'x-provider-check-occurred': revalidation.providerCheckOccurred ? 'true' : 'false',
       'x-fallback-used': 'true',
       'x-fallback-rank': String(candidate.rank),
       'x-fallback-original-release-key': existingSelection.releaseKey,
       'x-fallback-selected-release-key': candidate.releaseKey,
-    });
+    };
+    if (liveCheckPerformed) {
+      headers['x-url-live-checked'] = 'true';
+    }
+    response.writeHead(307, headers);
     response.end();
     return true;
-  } catch (redirectErr) {
-    if (redirectErr instanceof RedirectResolutionError) {
-      recordTelemetry(RESOLVER_OUTCOME.FAILED, redirectErr.code, null, {
+  } catch (deliveryErr) {
+    // The alternate-delivery seam raises the same error taxonomy as the
+    // primary seam (TorBoxDeliveryError). Surface it as a typed failure
+    // with the original alternate candidate's identity — never fall back
+    // to the legacy pure-redirect resolver, which cannot create placements.
+    if (deliveryErr instanceof TorBoxDeliveryError) {
+      recordTelemetry(RESOLVER_OUTCOME.FAILED, deliveryErr.code, null, {
         infoHash: candidate.info_hash,
         releaseKey: candidate.releaseKey,
         provider: 'torbox',
         availabilitySource: revalidation.availabilitySource,
         providerCheckOccurred: revalidation.providerCheckOccurred,
+        ...fallbackTelemetry,
       });
-      sendJson(response, redirectErr.status, {
-        error: redirectErr.message,
-        code: redirectErr.code,
+      sendJson(response, deliveryErr.status, {
+        error: deliveryErr.message,
+        code: deliveryErr.code,
         mediaId: rawId,
         mediaType,
       });
       return true;
     }
-    throw redirectErr;
+    // Preserve the historical error-class contract: a RedirectResolutionError
+    // here would mean a code-path bug (the pure redirect resolver is no
+    // longer invoked from this seam). Re-throw to surface it.
+    throw deliveryErr;
   }
 }
 
@@ -1390,12 +1445,19 @@ export function createRequestHandler(dependencies = {}) {
             profiler.mark('torbox-revalidation');
             const httpOutcome = mapRevalidationToHttp(revalidation);
             if (!httpOutcome.shouldRedirect) {
-              // Try alternate candidate fallback before returning typed failure
+              // Try alternate candidate fallback before returning typed failure.
+              // The fallback path uses the SAME authoritative TorBox delivery
+              // seam as the primary path: reuse / passively recover / cached-only
+              // create placement, then establish the exact provider-file mapping.
               const fallbackAttempted = await tryAlternateCandidateFallback({
                 searchCache,
                 alternateFallback,
                 revalidator,
                 controlPlaneStore,
+                resolveTorBoxDelivery,
+                torBoxDownloadUrlCache,
+                resolveTorBoxDownloadUrlFn,
+                isTorBoxDownloadUrlLive,
                 existingSelection,
                 primaryRevalidation: revalidation,
                 rawId,
