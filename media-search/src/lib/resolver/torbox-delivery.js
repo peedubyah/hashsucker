@@ -161,9 +161,10 @@ export async function ensureTorBoxDelivery({
         503,
       );
     }
+    const inventorySignal = AbortSignal.timeout(15_000);
     const inventory = await torBoxInventoryProvider
       .require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
-      .getFileInventory(placement);
+      .getFileInventory(placement, { signal: inventorySignal });
     const files = controlPlaneStore.replaceProviderFileInventory(
       placement.id,
       inventory.files,

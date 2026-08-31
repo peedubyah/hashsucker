@@ -72,6 +72,7 @@ test('cached-only creation (add_only_if_cached=true) → success', async () => {
 
 test('VFS delivery constructs a valid magnet for cached-only placement', async () => {
   let requestBody;
+  let inventorySignal;
   const torBoxProvider = createTorBoxProvider({
     apiKey: 'token',
     now: () => NOW,
@@ -85,8 +86,27 @@ test('VFS delivery constructs a valid magnet for cached-only placement', async (
     recordPlacement: (placement) => ({ id: 'placement-1', ...placement }),
     findFileMapping: () => null,
   };
+  const torBoxInventoryProvider = {
+    require(capability) {
+      if (capability === PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP) {
+        return { lookupPlacement: async () => null };
+      }
+      return {
+        async getFileInventory(_placement, context) {
+          inventorySignal = context.signal;
+          throw Object.assign(new Error('stop after inventory timeout capture'), { code: 'TEST_STOP' });
+        },
+      };
+    },
+  };
   const previousApiKey = process.env.TORBOX_API_KEY;
+  const originalTimeout = AbortSignal.timeout;
+  const timeoutBudgets = [];
   process.env.TORBOX_API_KEY = 'token';
+  AbortSignal.timeout = (milliseconds) => {
+    timeoutBudgets.push(milliseconds);
+    return new AbortController().signal;
+  };
 
   try {
     await assert.rejects(
@@ -97,12 +117,14 @@ test('VFS delivery constructs a valid magnet for cached-only placement', async (
         filename: 'Movie.mkv',
         controlPlaneStore,
         torBoxProvider,
+        torBoxInventoryProvider,
         fetchFn: async () => response({ success: true, data: { [HASH]: {} } }),
         now: () => NOW,
       }),
-      (error) => error.code === 'INVENTORY_UNAVAILABLE',
+      (error) => error.code === 'TEST_STOP',
     );
   } finally {
+    AbortSignal.timeout = originalTimeout;
     if (previousApiKey == null) delete process.env.TORBOX_API_KEY;
     else process.env.TORBOX_API_KEY = previousApiKey;
   }
@@ -110,6 +132,8 @@ test('VFS delivery constructs a valid magnet for cached-only placement', async (
   const body = new URLSearchParams(requestBody);
   assert.equal(body.get('magnet'), `magnet:?xt=urn:btih:${HASH}`);
   assert.equal(body.get('add_only_if_cached'), 'true');
+  assert.equal(inventorySignal.aborted, false);
+  assert.equal(timeoutBudgets.at(-1), 15_000);
 });
 
 test('successful creation preserves provider/account scope', async () => {
