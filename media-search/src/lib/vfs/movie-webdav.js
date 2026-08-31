@@ -432,6 +432,33 @@ export function createMovieWebDav({
     }
   }
 
+  // Eagerly hydrate authoritative VFS movie size for a specific release.
+  // Idempotent: if size is already known in DB or in-memory state, returns
+  // the current durable entry without touching the provider. Used by the
+  // request completion path so that PROPFIND/FUSE advertise the real size
+  // before notifyPlex() fires. Failure is non-fatal to the durable handoff
+  // — callers decide whether to skip the Plex notification.
+  async function hydrateVfsMovieEntry(releaseKey) {
+    if (typeof releaseKey !== 'string' || !releaseKey) {
+      throw new VfsError('Release key is required for VFS hydration', 400, 'HYDRATE_INVALID');
+    }
+    // Build the catalog so the state map is populated without depending on
+    // a prior WebDAV request.
+    getCatalog();
+    const state = states.get(releaseKey);
+    if (!state) {
+      throw new VfsError(`VFS movie state not found for ${releaseKey}`, 503, 'VFS_STATE_MISSING');
+    }
+    const result = await ensureMetadata(state);
+    return {
+      releaseKey: state.entry.releaseKey,
+      mediaId: state.entry.mediaId,
+      canonicalPath: state.entry.canonicalPath,
+      size: state.entry.size,
+      alreadyHydrated: state.entry.size === result.size && result.size != null,
+    };
+  }
+
   async function streamFile(request, response, state, metadata) {
     const requestedRange = normalizeRange(request.headers.range, metadata.size);
     const opened = await openValidatedProviderRead(
@@ -494,7 +521,7 @@ export function createMovieWebDav({
     }
   }
 
-  return async function handleMovieWebDav(request, response, url) {
+  async function handleMovieWebDav(request, response, url) {
     if (!url.pathname.startsWith(`${DAV_ROOT}/Movies`)) return false;
 
     try {
@@ -568,7 +595,15 @@ export function createMovieWebDav({
       sendError(response, error);
       return true;
     }
-  };
+  }
+
+  // Backwards-compatible callable: existing WebDAV dispatch treats the
+  // factory return as a plain request handler. Expose the hydrator as a
+  // property on the same callable so new code can reach it without breaking
+  // existing call sites.
+  const movieHandler = handleMovieWebDav;
+  movieHandler.hydrateVfsMovieEntry = hydrateVfsMovieEntry;
+  return movieHandler;
 }
 
 export const MOVIE_VFS_ROOT = MOVIES_PATH;

@@ -173,6 +173,14 @@ export async function searchByMedia(cache, request) {
     : DEFAULT_LIVE_DISCOVERY_THRESHOLD;
   const skipLiveDiscovery = request.skipLiveDiscovery === true;
   const skipAvailability = request.skipAvailability === true;
+  // Optional hydrators: when provided, must be { hydrateMovie, hydrateTv }.
+  // They are called between publishStrm and notifyPlex so that PROPFIND
+  // advertises the real file size before the Plex partial refresh fires.
+  // Hydration failure must NOT destroy the durable handoff or VFS entry;
+  // the caller decides whether to skip the Plex notification.
+  const hydrateVfs = request.hydrateVfs && typeof request.hydrateVfs === 'object'
+    ? request.hydrateVfs
+    : null;
 
   // Intent source metadata (optional)
   const source = request.source || null;
@@ -413,6 +421,44 @@ export async function searchByMedia(cache, request) {
               }).catch(() => {
                 // Jellyfin notification failure is non-fatal
               });
+
+              // Hydrate authoritative VFS metadata (real provider size) before
+              // asking Plex to scan the directory. The PROPFIND listing only
+              // surfaces the durable vfs_*_entries row, so without this step
+              // Plex sees a 0-byte file and refuses to add the item.
+              if (vfsEntry && hydrateVfs) {
+                try {
+                  if (mediaType === 'movie') {
+                    if (typeof hydrateVfs.hydrateMovie !== 'function') {
+                      throw new Error('hydrateMovie not provided to searchByMedia');
+                    }
+                    const hydrated = await hydrateVfs.hydrateMovie(vfsEntry.releaseKey);
+                    if (hydrated?.size == null) {
+                      throw new Error('hydrateMovie returned no size');
+                    }
+                    console.log(`[vfs-hydrate] media=${handoff.mediaId} release=${hydrated.releaseKey} size=${hydrated.size} alreadyHydrated=${hydrated.alreadyHydrated === true}`);
+                  } else if (mediaType === 'series' || mediaType === 'tv') {
+                    if (typeof hydrateVfs.hydrateTv !== 'function') {
+                      throw new Error('hydrateTv not provided to searchByMedia');
+                    }
+                    const hydrated = await hydrateVfs.hydrateTv({
+                      mediaId: handoff.mediaId,
+                      season: handoff.season,
+                      episode: handoff.episode,
+                    });
+                    if (hydrated?.size == null) {
+                      throw new Error('hydrateTv returned no size');
+                    }
+                    console.log(`[vfs-hydrate] media=${handoff.mediaId} S${hydrated.season}E${hydrated.episode} size=${hydrated.size} alreadyHydrated=${hydrated.alreadyHydrated === true}`);
+                  }
+                } catch (hydrateError) {
+                  // Do not destroy the durable handoff/VFS entry on hydration
+                  // failure. Skip the Plex notification so we do not ask Plex
+                  // to scan a 0-byte/size-NULL directory.
+                  console.error(`[Plex] Will be discovered on next scan: VFS metadata hydration failed for ${handoff.mediaId}: ${hydrateError.message}`);
+                  if (vfsEntry) vfsEntry = null;
+                }
+              }
 
               // Request Plex partial scan of the VFS directory that contains
               // the new file. Failure does not invalidate the fulfillment.

@@ -428,6 +428,36 @@ export function createTvWebDav({
     }
   }
 
+  // Eagerly hydrate authoritative VFS TV size for a specific episode.
+  // Idempotent: returns the current durable entry without touching the
+  // provider when size is already known. Mirrors the movie hydrator so
+  // Plex TV partial refreshes see real sizes before notification.
+  async function hydrateVfsTvEntry({ mediaId, season, episode }) {
+    if (!Number.isSafeInteger(season) || !Number.isSafeInteger(episode)) {
+      throw new VfsError('Episode coordinates are required for VFS hydration', 400, 'HYDRATE_INVALID');
+    }
+    getCatalog();
+    const stateKey = mediaId + ':' + season + ':' + episode;
+    const state = states.get(stateKey);
+    if (!state) {
+      throw new VfsError(
+        'VFS TV state not found for ' + mediaId + ' S' + season + 'E' + episode,
+        503,
+        'VFS_STATE_MISSING',
+      );
+    }
+    const result = await ensureMetadata(state);
+    return {
+      releaseKey: state.entry.releaseKey,
+      mediaId: state.entry.mediaId,
+      season: state.entry.season,
+      episode: state.entry.episode,
+      canonicalPath: state.entry.canonicalPath,
+      size: state.entry.size,
+      alreadyHydrated: state.entry.size === result.size && result.size != null,
+    };
+  }
+
   async function streamFile(request, response, state, metadata) {
     const requestedRange = normalizeRange(request.headers.range, metadata.size);
     const opened = await openValidatedProviderRead(
@@ -478,7 +508,7 @@ export function createTvWebDav({
     return entry.state;
   }
 
-  return async function handleTvWebDav(request, response, url) {
+  const handleTvWebDav = async function handleTvWebDav(request, response, url) {
     if (!url.pathname.startsWith('/vfs/TV')) return false;
     const tree = getCatalog();
     const pathname = normalizePath(url.pathname);
@@ -538,4 +568,11 @@ export function createTvWebDav({
     sendError(response, new VfsError('Unsupported method ' + request.method, 405, 'METHOD_NOT_ALLOWED'));
     return true;
   };
+
+  // Backwards-compatible callable: existing WebDAV dispatch treats the
+  // factory return as a plain request handler. Expose the hydrator as a
+  // property on the same callable so new code can reach it without breaking
+  // existing call sites.
+  handleTvWebDav.hydrateVfsTvEntry = hydrateVfsTvEntry;
+  return handleTvWebDav;
 }

@@ -450,7 +450,7 @@ export { resolveSeerrIdentity };
  * @param {http.ServerResponse} response
  * @param {Object} searchCache
  */
-async function handleSeerrIngress(request, response, searchCache) {
+async function handleSeerrIngress(request, response, searchCache, hydrateVfs = null) {
   // 1. Auth
   const authHeader = request.headers && typeof request.headers.authorization === 'string'
     ? request.headers.authorization
@@ -715,6 +715,7 @@ async function handleSeerrIngress(request, response, searchCache) {
           priority: operationalIntent.priority,
           intentId: childIntentId,
           persist: true,
+          hydrateVfs,
         });
         childResults.push({
           season: seasonNum,
@@ -807,7 +808,7 @@ async function handleSeerrIngress(request, response, searchCache) {
  */
 async function runSingleSearchByMedia({
   searchCache, operationalIntent, canonicalMediaTitle, intentId,
-  identityStatus, notificationType, response,
+  identityStatus, notificationType, response, hydrateVfs = null,
 }) {
   try {
     const result = await searchByMedia(searchCache, {
@@ -824,6 +825,7 @@ async function runSingleSearchByMedia({
       priority: operationalIntent.priority,
       intentId,
       persist: true,
+      hydrateVfs,
     });
     searchCache.db.prepare(
       'UPDATE media_intents SET last_processed_at = ?, last_result_count = ?, last_error = NULL WHERE id = ?'
@@ -1232,6 +1234,16 @@ export function createRequestHandler(dependencies = {}) {
     torBoxDownloadUrlCache,
     now: clock,
   });
+
+  // Eager VFS metadata hydrators used by the request completion path so
+  // that PROPFIND advertises the real file size before notifyPlex() fires.
+  // Wired from the same VFS factories that serve the WebDAV endpoints so
+  // they share the existing ensureMetadata/loadMetadata machinery and the
+  // internal state map — no provider code duplication.
+  const hydrateVfsForRequest = {
+    hydrateMovie: (releaseKey) => handleMovieWebDav.hydrateVfsMovieEntry(releaseKey),
+    hydrateTv: ({ mediaId, season, episode }) => handleTvWebDav.hydrateVfsTvEntry({ mediaId, season, episode }),
+  };
 
   // Root VFS handler — lists Movies and TV collections
   async function handleVfsRoot(request, response, url) {
@@ -1861,7 +1873,7 @@ export function createRequestHandler(dependencies = {}) {
       // Seerr ingress: webhook → durable intent → TMDB→IMDb translation →
       // existing single-intent discovery pipeline.
       if (request.method === 'POST' && url.pathname === '/api/ingress/seerr') {
-        return handleSeerrIngress(request, response, searchCache);
+        return handleSeerrIngress(request, response, searchCache, hydrateVfsForRequest);
       }
       if (request.method === 'GET' && url.pathname === '/api/search') {
         const startedAt = performance.now();
@@ -2202,7 +2214,10 @@ export function createRequestHandler(dependencies = {}) {
         const startedAt = performance.now();
         const body = await readBody(request);
         try {
-          const result = await searchByMedia(searchCache, body);
+          // Server-side VFS hydrator is wired in-process; the client body
+          // cannot override it. This keeps the request contract minimal
+          // and prevents callers from disabling metadata hydration.
+          const result = await searchByMedia(searchCache, { ...body, hydrateVfs: hydrateVfsForRequest });
           return sendJson(response, 200, {
             ...result,
             timings: { totalMs: Math.round(performance.now() - startedAt) },
