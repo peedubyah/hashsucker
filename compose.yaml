@@ -27,6 +27,10 @@ services:
       SEERR_WEBHOOK_TOKEN: ${SEERR_WEBHOOK_TOKEN:-}
       SEERR_URL: ${SEERR_URL:-}
       SEERR_API_KEY: ${SEERR_API_KEY:-}
+      PLEX_URL: ${PLEX_URL:-}
+      PLEX_TOKEN: ${PLEX_TOKEN:-}
+      PLEX_MOVIES_SECTION_ID: ${PLEX_MOVIES_SECTION_ID:-}
+      PLEX_TV_SECTION_ID: ${PLEX_TV_SECTION_ID:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
