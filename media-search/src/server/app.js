@@ -62,7 +62,12 @@ import { createResolverTelemetry, getRecentResolverTelemetry, RESOLVER_OUTCOME }
 import { createResolverProfiler } from '../lib/resolver/profiler.js';
 import { createTorBoxProvider } from '../lib/providers/torbox.js';
 import { createTorBoxInventoryProvider } from '../lib/providers/torbox-inventory.js';
-import { ensureTorBoxDelivery } from '../lib/resolver/torbox-delivery.js';
+import { ensureTorBoxDelivery, TorBoxDeliveryError } from '../lib/resolver/torbox-delivery.js';
+import {
+  getTorBoxDownloadUrlCache,
+  resolveTorBoxDownloadUrl,
+  TorBoxDownloadUrlError,
+} from '../lib/resolver/torbox-download-url-cache.js';
 import { isUrlLive } from '../lib/resolver/liveness.js';
 import { createRealDebridClient, RdCooldownError } from '../lib/providers/realdebrid/client.js';
 import { attemptRdResolution, getRdObservationState, getRdPlaybackUrl } from '../lib/providers/realdebrid/resolve.js';
@@ -1111,18 +1116,24 @@ export function createRequestHandler(dependencies = {}) {
     }) : null);
 
   // Single entry point for TorBox delivery resolution (owns placement lifecycle)
-  async function resolveTorBoxDelivery({ infoHash, fileIndex, releaseKey, filename }) {
-    return ensureTorBoxDelivery({
-      infoHash,
-      fileIndex,
-      releaseKey,
-      filename,
-      controlPlaneStore,
-      torBoxProvider,
-      torBoxInventoryProvider,
-      now: clock,
-    });
-  }
+  const resolveTorBoxDelivery = dependencies.resolveTorBoxDelivery || (async ({
+    infoHash,
+    fileIndex,
+    releaseKey,
+    filename,
+  }) => ensureTorBoxDelivery({
+    infoHash,
+    fileIndex,
+    releaseKey,
+    filename,
+    controlPlaneStore,
+    torBoxProvider,
+    torBoxInventoryProvider,
+    now: clock,
+  }));
+  const torBoxDownloadUrlCache = dependencies.torBoxDownloadUrlCache || getTorBoxDownloadUrlCache();
+  const resolveTorBoxDownloadUrlFn = dependencies.resolveTorBoxDownloadUrl || resolveTorBoxDownloadUrl;
+  const isTorBoxDownloadUrlLive = dependencies.isTorBoxDownloadUrlLive || isUrlLive;
 
   const handleMovieWebDav = createMovieWebDav({
     searchCache,
@@ -1412,15 +1423,46 @@ export function createRequestHandler(dependencies = {}) {
               });
             }
 
-            // 1d. Attempt TorBox redirect resolution when control plane is available
+            // 1d. Resolve TorBox delivery through the placement lifecycle when
+            // the control plane is available. This reuses or recovers placement,
+            // creates cached-only placement when needed, and maps the exact file.
             if (controlPlaneStore) {
               try {
-                const redirect = resolveTorBoxRedirect(existingSelection, controlPlaneStore);
-                profiler.mark('torbox-redirect-resolved');
+                const delivery = await resolveTorBoxDelivery({
+                  infoHash: existingSelection.selectedHash,
+                  fileIndex: existingSelection.fileIndex,
+                  releaseKey: existingSelection.releaseKey,
+                  filename: existingSelection.filename,
+                });
+                profiler.mark('torbox-delivery-resolved');
 
-                // TorBox requestdl with redirect=true is the documented consumer permalink.
-                // Jellyfin follows the 307 to TorBox API; TorBox 302/307 redirects to CDN.
-                // This avoids minting fresh CDN URLs on every reconnect.
+                let cachedDownload = torBoxDownloadUrlCache.get(
+                  existingSelection.releaseKey,
+                  delivery.providerFileId,
+                );
+                if (cachedDownload && !await isTorBoxDownloadUrlLive(cachedDownload.url)) {
+                  torBoxDownloadUrlCache.delete(
+                    existingSelection.releaseKey,
+                    delivery.providerFileId,
+                  );
+                  cachedDownload = null;
+                  profiler.mark('torbox-download-cache-stale');
+                }
+                const downloadUrl = cachedDownload?.url || await torBoxDownloadUrlCache.getOrInFlight(
+                  existingSelection.releaseKey,
+                  delivery.providerFileId,
+                  async () => {
+                    const url = await resolveTorBoxDownloadUrlFn(delivery.url);
+                    torBoxDownloadUrlCache.set(
+                      existingSelection.releaseKey,
+                      delivery.providerFileId,
+                      url,
+                    );
+                    return url;
+                  },
+                );
+                profiler.mark(cachedDownload ? 'torbox-download-cache-hit' : 'torbox-download-resolved');
+
                 recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
                   infoHash: existingSelection.selectedHash,
                   releaseKey: existingSelection.releaseKey,
@@ -1429,12 +1471,11 @@ export function createRequestHandler(dependencies = {}) {
                   providerCheckOccurred: revalidation.providerCheckOccurred,
                 });
                 profiler.mark('307-returned');
-                // HTTP 307 — Temporary Redirect to TorBox API (documented permalink)
                 response.writeHead(307, {
-                  location: redirect.redirectUrl,
+                  location: downloadUrl,
                   'cache-control': 'no-store',
-                  'x-torrent-id': redirect.torrentId,
-                  'x-file-id': redirect.providerFileId,
+                  'x-torrent-id': delivery.placementId,
+                  'x-file-id': delivery.providerFileId,
                   'x-availability-source': revalidation.availabilitySource,
                   'x-provider-check-occurred': revalidation.providerCheckOccurred ? 'true' : 'false',
                   'x-url-live-checked': 'true',
@@ -1442,24 +1483,23 @@ export function createRequestHandler(dependencies = {}) {
                 });
                 response.end();
                 return;
-              } catch (redirectErr) {
-                // Map redirect failures to clear non-redirect responses
-                if (redirectErr instanceof RedirectResolutionError) {
-                  recordTelemetry(RESOLVER_OUTCOME.FAILED, redirectErr.code, null, {
+              } catch (deliveryErr) {
+                if (deliveryErr instanceof TorBoxDeliveryError || deliveryErr instanceof TorBoxDownloadUrlError) {
+                  recordTelemetry(RESOLVER_OUTCOME.FAILED, deliveryErr.code, null, {
                     infoHash: existingSelection.selectedHash,
                     releaseKey: existingSelection.releaseKey,
                     provider: existingSelection.provider,
                     availabilitySource: revalidation.availabilitySource,
                     providerCheckOccurred: revalidation.providerCheckOccurred,
                   });
-                  return sendJson(response, redirectErr.status, {
-                    error: redirectErr.message,
-                    code: redirectErr.code,
+                  return sendJson(response, deliveryErr.status, {
+                    error: deliveryErr.message,
+                    code: deliveryErr.code,
                     mediaId: rawId,
                     mediaType,
                   });
                 }
-                throw redirectErr;
+                throw deliveryErr;
               }
             }
             // 1d. No control plane store — return selection JSON (legacy behavior)

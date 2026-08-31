@@ -1102,7 +1102,7 @@ test('getExistingSelection: returns selected when handoff exists with cached sta
   cache.close();
 });
 
-test('getExistingSelection: returns debug when handoff exists but not usable', () => {
+test('getExistingSelection: preserves a file-level handoff when only torrent-level availability exists', () => {
   const cache = createDiscoveryCache();
   const mediaId = 'tt7654321';
   const infoHash = HASH;
@@ -1117,38 +1117,59 @@ test('getExistingSelection: returns debug when handoff exists but not usable', (
     },
     [{
       infoHash,
-      fileIndex: null,
+      fileIndex: 0,
       filename: 'Movie.mkv',
       score: 0.85,
       rank: 1,
-      release: { infoHash, fileIndex: null, releaseKey: `${infoHash}:torrent` },
+      release: { infoHash, fileIndex: 0, releaseKey: `${infoHash}:0` },
     }]
   );
 
+  const selectedAt = Date.now();
   cache.persistPlaybackHandoff({
     requestId,
     mediaId,
     mediaType: 'movie',
     season: null,
     episode: null,
-    releaseKey: `${infoHash}:torrent`,
+    releaseKey: `${infoHash}:0`,
     infoHash,
-    fileIndex: null,
+    fileIndex: 0,
     filename: 'Movie.mkv',
     provider: 'torbox',
-    providerState: 'uncached',
-    identityTier: 'Verified',
-    resolutionState: 'confirmed',
+    providerState: 'cached',
+    identityTier: 'ProviderConfirmed',
+    resolutionState: 'resolved',
     selectionReason: 'test selection',
-    selectedAt: Date.now(),
+    selectedAt,
   });
 
-  // No observation = unknown state (not usable)
+  cache.appendProviderObservation({
+    provider: 'torbox',
+    accountScope: 'primary',
+    scope: 'candidate',
+    infoHash,
+    fileIndex: null,
+    state: 'cached',
+    kind: 'authoritative',
+    observedAt: Date.now(),
+    expiresAt: Date.now() + 3600000,
+    source: 'test',
+  });
+
   const result = cache.getExistingSelection(mediaId);
-  assert.equal(result.status, 'debug');
+  assert.equal(result.status, 'selected');
+  assert.equal(result.requestId, requestId);
   assert.equal(result.mediaId, mediaId);
+  assert.equal(result.mediaType, 'movie');
+  assert.equal(result.releaseKey, `${infoHash}:0`);
   assert.equal(result.selectedHash, infoHash);
-  assert.equal(result.providerState, 'unknown');
+  assert.equal(result.fileIndex, 0);
+  assert.equal(result.provider, 'torbox');
+  assert.equal(result.providerState, 'cached');
+  assert.equal(result.identityTier, 'ProviderConfirmed');
+  assert.equal(result.resolutionState, 'resolved');
+  assert.equal(result.selectedAt, selectedAt);
 
   cache.close();
 });
@@ -1324,9 +1345,11 @@ test('GET /stream returns HTTP 307 redirect when TorBox selection exists with va
     authoritative: true,
   });
 
+  const downstreamUrl = 'https://download.example.test/movie.mkv?ephemeral=true';
   const handler = createRequestHandler({
     searchCache: cache,
     controlPlaneStore: controlPlane,
+    resolveTorBoxDownloadUrl: async () => downstreamUrl,
   });
 
   const input = Readable.from([]);
@@ -1342,19 +1365,15 @@ test('GET /stream returns HTTP 307 redirect when TorBox selection exists with va
     handler(input, res).catch(reject);
   });
 
-  // Must be a 307 redirect
+  // Must redirect directly to the resolved downstream URL, not requestdl.
   assert.equal(response.status, 307);
-  assert.ok(response.headers.location, 'Location header is required');
-  assert.match(response.headers.location, /torrents\/requestdl/, 'Location must contain requestdl endpoint');
-  assert.match(response.headers.location, /torrent_id=12345/, 'Location must contain correct torrent_id');
-  assert.match(response.headers.location, /file_id=67890/, 'Location must contain correct provider_file_id');
-  // Must NOT proxy media bytes — no content-length > 0, no media content-type
+  assert.equal(response.headers.location, downstreamUrl);
+  assert.equal(response.headers['x-file-id'], '67890');
   assert.equal(response.text, '', '307 must not proxy media bytes');
-  // No temporary CDN URL is persisted — we didn't call any provider
   cache.close();
 });
 
-test('GET /stream redirect fails with 404 when no torrent mapping exists', async () => {
+test('GET /stream delegates missing placement recovery to TorBox delivery lifecycle', async () => {
   const cache = createDiscoveryCache();
   const controlPlane = createControlPlaneStore();
   const mediaId = 'tt9999998';
@@ -1370,11 +1389,11 @@ test('GET /stream redirect fails with 404 when no torrent mapping exists', async
     },
     [{
       infoHash,
-      fileIndex: null,
+      fileIndex: 0,
       filename: 'Movie.mkv',
       score: 0.85,
       rank: 1,
-      release: { infoHash, fileIndex: null, releaseKey: `${infoHash}:torrent` },
+      release: { infoHash, fileIndex: 0, releaseKey: `${infoHash}:0` },
     }]
   );
 
@@ -1384,9 +1403,9 @@ test('GET /stream redirect fails with 404 when no torrent mapping exists', async
     mediaType: 'movie',
     season: null,
     episode: null,
-    releaseKey: `${infoHash}:torrent`,
+    releaseKey: `${infoHash}:0`,
     infoHash,
-    fileIndex: null,
+    fileIndex: 0,
     filename: 'Movie.mkv',
     provider: 'torbox',
     providerState: 'cached',
@@ -1409,28 +1428,59 @@ test('GET /stream redirect fails with 404 when no torrent mapping exists', async
     source: 'test',
   });
 
-  // No placement, no mapping — just an empty control plane
+  let deliveryInput = null;
+  let requestdlResolutions = 0;
+  const downstreamUrl = 'https://download.example.test/movie.mkv?ephemeral=true';
   const handler = createRequestHandler({
     searchCache: cache,
     controlPlaneStore: controlPlane,
+    resolveTorBoxDelivery: async (input) => {
+      deliveryInput = input;
+      return {
+        url: 'https://api.torbox.app/v1/api/torrents/requestdl?redacted=true',
+        placementId: 'placement-123',
+        providerFileId: 'file-456',
+        size: 1000000,
+      };
+    },
+    resolveTorBoxDownloadUrl: async () => {
+      requestdlResolutions += 1;
+      return downstreamUrl;
+    },
+    isTorBoxDownloadUrlLive: async () => true,
   });
 
-  const input = Readable.from([]);
-  input.method = 'GET';
-  input.url = `/stream/movie/${mediaId}`;
+  async function openStream() {
+    const input = Readable.from([]);
+    input.method = 'GET';
+    input.url = `/stream/movie/${mediaId}`;
+    return new Promise((resolve, reject) => {
+      const chunks = [];
+      const res = {
+        writeHead(status, headers) { this.status = status; this.headers = headers; },
+        end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8'), headers: this.headers }); },
+      };
+      handler(input, res).catch(reject);
+    });
+  }
 
-  const response = await new Promise((resolve, reject) => {
-    const chunks = [];
-    const res = {
-      writeHead(status, headers) { this.status = status; this.headers = headers; },
-      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8'), headers: this.headers }); },
-    };
-    handler(input, res).catch(reject);
+  const firstResponse = await openStream();
+  const secondResponse = await openStream();
+
+  assert.deepEqual(deliveryInput, {
+    infoHash,
+    fileIndex: 0,
+    releaseKey: `${infoHash}:0`,
+    filename: 'Movie.mkv',
   });
-
-  assert.equal(response.status, 404);
-  const body = JSON.parse(response.text);
-  assert.equal(body.code, 'MISSING_TORRENT_MAPPING');
+  assert.equal(requestdlResolutions, 1);
+  for (const response of [firstResponse, secondResponse]) {
+    assert.equal(response.status, 307);
+    assert.equal(response.headers.location, downstreamUrl);
+    assert.equal(response.headers['x-torrent-id'], 'placement-123');
+    assert.equal(response.headers['x-file-id'], 'file-456');
+    assert.equal(response.text, '');
+  }
   cache.close();
 });
 

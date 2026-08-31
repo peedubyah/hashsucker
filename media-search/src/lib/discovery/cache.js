@@ -2268,60 +2268,49 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
   /**
    * Look up an existing persisted selection for a media identity.
-   * Returns the selected candidate if:
-   *   - A playback handoff exists for this media_id
-   *   - The selection is eligible (not marked ineligible)
-   *   - Provider availability indicates usable/cached state
+   * The durable playback handoff is the authoritative selection boundary.
+   * Provider observations may refine its availability state, but availability
+   * is revalidated by the stream route and must not erase the selection.
    *
    * @param {string} mediaId - Media identifier
-   * @returns {Object|null} Selection object or null if no valid selection
+   * @returns {Object|null} Selection object or null when no handoff exists
    */
   function getExistingSelection(mediaId) {
     const handoff = getPlaybackHandoffsByMediaIdStmt.get({ media_id: mediaId });
     if (!handoff) return null;
 
-    // Check provider availability for the selected hash
-    // Only consider observations from the selected provider (not all providers)
+    // Prefer the latest exact-file observation when present. File-level
+    // handoffs can legitimately have only a torrent-level observation, so the
+    // persisted handoff state remains the fallback rather than losing selection.
     const observations = getProviderObservations(handoff.info_hash, handoff.file_index, {
       includeStale: true,
     });
     const providerObservations = observations.filter(o => o.provider === handoff.provider);
-
-    // Find the most recent observation from the selected provider
-    let providerState = 'unknown';
+    let providerState = handoff.provider_state || 'unknown';
     if (providerObservations.length > 0) {
-      const latest = providerObservations.reduce((a,b) => (b.observedAt > a.observedAt ? b : a));
-      providerState = latest.state || 'unknown';
-    }
-
-    // Only return selection if provider state indicates usability
-    const usableStates = new Set(['cached', 'usable', 'available']);
-    const isUsable = usableStates.has(providerState);
-
-    if (!isUsable) {
-      return {
-        status: 'debug',
-        mediaId,
-        releaseKey: handoff.release_key,
-        selectedHash: handoff.info_hash,
-        fileIndex: handoff.file_index,
-        provider: handoff.provider,
-        providerState,
-        reason: 'existing selection not currently usable',
-      };
+      const latest = providerObservations.reduce((a, b) => (
+        b.observedAt > a.observedAt ? b : a
+      ));
+      providerState = latest.state || providerState;
     }
 
     return {
       status: 'selected',
-      mediaId,
+      requestId: handoff.request_id,
+      mediaId: handoff.media_id,
       mediaType: handoff.media_type,
+      season: handoff.season,
+      episode: handoff.episode,
       releaseKey: handoff.release_key,
       selectedHash: handoff.info_hash,
       fileIndex: handoff.file_index,
+      filename: handoff.filename,
       provider: handoff.provider,
       providerState,
-      filename: handoff.filename,
+      identityTier: handoff.identity_tier,
+      resolutionState: handoff.resolution_state,
       reason: handoff.selection_reason || 'existing persisted selection',
+      selectedAt: handoff.selected_at,
     };
   }
 
