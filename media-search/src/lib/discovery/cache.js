@@ -245,6 +245,7 @@ CREATE TABLE IF NOT EXISTS media_request_results (
   ineligible_code TEXT,
   expected_media_scope TEXT,
   parsed_candidate_scope TEXT,
+  selected_file_size INTEGER,
   FOREIGN KEY (request_id) REFERENCES media_requests(id),
   FOREIGN KEY (intent_id) REFERENCES media_intents(id)
 );
@@ -302,12 +303,22 @@ CREATE TABLE IF NOT EXISTS playback_handoffs (
   resolution_state TEXT,
   selection_reason TEXT,
   selected_at INTEGER NOT NULL,
+  torrent_file_id TEXT,
   created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER)),
   FOREIGN KEY (request_id) REFERENCES media_requests(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_playback_handoffs_request ON playback_handoffs(request_id);
 CREATE INDEX IF NOT EXISTS idx_playback_handoffs_media ON playback_handoffs(media_id, created_at);
+-- Slice 1.75: the playback_handoffs row carries the durable TorrentFile id
+-- once the pre-publication identity helper has bound the selected candidate to
+-- an exact TorBox file. NULL on legacy handoffs and on candidates where the
+-- raw per-file size is unknown. The id lives in control-plane.db and is
+-- enforced only via application-level validation; no FK by design.
+-- The index is created AFTER the column migration (see
+-- migratePlaybackHandoffsTorrentFileId + ensurePlaybackHandoffsTorrentFileIndex)
+-- so a legacy prod DB that already has the playback_handoffs table without
+-- this column does not error at SCHEMA exec time.
 
 -- Stable, movies-only virtual filesystem metadata. Provider playback URLs are
 -- deliberately excluded: backing URLs remain short-lived process state.
@@ -576,6 +587,16 @@ WHERE ra.info_hash IS NULL;
 const LEGACY_OBSERVATION_MIGRATION = 'provider-observations-v2';
 const MEDIA_REQUEST_ELIGIBILITY_COLUMNS = 'media-request-eligibility-columns';
 const MEDIA_INTENTS_SCHEMA = 'media-intents-v1';
+// Slice 1.75: preserve raw selected-file size from behaviorHints.videoSize so
+// downstream control-plane identity binding can match the exact TorBox file
+// before a playback handoff becomes authoritative. Integer byte count; null
+// when no exact size is observable (corpus-only or selected without a known
+// per-file size).
+const SELECTED_FILE_SIZE_COLUMN = 'media-request-results-selected-file-size';
+// Slice 1.75: nullable playback_handoffs.torrent_file_id. Carried into the
+// durable handoff after ensureTorBoxFileIdentity binds a candidate to an
+// exact TorBox file. Lives in control-plane.db; no SQL FK.
+const PLAYBACK_HANDOFF_TORRENT_FILE_COLUMN = 'playback-handoffs-torrent-file-id';
 
 function migrateLegacyProviderObservations(db) {
   const applied = db.prepare(
@@ -708,6 +729,41 @@ function migrateMediaIntents(db) {
   ).run(MEDIA_INTENTS_SCHEMA, Date.now());
 }
 
+// Slice 1.75: nullable column for the RAW byte size from
+// behaviorHints.videoSize on the selected candidate. Survives selection so
+// the pre-publication identity helper can match provider files by exact size.
+// Corpus rows that pre-date this migration keep NULL — legacy behavior.
+function migrateMediaRequestResultsSelectedFileSize(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(SELECTED_FILE_SIZE_COLUMN);
+  if (applied) return;
+  const info = db.prepare('PRAGMA table_info(media_request_results)').all();
+  if (!info.some((col) => col.name === 'selected_file_size')) {
+    db.exec('ALTER TABLE media_request_results ADD COLUMN selected_file_size INTEGER');
+  }
+  db.prepare(
+    'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+  ).run(SELECTED_FILE_SIZE_COLUMN, Date.now());
+}
+
+// Slice 1.75: nullable playback_handoffs.torrent_file_id. NULL on legacy
+// handoffs and on candidates without an exact selected-file size. The
+// controlPlaneStore is the source of truth; this column is a soft pointer.
+function migratePlaybackHandoffsTorrentFileId(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(PLAYBACK_HANDOFF_TORRENT_FILE_COLUMN);
+  if (applied) return;
+  const info = db.prepare('PRAGMA table_info(playback_handoffs)').all();
+  if (!info.some((col) => col.name === 'torrent_file_id')) {
+    db.exec('ALTER TABLE playback_handoffs ADD COLUMN torrent_file_id TEXT');
+  }
+  db.prepare(
+    'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+  ).run(PLAYBACK_HANDOFF_TORRENT_FILE_COLUMN, Date.now());
+}
+
 // Demand priority constants for queue promotion
 // Background corpus work: ~10, explicit request: ~100, selected release: ~200
 export const DEMAND_PRIORITY = Object.freeze({
@@ -811,6 +867,16 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   migrateLegacyProviderObservations(db);
   migrateMediaRequestEligibilityColumns(db);
   migrateMediaIntents(db);
+  migrateMediaRequestResultsSelectedFileSize(db);
+  migratePlaybackHandoffsTorrentFileId(db);
+  // Slice 1.75: the torrent_file_id index can only be created once the
+  // column is present. For legacy prod databases, the column is added by
+  // migratePlaybackHandoffsTorrentFileId above. For fresh installs the
+  // column is part of the SCHEMA CREATE TABLE.
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_playback_handoffs_torrent_file '
+    + 'ON playback_handoffs(torrent_file_id)'
+  );
   migrateCacheProbeQueue(db);
 
   const insertCandidateStmt = db.prepare(INSERT_CANDIDATE);
@@ -1583,7 +1649,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       'request_id', 'rank', 'info_hash', 'file_index_key', 'filename', 'score',
       'score_breakdown', 'identity_tier', 'identity_confidence', 'identity_evidence',
       'resolution_state', 'release_metadata', 'ranking_breakdown',
-      'eligible', 'ineligible_reason', 'ineligible_code', 'expected_media_scope', 'parsed_candidate_scope'
+      'eligible', 'ineligible_reason', 'ineligible_code', 'expected_media_scope', 'parsed_candidate_scope',
+      'selected_file_size'
     ];
     if (intentId) { cols.push('intent_id'); }
     const placeholders = cols.map(() => '?').join(', ');
@@ -1607,6 +1674,9 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
         r.ineligibleCode,
         r.expectedMediaScope,
         r.parsedCandidateScope,
+        Number.isSafeInteger(r.selectedFileSize) && r.selectedFileSize > 0
+          ? r.selectedFileSize
+          : null,
       ];
       if (intentId) { values.push(intentId); }
       return values;
@@ -1662,12 +1732,12 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       request_id, media_id, media_type, season, episode,
       release_key, info_hash, file_index, filename,
       provider, provider_state, identity_tier, resolution_state,
-      selection_reason, selected_at
+      selection_reason, selected_at, torrent_file_id
     ) VALUES (
       @request_id, @media_id, @media_type, @season, @episode,
       @release_key, @info_hash, @file_index, @filename,
       @provider, @provider_state, @identity_tier, @resolution_state,
-      @selection_reason, @selected_at
+      @selection_reason, @selected_at, @torrent_file_id
     );
   `;
 
@@ -1757,6 +1827,11 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       resolution_state: handoff.resolutionState,
       selection_reason: handoff.selectionReason,
       selected_at: handoff.selectedAt,
+      // Slice 1.75: durable pointer to the control-plane TorrentFile once
+      // ensureTorBoxFileIdentity has bound the selected candidate to an
+      // exact TorBox file. NULL on legacy handoffs and on candidates
+      // without an observable raw per-file size.
+      torrent_file_id: handoff.torrentFileId ?? null,
     });
     return info.lastInsertRowid;
   }
@@ -1973,6 +2048,11 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       selectionReason: row.selection_reason,
       selectedAt: row.selected_at,
       createdAt: row.created_at,
+      // Slice 1.75: durable pointer to the control-plane TorrentFile once
+      // ensureTorBoxFileIdentity has bound the selected candidate to an
+      // exact TorBox file. NULL on legacy handoffs and on candidates
+      // without an observable raw per-file size.
+      torrentFileId: row.torrent_file_id ?? null,
     };
   }
 
@@ -2165,8 +2245,11 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
         ineligibleCode: r.identity?.ineligibleCode || null,
         expectedMediaScope: r.identity?.expectedMediaScope || null,
         parsedCandidateScope: r.identity?.parsedCandidateScope || null,
+        selectedFileSize:
+          Number.isSafeInteger(r.selectedFileSize) && r.selectedFileSize > 0
+            ? r.selectedFileSize
+            : null,
       }));
-    }
 
     return requestId;
   }

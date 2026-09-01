@@ -63,6 +63,7 @@ import { createResolverProfiler } from '../lib/resolver/profiler.js';
 import { createTorBoxProvider } from '../lib/providers/torbox.js';
 import { createTorBoxInventoryProvider } from '../lib/providers/torbox-inventory.js';
 import { ensureTorBoxDelivery, TorBoxDeliveryError, resolveTorBoxDeliveryWithStaleRecovery } from '../lib/resolver/torbox-delivery.js';
+import { ensureTorBoxFileIdentity } from '../lib/resolver/torbox-file-identity.js';
 import {
   getTorBoxDownloadUrlCache,
   resolveTorBoxDownloadUrl,
@@ -597,6 +598,7 @@ async function handleSeerrIngress(request, response, searchCache, hydrateVfs = n
       return await runSingleSearchByMedia({
         searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, intentId,
         identityStatus, notificationType, response, hydrateVfs,
+        ensureTorBoxFileIdentity: ensureTorBoxFileIdentityFn,
       });
     }
     // For series with parse failure, we stop here — the parent is durable
@@ -728,6 +730,13 @@ async function handleSeerrIngress(request, response, searchCache, hydrateVfs = n
           intentId: childIntentId,
           persist: true,
           hydrateVfs,
+          // Slice 1.75: pre-publication TorBox file identity binding
+          // for TV episodes. TV episodes typically have exact per-file
+          // size on the candidate (behaviorHints.videoSize). When
+          // configured, this matches the size against the live TorBox
+          // inventory and threads the resulting torrentFileId into
+          // the handoff.
+          ...(ensureTorBoxFileIdentityFn ? { ensureTorBoxFileIdentity: ensureTorBoxFileIdentityFn } : {}),
           // TV series don't currently use the canonical title/year for
           // the VFS path (TV materializer uses its own filename-derived
           // identity — unchanged in this slice). Forwarding them is
@@ -829,6 +838,7 @@ async function handleSeerrIngress(request, response, searchCache, hydrateVfs = n
 async function runSingleSearchByMedia({
   searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, intentId,
   identityStatus, notificationType, response, hydrateVfs = null,
+  ensureTorBoxFileIdentity = null,
 }) {
   try {
     const result = await searchByMedia(searchCache, {
@@ -846,6 +856,15 @@ async function runSingleSearchByMedia({
       intentId,
       persist: true,
       hydrateVfs,
+      // Slice 1.75: pre-publication TorBox file identity binding.
+      // When the operator has configured the TorBox provider + control
+      // plane, the seam matches the selected candidate's exact per-file
+      // size against the live TorBox inventory BEFORE the handoff is
+      // persisted and threads the resulting torrentFileId into the
+      // handoff. When the seam is absent (operator has not configured
+      // a real TorBox account, e.g. tests), the search path persists
+      // legacy handoffs with torrentFileId=null.
+      ...(ensureTorBoxFileIdentity ? { ensureTorBoxFileIdentity } : {}),
       // Forward the canonical Seerr detail identity (originalTitle +
       // releaseDate) so the VFS materializer builds a clean Plex-facing
       // path like Movies/Dune Part Two (2024)/Dune Part Two (2024).mkv
@@ -1241,6 +1260,20 @@ export function createRequestHandler(dependencies = {}) {
     isUrlLive: isTorBoxDownloadUrlLive,
     now: clock,
   }));
+
+  // Slice 1.75: pre-publication TorBox file identity binding seam. The
+  // helper is only available when both the control plane and the TorBox
+  // provider are configured; in that case the same factory is reused for
+  // every ingress path so the seam has a single source of truth.
+  const ensureTorBoxFileIdentityFn = dependencies.ensureTorBoxFileIdentity || (controlPlaneStore && torBoxProvider && torBoxInventoryProvider
+    ? (params) => ensureTorBoxFileIdentity({
+      ...params,
+      controlPlaneStore,
+      torBoxProvider,
+      torBoxInventoryProvider,
+      now: clock,
+    })
+    : null);
 
   const handleMovieWebDav = createMovieWebDav({
     searchCache,
@@ -2035,6 +2068,7 @@ export function createRequestHandler(dependencies = {}) {
               cache: searchCache,
               intent,
               release,
+              ...(ensureTorBoxFileIdentityFn ? { ensureTorBoxFileIdentity: ensureTorBoxFileIdentityFn } : {}),
             });
             result = {
               requestId: handoff.requestId,
@@ -2243,7 +2277,14 @@ export function createRequestHandler(dependencies = {}) {
           // Server-side VFS hydrator is wired in-process; the client body
           // cannot override it. This keeps the request contract minimal
           // and prevents callers from disabling metadata hydration.
-          const result = await searchByMedia(searchCache, { ...body, hydrateVfs: hydrateVfsForRequest });
+          // Slice 1.75: same for the identity-binding seam — server-side
+          // and overridable only via the createApp dependency factory,
+          // not via the client body.
+          const result = await searchByMedia(searchCache, {
+            ...body,
+            hydrateVfs: hydrateVfsForRequest,
+            ...(ensureTorBoxFileIdentityFn ? { ensureTorBoxFileIdentity: ensureTorBoxFileIdentityFn } : {}),
+          });
           return sendJson(response, 200, {
             ...result,
             timings: { totalMs: Math.round(performance.now() - startedAt) },

@@ -70,6 +70,16 @@ export async function runLiveDiscovery(mediaId, options = {}) {
       releaseGroup: r.releaseGroup,
       providers: r.providers || {},
       confidence: r.confidence ?? 0.5,
+      // Slice 1.75: the RAW byte size from behaviorHints.videoSize on the
+      // source stream. Sourced from the strict `exactFileSize` field emitted
+      // by normalize.js — NEVER from `size`, which may be a parseSizeFromText
+      // round (GiB*1024^3) or torrent total size. Survives into
+      // media_request_results so the pre-publication TorBox identity helper
+      // can match by exact integer byte count.
+      selectedFileSize:
+        Number.isSafeInteger(r.exactFileSize) && r.exactFileSize > 0
+          ? r.exactFileSize
+          : null,
     }));
 }
 
@@ -136,6 +146,13 @@ export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
     releaseGroup: r.releaseGroup,
     providers: r.providers || {},
     confidence: r.confidence ?? 0.5,
+    // Slice 1.75: prefer the strict `exactFileSize` (behaviorHints.videoSize
+    // only, safe integer > 0) over `size`, which may be a parseSizeFromText
+    // round. Identity helper needs an exact integer byte count.
+    selectedFileSize:
+      Number.isSafeInteger(r.exactFileSize) && r.exactFileSize > 0
+        ? r.exactFileSize
+        : null,
   }));
 
   return { releases, sources };

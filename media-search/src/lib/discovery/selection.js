@@ -131,5 +131,17 @@ function formatSelection(candidate) {
       episode: candidate.release.episode,
     } : null,
     sources: candidate.sources?.map(s => s.origin) || [],
+    // Slice 1.75: the raw per-file byte size from behaviorHints.videoSize.
+    // Null when the source stream had no numeric videoSize. The pre-publication
+    // TorBox identity helper uses this to match provider files by exact size.
+    // Sourced from the strict `exactFileSize` (Number.isSafeInteger && > 0);
+    // the legacy `selectedFileSize` is only consulted as a compatibility shim
+    // for upstream callers that pre-date the strict-field rename.
+    selectedFileSize:
+      Number.isSafeInteger(candidate.exactFileSize) && candidate.exactFileSize > 0
+        ? candidate.exactFileSize
+        : Number.isSafeInteger(candidate.selectedFileSize) && candidate.selectedFileSize > 0
+          ? candidate.selectedFileSize
+          : null,
   };
 }

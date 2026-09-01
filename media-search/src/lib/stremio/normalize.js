@@ -332,6 +332,19 @@ export function normalizeStream(raw, addonMeta = {}) {
       parseSizeFromText([title, description].filter(Boolean).join('\n'));
   }
 
+  // Slice 1.75 (correctness fix): exactFileSize is the RAW integer byte count
+  // from behaviorHints.videoSize, NOT a parseSizeFromText() round. It is the
+  // only authoritative source for the per-file size used by the TorBox
+  // pre-publication identity binding. parseSizeFromText() rounds filenames
+  // like "10.5GB" to 11274289152 — that value is fine for ranking/display
+  // but is NEVER exact enough to bind a TorBox provider file. We surface the
+  // exact integer (or null) under a distinct field so downstream consumers
+  // can require the strict value and ignore the rounded one.
+  const exactFileSize =
+    Number.isSafeInteger(behaviorHints.videoSize) && behaviorHints.videoSize > 0
+      ? behaviorHints.videoSize
+      : null;
+
   const cached = behaviorHints.cached === true;
   const sourceFileIndex = Object.hasOwn(raw, 'fileIdx') ? raw.fileIdx : null;
   const identity = infoHash
@@ -353,6 +366,7 @@ export function normalizeStream(raw, addonMeta = {}) {
     addonLogo: addonMeta.addonLogo || null,
     addonSortOrder: addonMeta.sortOrder ?? 0,
     streamType: addonMeta.streamType || null,
+    exactFileSize,
     role: addonMeta.role || 'discovery',
     title: title || description || 'Stream',
     description,

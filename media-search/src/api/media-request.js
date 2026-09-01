@@ -144,6 +144,67 @@ function _getAvailabilityForCandidate(hit) {
 }
 
 /**
+ * Slice 1.75: pre-publication TorBox file identity binding seam.
+ *
+ * Calls the injected `ensureTorBoxFileIdentity` helper when a candidate has
+ * an exact per-file size (selectedFileSize). Failures are logged and the
+ * handoff is persisted with torrentFileId=null (legacy behavior). Success
+ * returns the torrentFileId to thread into the handoff.
+ *
+ * @param {Object} params
+ * @param {Function|null} params.ensureTorBoxFileIdentityFn
+ * @param {Object|null} params.selected - the selected candidate (selection.selected)
+ * @param {Object|null} params.reason - debug reason when binding is skipped
+ * @returns {Promise<{ torrentFileId: string|null, identity: Object|null }>}
+ */
+async function attemptTorBoxFileBinding({ ensureTorBoxFileIdentityFn, selected, reason }) {
+  if (typeof ensureTorBoxFileIdentityFn !== 'function') {
+    return { torrentFileId: null, identity: null };
+  }
+  if (!selected || !selected.infoHash) {
+    return { torrentFileId: null, identity: null };
+  }
+  const selectedFileSize =
+    Number.isSafeInteger(selected.selectedFileSize) && selected.selectedFileSize > 0
+      ? selected.selectedFileSize
+      : null;
+  if (selectedFileSize == null) {
+    return {
+      torrentFileId: null,
+      identity: { status: 'skipped', reason: reason || 'no-exact-selected-file-size' },
+    };
+  }
+  try {
+    const result = await ensureTorBoxFileIdentityFn({
+      infoHash: selected.infoHash,
+      selectedFileSize,
+      releaseKey: selected.releaseKey || null,
+    });
+    return {
+      torrentFileId: result?.torrentFileId ?? null,
+      identity: {
+        status: 'bound',
+        placementId: result?.placementId ?? null,
+        providerFileId: result?.providerFileId ?? null,
+        size: result?.size ?? null,
+        selectedFileSize,
+      },
+    };
+  } catch (error) {
+    const code = error?.code || 'BINDING_ERROR';
+    return {
+      torrentFileId: null,
+      identity: {
+        status: 'unbound',
+        code,
+        reason: error?.message || String(error),
+        selectedFileSize,
+      },
+    };
+  }
+}
+
+/**
  * Search for release candidates by media identity.
  *
  * @param {Object} cache - Discovery cache instance
@@ -158,6 +219,12 @@ function _getAvailabilityForCandidate(hit) {
  * @param {number} [request.liveDiscoveryThreshold] - Min eligible corpus before live discovery
  * @param {boolean} [request.skipLiveDiscovery] - Skip live discovery fallback
  * @param {boolean} [request.skipAvailability] - Skip TorBox availability check
+ * @param {Function} [request.ensureTorBoxFileIdentity] - Slice 1.75 helper
+ *   injection. When present, searchByMedia calls it before persisting a
+ *   durable playback handoff and threads the resulting torrentFileId into
+ *   the handoff. When the helper is absent, handoffs are persisted with
+ *   torrentFileId=null (legacy behavior). The function signature is
+ *   `({ infoHash, selectedFileSize, releaseKey }) => Promise<{ placementId, providerFileId, torrentFileId, size }>`.
  * @returns {Promise<Object>} Ranked results with identity state and score breakdown
  */
 export async function searchByMedia(cache, request) {
@@ -173,6 +240,14 @@ export async function searchByMedia(cache, request) {
     : DEFAULT_LIVE_DISCOVERY_THRESHOLD;
   const skipLiveDiscovery = request.skipLiveDiscovery === true;
   const skipAvailability = request.skipAvailability === true;
+  // Slice 1.75: optional identity-binding seam. When provided by the caller,
+  // the selected candidate's exact per-file size is matched against the
+  // current TorBox inventory BEFORE a playback handoff is persisted, and
+  // the resulting torrentFileId is carried into the handoff. Failures are
+  // logged and degrade to a NULL torrentFileId on the handoff.
+  const ensureTorBoxFileIdentityFn = typeof request.ensureTorBoxFileIdentity === 'function'
+    ? request.ensureTorBoxFileIdentity
+    : null;
   // Optional hydrators: when provided, must be { hydrateMovie, hydrateTv }.
   // They are called between publishStrm and notifyPlex so that PROPFIND
   // advertises the real file size before the Plex partial refresh fires.
@@ -270,6 +345,10 @@ export async function searchByMedia(cache, request) {
           sources: [{ origin: 'live', evidence: [], confidence: live.confidence ?? 0.5 }],
           selectedMediaId: mediaId,
           hasLiveDiscovery: true,
+          // Slice 1.75: propagate the RAW byte size from behaviorHints.videoSize
+          // through live discovery so the pre-publication TorBox identity
+          // helper can match by exact size. Corpus rows remain null.
+          selectedFileSize: live.selectedFileSize ?? null,
         });
       }
     } catch (error) {
@@ -330,6 +409,9 @@ export async function searchByMedia(cache, request) {
         sources: hit.sources || [],
         observations: [],
         availability: {},
+        // Slice 1.75: surface the per-file byte size carried by live
+        // discovery. Null when the source stream had no numeric videoSize.
+        selectedFileSize: hit.selectedFileSize ?? null,
       };
     });
 
@@ -384,6 +466,11 @@ export async function searchByMedia(cache, request) {
     // Stage 9: Build playback handoff if selection succeeded and request was persisted
     let handoff = null;
     if (selection.selected && !selection.selected.ineligibleReason && requestId) {
+      const liveBinding = await attemptTorBoxFileBinding({
+        ensureTorBoxFileIdentityFn,
+        selected: selection.selected,
+        reason: 'live-discovery-no-exact-size',
+      });
       const handoffRequest = {
         requestId,
         mediaId,
@@ -399,8 +486,15 @@ export async function searchByMedia(cache, request) {
         // provider-backed file.
         ...(canonicalTitle ? { canonicalTitle } : {}),
         ...(canonicalYear != null ? { canonicalYear } : {}),
+        // Slice 1.75: durable TorrentFile id from the pre-publication
+        // identity helper. NULL when no exact selected-file size is
+        // available or when the helper failed.
+        ...(liveBinding.torrentFileId ? { torrentFileId: liveBinding.torrentFileId } : {}),
       };
       handoff = buildPlaybackHandoff(selection, handoffRequest);
+      if (handoff && liveBinding.identity) {
+        handoff.torrentFileIdentity = liveBinding.identity;
+      }
 
       // Persist handoff
       if (handoff) {
@@ -793,6 +887,12 @@ export async function searchByMedia(cache, request) {
         observedAt: o.observedAt,
       })),
       availability: _getAvailabilityForCandidate(hit),
+      // Slice 1.75: corpus rows do NOT have a per-file exact size (the
+      // candidates table only stores the whole-torrent size which is not
+      // a usable identity). Live-discovery rows carry the raw videoSize
+      // from behaviorHints. The pre-publication identity helper is a
+      // no-op when this is null.
+      selectedFileSize: hit.selectedFileSize ?? null,
     };
   });
 
@@ -859,6 +959,11 @@ export async function searchByMedia(cache, request) {
   // Stage 8: Build playback handoff if selection succeeded and request was persisted
   let handoff = null;
   if (selection.selected && !selection.selected.ineligibleReason && requestId) {
+    const corpusBinding = await attemptTorBoxFileBinding({
+      ensureTorBoxFileIdentityFn,
+      selected: selection.selected,
+      reason: 'corpus-hit-no-exact-size',
+    });
     const handoffRequest = {
       requestId,
       mediaId,
@@ -873,8 +978,15 @@ export async function searchByMedia(cache, request) {
       // slice).
       ...(canonicalTitle ? { canonicalTitle } : {}),
       ...(canonicalYear != null ? { canonicalYear } : {}),
+      // Slice 1.75: durable TorrentFile id from the pre-publication
+      // identity helper. NULL when no exact selected-file size is
+      // available (typical for corpus-only hits) or when binding failed.
+      ...(corpusBinding.torrentFileId ? { torrentFileId: corpusBinding.torrentFileId } : {}),
     };
     handoff = buildPlaybackHandoff(selection, handoffRequest);
+    if (handoff && corpusBinding.identity) {
+      handoff.torrentFileIdentity = corpusBinding.identity;
+    }
 
     // Persist handoff
     if (handoff) {

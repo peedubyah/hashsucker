@@ -18,6 +18,10 @@
  * @param {string} request.mediaType - 'movie' or 'series'
  * @param {number} [request.season] - Season number
  * @param {number} [request.episode] - Episode number
+ * @param {string} [request.torrentFileId] - Slice 1.75: the durable TorrentFile
+ *   id after ensureTorBoxFileIdentity has bound the selected candidate to an
+ *   exact TorBox file. NULL when raw per-file size is unavailable or when
+ *   control-plane binding failed.
  * @returns {Object|null} Handoff object, or null if selection is invalid
  * @throws {Error} If requestId is null or undefined
  */
@@ -84,6 +88,11 @@ export function buildPlaybackHandoff(selection, request) {
     resolutionState,
     selectionReason: selection.reason || 'unknown',
     selectedAt: Date.now(),
+    // Slice 1.75: durable pointer to the control-plane TorrentFile once
+    // ensureTorBoxFileIdentity has bound the selected candidate to an exact
+    // TorBox file. NULL on legacy handoffs and on candidates without a
+    // raw per-file size observable from behaviorHints.videoSize.
+    torrentFileId: request.torrentFileId ?? null,
     ...(canonicalTitle ? { canonicalTitle } : {}),
     ...(canonicalYear != null ? { canonicalYear } : {}),
   };
