@@ -242,12 +242,14 @@ export async function selectBindableCandidate(results, options = {}) {
           continue;
         }
         let placementTorrentFiles;
+        let placementId = null;
         try {
           const result = await ensureTorBoxFileIdentityFn({
             infoHash: candidate.infoHash,
             controlPlaneStore,
             skipSizeMatch: true,
           });
+          placementId = result?.placementId ?? null;
           placementTorrentFiles = result?.torrentFiles ?? controlPlaneStore.listTorrentFilesForRelease(candidate.infoHash);
         } catch (err) {
           console.error(`[PATH B] ensureTorBox FAILED hash=${candidate.infoHash} err=${err?.message ?? err}`);
@@ -263,14 +265,27 @@ export async function selectBindableCandidate(results, options = {}) {
         // STEP 2: Resolve requested S/E from the now-persisted TorrentFiles.
         try {
           const { torrentFile } = resolveTvTorrentFileFn({ torrentFiles: placementTorrentFiles, season, episode });
+          // Map the chosen TorrentFile back to its present provider_file so
+          // the durable handoff carries the full (placement, providerFile,
+          // torrentFile) identity triple. Without this, the handoff's
+          // torrentFileIdentity.placementId and .providerFileId are null
+          // even though the placement is the source of truth for the binding.
+          let providerFileId = null;
+          if (placementId && typeof controlPlaneStore.listProviderRefsForTorrentFile === 'function') {
+            const refs = controlPlaneStore.listProviderRefsForTorrentFile(torrentFile.id) || [];
+            const present = refs.find((r) => r.placementId === placementId && r.present);
+            providerFileId = present?.providerFileId ?? null;
+          }
           selected = formatSelection(candidate);
           selected._torrentFileId = torrentFile.id;
           selected._binding = {
             status: 'tv-episode',
             torrentFileId: torrentFile.id,
+            placementId,
+            providerFileId,
+            size: torrentFile.size,
             season,
             episode,
-            size: torrentFile.size,
           };
           reason = `tv-episode bound S${season}E${episode}`;
           break;

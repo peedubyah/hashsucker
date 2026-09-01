@@ -22,3 +22,4 @@ artifacts/dmm-rebuild/*.db-wal
 artifacts/stage3/enrichment-*.db
 artifacts/stage3/enrichment-*.db-shm
 artifacts/stage3/enrichment-*.db-wal
+.worktrees/
