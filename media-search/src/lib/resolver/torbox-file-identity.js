@@ -54,7 +54,7 @@ export class TorBoxFileIdentityError extends Error {
  * @param {string} params.infoHash - 40-char lowercase infoHash (validated)
  * @param {number} params.selectedFileSize - positive integer byte count from
  *   BehaviorHints.videoSize. NOT a torrent total size, NOT a rounded value,
- *   NOT a parsed title size.
+ *   NOT a parsed title size. Required unless skipSizeMatch is true.
  * @param {Object} params.controlPlaneStore - controlPlaneStore instance
  * @param {Object} [params.torBoxInventoryProvider] - adapter with FILE_INVENTORY
  * @param {Object} [params.torBoxProvider] - placement provider (passive recovery)
@@ -62,6 +62,7 @@ export class TorBoxFileIdentityError extends Error {
  * @param {string} [params.accountScope='default'] - placement account scope
  * @param {Function} [params.now] - clock
  * @param {Function} [params.fetchSignal] - optional AbortSignal factory
+ * @param {boolean} [params.skipSizeMatch] - Skip selectedFileSize matching (TV path)
  * @returns {Promise<{ placementId: string, providerFileId: string, torrentFileId: string, size: number }>}
  * @throws {TorBoxFileIdentityError} on every failure path with deterministic code
  */
@@ -75,6 +76,7 @@ export async function ensureTorBoxFileIdentity({
   accountScope = 'default',
   now = () => Date.now(),
   fetchSignal,
+  skipSizeMatch = false,
 }) {
   // A. Input validation: positive int selectedFileSize + valid infoHash.
   if (!controlPlaneStore) {
@@ -88,7 +90,7 @@ export async function ensureTorBoxFileIdentity({
       { infoHash: String(infoHash ?? '') },
     );
   }
-  if (!Number.isSafeInteger(selectedFileSize) || selectedFileSize <= 0) {
+  if (!skipSizeMatch && (!Number.isSafeInteger(selectedFileSize) || selectedFileSize <= 0)) {
     throw new TorBoxFileIdentityError(
       'selectedFileSize must be a positive integer byte count',
       INVALID_INPUT,
@@ -139,7 +141,65 @@ export async function ensureTorBoxFileIdentity({
         });
       }
     } catch (lookupError) {
-      // Lookup failures are non-fatal here — inventory may still have files.
+      // Lookup failures are non-fatal — inventory may still have files for hashes
+      // that are in the TorBox account but where mylist lookup timed out.
+    }
+  }
+
+  if (!placement && torBoxProvider) {
+  }
+
+  // B.2: If no placement found via passive lookup AND torBoxProvider is available,
+  // create a cached-only TorBox placement. This is the critical step for TV episode
+  // requests where we have no prior placement and no exact file size to guide mapping.
+  // The addOnlyIfCached flag ensures we NEVER initiate an uncached download.
+  if (!placement && torBoxProvider && typeof torBoxProvider.supports === 'function'
+      && torBoxProvider.supports(PROVIDER_CAPABILITIES.PLACEMENT_CREATE)) {
+    const observedAt = now();
+    const createSignal = fetchSignal ? fetchSignal(30_000) : AbortSignal.timeout(30_000);
+    const magnet = `magnet:?xt=urn:btih:${normalizedHash}`;
+    try {
+      const placementCapability = torBoxProvider.require(PROVIDER_CAPABILITIES.PLACEMENT_CREATE);
+      const placementResult = await placementCapability.createPlacement(
+        { magnet, addOnlyIfCached: true },
+        { signal: createSignal },
+      );
+      if (placementResult && placementResult.providerResourceId) {
+        placement = controlPlaneStore.recordPlacement({
+          provider: 'torbox',
+          accountScope,
+          infoHash: normalizedHash,
+          providerResourceId: String(placementResult.providerResourceId),
+          state: 'ready',
+          ownership: 'owned',
+          ownerKey: `vfs-${observedAt}`,
+          provenance: 'torbox-file-identity',
+          observedAt,
+          expiresAt: observedAt + 5 * 60 * 1000,
+        });
+      }
+    } catch (createErr) {
+      // Cached-only creation failed — the hash is not in the TorBox account.
+      // Record the failure observation so we don't retry immediately.
+      console.error(`[torbox-file-identity] B.2 createPlacement FAILED hash=${normalizedHash} err=${createErr?.message ?? createErr}`);
+      if (controlPlaneStore.recordPlacementLookupObservation) {
+        controlPlaneStore.recordPlacementLookupObservation({
+          provider: 'torbox',
+          accountScope,
+          infoHash: normalizedHash,
+          observationState: 'absent',
+          placementId: null,
+          observedAt,
+          expiresAt: observedAt + 5 * 60 * 1000,
+          source: 'torbox-file-identity',
+          failureCategory: 'not-in-account',
+        });
+      }
+      throw new TorBoxFileIdentityError(
+        `No TorBox placement for infoHash ${normalizedHash}`,
+        NO_PLACEMENT,
+        { infoHash: normalizedHash },
+      );
     }
   }
 
@@ -192,6 +252,22 @@ export async function ensureTorBoxFileIdentity({
 
   // E. Find present provider_files with exact size match.
   // F. Enforce cardinality: 0 → NO_FILE_SIZE_MATCH, >1 → AMBIGUOUS_FILE_SIZE.
+  //    For the TV episode path (skipSizeMatch=true): skip the size-match step
+  //    and instead persist all TorrentFile mappings so the caller can resolve
+  //    S/E from the authoritative torrent_files table.
+  if (skipSizeMatch) {
+    // The returned `files` are pre-UPDATE rows; torrent_file_id was assigned
+    // by post-UPDATE in replaceProviderFileInventory but the returned array
+    // doesn't reflect it yet. listTorrentFilesForRelease uses a separate query
+    // that reads already-mapped rows, so it sees the authoritative state.
+    const tfs = controlPlaneStore.listTorrentFilesForRelease(normalizedHash);
+    return {
+      placementId: placement.id,
+      // Return all TorrentFiles for TV S/E resolution by the caller.
+      torrentFiles: tfs,
+    };
+  }
+
   const matches = files.filter((f) => f.size === selectedFileSize);
   if (matches.length === 0) {
     throw new TorBoxFileIdentityError(

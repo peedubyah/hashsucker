@@ -17,7 +17,8 @@ import { getStrongestReleaseAttributes } from '../lib/discovery/release-attribut
 import { evaluateObservationFreshness } from '../lib/providers/observations.js';
 import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
 import { createAvailabilityChecker } from '../lib/intents/availability.js';
-import { selectBestCandidate } from '../lib/discovery/selection.js';
+import { selectBestCandidate, selectBindableCandidate } from '../lib/discovery/selection.js';
+import { resolveTvTorrentFile } from '../lib/resolver/tv-episode-resolver.js';
 import { buildPlaybackHandoff } from '../lib/discovery/playback-handoff.js';
 import { publishStrm } from '../lib/requests/strm-publisher.js';
 import { notifyJellyfin } from '../lib/requests/jellyfin-notifier.js';
@@ -230,8 +231,6 @@ async function attemptTorBoxFileBinding({ ensureTorBoxFileIdentityFn, selected, 
 export async function searchByMedia(cache, request) {
   const mediaId = String(request.mediaId || '').trim();
   const mediaType = request.mediaType || 'movie';
-  const season = request.season != null ? parseInt(request.season, 10) : null;
-  const episode = request.episode != null ? parseInt(request.episode, 10) : null;
   const limit = Math.min(parseInt(request.limit, 10) || 50, 100);
   const offset = parseInt(request.offset, 10) || 0;
   const persist = request.persist !== false;
@@ -283,6 +282,14 @@ export async function searchByMedia(cache, request) {
   }
 
   const intent = createRequestIntent({ type: mediaType, mediaId });
+
+  // Resolve season/episode: intent encodes them from mediaId (Seerr fan-out children
+  // encode S:E in the mediaId, e.g. 'tt10986410:1:2') or from explicit request params.
+  // Prefer explicit params; fall back to intent for Seerr-style S:E mediaId.
+  const season = request.season != null ? parseInt(request.season, 10)
+    : (intent.season != null ? intent.season : null);
+  const episode = request.episode != null ? parseInt(request.episode, 10)
+    : (intent.episodes?.length > 0 ? intent.episodes[0] : null);
 
   // Stage 1: Retrieve candidates by media association
   const candidates = cache.queryCandidatesByMedia(mediaId);
@@ -440,8 +447,26 @@ export async function searchByMedia(cache, request) {
       }
     }
 
-    // Stage 7: Select best candidate
-    const selection = selectBestCandidate(explainable);
+    // Stage 7: Select bindable candidate
+    // Slice 2.1: iterate ranked candidates in existing order until one becomes
+    // bindable (exact-size fast path, or TV episode resolution for cached TorBox).
+    // Side effects (handoff persist, VFS publication, STRM, notifications) are
+    // deferred until a genuine TorrentFile binding is proven.
+    // TV episode scope: activate PATH B TV resolution when we have explicit episode
+    // context, regardless of intent scope:
+    // - S:E in mediaId → intent.scope='episode' (direct episode request)
+    // - request.season/episode params → Seerr fan-out children (scope='series')
+    // - mediaType='episode' → legacy direct episode request
+    const hasExplicitEpisode = request.season != null || request.episode != null;
+    const tvCoordinates = (intent.scope === 'episode' || mediaType === 'episode' || hasExplicitEpisode)
+      ? { season, episode }
+      : null;
+    const selection = await selectBindableCandidate(explainable, {
+      ensureTorBoxFileIdentityFn,
+      resolveTvTorrentFileFn: resolveTvTorrentFile,
+      tvCoordinates,
+      controlPlaneStore: request.controlPlaneStore ?? null,
+    });
 
     // Stage 8: Persist media request to obtain requestId
     if (persist) {
@@ -463,14 +488,12 @@ export async function searchByMedia(cache, request) {
       );
     }
 
-    // Stage 9: Build playback handoff if selection succeeded and request was persisted
+    // Stage 9: Build playback handoff if bindable selection succeeded and request was persisted
     let handoff = null;
-    if (selection.selected && !selection.selected.ineligibleReason && requestId) {
-      const liveBinding = await attemptTorBoxFileBinding({
-        ensureTorBoxFileIdentityFn,
-        selected: selection.selected,
-        reason: 'live-discovery-no-exact-size',
-      });
+    if (selection.selected && requestId) {
+      // Bindable selection already resolved the TorrentFile; pull from the
+      // private _binding marker set inside selectBindableCandidate.
+      const binding = selection.selected._binding ?? null;
       const handoffRequest = {
         requestId,
         mediaId,
@@ -486,14 +509,21 @@ export async function searchByMedia(cache, request) {
         // provider-backed file.
         ...(canonicalTitle ? { canonicalTitle } : {}),
         ...(canonicalYear != null ? { canonicalYear } : {}),
-        // Slice 1.75: durable TorrentFile id from the pre-publication
-        // identity helper. NULL when no exact selected-file size is
-        // available or when the helper failed.
-        ...(liveBinding.torrentFileId ? { torrentFileId: liveBinding.torrentFileId } : {}),
+        // Slice 2.1: durable TorrentFile id from bindable selection.
+        // NULL when no bindable candidate exists (all candidates unbindable).
+        ...(selection.selected._torrentFileId ? { torrentFileId: selection.selected._torrentFileId } : {}),
       };
       handoff = buildPlaybackHandoff(selection, handoffRequest);
-      if (handoff && liveBinding.identity) {
-        handoff.torrentFileIdentity = liveBinding.identity;
+      if (handoff && binding) {
+        handoff.torrentFileIdentity = {
+          status: binding.status,
+          torrentFileId: binding.torrentFileId,
+          placementId: binding.placementId ?? null,
+          providerFileId: binding.providerFileId ?? null,
+          size: binding.size ?? null,
+          season: binding.season ?? null,
+          episode: binding.episode ?? null,
+        };
       }
 
       // Persist handoff
@@ -962,17 +992,29 @@ export async function searchByMedia(cache, request) {
     );
   }
 
-  // Stage 7: Select best candidate
-  const selection = selectBestCandidate(explainable);
+  // Stage 7: Select bindable candidate
+  // Slice 2.1: iterate ranked candidates in existing order until one becomes
+  // bindable (exact-size fast path, or TV episode resolution for cached TorBox).
+  // TV episode scope: activate PATH B TV resolution when we have explicit episode
+  // context, regardless of intent scope:
+  // - S:E in mediaId → intent.scope='episode' (direct episode request)
+  // - request.season/episode params → Seerr fan-out children (scope='series')
+  // - mediaType='episode' → legacy direct episode request
+  const hasExplicitEpisode = request.season != null || request.episode != null;
+  const tvCoordinates = (intent.scope === 'episode' || mediaType === 'episode' || hasExplicitEpisode)
+    ? { season, episode }
+    : null;
+  const selection = await selectBindableCandidate(explainable, {
+    ensureTorBoxFileIdentityFn,
+    resolveTvTorrentFileFn: resolveTvTorrentFile,
+    tvCoordinates,
+    controlPlaneStore: request.controlPlaneStore ?? null,
+  });
 
-  // Stage 8: Build playback handoff if selection succeeded and request was persisted
+  // Stage 8: Build playback handoff if bindable selection succeeded and request was persisted
   let handoff = null;
-  if (selection.selected && !selection.selected.ineligibleReason && requestId) {
-    const corpusBinding = await attemptTorBoxFileBinding({
-      ensureTorBoxFileIdentityFn,
-      selected: selection.selected,
-      reason: 'corpus-hit-no-exact-size',
-    });
+  if (selection.selected && requestId) {
+    const binding = selection.selected._binding ?? null;
     const handoffRequest = {
       requestId,
       mediaId,
@@ -987,14 +1029,21 @@ export async function searchByMedia(cache, request) {
       // slice).
       ...(canonicalTitle ? { canonicalTitle } : {}),
       ...(canonicalYear != null ? { canonicalYear } : {}),
-      // Slice 1.75: durable TorrentFile id from the pre-publication
-      // identity helper. NULL when no exact selected-file size is
-      // available (typical for corpus-only hits) or when binding failed.
-      ...(corpusBinding.torrentFileId ? { torrentFileId: corpusBinding.torrentFileId } : {}),
+      // Slice 2.1: durable TorrentFile id from bindable selection.
+      // NULL when no bindable candidate exists (all candidates unbindable).
+      ...(selection.selected._torrentFileId ? { torrentFileId: selection.selected._torrentFileId } : {}),
     };
     handoff = buildPlaybackHandoff(selection, handoffRequest);
-    if (handoff && corpusBinding.identity) {
-      handoff.torrentFileIdentity = corpusBinding.identity;
+    if (handoff && binding) {
+      handoff.torrentFileIdentity = {
+        status: binding.status,
+        torrentFileId: binding.torrentFileId,
+        placementId: binding.placementId ?? null,
+        providerFileId: binding.providerFileId ?? null,
+        size: binding.size ?? null,
+        season: binding.season ?? null,
+        episode: binding.episode ?? null,
+      };
     }
 
     // Persist handoff

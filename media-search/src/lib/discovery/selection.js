@@ -145,3 +145,184 @@ function formatSelection(candidate) {
           : null,
   };
 }
+
+/**
+ * Slice 2.1 — Bindable TV Candidate Selection
+ *
+ * Iterate ranked candidates in EXISTING array order until one becomes bindable.
+ * A candidate is bindable when either:
+ *   (A) it carries a trustworthy exact selected-file size and exact-size binding succeeds, OR
+ *   (B) it is a TV media request and TV episode resolution succeeds uniquely.
+ *
+ * No rediscovery, no reranking, no mutation of the input array.
+ *
+ * @param {Object[]} results     - Already-ranked explainable candidates
+ * @param {Object}   options
+ * @param {Function} options.ensureTorBoxFileIdentityFn
+ * @param {Function} options.resolveTvTorrentFileFn  - resolveTvTorrentFile({ torrentFiles, season, episode })
+ * @param {Object}   options.tvCoordinates           - { season, episode } or null for movies
+ * @param {Object}   options.controlPlaneStore
+ * @returns {{ selected: Object|null, reason: string, alternates: Object[], skipped: Object[] }}
+ */
+export async function selectBindableCandidate(results, options = {}) {
+  const {
+    ensureTorBoxFileIdentityFn,
+    resolveTvTorrentFileFn,
+    tvCoordinates,
+    controlPlaneStore,
+  } = options;
+
+  if (!Array.isArray(results) || results.length === 0) {
+    return { selected: null, reason: 'no candidates', alternates: [], skipped: [] };
+  }
+
+  const eligible = results.filter(r => r.identity?.eligible !== false);
+
+  if (eligible.length === 0) {
+    return { selected: null, reason: 'no eligible candidates', alternates: [], skipped: [] };
+  }
+
+  const skipped = [];
+  let selected = null;
+  let reason = '';
+
+  for (const candidate of eligible) {
+    // ---- PATH A: exact-file-size binding (existing Slice 1.75 fast path) ----
+    const selectedFileSize =
+      Number.isSafeInteger(candidate.exactFileSize) && candidate.exactFileSize > 0
+        ? candidate.exactFileSize
+        : Number.isSafeInteger(candidate.selectedFileSize) && candidate.selectedFileSize > 0
+          ? candidate.selectedFileSize
+          : null;
+
+    if (selectedFileSize != null && typeof ensureTorBoxFileIdentityFn === 'function') {
+      try {
+        const sizeResult = await ensureTorBoxFileIdentityFn({
+          infoHash: candidate.infoHash,
+          selectedFileSize,
+          releaseKey: candidate.release?.key || null,
+        });
+        if (sizeResult?.torrentFileId) {
+          selected = formatSelection(candidate);
+          selected._torrentFileId = sizeResult.torrentFileId;
+          selected._binding = {
+            status: 'exact-size',
+            torrentFileId: sizeResult.torrentFileId,
+            placementId: sizeResult.placementId,
+            providerFileId: sizeResult.providerFileId,
+            size: sizeResult.size,
+            selectedFileSize,
+          };
+          reason = 'exact-size bound';
+          break;
+        }
+      } catch {
+        // exact-size failed; fall through to try TV resolution
+      }
+    }
+
+    // ---- PATH B: TV episode resolution from cached-only TorBox inventory ----
+    if (tvCoordinates && typeof resolveTvTorrentFileFn === 'function' && controlPlaneStore) {
+      const { season, episode } = tvCoordinates;
+      if (Number.isSafeInteger(season) && season >= 1 &&
+          Number.isSafeInteger(episode) && episode >= 1) {
+        // STEP 1: Ensure cached-only TorBox placement + authoritative inventory + TorrentFiles.
+        // Uses the same ensureTorBoxFileIdentityFn factory as PATH A but skips
+        // the selectedFileSize match (no exact size evidence available for TV).
+        // This guarantees listTorrentFilesForRelease returns non-empty results
+        // when the candidate is actually TorBox-cached.
+        if (typeof ensureTorBoxFileIdentityFn !== 'function') {
+          console.error(`[PATH B] No TorBox integration — cannot bind ${candidate.infoHash}`);
+          skipped.push({
+            infoHash: candidate.infoHash,
+            rank: candidate.rank,
+            torboxState: candidate.availability?.torbox?.state || 'unknown',
+            reason: 'no TorBox integration',
+          });
+          continue;
+        }
+        let placementTorrentFiles;
+        try {
+          const result = await ensureTorBoxFileIdentityFn({
+            infoHash: candidate.infoHash,
+            controlPlaneStore,
+            skipSizeMatch: true,
+          });
+          placementTorrentFiles = result?.torrentFiles ?? controlPlaneStore.listTorrentFilesForRelease(candidate.infoHash);
+        } catch (err) {
+          console.error(`[PATH B] ensureTorBox FAILED hash=${candidate.infoHash} err=${err?.message ?? err}`);
+          skipped.push({
+            infoHash: candidate.infoHash,
+            rank: candidate.rank,
+            torboxState: candidate.availability?.torbox?.state || 'unknown',
+            reason: 'TorBox placement failed',
+          });
+          continue;
+        }
+
+        // STEP 2: Resolve requested S/E from the now-persisted TorrentFiles.
+        try {
+          const { torrentFile } = resolveTvTorrentFileFn({ torrentFiles: placementTorrentFiles, season, episode });
+          selected = formatSelection(candidate);
+          selected._torrentFileId = torrentFile.id;
+          selected._binding = {
+            status: 'tv-episode',
+            torrentFileId: torrentFile.id,
+            season,
+            episode,
+            size: torrentFile.size,
+          };
+          reason = `tv-episode bound S${season}E${episode}`;
+          break;
+        } catch (err) {
+          // unbindable: EPISODE_NOT_PLAYABLE | EPISODE_NOT_FOUND | EPISODE_AMBIGUOUS
+          // skip to next candidate
+          skipped.push({
+            infoHash: candidate.infoHash,
+            rank: candidate.rank,
+            torboxState: candidate.availability?.torbox?.state || 'unknown',
+            reason: err?.code || 'tv-resolution-failed',
+          });
+        }
+      }
+    }
+
+    skipped.push({
+      infoHash: candidate.infoHash,
+      rank: candidate.rank,
+      torboxState: candidate.availability?.torbox?.state || 'unknown',
+    });
+  }
+
+  // ---- FALLBACK: preserve cached-first selection when bindability cannot be determined ----
+  // (movies without exactFileSize; TV when no controlPlaneStore is available)
+  if (!selected && eligible.length > 0) {
+    const byState = { cached: [], unknown: [], uncached: [] };
+    for (const candidate of eligible) {
+      const state = candidate.availability?.torbox?.state || 'unknown';
+      if (byState[state]) byState[state].push(candidate);
+      else byState.unknown.push(candidate);
+    }
+    const fallback =
+      byState.cached[0] ?? byState.unknown[0] ?? byState.uncached[0];
+    if (fallback) {
+      selected = formatSelection(fallback);
+      reason = 'cached-first fallback (no bindable candidate)';
+    }
+  }
+
+  const alternates = eligible
+    .filter(c => c.infoHash !== selected?.infoHash || c.fileIndex !== selected?.fileIndex)
+    .slice(0, 10)
+    .map(c => ({
+      infoHash: c.infoHash,
+      fileIndex: c.fileIndex,
+      filename: c.filename,
+      rank: c.rank,
+      score: c.score,
+      identityTier: c.identity?.tier,
+      torboxState: c.availability?.torbox?.state || 'unknown',
+    }));
+
+  return { selected, reason, alternates, skipped };
+}
