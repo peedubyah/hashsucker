@@ -451,7 +451,13 @@ export { resolveSeerrIdentity };
  * @param {http.ServerResponse} response
  * @param {Object} searchCache
  */
-async function handleSeerrIngress(request, response, searchCache, hydrateVfs = null) {
+async function handleSeerrIngress(
+  request,
+  response,
+  searchCache,
+  hydrateVfs = null,
+  { controlPlaneStore = null, ensureTorBoxFileIdentityFn = null } = {},
+) {
   // 1. Auth
   const authHeader = request.headers && typeof request.headers.authorization === 'string'
     ? request.headers.authorization
@@ -599,6 +605,7 @@ async function handleSeerrIngress(request, response, searchCache, hydrateVfs = n
         searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, intentId,
         identityStatus, notificationType, response, hydrateVfs,
         ensureTorBoxFileIdentity: ensureTorBoxFileIdentityFn,
+        controlPlaneStore,
       });
     }
     // For series with parse failure, we stop here — the parent is durable
@@ -730,6 +737,7 @@ async function handleSeerrIngress(request, response, searchCache, hydrateVfs = n
           intentId: childIntentId,
           persist: true,
           hydrateVfs,
+          controlPlaneStore,
           // Slice 1.75: pre-publication TorBox file identity binding
           // for TV episodes. TV episodes typically have exact per-file
           // size on the candidate (behaviorHints.videoSize). When
@@ -838,7 +846,7 @@ async function handleSeerrIngress(request, response, searchCache, hydrateVfs = n
 async function runSingleSearchByMedia({
   searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, intentId,
   identityStatus, notificationType, response, hydrateVfs = null,
-  ensureTorBoxFileIdentity = null,
+  ensureTorBoxFileIdentity = null, controlPlaneStore = null,
 }) {
   try {
     const result = await searchByMedia(searchCache, {
@@ -856,6 +864,7 @@ async function runSingleSearchByMedia({
       intentId,
       persist: true,
       hydrateVfs,
+      controlPlaneStore,
       // Slice 1.75: pre-publication TorBox file identity binding.
       // When the operator has configured the TorBox provider + control
       // plane, the seam matches the selected candidate's exact per-file
@@ -1932,7 +1941,10 @@ export function createRequestHandler(dependencies = {}) {
       // Seerr ingress: webhook → durable intent → TMDB→IMDb translation →
       // existing single-intent discovery pipeline.
       if (request.method === 'POST' && url.pathname === '/api/ingress/seerr') {
-        return handleSeerrIngress(request, response, searchCache, hydrateVfsForRequest);
+        return handleSeerrIngress(request, response, searchCache, hydrateVfsForRequest, {
+          controlPlaneStore,
+          ensureTorBoxFileIdentityFn,
+        });
       }
       if (request.method === 'GET' && url.pathname === '/api/search') {
         const startedAt = performance.now();
@@ -2283,6 +2295,7 @@ export function createRequestHandler(dependencies = {}) {
           const result = await searchByMedia(searchCache, {
             ...body,
             hydrateVfs: hydrateVfsForRequest,
+            controlPlaneStore,
             ...(ensureTorBoxFileIdentityFn ? { ensureTorBoxFileIdentity: ensureTorBoxFileIdentityFn } : {}),
           });
           return sendJson(response, 200, {

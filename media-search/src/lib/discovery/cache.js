@@ -328,13 +328,11 @@ CREATE TABLE IF NOT EXISTS vfs_movie_entries (
   info_hash TEXT NOT NULL,
   file_index INTEGER,
   canonical_path TEXT NOT NULL UNIQUE,
+  torrent_file_id TEXT,
   size INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_vfs_movie_entries_release
-ON vfs_movie_entries(release_key);
 
 -- Stable TV episode virtual filesystem metadata. Same invariants as movies:
 -- provider playback URLs remain ephemeral process state.
@@ -346,14 +344,12 @@ CREATE TABLE IF NOT EXISTS vfs_tv_entries (
   info_hash TEXT NOT NULL,
   file_index INTEGER,
   canonical_path TEXT NOT NULL UNIQUE,
+  torrent_file_id TEXT,
   size INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (media_id, season, episode)
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_vfs_tv_entries_release
-ON vfs_tv_entries(release_key);
 
 -- FTS5 full-text search index over release_attributes
 -- Stores its own copy of searchable fields (simpler than external content)
@@ -597,6 +593,9 @@ const SELECTED_FILE_SIZE_COLUMN = 'media-request-results-selected-file-size';
 // durable handoff after ensureTorBoxFileIdentity binds a candidate to an
 // exact TorBox file. Lives in control-plane.db; no SQL FK.
 const PLAYBACK_HANDOFF_TORRENT_FILE_COLUMN = 'playback-handoffs-torrent-file-id';
+// Slice 2: nullable cross-database pointer on durable VFS rows. Legacy rows
+// remain NULL. The corresponding TorrentFile is validated in application code.
+const VFS_TORRENT_FILE_COLUMN = 'vfs-entries-torrent-file-id';
 
 function migrateLegacyProviderObservations(db) {
   const applied = db.prepare(
@@ -764,6 +763,37 @@ function migratePlaybackHandoffsTorrentFileId(db) {
   ).run(PLAYBACK_HANDOFF_TORRENT_FILE_COLUMN, Date.now());
 }
 
+function migrateVfsTorrentFileId(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(VFS_TORRENT_FILE_COLUMN);
+  if (!applied) {
+    for (const table of ['vfs_movie_entries', 'vfs_tv_entries']) {
+      const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+      if (!columns.some((column) => column.name === 'torrent_file_id')) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN torrent_file_id TEXT`);
+      }
+    }
+    db.prepare(
+      'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+    ).run(VFS_TORRENT_FILE_COLUMN, Date.now());
+  }
+
+  // release_key is legacy candidate metadata, not physical-file identity.
+  // Its old unique indexes block season-pack episodes that legitimately share
+  // a release key while pointing at different TorrentFiles.
+  db.exec('DROP INDEX IF EXISTS idx_vfs_movie_entries_release');
+  db.exec('DROP INDEX IF EXISTS idx_vfs_tv_entries_release');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_vfs_movie_entries_torrent_file
+    ON vfs_movie_entries(torrent_file_id)
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_vfs_tv_entries_torrent_file
+    ON vfs_tv_entries(torrent_file_id)
+  `);
+}
+
 // Demand priority constants for queue promotion
 // Background corpus work: ~10, explicit request: ~100, selected release: ~200
 export const DEMAND_PRIORITY = Object.freeze({
@@ -869,6 +899,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   migrateMediaIntents(db);
   migrateMediaRequestResultsSelectedFileSize(db);
   migratePlaybackHandoffsTorrentFileId(db);
+  migrateVfsTorrentFileId(db);
   // Slice 1.75: the torrent_file_id index can only be created once the
   // column is present. For legacy prod databases, the column is added by
   // migratePlaybackHandoffsTorrentFileId above. For fresh installs the
@@ -1767,12 +1798,24 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     SELECT h.*
     FROM playback_handoffs h
     WHERE h.media_type = 'movie'
+      AND (
+        h.torrent_file_id IS NOT NULL
+        OR h.selected_at < COALESCE((
+          SELECT applied_at FROM schema_migrations WHERE name = '${VFS_TORRENT_FILE_COLUMN}'
+        ), 0)
+      )
       AND h.release_key = h.info_hash || ':' || COALESCE(CAST(h.file_index AS TEXT), 'torrent')
       AND h.id = (
         SELECT latest.id
         FROM playback_handoffs latest
         WHERE latest.media_id = h.media_id
           AND latest.media_type = 'movie'
+          AND (
+            latest.torrent_file_id IS NOT NULL
+            OR latest.selected_at < COALESCE((
+              SELECT applied_at FROM schema_migrations WHERE name = '${VFS_TORRENT_FILE_COLUMN}'
+            ), 0)
+          )
           AND latest.release_key = latest.info_hash || ':' || COALESCE(CAST(latest.file_index AS TEXT), 'torrent')
         ORDER BY latest.created_at DESC, latest.id DESC
         LIMIT 1
@@ -1796,10 +1839,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const insertVfsMovieEntryStmt = db.prepare(`
     INSERT INTO vfs_movie_entries (
       media_id, release_key, info_hash, file_index, canonical_path,
-      size, created_at, updated_at
+      torrent_file_id, size, created_at, updated_at
     ) VALUES (
       @media_id, @release_key, @info_hash, @file_index, @canonical_path,
-      @size, @created_at, @updated_at
+      @torrent_file_id, @size, @created_at, @updated_at
     )
   `);
   const updateVfsMovieEntrySizeStmt = db.prepare(`
@@ -1874,6 +1917,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       info_hash: entry.infoHash,
       file_index: entry.fileIndex ?? null,
       canonical_path: entry.canonicalPath,
+      torrent_file_id: entry.torrentFileId ?? null,
       size: entry.size ?? null,
       created_at: entry.createdAt,
       updated_at: entry.updatedAt,
@@ -1899,6 +1943,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       infoHash: row.info_hash,
       fileIndex: row.file_index,
       canonicalPath: row.canonical_path,
+      torrentFileId: row.torrent_file_id,
       size: row.size,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -1912,6 +1957,12 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     WHERE h.media_type IN ('series', 'tv')
       AND h.season IS NOT NULL
       AND h.episode IS NOT NULL
+      AND (
+        h.torrent_file_id IS NOT NULL
+        OR h.selected_at < COALESCE((
+          SELECT applied_at FROM schema_migrations WHERE name = '${VFS_TORRENT_FILE_COLUMN}'
+        ), 0)
+      )
       AND h.release_key = h.info_hash || ':' || COALESCE(CAST(h.file_index AS TEXT), 'torrent')
       AND h.id = (
         SELECT latest.id
@@ -1920,6 +1971,12 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
           AND latest.season = h.season
           AND latest.episode = h.episode
           AND latest.media_type IN ('series', 'tv')
+          AND (
+            latest.torrent_file_id IS NOT NULL
+            OR latest.selected_at < COALESCE((
+              SELECT applied_at FROM schema_migrations WHERE name = '${VFS_TORRENT_FILE_COLUMN}'
+            ), 0)
+          )
           AND latest.release_key = latest.info_hash || ':' || COALESCE(CAST(latest.file_index AS TEXT), 'torrent')
         ORDER BY latest.created_at DESC, latest.id DESC
         LIMIT 1
@@ -1944,10 +2001,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const insertVfsTvEntryStmt = db.prepare(`
     INSERT INTO vfs_tv_entries (
       media_id, season, episode, release_key, info_hash, file_index,
-      canonical_path, size, created_at, updated_at
+      canonical_path, torrent_file_id, size, created_at, updated_at
     ) VALUES (
       @media_id, @season, @episode, @release_key, @info_hash, @file_index,
-      @canonical_path, @size, @created_at, @updated_at
+      @canonical_path, @torrent_file_id, @size, @created_at, @updated_at
     )
   `);
   const updateVfsTvEntrySizeStmt = db.prepare(`
@@ -1993,6 +2050,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       info_hash: entry.infoHash,
       file_index: entry.fileIndex ?? null,
       canonical_path: entry.canonicalPath,
+      torrent_file_id: entry.torrentFileId ?? null,
       size: entry.size ?? null,
       created_at: entry.createdAt,
       updated_at: entry.updatedAt,
@@ -2022,6 +2080,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       infoHash: row.info_hash,
       fileIndex: row.file_index,
       canonicalPath: row.canonical_path,
+      torrentFileId: row.torrent_file_id,
       size: row.size,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -2250,6 +2309,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
             ? r.selectedFileSize
             : null,
       }));
+    }
 
     return requestId;
   }

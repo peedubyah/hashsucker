@@ -502,9 +502,18 @@ export async function searchByMedia(cache, request) {
           cache.persistPlaybackHandoff(handoff);
           let vfsEntry = null;
           try {
-            vfsEntry = materializeVfsEntry(cache, handoff);
+            vfsEntry = materializeVfsEntry(
+              cache,
+              handoff,
+              request.controlPlaneStore ?? null,
+              undefined,
+              { allowLegacy: false },
+            );
           } catch (error) {
             console.error(`VFS materialization failed: ${error.message}`);
+          }
+          if (handoff.torrentFileId && !vfsEntry) {
+            console.error(`VFS publication blocked: TorrentFile validation failed for ${handoff.mediaId}`);
           }
 
           // After durable handoff, immediately publish .strm

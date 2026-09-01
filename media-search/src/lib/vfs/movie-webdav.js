@@ -243,7 +243,7 @@ export function createMovieWebDav({
 
   function getCatalog() {
     for (const handoff of searchCache.listMoviePlaybackHandoffs()) {
-      materializeVfsEntry(searchCache, handoff, now);
+      materializeVfsEntry(searchCache, handoff, controlPlaneStore, now, { allowLegacy: true });
     }
     const nextStates = [];
     for (const entry of searchCache.listVfsMovieEntries()) {

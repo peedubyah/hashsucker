@@ -228,7 +228,7 @@ export function createTvWebDav({
 
   function getCatalog() {
     for (const handoff of searchCache.listTvPlaybackHandoffs()) {
-      materializeVfsEntry(searchCache, handoff, now);
+      materializeVfsEntry(searchCache, handoff, controlPlaneStore, now, { allowLegacy: true });
     }
     const nextStates = [];
     for (const entry of searchCache.listVfsTvEntries()) {
@@ -243,11 +243,15 @@ export function createTvWebDav({
             'HANDOFF_MISSING',
           );
         }
-        if (entry.releaseKey !== handoff.releaseKey
-          || entry.infoHash !== handoff.infoHash
-          || entry.fileIndex !== handoff.fileIndex) {
+        const identityMismatch = entry.torrentFileId
+          ? entry.torrentFileId !== handoff.torrentFileId
+            || entry.infoHash !== handoff.infoHash
+          : entry.releaseKey !== handoff.releaseKey
+            || entry.infoHash !== handoff.infoHash
+            || entry.fileIndex !== handoff.fileIndex;
+        if (identityMismatch) {
           throw new VfsError(
-            'Durable TV entry and playback handoff identify different releases',
+            'Durable TV entry and playback handoff identify different physical files',
             503,
             'HANDOFF_RELEASE_MISMATCH',
           );
