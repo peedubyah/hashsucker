@@ -596,6 +596,77 @@ const PLAYBACK_HANDOFF_TORRENT_FILE_COLUMN = 'playback-handoffs-torrent-file-id'
 // Slice 2: nullable cross-database pointer on durable VFS rows. Legacy rows
 // remain NULL. The corresponding TorrentFile is validated in application code.
 const VFS_TORRENT_FILE_COLUMN = 'vfs-entries-torrent-file-id';
+// Slice 2.6: enforce a single durable handoff slot per media identity
+// (media_type, media_id, season, episode). The partial index plus
+// ON CONFLICT in persistPlaybackHandoff converts a duplicate insert into
+// an upsert against the canonical row, so Seerr resends, retries, and
+// concurrent identical requests all converge on the same handoff id.
+const PLAYBACK_HANDOFF_IDENTITY_INDEX = 'playback-handoffs-identity-unique-v1';
+
+// Slice 2.6: enforce a single durable handoff slot per media identity so
+// duplicate / concurrent persistPlaybackHandoff calls converge on the same
+// row. Older databases may carry many duplicate rows for the same media
+// slot; the migration deduplicates first (keeping the most-recent
+// authoritative handoff when one exists, otherwise the most-recent row)
+// before installing the unique index. Without dedupe the CREATE UNIQUE
+// INDEX would fail on production data.
+function migratePlaybackHandoffsIdentityUnique(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(PLAYBACK_HANDOFF_IDENTITY_INDEX);
+  if (applied) return;
+
+  // Dedupe existing rows. Authoritative rows (torrent_file_id IS NOT NULL)
+  // win over legacy rows (NULL); ties broken by id DESC. Older databases
+  // can carry many duplicate rows for the same media slot; we keep the
+  // survivor per (media_type, media_id, season, episode) group and delete
+  // the rest before installing the unique index.
+  const fullRows = db.prepare(`
+    SELECT h.id, h.media_type, h.media_id, h.season, h.episode, h.torrent_file_id
+    FROM playback_handoffs h
+  `).all();
+  const groupMap = new Map();
+  for (const row of fullRows) {
+    const key = `${row.media_type}|${row.media_id}|${row.season ?? -1}|${row.episode ?? -1}`;
+    const cur = groupMap.get(key);
+    const authoritative = row.torrent_file_id != null ? 1 : 0;
+    if (!cur
+      || authoritative > cur.authoritative
+      || (authoritative === cur.authoritative && row.id > cur.id)) {
+      groupMap.set(key, { id: row.id, authoritative });
+    }
+  }
+  const survivorIds = new Set(Array.from(groupMap.values()).map((v) => v.id));
+  const toDelete = fullRows.map((r) => r.id).filter((id) => !survivorIds.has(id));
+  if (toDelete.length > 0) {
+    const stmt = db.prepare('DELETE FROM playback_handoffs WHERE id = ?');
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const id of toDelete) stmt.run(id);
+      db.prepare(
+        'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+      ).run(PLAYBACK_HANDOFF_IDENTITY_INDEX, Date.now());
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  } else {
+    db.prepare(
+      'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+    ).run(PLAYBACK_HANDOFF_IDENTITY_INDEX, Date.now());
+  }
+
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_playback_handoffs_identity
+    ON playback_handoffs(
+      media_type,
+      media_id,
+      IFNULL(season, -1),
+      IFNULL(episode, -1)
+    )
+  `);
+}
 
 function migrateLegacyProviderObservations(db) {
   const applied = db.prepare(
@@ -879,6 +950,10 @@ function migrateCacheProbeQueue(db) {
 export function createDiscoveryCache({ dbPath = ':memory:', database = null } = {}) {
   const db = database || new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
+  // Slice 2.6: bound concurrent-writer wait to absorb the brief lock window
+  // when two requests for the same media hit playback_handoffs together.
+  // SQLite will retry the write up to 5s instead of failing with SQLITE_BUSY.
+  db.exec('PRAGMA busy_timeout = 5000');
 
   // Ensure schema_migrations exists BEFORE any migration queries it
   db.exec(`
@@ -900,6 +975,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   migrateMediaRequestResultsSelectedFileSize(db);
   migratePlaybackHandoffsTorrentFileId(db);
   migrateVfsTorrentFileId(db);
+  migratePlaybackHandoffsIdentityUnique(db);
   // Slice 1.75: the torrent_file_id index can only be created once the
   // column is present. For legacy prod databases, the column is added by
   // migratePlaybackHandoffsTorrentFileId above. For fresh installs the
@@ -1769,7 +1845,30 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       @release_key, @info_hash, @file_index, @filename,
       @provider, @provider_state, @identity_tier, @resolution_state,
       @selection_reason, @selected_at, @torrent_file_id
-    );
+    )
+    ON CONFLICT(media_type, media_id, IFNULL(season, -1), IFNULL(episode, -1))
+    DO UPDATE SET
+      -- Slice 2.6: only fire the update when the new handoff is
+      -- authoritative AND the existing row is legacy. The excluded row
+      -- carries the new payload; the playback_handoffs row is the
+      -- existing canonical row. The WHERE guards against overwriting an
+      -- existing authoritative identity (we keep the winner) and against
+      -- re-asserting the same physical identity with stale metadata.
+      request_id = excluded.request_id,
+      release_key = excluded.release_key,
+      info_hash = excluded.info_hash,
+      file_index = excluded.file_index,
+      filename = excluded.filename,
+      provider = excluded.provider,
+      provider_state = excluded.provider_state,
+      identity_tier = excluded.identity_tier,
+      resolution_state = excluded.resolution_state,
+      selection_reason = excluded.selection_reason,
+      selected_at = excluded.selected_at,
+      torrent_file_id = excluded.torrent_file_id
+    WHERE playback_handoffs.torrent_file_id IS NULL
+      AND excluded.torrent_file_id IS NOT NULL
+    ;
   `;
 
   const GET_PLAYBACK_HANDOFF_BY_REQUEST = `
@@ -1790,10 +1889,25 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     LIMIT 1;
   `;
 
+  // Slice 2.6: look up the canonical handoff slot for upsert idempotency.
+  // Identical-shape query to GET_TV_PLAYBACK_HANDOFF but parameterized for
+  // either movies (season/episode NULL) or episodes (both set). Returns the
+  // single durable row in the slot, or null when the slot is empty.
+  const GET_PLAYBACK_HANDOFF_BY_MEDIA_IDENTITY = `
+    SELECT * FROM playback_handoffs
+    WHERE media_type = @media_type
+      AND media_id = @media_id
+      AND IFNULL(season, -1) = IFNULL(@season, -1)
+      AND IFNULL(episode, -1) = IFNULL(@episode, -1)
+    ORDER BY torrent_file_id IS NOT NULL DESC, id DESC
+    LIMIT 1;
+  `;
+
   const insertPlaybackHandoffStmt = db.prepare(INSERT_PLAYBACK_HANDOFF);
   const getPlaybackHandoffByRequestStmt = db.prepare(GET_PLAYBACK_HANDOFF_BY_REQUEST);
   const getPlaybackHandoffByIdStmt = db.prepare(GET_PLAYBACK_HANDOFF_BY_ID);
   const getPlaybackHandoffByMediaStmt = db.prepare(GET_PLAYBACK_HANDOFF_BY_MEDIA);
+  const getPlaybackHandoffByMediaIdentityStmt = db.prepare(GET_PLAYBACK_HANDOFF_BY_MEDIA_IDENTITY);
   const listMoviePlaybackHandoffsStmt = db.prepare(`
     SELECT h.*
     FROM playback_handoffs h
@@ -1871,7 +1985,37 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   `);
 
   function persistPlaybackHandoff(handoff) {
-    const info = insertPlaybackHandoffStmt.run({
+    return upsertPlaybackHandoff(handoff).id;
+  }
+
+  /**
+   * Upsert a playback handoff against the canonical (media_type, media_id,
+   * season, episode) slot. Idempotency contract (slice 2.6):
+   *
+   *   - No prior row           -> insert and return { id, status: 'inserted' }.
+   *   - Prior identical row    -> return its id, status: 'noop'. The handoff
+   *                               row is left untouched (selected_at and
+   *                               request_id are preserved).
+   *   - Prior legacy (no
+   *     torrent_file_id),
+   *     new authoritative      -> upgrade the existing row in place and
+   *                               return its id, status: 'upgraded'. The
+   *                               canonical (latest) selection is now
+   *                               authoritative; the row is the same
+   *                               physical identity.
+   *   - Prior authoritative,
+   *     new legacy             -> keep the authoritative row. Return its id,
+   *                               status: 'kept-authoritative'. The legacy
+   *                               payload is dropped: the authoritative row
+   *                               is the durable identity.
+   *
+   * The return value is always the id of the canonical row in the slot, so
+   * subsequent VFS materialization / STRM publication / hydration hooks
+   * always operate on the same durable identity. Callers that only need the
+   * id should use persistPlaybackHandoff (thin wrapper).
+   */
+  function upsertPlaybackHandoff(handoff) {
+    const params = {
       request_id: handoff.requestId || null,
       media_id: handoff.mediaId,
       media_type: handoff.mediaType,
@@ -1892,8 +2036,35 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       // exact TorBox file. NULL on legacy handoffs and on candidates
       // without an observable raw per-file size.
       torrent_file_id: handoff.torrentFileId ?? null,
+    };
+    const newIsAuthoritative = params.torrent_file_id != null;
+    const existedBefore = getPlaybackHandoffByMediaIdentityStmt.get({
+      media_id: params.media_id,
+      media_type: params.media_type,
+      season: params.season,
+      episode: params.episode,
     });
-    return info.lastInsertRowid;
+    const info = insertPlaybackHandoffStmt.run(params);
+    const id = Number(info.lastInsertRowid);
+    if (!existedBefore) {
+      return { id, status: 'inserted' };
+    }
+    if (existedBefore.id === id) {
+      return { id, status: 'noop' };
+    }
+    // Conflict: classify the upsert outcome relative to the new payload.
+    const wasAuthoritative = existedBefore.torrent_file_id != null;
+    let status;
+    if (newIsAuthoritative && !wasAuthoritative) status = 'upgraded';
+    else if (!newIsAuthoritative && wasAuthoritative) status = 'kept-authoritative';
+    else status = 'noop';
+    const after = getPlaybackHandoffByMediaIdentityStmt.get({
+      media_id: params.media_id,
+      media_type: params.media_type,
+      season: params.season,
+      episode: params.episode,
+    });
+    return { id: Number(after.id), status };
   }
 
   function getPlaybackHandoffByRequestId(requestId) {
@@ -3167,6 +3338,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getMediaRequestResults,
     // Playback handoff persistence
     persistPlaybackHandoff,
+    upsertPlaybackHandoff,
     getPlaybackHandoffByRequestId,
     getPlaybackHandoffById,
     getPlaybackHandoffByMediaId,

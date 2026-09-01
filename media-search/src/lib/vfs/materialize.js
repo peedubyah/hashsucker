@@ -121,6 +121,52 @@ function authoritativeMovieFields(torrentFile, handoff, canonicalPath, timestamp
  * (torrent_file_id IS NOT NULL) are never overwritten here: identical
  * current identity is idempotent; differing identity is fail-closed.
  */
+function isUniqueConstraintError(error) {
+  if (!error) return false;
+  const code = error.code || (typeof error.message === 'string' ? null : null);
+  if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY') {
+    return true;
+  }
+  const msg = typeof error.message === 'string' ? error.message : '';
+  return /UNIQUE constraint failed|PRIMARY KEY constraint failed/i.test(msg);
+}
+
+function raceRecoverVfsMovieEntry(searchCache, handoff, torrentFile, now, canonicalPath) {
+  // Another writer materialized the same logical movie slot between our
+  // SELECT and INSERT. Re-read and reconcile against the existing row.
+  const existing = searchCache.getVfsMovieEntry(handoff.mediaId);
+  if (!existing) {
+    throw new Error(`VFS race recovery could not find media_id=${handoff.mediaId}`);
+  }
+  if (torrentFile && isLegacyVfsEntry(existing)) {
+    const replaced = searchCache.replaceVfsMovieEntry(
+      authoritativeMovieFields(torrentFile, handoff, existing.canonicalPath, now()),
+    );
+    if (replaced) {
+      console.log(`[vfs] race-recovered legacy media=${replaced.mediaId} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
+      return replaced;
+    }
+  }
+  return assertExistingIdentityOrThrow(existing, handoff, torrentFile);
+}
+
+function raceRecoverVfsTvEntry(searchCache, handoff, torrentFile, now) {
+  const existing = searchCache.getVfsTvEntry(handoff.mediaId, handoff.season, handoff.episode);
+  if (!existing) {
+    throw new Error(`VFS race recovery could not find media_id=${handoff.mediaId} S${handoff.season}E${handoff.episode}`);
+  }
+  if (torrentFile && isLegacyVfsEntry(existing)) {
+    const replaced = searchCache.replaceVfsTvEntry(
+      authoritativeTvFields(torrentFile, handoff, existing.canonicalPath, now()),
+    );
+    if (replaced) {
+      console.log(`[vfs-tv] race-recovered legacy media=${replaced.mediaId} S${replaced.season}E${replaced.episode} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
+      return replaced;
+    }
+  }
+  return assertExistingIdentityOrThrow(existing, handoff, torrentFile);
+}
+
 export function materializeVfsEntry(
   searchCache,
   handoff,
@@ -186,17 +232,32 @@ export function materializeVfsEntry(
       );
     }
     const timestamp = now();
-    const created = searchCache.createVfsMovieEntry({
-      mediaId: handoff.mediaId,
-      releaseKey: handoff.releaseKey,
-      infoHash: torrentFile?.infoHash ?? handoff.infoHash,
-      fileIndex: torrentFile ? null : handoff.fileIndex,
-      canonicalPath,
-      torrentFileId: torrentFile?.id ?? null,
-      size: torrentFile?.size ?? null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    });
+    let created;
+    try {
+      created = searchCache.createVfsMovieEntry({
+        mediaId: handoff.mediaId,
+        releaseKey: handoff.releaseKey,
+        infoHash: torrentFile?.infoHash ?? handoff.infoHash,
+        fileIndex: torrentFile ? null : handoff.fileIndex,
+        canonicalPath,
+        torrentFileId: torrentFile?.id ?? null,
+        size: torrentFile?.size ?? null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+    } catch (error) {
+      // Slice 2.6: concurrent identical first-publication race. Two
+      // requests both saw no row, then both tried to insert. The
+      // PRIMARY KEY on vfs_movie_entries rejects the loser; reconcile
+      // against the winner's row before giving up.
+      if (isUniqueConstraintError(error)) {
+        created = raceRecoverVfsMovieEntry(
+          searchCache, handoff, torrentFile, now, canonicalPath,
+        );
+      } else {
+        throw error;
+      }
+    }
     console.log(`[vfs] materialized media=${created.mediaId} path="${created.canonicalPath}" release=${created.releaseKey}`);
     return created;
   }
@@ -251,19 +312,32 @@ export function materializeVfsEntry(
     );
   }
   const timestamp = now();
-  const created = searchCache.createVfsTvEntry({
-    mediaId: handoff.mediaId,
-    season: handoff.season,
-    episode: handoff.episode,
-    releaseKey: handoff.releaseKey,
-    infoHash: torrentFile?.infoHash ?? handoff.infoHash,
-    fileIndex: torrentFile ? null : handoff.fileIndex,
-    canonicalPath,
-    torrentFileId: torrentFile?.id ?? null,
-    size: torrentFile?.size ?? null,
-    createdAt: timestamp,
-    updatedAt: timestamp,
-  });
+  let created;
+  try {
+    created = searchCache.createVfsTvEntry({
+      mediaId: handoff.mediaId,
+      season: handoff.season,
+      episode: handoff.episode,
+      releaseKey: handoff.releaseKey,
+      infoHash: torrentFile?.infoHash ?? handoff.infoHash,
+      fileIndex: torrentFile ? null : handoff.fileIndex,
+      canonicalPath,
+      torrentFileId: torrentFile?.id ?? null,
+      size: torrentFile?.size ?? null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+  } catch (error) {
+    // Slice 2.6: concurrent identical first-publication race. Two
+    // requests both saw no row, then both tried to insert. The
+    // PRIMARY KEY (media_id, season, episode) rejects the loser;
+    // reconcile against the winner's row before giving up.
+    if (isUniqueConstraintError(error)) {
+      created = raceRecoverVfsTvEntry(searchCache, handoff, torrentFile, now);
+    } else {
+      throw error;
+    }
+  }
   console.log(`[vfs-tv] materialized media=${created.mediaId} S${created.season}E${created.episode} path="${created.canonicalPath}" release=${created.releaseKey}`);
   return created;
 }

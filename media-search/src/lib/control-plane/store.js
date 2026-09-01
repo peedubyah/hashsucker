@@ -319,6 +319,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   migrateTorrentFileSchema(db);
   db.exec(CONTROL_PLANE_SCHEMA);
   migrateExposureSchema(db);
+  migrateRepairEvidenceSchema(db);
   let closed = false;
 
   function transaction(work) {
@@ -1808,8 +1809,7 @@ function queryRowsForIds(db, prefix, ids) {
 function migrateExposureSchema(db) {
   const columns = db.prepare('PRAGMA table_info(exposures)').all();
   if (columns.length === 0) return;
-  const hasAccountScope = columns.some((row) => row.name === 'account_scope');
-  const hasMountScope = columns.some((row) => row.name === 'mount_scope');
+  const hasAccountScope = columns.some((row) => row.name === 'account_scope');  const hasMountScope = columns.some((row) => row.name === 'mount_scope');
   const uniqueColumns = db.prepare('PRAGMA index_list(exposures)').all()
     .filter((row) => row.unique === 1)
     .map((row) => db.prepare(`PRAGMA index_info(${row.name})`).all().map((entry) => entry.name));
@@ -1864,6 +1864,30 @@ function migrateExposureSchema(db) {
     db.exec('PRAGMA foreign_keys = ON');
   }
 }
+// Slice 2.6: additive repair_evidence table. Holds repair-event taxonomy
+// rows when no library_item is associated with the affected info_hash.
+// lifecycle_events remains the canonical projection; repair_evidence is
+// the best-effort additive mirror so the failure_category remains
+// observable end-to-end.
+function migrateRepairEvidenceSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS repair_evidence (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      failure_category TEXT NOT NULL,
+      info_hash TEXT,
+      reason TEXT,
+      evidence TEXT,
+      correlation_id TEXT,
+      occurred_at INTEGER NOT NULL,
+      recorded_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_repair_evidence_category_time
+      ON repair_evidence(failure_category, occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_repair_evidence_hash_time
+      ON repair_evidence(info_hash, occurred_at DESC);
+  `);
+}
+
 // Slice 1.5: collapse the legacy torrent_file_provider_refs table into
 // provider_files. The migration is non-destructive for any prior inventory
 // observation and idempotent.
