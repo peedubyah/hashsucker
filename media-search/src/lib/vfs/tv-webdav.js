@@ -105,7 +105,7 @@ async function sendDavXml(response, entries, metadataForEntry) {
   response.end(body);
 }
 
-function sendError(response, error) {
+function sendError(response, error, { size = null } = {}) {
   const status = error instanceof VfsError ? error.status : 500;
   const code = error instanceof VfsError ? error.code : 'INTERNAL_ERROR';
   if (response.headersSent) {
@@ -113,11 +113,20 @@ function sendError(response, error) {
     return;
   }
   const body = JSON.stringify({ error: error.message, code });
-  response.writeHead(status, {
+  const headers = {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(body),
     'cache-control': 'no-store',
-  });
+  };
+  // RFC 7233 §4.4: a 416 response SHOULD include a Content-Range header of
+  // the form "bytes */<size>" so clients can correct their range arithmetic.
+  // Only attach the header when we know the authoritative size for the
+  // requested file. Otherwise omit it (clients must rely on a HEAD probe).
+  if (status === 416 && Number.isSafeInteger(size) && size > 0) {
+    headers['content-range'] = 'bytes */' + size;
+    headers['accept-ranges'] = 'bytes';
+  }
+  response.writeHead(status, headers);
   response.end(body);
 }
 
@@ -131,19 +140,39 @@ function parseContentRange(value) {
   };
 }
 
-function normalizeRange(rangeHeader, size) {
+export function normalizeRange(rangeHeader, size) {
   if (!rangeHeader) return null;
   const match = rangeHeader.match(/^bytes=(\d*)-(\d*)$/i);
-  if (!match) throw new VfsError('Only byte ranges are supported', 416, 'INVALID_RANGE');
+  // Multipart ranges and any header with commas / extra characters must fail
+  // closed — we only serve a single byte range.
+  if (!match || rangeHeader.includes(',')) {
+    throw new VfsError('Only one byte range is supported', 416, 'INVALID_RANGE');
+  }
   const [, startText, endText] = match;
   if (!startText && !endText) throw new VfsError('Malformed byte range', 416, 'INVALID_RANGE');
-  if (startText && endText && Number(startText) > Number(endText)) {
-    throw new VfsError('Malformed byte range', 416, 'INVALID_RANGE');
+
+  if (!Number.isSafeInteger(size) || size <= 0) {
+    throw new VfsError('Byte range requires known content length', 416, 'RANGE_NOT_SATISFIABLE');
   }
-  if (!size) throw new VfsError('Byte range requires known content length', 416, 'RANGE_NOT_SATISFIABLE');
-  const start = startText ? Number(startText) : size - Number(endText);
-  const end = endText ? Math.min(Number(endText), size - 1) : size - 1;
-  if (start >= size) {
+
+  let start;
+  let end;
+  if (!startText) {
+    // Suffix range: bytes=-N requests the last N bytes.
+    const suffixLength = Number(endText);
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
+      throw new VfsError('Malformed suffix range', 416, 'INVALID_RANGE');
+    }
+    // RFC 7233 §2.1: a suffix range whose length exceeds the representation
+    // is satisfiable but yields the whole representation.
+    start = Math.max(0, size - suffixLength);
+    end = size - 1;
+  } else {
+    start = Number(startText);
+    end = endText ? Math.min(Number(endText), size - 1) : size - 1;
+  }
+
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= size || start > end) {
     throw new VfsError('Byte range is outside the file', 416, 'RANGE_NOT_SATISFIABLE');
   }
   return { start, end, header: 'bytes=' + start + '-' + end };
@@ -271,12 +300,13 @@ export function createTvWebDav({
     const { handoff } = state;
     if (forceFresh) {
       rdResolutionCache.delete(handoff.infoHash, handoff.fileIndex);
-      // forceFresh only refreshes the ephemeral downstream URL through the
-      // shared seam. The seam owns placement lifecycle, mylist verification,
-      // and exact-file mapping; VFS must not duplicate that recovery path.
-      if (torBoxDownloadUrlCache && handoff.provider === 'torbox') {
-        torBoxDownloadUrlCache.delete(handoff.releaseKey, handoff.fileIndex ?? 'torrent');
-      }
+      // forceFresh forces the TorBox ephemeral downstream URL to be
+      // re-resolved on the next cache miss. The cache now keys on the
+      // provider-stable capability tuple (provider, accountScope,
+      // placementId, providerFileId); that tuple is not known to the
+      // VFS layer until the seam returns. Invalidation on actual byte
+      // read failure is handled inside openValidatedProviderRead where
+      // the fresh delivery is available.
     }
 
     if (rdClient) {
@@ -330,6 +360,9 @@ export function createTvWebDav({
       provider: 'torbox',
       url: delivery.url,
       size: delivery.size,
+      placementId: delivery.placementId,
+      providerFileId: delivery.providerFileId,
+      accountScope: delivery.accountScope,
       resolution: delivery.recovered ? 'recovered' : (forceFresh ? 'remapped' : 'mapped'),
     };
   }
@@ -352,6 +385,7 @@ export function createTvWebDav({
         upstream = await fetchProvider(backing, rangeHeader);
       } catch (error) {
         firstFailure ||= error;
+        invalidateTorBoxCapability(backing);
         if (!forceFresh) continue;
         throw new VfsError('Provider read failed after fresh resolution', 502, 'PROVIDER_READ_FAILED');
       }
@@ -365,11 +399,31 @@ export function createTvWebDav({
           ? 'rate-limited'
           : STALE_PROVIDER_STATUSES.has(upstream.status) ? 'stale' : 'invalid';
         console.warn('[vfs-tv] provider=' + backing.provider + ' read=' + readFailure + ' status=' + upstream.status + ' release=' + state.entry.releaseKey);
-        if (upstream.status !== 429) continue;
+        if (upstream.status !== 429) {
+          // The cached capability (if any) just produced a stale or
+          // invalid byte response — invalidate it so the retry resolves
+          // fresh. Single-flight inside the cache prevents the retry
+          // from stampeding requestdl.
+          invalidateTorBoxCapability(backing);
+          continue;
+        }
       }
       throw validationError;
     }
     throw firstFailure || new VfsError('Provider read failed', 502, 'PROVIDER_READ_FAILED');
+  }
+
+  function invalidateTorBoxCapability(backing) {
+    if (!torBoxDownloadUrlCache) return;
+    if (backing?.provider !== 'torbox') return;
+    if (typeof torBoxDownloadUrlCache.invalidateByCapability !== 'function') return;
+    if (!backing.placementId || !backing.providerFileId) return;
+    torBoxDownloadUrlCache.invalidateByCapability({
+      provider: backing.provider,
+      accountScope: backing.accountScope ?? 'default',
+      placementId: backing.placementId,
+      providerFileId: backing.providerFileId,
+    });
   }
 
   async function loadMetadata(state) {
@@ -463,7 +517,15 @@ export function createTvWebDav({
   }
 
   async function streamFile(request, response, state, metadata) {
-    const requestedRange = normalizeRange(request.headers.range, metadata.size);
+    let requestedRange;
+    try {
+      requestedRange = normalizeRange(request.headers.range, metadata.size);
+    } catch (error) {
+      // Reject impossible / malformed ranges before any provider call. A
+      // locally-known impossible range must not call requestdl.
+      sendError(response, error, { size: metadata.size });
+      return;
+    }
     const opened = await openValidatedProviderRead(
       state,
       requestedRange?.header,

@@ -209,6 +209,8 @@ export async function ensureTorBoxDelivery({
 
   return {
     url,
+    provider: placement.provider,
+    accountScope: placement.accountScope,
     placementId: placement.id,
     providerFileId: mapping.providerFileId,
     size,
@@ -311,7 +313,6 @@ export async function resolveTorBoxDeliveryWithStaleRecovery({
 
   try {
     const downloadUrl = await resolveCachedDownloadUrl({
-      releaseKey,
       delivery,
       torBoxDownloadUrlCache,
       resolveTorBoxDownloadUrl,
@@ -340,36 +341,44 @@ export async function resolveTorBoxDeliveryWithStaleRecovery({
 }
 
 async function resolveCachedDownloadUrl({
-  releaseKey,
   delivery,
   torBoxDownloadUrlCache,
   resolveTorBoxDownloadUrl,
   isUrlLive,
 }) {
-  let cachedDownload = torBoxDownloadUrlCache.get(releaseKey, delivery.providerFileId);
+  const capability = {
+    provider: delivery.provider,
+    accountScope: delivery.accountScope,
+    placementId: delivery.placementId,
+    providerFileId: delivery.providerFileId,
+  };
+  let cachedDownload = torBoxDownloadUrlCache.getByCapability?.(capability) ?? null;
   if (cachedDownload && isUrlLive && !await isUrlLive(cachedDownload.url)) {
-    torBoxDownloadUrlCache.delete(releaseKey, delivery.providerFileId);
+    torBoxDownloadUrlCache.invalidateByCapability?.(capability);
     cachedDownload = null;
   }
   if (cachedDownload?.url) {
     return {
       url: cachedDownload.url,
+      provider: delivery.provider,
+      accountScope: delivery.accountScope,
       placementId: delivery.placementId,
       providerFileId: delivery.providerFileId,
       size: delivery.size,
     };
   }
-  const url = await torBoxDownloadUrlCache.getOrInFlight(
-    releaseKey,
-    delivery.providerFileId,
+  const url = await torBoxDownloadUrlCache.getOrInFlightByCapability(
+    capability,
     async () => {
       const resolved = await resolveTorBoxDownloadUrl(delivery.url);
-      torBoxDownloadUrlCache.set(releaseKey, delivery.providerFileId, resolved);
+      torBoxDownloadUrlCache.setByCapability(capability, resolved);
       return resolved;
     },
   );
   return {
     url,
+    provider: delivery.provider,
+    accountScope: delivery.accountScope,
     placementId: delivery.placementId,
     providerFileId: delivery.providerFileId,
     size: delivery.size,
@@ -455,7 +464,6 @@ async function recoverStalePlacement({
   });
 
   const recoveredUrl = await resolveCachedDownloadUrl({
-    releaseKey,
     delivery: recoveredDelivery,
     torBoxDownloadUrlCache,
     resolveTorBoxDownloadUrl,

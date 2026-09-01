@@ -77,6 +77,7 @@ function seedPlacement(store, infoHash, providerResourceId) {
 
 function makeCache() {
   const store = new Map();
+  const capStore = new Map();
   return {
     get(releaseKey, providerFileId) {
       const key = `${releaseKey}:${providerFileId}`;
@@ -94,6 +95,24 @@ function makeCache() {
     delete(releaseKey, providerFileId) {
       store.delete(`${releaseKey}:${providerFileId}`);
     },
+    getByCapability(capability) {
+      const key = `${capability.provider}:${capability.accountScope}:${capability.placementId}:${capability.providerFileId}`;
+      const entry = capStore.get(key);
+      if (!entry) return null;
+      if (Date.now() >= entry.expiresAt) {
+        capStore.delete(key);
+        return null;
+      }
+      return { url: entry.url, capability: entry.capability };
+    },
+    setByCapability(capability, url) {
+      const key = `${capability.provider}:${capability.accountScope}:${capability.placementId}:${capability.providerFileId}`;
+      capStore.set(key, { url, capability: { ...capability }, expiresAt: Date.now() + 60_000 });
+    },
+    invalidateByCapability(capability) {
+      const key = `${capability.provider}:${capability.accountScope}:${capability.placementId}:${capability.providerFileId}`;
+      capStore.delete(key);
+    },
     async getOrInFlight(releaseKey, providerFileId, factory) {
       const key = `${releaseKey}:${providerFileId}`;
       const cached = this.get(releaseKey, providerFileId);
@@ -102,7 +121,14 @@ function makeCache() {
       this.set(releaseKey, providerFileId, url);
       return url;
     },
-    size() { return store.size; },
+    async getOrInFlightByCapability(capability, factory) {
+      const cached = this.getByCapability(capability);
+      if (cached) return cached.url;
+      const url = await factory();
+      this.setByCapability(capability, url);
+      return url;
+    },
+    size() { return store.size + capStore.size; },
     _peek(releaseKey, providerFileId) {
       return store.get(`${releaseKey}:${providerFileId}`) || null;
     },
