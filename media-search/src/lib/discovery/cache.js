@@ -1852,6 +1852,23 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       AND release_key = @release_key
       AND size IS NULL
   `);
+  // Atomic supersede of a legacy vfs_movie_entries row with TorrentFile-backed
+  // identity. Only fires when the existing row has torrent_file_id IS NULL —
+  // authoritative rows must be reconciled by application code, never silently
+  // overwritten. canonical_path is preserved so the published library alias
+  // (and any downstream WebDAV/Plex/Jellyfin references) remains stable.
+  const supersedeVfsMovieEntryStmt = db.prepare(`
+    UPDATE vfs_movie_entries
+    SET release_key = @release_key,
+        info_hash = @info_hash,
+        file_index = NULL,
+        canonical_path = @canonical_path,
+        torrent_file_id = @torrent_file_id,
+        size = @size,
+        updated_at = @updated_at
+    WHERE media_id = @media_id
+      AND torrent_file_id IS NULL
+  `);
 
   function persistPlaybackHandoff(handoff) {
     const info = insertPlaybackHandoffStmt.run({
@@ -1935,6 +1952,31 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     return info.changes === 1 ? getVfsMovieEntry(mediaId) : null;
   }
 
+  /**
+   * Atomically supersede a legacy movie VFS row (torrent_file_id IS NULL)
+   * with a TorrentFile-backed authoritative row. The existing canonical_path
+   * is preserved verbatim so the published library alias (and any downstream
+   * WebDAV / Plex / Jellyfin references) remains stable. Returns the
+   * resulting row, or null when no legacy row was found (caller must insert).
+   *
+   * This is the only path that may overwrite an existing VFS entry's
+   * physical identity. Authoritative rows (torrent_file_id IS NOT NULL) are
+   * not touched here — those are reconciled in application code with a
+   * fail-closed conflict check.
+   */
+  function replaceVfsMovieEntry(entry) {
+    const info = supersedeVfsMovieEntryStmt.run({
+      media_id: entry.mediaId,
+      release_key: entry.releaseKey,
+      info_hash: entry.infoHash,
+      canonical_path: entry.canonicalPath,
+      torrent_file_id: entry.torrentFileId,
+      size: entry.size,
+      updated_at: entry.updatedAt,
+    });
+    return info.changes === 1 ? getVfsMovieEntry(entry.mediaId) : null;
+  }
+
   function rowToVfsMovieEntry(row) {
     if (!row) return null;
     return {
@@ -2016,6 +2058,25 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       AND release_key = @release_key
       AND size IS NULL
   `);
+  // Atomic supersede of a legacy vfs_tv_entries row with TorrentFile-backed
+  // identity. Only fires when the existing row has torrent_file_id IS NULL —
+  // authoritative rows must be reconciled by application code, never silently
+  // overwritten. canonical_path is preserved so the published library alias
+  // (and any downstream WebDAV/Plex/Jellyfin references) remains stable.
+  const supersedeVfsTvEntryStmt = db.prepare(`
+    UPDATE vfs_tv_entries
+    SET release_key = @release_key,
+        info_hash = @info_hash,
+        file_index = NULL,
+        canonical_path = @canonical_path,
+        torrent_file_id = @torrent_file_id,
+        size = @size,
+        updated_at = @updated_at
+    WHERE media_id = @media_id
+      AND season = @season
+      AND episode = @episode
+      AND torrent_file_id IS NULL
+  `);
 
   function listTvPlaybackHandoffs() {
     return listTvPlaybackHandoffsStmt.all().map(rowToPlaybackHandoff);
@@ -2068,6 +2129,33 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       updated_at: updatedAt,
     });
     return info.changes === 1 ? getVfsTvEntry(mediaId, season, episode) : null;
+  }
+
+  /**
+   * Atomically supersede a legacy TV VFS row (torrent_file_id IS NULL) with
+   * a TorrentFile-backed authoritative row. The existing canonical_path is
+   * preserved verbatim so the published library alias (and any downstream
+   * WebDAV / Plex / Jellyfin references) remains stable. Returns the
+   * resulting row, or null when no legacy row was found (caller must insert).
+   *
+   * This is the only path that may overwrite an existing VFS entry's
+   * physical identity. Authoritative rows (torrent_file_id IS NOT NULL) are
+   * not touched here — those are reconciled in application code with a
+   * fail-closed conflict check.
+   */
+  function replaceVfsTvEntry(entry) {
+    const info = supersedeVfsTvEntryStmt.run({
+      media_id: entry.mediaId,
+      season: entry.season,
+      episode: entry.episode,
+      release_key: entry.releaseKey,
+      info_hash: entry.infoHash,
+      canonical_path: entry.canonicalPath,
+      torrent_file_id: entry.torrentFileId,
+      size: entry.size,
+      updated_at: entry.updatedAt,
+    });
+    return info.changes === 1 ? getVfsTvEntry(entry.mediaId, entry.season, entry.episode) : null;
   }
 
   function rowToVfsTvEntry(row) {
@@ -3083,12 +3171,14 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     listVfsMovieEntries,
     createVfsMovieEntry,
     setVfsMovieEntrySize,
+    replaceVfsMovieEntry,
     listTvPlaybackHandoffs,
     getTvPlaybackHandoff,
     getVfsTvEntry,
     listVfsTvEntries,
     createVfsTvEntry,
     setVfsTvEntrySize,
+    replaceVfsTvEntry,
     rowToPlaybackHandoff,
     // Stored knowledge lookup for resolver debug
     getStoredKnowledge,

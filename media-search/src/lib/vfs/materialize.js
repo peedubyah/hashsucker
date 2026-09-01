@@ -71,11 +71,55 @@ function assertExistingIdentity(existing, handoff, torrentFile) {
   }
 }
 
+function assertExistingIdentityOrThrow(existing, handoff, torrentFile) {
+  assertExistingIdentity(existing, handoff, torrentFile);
+  return existing;
+}
+
+function isLegacyVfsEntry(existing) {
+  return existing && existing.torrentFileId == null;
+}
+
+function authoritativeTvFields(torrentFile, handoff, canonicalPath, timestamp) {
+  return {
+    mediaId: handoff.mediaId,
+    season: handoff.season,
+    episode: handoff.episode,
+    releaseKey: handoff.releaseKey,
+    infoHash: torrentFile.infoHash,
+    canonicalPath,
+    torrentFileId: torrentFile.id,
+    size: torrentFile.size,
+    updatedAt: timestamp,
+  };
+}
+
+function authoritativeMovieFields(torrentFile, handoff, canonicalPath, timestamp) {
+  return {
+    mediaId: handoff.mediaId,
+    releaseKey: handoff.releaseKey,
+    infoHash: torrentFile.infoHash,
+    canonicalPath,
+    torrentFileId: torrentFile.id,
+    size: torrentFile.size,
+    updatedAt: timestamp,
+  };
+}
+
 /**
  * Materialize and return the durable VFS entry for a playback handoff.
  * TorrentFile supplies physical identity; handoff media fields supply the
  * stable library alias. New publication callers pass allowLegacy=false;
  * default compatibility preserves existing direct callers and WebDAV readback.
+ *
+ * Legacy reconciliation: when a VFS row already exists for the same logical
+ * media alias but its torrent_file_id IS NULL (legacy hydrated row), and the
+ * new authoritative publication carries a validated TorrentFile, the legacy
+ * row is atomically superseded in place. The published canonical_path is
+ * preserved verbatim so the library alias (and any downstream WebDAV /
+ * Plex / Jellyfin references) remains stable. Authoritative rows
+ * (torrent_file_id IS NOT NULL) are never overwritten here: identical
+ * current identity is idempotent; differing identity is fail-closed.
  */
 export function materializeVfsEntry(
   searchCache,
@@ -88,6 +132,26 @@ export function materializeVfsEntry(
   if (handoff.mediaType === 'movie') {
     const existing = searchCache.getVfsMovieEntry(handoff.mediaId);
     if (existing) {
+      if (torrentFile && isLegacyVfsEntry(existing)) {
+        // Legacy supersede: keep the existing canonical_path so the published
+        // library alias stays stable, and atomically replace the physical
+        // identity with the validated TorrentFile bundle.
+        const replaced = searchCache.replaceVfsMovieEntry(
+          authoritativeMovieFields(torrentFile, handoff, existing.canonicalPath, now()),
+        );
+        if (replaced) {
+          console.log(`[vfs] superseded legacy media=${replaced.mediaId} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
+          return replaced;
+        }
+        // Race: another writer converted the row to authoritative between
+        // the SELECT and the UPDATE. Re-read and assert against the
+        // authoritative identity.
+        return assertExistingIdentityOrThrow(
+          searchCache.getVfsMovieEntry(handoff.mediaId),
+          handoff,
+          torrentFile,
+        );
+      }
       assertExistingIdentity(existing, handoff, torrentFile);
       return existing;
     }
@@ -145,6 +209,26 @@ export function materializeVfsEntry(
 
   const existing = searchCache.getVfsTvEntry(handoff.mediaId, handoff.season, handoff.episode);
   if (existing) {
+    if (torrentFile && isLegacyVfsEntry(existing)) {
+      // Legacy supersede: keep the existing canonical_path so the published
+      // library alias stays stable, and atomically replace the physical
+      // identity with the validated TorrentFile bundle.
+      const replaced = searchCache.replaceVfsTvEntry(
+        authoritativeTvFields(torrentFile, handoff, existing.canonicalPath, now()),
+      );
+      if (replaced) {
+        console.log(`[vfs-tv] superseded legacy media=${replaced.mediaId} S${replaced.season}E${replaced.episode} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
+        return replaced;
+      }
+      // Race: another writer converted the row to authoritative between
+      // the SELECT and the UPDATE. Re-read and assert against the
+      // authoritative identity.
+      return assertExistingIdentityOrThrow(
+        searchCache.getVfsTvEntry(handoff.mediaId, handoff.season, handoff.episode),
+        handoff,
+        torrentFile,
+      );
+    }
     assertExistingIdentity(existing, handoff, torrentFile);
     return existing;
   }
