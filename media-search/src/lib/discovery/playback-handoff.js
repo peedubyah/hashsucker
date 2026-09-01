@@ -53,6 +53,21 @@ export function buildPlaybackHandoff(selection, request) {
     ? 'resolved'
     : (sel.identityTier === 'Verified' ? 'confirmed' : 'probable');
 
+  // Canonical movie title/year are surfaced from the request context (e.g.
+  // Seerr detail body) so the VFS presentation can use a clean identity
+  // (e.g. "Dune Part Two (2024)") instead of the noisy provider release
+  // name (e.g. "Dune - Parte Due - Part Two (2024) WebDl Rip ... Licdom").
+  // These are presentation aliases only — the handoff's `filename` and
+  // `infoHash` continue to identify the provider-backed file.
+  const canonicalTitle = typeof request.canonicalTitle === 'string' && request.canonicalTitle.trim()
+    ? request.canonicalTitle.trim()
+    : null;
+  const canonicalYearRaw = request.canonicalYear;
+  const canonicalYear = typeof canonicalYearRaw === 'number'
+    && Number.isSafeInteger(canonicalYearRaw) && canonicalYearRaw >= 0
+    ? canonicalYearRaw
+    : null;
+
   return {
     requestId: request.requestId,
     mediaId: request.mediaId || null,
@@ -69,6 +84,8 @@ export function buildPlaybackHandoff(selection, request) {
     resolutionState,
     selectionReason: selection.reason || 'unknown',
     selectedAt: Date.now(),
+    ...(canonicalTitle ? { canonicalTitle } : {}),
+    ...(canonicalYear != null ? { canonicalYear } : {}),
   };
 }
 

@@ -49,12 +49,23 @@ export function materializeVfsEntry(searchCache, handoff, now = () => Date.now()
       throw new Error(`Durable movie handoff identity is inconsistent for ${handoff.mediaId}`);
     }
 
+    // Prefer the canonical request identity (e.g. "Dune: Part Two", 2024
+    // from the Seerr detail body) for the Plex-facing VFS path. Fall back
+    // to the provider release filename only when no canonical identity
+    // was supplied. The provider-backed `filename` and `infoHash` are
+    // unchanged either way.
     const movie = movieIdentity(handoff.filename, handoff.mediaId);
+    const presentationTitle = typeof handoff.canonicalTitle === 'string' && handoff.canonicalTitle.trim()
+      ? handoff.canonicalTitle.trim()
+      : movie.title;
+    const presentationYear = Number.isSafeInteger(handoff.canonicalYear) && handoff.canonicalYear >= 0
+      ? handoff.canonicalYear
+      : movie.year;
     let canonicalPath = buildPreferredCanonicalPath({
       mediaType: 'movie',
       mediaId: handoff.mediaId,
-      title: movie.title,
-      year: movie.year,
+      title: presentationTitle,
+      year: presentationYear,
     }, { extension: movie.extension });
     const usedPaths = new Set(searchCache.listVfsMovieEntries().map((entry) => entry.canonicalPath));
     if (usedPaths.has(canonicalPath)) {

@@ -513,6 +513,7 @@ async function handleSeerrIngress(request, response, searchCache, hydrateVfs = n
   let operationalIntent = intent;
   let identityStatus = 'imdb-already-known';
   let canonicalMediaTitle = null;
+  let canonicalMediaYear = null;
   if (!intent.imdbId && intent.tmdbId) {
     const resolved = await resolveSeerrIdentity(
       { tmdbId: intent.tmdbId, mediaType: intent.mediaType },
@@ -547,6 +548,17 @@ async function handleSeerrIngress(request, response, searchCache, hydrateVfs = n
     identityStatus = 'imdb-resolved';
     if (typeof resolved.canonicalTitle === 'string' && resolved.canonicalTitle.length > 0) {
       canonicalMediaTitle = resolved.canonicalTitle;
+    }
+    // Surface the release year too. The Seerr detail body returns
+    // `releaseDate` as an ISO date (e.g. "2024-02-27"); we only need the
+    // 4-digit year to drive the canonical VFS path. We intentionally do
+    // not add a second metadata lookup — the year is already in the same
+    // Seerr response that supplied the IMDb id and canonical title.
+    if (typeof resolved.releaseDate === 'string' && /^\d{4}/.test(resolved.releaseDate)) {
+      const parsed = Number.parseInt(resolved.releaseDate.slice(0, 4), 10);
+      if (Number.isSafeInteger(parsed) && parsed > 0) {
+        canonicalMediaYear = parsed;
+      }
     }
   }
 
@@ -583,8 +595,8 @@ async function handleSeerrIngress(request, response, searchCache, hydrateVfs = n
     // For non-TV (movies) the existing single-intent pipeline continues.
     if (intent.mediaType !== 'series') {
       return await runSingleSearchByMedia({
-        searchCache, operationalIntent, canonicalMediaTitle, intentId,
-        identityStatus, notificationType, response,
+        searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, intentId,
+        identityStatus, notificationType, response, hydrateVfs,
       });
     }
     // For series with parse failure, we stop here — the parent is durable
@@ -716,6 +728,14 @@ async function handleSeerrIngress(request, response, searchCache, hydrateVfs = n
           intentId: childIntentId,
           persist: true,
           hydrateVfs,
+          // TV series don't currently use the canonical title/year for
+          // the VFS path (TV materializer uses its own filename-derived
+          // identity — unchanged in this slice). Forwarding them is
+          // safe and lets the handoff record the canonical identity
+          // for telemetry / future TV work without forcing a separate
+          // codepath.
+          ...(canonicalMediaTitle ? { canonicalTitle: canonicalMediaTitle } : {}),
+          ...(canonicalMediaYear != null ? { canonicalYear: canonicalMediaYear } : {}),
         });
         childResults.push({
           season: seasonNum,
@@ -807,7 +827,7 @@ async function handleSeerrIngress(request, response, searchCache, hydrateVfs = n
  * missing/malformed Requested Seasons entry, which never reach here).
  */
 async function runSingleSearchByMedia({
-  searchCache, operationalIntent, canonicalMediaTitle, intentId,
+  searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, intentId,
   identityStatus, notificationType, response, hydrateVfs = null,
 }) {
   try {
@@ -826,6 +846,12 @@ async function runSingleSearchByMedia({
       intentId,
       persist: true,
       hydrateVfs,
+      // Forward the canonical Seerr detail identity (originalTitle +
+      // releaseDate) so the VFS materializer builds a clean Plex-facing
+      // path like Movies/Dune Part Two (2024)/Dune Part Two (2024).mkv
+      // instead of inheriting the noisy provider release name.
+      ...(canonicalMediaTitle ? { canonicalTitle: canonicalMediaTitle } : {}),
+      ...(canonicalMediaYear != null ? { canonicalYear: canonicalMediaYear } : {}),
     });
     searchCache.db.prepare(
       'UPDATE media_intents SET last_processed_at = ?, last_result_count = ?, last_error = NULL WHERE id = ?'

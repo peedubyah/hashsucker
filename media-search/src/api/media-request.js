@@ -191,6 +191,17 @@ export async function searchByMedia(cache, request) {
   const priority = request.priority ?? null;
   const mediaTitle = request.mediaTitle || null; // Optional: human-readable media name for identity verification
   const intentId = request.intentId != null ? request.intentId : null; // Optional: pre-existing media_intents.id (skips implicit upsert)
+  // Canonical presentation title/year for the VFS path. Surfaces the
+  // Seerr detail body's `originalTitle` / `releaseDate` so the Plex-facing
+  // directory uses a clean identity (e.g. "Dune Part Two (2024)") instead
+  // of the noisy provider release name. Falls back to the candidate
+  // filename when absent.
+  const canonicalTitle = typeof request.canonicalTitle === 'string' && request.canonicalTitle.trim()
+    ? request.canonicalTitle.trim()
+    : null;
+  const canonicalYear = Number.isSafeInteger(request.canonicalYear) && request.canonicalYear >= 0
+    ? request.canonicalYear
+    : null;
 
   if (!mediaId) {
     throw new Error('mediaId is required');
@@ -379,6 +390,15 @@ export async function searchByMedia(cache, request) {
         mediaType,
         season,
         episode,
+        // Canonical presentation identity (e.g. Seerr `originalTitle` /
+        // `releaseDate`). Threaded into the handoff so the VFS
+        // materializer can build a clean Plex-facing path
+        // (Movies/<Title> (<Year>)/...) without parsing it out of the
+        // provider release filename. Only used for presentation; the
+        // handoff's `filename` / `infoHash` continue to identify the
+        // provider-backed file.
+        ...(canonicalTitle ? { canonicalTitle } : {}),
+        ...(canonicalYear != null ? { canonicalYear } : {}),
       };
       handoff = buildPlaybackHandoff(selection, handoffRequest);
 
@@ -845,6 +865,14 @@ export async function searchByMedia(cache, request) {
       mediaType,
       season,
       episode,
+      // See the live-discovery handoffRequest above. For movies the
+      // canonical title/year are wired all the way to the VFS
+      // presentation path; for series/TV they are stored on the handoff
+      // for downstream telemetry but the VFS TV materializer currently
+      // uses its existing filename-derived identity (unchanged in this
+      // slice).
+      ...(canonicalTitle ? { canonicalTitle } : {}),
+      ...(canonicalYear != null ? { canonicalYear } : {}),
     };
     handoff = buildPlaybackHandoff(selection, handoffRequest);
 
