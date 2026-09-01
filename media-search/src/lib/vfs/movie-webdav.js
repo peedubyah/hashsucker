@@ -93,7 +93,7 @@ async function sendDavXml(response, entries, metadataForEntry) {
   response.end(body);
 }
 
-function sendError(response, error, { size = null } = {}) {
+function sendError(response, error, { size = null, retryAfterSeconds = null } = {}) {
   const status = error instanceof VfsError ? error.status : 500;
   const code = error instanceof VfsError ? error.code : 'INTERNAL_ERROR';
   if (response.headersSent) {
@@ -107,10 +107,15 @@ function sendError(response, error, { size = null } = {}) {
     'cache-control': 'no-store',
   };
   // RFC 7233 §4.4: a 416 response SHOULD include a Content-Range header of
-  // the form "bytes */<size>" so clients can correct their range arithmetic.
+  // the form "bytes */<size>".
   if (status === 416 && Number.isSafeInteger(size) && size > 0) {
     headers['content-range'] = `bytes */${size}`;
     headers['accept-ranges'] = 'bytes';
+  }
+  // RFC 7231 §7.1.3: surface Retry-After when the provider is currently
+  // rate-limiting reads of the cached capability.
+  if (retryAfterSeconds != null && Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+    headers['retry-after'] = String(Math.ceil(retryAfterSeconds));
   }
   response.writeHead(status, headers);
   response.end(body);
@@ -355,8 +360,65 @@ export function createMovieWebDav({
     });
   }
 
+  function parseReadRetryAfter(response) {
+    if (!response || !response.headers) return null;
+    const raw = response.headers.get?.('retry-after');
+    if (!raw) return null;
+    const seconds = Number(String(raw).trim());
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const date = Date.parse(String(raw).trim());
+    if (Number.isFinite(date)) {
+      const diff = date - Date.now();
+      return diff > 0 ? diff : null;
+    }
+    return null;
+  }
+
+  // Bounded read-429 back-pressure. When a byte read against a cached
+  // capability returns 429, mark the state as rate-limited. Subsequent
+  // reads in the backoff window short-circuit BEFORE the seam is
+  // invoked — no new requestdl, no upstream call.
+  const MIN_READ_RETRY_AFTER_MS = 30_000; // 30s floor when upstream omits Retry-After.
+
+  function gateRateLimited(state) {
+    const rl = state?.rateLimited;
+    if (!rl || !Number.isFinite(rl.until)) return null;
+    if (now() >= rl.until) {
+      state.rateLimited = null;
+      return null;
+    }
+    return rl;
+  }
+
+  function markReadRateLimited(state, retryAfterMs) {
+    if (!state) return;
+    const until = now() + (Number.isFinite(retryAfterMs) && retryAfterMs > 0
+      ? retryAfterMs
+      : MIN_READ_RETRY_AFTER_MS);
+    const existing = state.rateLimited;
+    state.rateLimited = { until: Math.max(until, existing?.until || 0) };
+  }
+
   async function openValidatedProviderRead(state, rangeHeader, validate) {
     let firstFailure = null;
+    let sawReadRateLimit = false;
+    // Bounded read-429 back-pressure: if a prior byte read against the
+    // same playback handoff already returned 429 within the backoff
+    // window, refuse the call without re-resolving requestdl and
+    // without hitting the upstream URL again. The capability itself
+    // remains valid — once the window expires the next read reuses it.
+    const earlyGate = gateRateLimited(state);
+    if (earlyGate) {
+      const retryAfterSeconds = Math.max(1, Math.ceil((earlyGate.until - now()) / 1000));
+      const error = new VfsError(
+        'Provider byte reads are currently rate-limited',
+        429,
+        'PROVIDER_READ_RATE_LIMITED',
+      );
+      error.retryAfterMs = Math.max(0, earlyGate.until - now());
+      error.retryAfterSeconds = retryAfterSeconds;
+      throw error;
+    }
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const forceFresh = attempt === 1;
       const backing = await resolveBacking(state, { forceFresh });
@@ -387,8 +449,25 @@ export function createMovieWebDav({
           invalidateTorBoxCapability(backing);
           continue;
         }
+        // Read 429 — the capability itself is still valid; it is just
+        // currently being throttled. Mark the state rate-limited so
+        // concurrent and subsequent reads in the backoff window
+        // short-circuit BEFORE the seam is invoked. Do not retry within
+        // this loop — the next call after the window is the correct
+        // retry boundary.
+        const upstreamRetryAfterMs = parseReadRetryAfter(upstream);
+        markReadRateLimited(state, upstreamRetryAfterMs);
+        sawReadRateLimit = true;
       }
       throw validationError;
+    }
+    if (sawReadRateLimit) {
+      // First-failure path: surface the upstream provider failure as the
+      // existing typed error (preserves the established 502 contract for
+      // the FIRST observer of the 429). The back-pressure window now
+      // guarantees subsequent reads within the window short-circuit
+      // with 429.
+      throw firstFailure;
     }
     throw firstFailure || new VfsError('Provider read failed', 502, 'PROVIDER_READ_FAILED');
   }
@@ -500,29 +579,40 @@ export function createMovieWebDav({
       sendError(response, error, { size: metadata.size });
       return;
     }
-    const opened = await openValidatedProviderRead(
-      state,
-      requestedRange?.header,
-      (upstream) => {
-        if (requestedRange) {
-          const upstreamRange = parseContentRange(upstream.headers.get('content-range'));
-          if (upstream.status !== 206) {
-            return new VfsError('Provider did not honor the requested byte range', 502, 'PROVIDER_RANGE_FAILED');
-          }
-          if (!upstreamRange
-            || upstreamRange.start !== requestedRange.start
-            || upstreamRange.end !== requestedRange.end
-            || upstreamRange.total !== metadata.size) {
-            return new VfsError('Provider returned inconsistent range metadata', 502, 'PROVIDER_RANGE_MISMATCH');
-          }
-        } else if (upstream.status !== 200) {
-          return new VfsError(`Provider returned HTTP ${upstream.status}`, 502, 'PROVIDER_READ_FAILED');
+    const opened = await (async () => {
+      try {
+        return await openValidatedProviderRead(
+          state,
+          requestedRange?.header,
+          (upstream) => {
+            if (requestedRange) {
+              const upstreamRange = parseContentRange(upstream.headers.get('content-range'));
+              if (upstream.status !== 206) {
+                return new VfsError('Provider did not honor the requested byte range', 502, 'PROVIDER_RANGE_FAILED');
+              }
+              if (!upstreamRange
+                || upstreamRange.start !== requestedRange.start
+                || upstreamRange.end !== requestedRange.end
+                || upstreamRange.total !== metadata.size) {
+                return new VfsError('Provider returned inconsistent range metadata', 502, 'PROVIDER_RANGE_MISMATCH');
+              }
+            } else if (upstream.status !== 200) {
+              return new VfsError(`Provider returned HTTP ${upstream.status}`, 502, 'PROVIDER_READ_FAILED');
+            }
+            return upstream.body
+              ? null
+              : new VfsError('Provider response had no body', 502, 'PROVIDER_EMPTY_BODY');
+          },
+        );
+      } catch (error) {
+        if (error instanceof VfsError && error.code === 'PROVIDER_READ_RATE_LIMITED') {
+          sendError(response, error, { retryAfterSeconds: error.retryAfterSeconds ?? 1 });
+          return null;
         }
-        return upstream.body
-          ? null
-          : new VfsError('Provider response had no body', 502, 'PROVIDER_EMPTY_BODY');
-      },
-    );
+        throw error;
+      }
+    })();
+    if (!opened) return;
     const { backing, upstream } = opened;
 
     const contentLength = requestedRange
@@ -604,7 +694,16 @@ export function createMovieWebDav({
         throw new VfsError('Collections are read-only', 405, 'COLLECTION_READ_ONLY');
       }
 
-      const metadata = await ensureMetadata(entry.state);
+      let metadata;
+      try {
+        metadata = await ensureMetadata(entry.state);
+      } catch (error) {
+        if (error instanceof VfsError && error.code === 'PROVIDER_READ_RATE_LIMITED') {
+          sendError(response, error, { retryAfterSeconds: error.retryAfterSeconds ?? 1 });
+          return true;
+        }
+        throw error;
+      }
       if (method === 'HEAD') {
         console.log(`[vfs] stat path="${entry.path}" size=${metadata.size} release=${entry.state.entry.releaseKey}`);
         response.writeHead(200, {

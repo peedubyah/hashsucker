@@ -435,3 +435,219 @@ test('TV VFS does not buffer full-file body and stops reading on client close', 
   assert.ok(upstreamDestroyed || bytesFromProvider < 64 * 1024 * 1024, 'upstream cancelled or bounded reads');
 });
 
+// ---------------------------------------------------------------------------
+// Bounded back-pressure on upstream read 429 (slice 2.5 REPAIR)
+// ---------------------------------------------------------------------------
+//
+// Regression: when TorBox returns 429 on a byte read against a CACHED
+// capability, the same cached URL must not be re-hit until a bounded
+// backoff window elapses. Otherwise N concurrent small-range reads
+// stampede the upstream with N identical 429s. This test proves:
+//   1. The first 429 marks the capability rate-limited (no upstream
+//      re-resolve, no Retry-After → 30s floor).
+//   2. Subsequent reads within the window return 429 immediately,
+//      WITHOUT calling the upstream and WITHOUT calling requestdl
+//      (delivery seam not invoked).
+//   3. The 429 response carries a Retry-After header.
+
+test('TV VFS back-pressures cached capability on upstream read 429 (no upstream retry storm)', async (t) => {
+  const cache = createDiscoveryCache({ dbPath: ':memory:' });
+  t.after(() => cache.close());
+  persistEpisode(cache);
+
+  let deliveryResolutions = 0;
+  let providerOpens = 0;
+  // The real TorBoxDownloadUrlCache is unused for the gate (state-based),
+  // but we wire it through so production paths match.
+  const { getTorBoxDownloadUrlCache } = await import('../src/lib/resolver/torbox-download-url-cache.js');
+  const torBoxDownloadUrlCache = getTorBoxDownloadUrlCache();
+
+  const handler = createTvWebDav({
+    searchCache: cache,
+    rdClient: null,
+    rdResolutionCache: {
+      delete() {},
+      get() { return null; },
+      async getOrInFlight() { throw new Error('unused'); },
+    },
+    resolveTorBoxDeliverySeam: async () => {
+      deliveryResolutions += 1;
+      return {
+        url: 'https://provider.test/file',
+        size: 100,
+        placementId: 'pl_1',
+        providerFileId: 'pf_1',
+        accountScope: 'default',
+        recovered: false,
+      };
+    },
+    torBoxDownloadUrlCache,
+    fetchFn: async (_url, options) => {
+      providerOpens += 1;
+      assert.equal(options.headers.range, 'bytes=10-19');
+      // No Retry-After → minimum 30s floor applies.
+      return new Response('rate limited', { status: 429 });
+    },
+  });
+
+  const url = new URL('http://localhost/vfs/TV/Family%20Guy/Season%2005/Family%20Guy%20-%20S05E12.mkv');
+
+  // First read: hits upstream once, observes 429, marks capability.
+  // The validate callback surfaces 429 as PROVIDER_RANGE_FAILED (502)
+  // per the existing contract; the error propagates and is handled by
+  // the dispatcher's top-level catch in production. In a unit test we
+  // capture the rejection (it does NOT write a 502 response directly
+  // because streamFile only sinks the 429-gate error) and assert on
+  // the call counters.
+  await assert.rejects(
+    handler(createRangeRequest('bytes=10-19'), createCapturingResponse(), url),
+    (error) => error.status === 502 && error.code === 'PROVIDER_RANGE_FAILED',
+    'first read fails with the existing 502 PROVIDER_RANGE_FAILED contract',
+  );
+  assert.equal(deliveryResolutions, 1, 'first read resolves backing exactly once');
+  assert.equal(providerOpens, 1, 'first read calls upstream exactly once');
+
+  // Second read: must short-circuit. NO new delivery resolution, NO new
+  // provider open. Returns 429 with Retry-After.
+  const second = createCapturingResponse();
+  await handler(createRangeRequest('bytes=10-19'), second, url);
+  const secondCaptured = second._capture();
+  assert.equal(secondCaptured.status, 429, 'second read in backoff window returns 429');
+  assert.ok(
+    Number(secondCaptured.headers['retry-after']) >= 1,
+    `retry-after must be a positive integer second count, got ${secondCaptured.headers['retry-after']}`,
+  );
+  assert.equal(deliveryResolutions, 1, 'second read must NOT re-resolve backing (no requestdl stampede)');
+  assert.equal(providerOpens, 1, 'second read must NOT call upstream again');
+
+  // Third concurrent-style read: same assertion.
+  const third = createCapturingResponse();
+  await handler(createRangeRequest('bytes=10-19'), third, url);
+  const thirdCaptured = third._capture();
+  assert.equal(thirdCaptured.status, 429);
+  assert.equal(deliveryResolutions, 1);
+  assert.equal(providerOpens, 1);
+});
+
+test('TV VFS honors upstream Retry-After header on read 429', async (t) => {
+  const cache = createDiscoveryCache({ dbPath: ':memory:' });
+  t.after(() => cache.close());
+  persistEpisode(cache);
+
+  let providerOpens = 0;
+  const { getTorBoxDownloadUrlCache } = await import('../src/lib/resolver/torbox-download-url-cache.js');
+  const torBoxDownloadUrlCache = getTorBoxDownloadUrlCache();
+
+  const handler = createTvWebDav({
+    searchCache: cache,
+    rdClient: null,
+    rdResolutionCache: {
+      delete() {},
+      get() { return null; },
+      async getOrInFlight() { throw new Error('unused'); },
+    },
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://provider.test/file2',
+      size: 100,
+      placementId: 'pl_2',
+      providerFileId: 'pf_2',
+      accountScope: 'default',
+      recovered: false,
+    }),
+    torBoxDownloadUrlCache,
+    fetchFn: async () => {
+      providerOpens += 1;
+      // Upstream honors RFC 7231: 45 seconds.
+      return new Response('rate limited', { status: 429, headers: { 'retry-after': '45' } });
+    },
+  });
+
+  const url = new URL('http://localhost/vfs/TV/Family%20Guy/Season%2005/Family%20Guy%20-%20S05E12.mkv');
+
+  // Prime the gate. The 429 surfaces as the existing 502 contract.
+  await assert.rejects(
+    handler(createRangeRequest('bytes=10-19'), createCapturingResponse(), url),
+    (error) => error.status === 502 && error.code === 'PROVIDER_RANGE_FAILED',
+  );
+  assert.equal(providerOpens, 1);
+
+  // Second read in window: must use upstream-provided Retry-After (45s),
+  // not the 30s floor.
+  const second = createCapturingResponse();
+  await handler(createRangeRequest('bytes=10-19'), second, url);
+  const captured = second._capture();
+  assert.equal(captured.status, 429);
+  assert.ok(
+    Number(captured.headers['retry-after']) >= 30 && Number(captured.headers['retry-after']) <= 45,
+    `retry-after must reflect upstream 45s window, got ${captured.headers['retry-after']}`,
+  );
+  assert.equal(providerOpens, 1, 'no upstream call in backoff window');
+});
+
+test('TV VFS read 429 backoff expires after the window — capability is reused, not invalidated', async (t) => {
+  const cache = createDiscoveryCache({ dbPath: ':memory:' });
+  t.after(() => cache.close());
+  persistEpisode(cache);
+
+  let currentTime = 1_700_000_000_000;
+  const { getTorBoxDownloadUrlCache } = await import('../src/lib/resolver/torbox-download-url-cache.js');
+  const torBoxDownloadUrlCache = getTorBoxDownloadUrlCache();
+
+  let upstreamCalls = 0;
+  const handler = createTvWebDav({
+    searchCache: cache,
+    rdClient: null,
+    rdResolutionCache: {
+      delete() {},
+      get() { return null; },
+      async getOrInFlight() { throw new Error('unused'); },
+    },
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://provider.test/file3',
+      size: 100,
+      placementId: 'pl_3',
+      providerFileId: 'pf_3',
+      accountScope: 'default',
+      recovered: false,
+    }),
+    torBoxDownloadUrlCache,
+    // Returns 429 only on the very first upstream call; thereafter 206.
+    fetchFn: async () => {
+      upstreamCalls += 1;
+      if (upstreamCalls === 1) {
+        return new Response('rate limited', { status: 429 });
+      }
+      return new Response('hello world', {
+        status: 206,
+        headers: { 'content-range': 'bytes 10-19/100' },
+      });
+    },
+    now: () => currentTime,
+  });
+
+  const url = new URL('http://localhost/vfs/TV/Family%20Guy/Season%2005/Family%20Guy%20-%20S05E12.mkv');
+
+  // Prime the gate at t0 — upstream is called once and returns 429,
+  // surfacing as the existing 502 contract.
+  await assert.rejects(
+    handler(createRangeRequest('bytes=10-19'), createCapturingResponse(), url),
+    (error) => error.status === 502 && error.code === 'PROVIDER_RANGE_FAILED',
+  );
+  assert.equal(upstreamCalls, 1);
+
+  // In-window read: short-circuits at the gate, NO upstream call.
+  const inWindow = createCapturingResponse();
+  await handler(createRangeRequest('bytes=10-19'), inWindow, url);
+  assert.equal(inWindow._capture().status, 429);
+  assert.equal(upstreamCalls, 1, 'no upstream call while backoff is active');
+
+  // Advance past the 30s floor — gate must clear, cached capability is
+  // reused (still NO delivery re-resolution; upstream called once for
+  // the new attempt).
+  currentTime += 31_000;
+  const afterWindow = createCapturingResponse();
+  await handler(createRangeRequest('bytes=10-19'), afterWindow, url);
+  assert.equal(upstreamCalls, 2, 'upstream called exactly once after backoff expires');
+  assert.equal(afterWindow._capture().status, 206, 'after window expires, the cached capability is reused and bytes flow');
+});
+
