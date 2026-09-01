@@ -94,6 +94,21 @@ CREATE TABLE IF NOT EXISTS provider_readiness_observations (
   FOREIGN KEY (placement_id) REFERENCES provider_placements(id)
 );
 
+-- Slice 1.5: durable physical-file identity grain (TorrentFile).
+-- Identity is (info_hash, canonical_internal_path). The size is a positive
+-- integer invariant; once inserted it is never updated. Provider addresses
+-- live in provider_files and may churn without disturbing identity.
+CREATE TABLE IF NOT EXISTS torrent_files (
+  id TEXT PRIMARY KEY,
+  info_hash TEXT NOT NULL CHECK (length(info_hash) = 40 AND info_hash NOT GLOB '*[^0-9a-f]*'),
+  internal_path TEXT NOT NULL,
+  size INTEGER NOT NULL CHECK (size > 0),
+  created_at INTEGER NOT NULL,
+  UNIQUE (info_hash, internal_path)
+);
+CREATE INDEX IF NOT EXISTS idx_torrent_files_hash
+  ON torrent_files(info_hash);
+
 CREATE TABLE IF NOT EXISTS provider_files (
   id TEXT PRIMARY KEY,
   placement_id TEXT NOT NULL,
@@ -109,9 +124,22 @@ CREATE TABLE IF NOT EXISTS provider_files (
   inventory_expires_at INTEGER,
   missing_since INTEGER,
   evidence TEXT,
+  torrent_file_id TEXT,
+  mapping_state TEXT NOT NULL DEFAULT 'unmapped'
+    CHECK (mapping_state IN ('unmapped', 'mapped', 'incomplete', 'conflict')),
+  mapping_error TEXT,
   UNIQUE (placement_id, provider_file_id),
-  FOREIGN KEY (placement_id) REFERENCES provider_placements(id)
+  FOREIGN KEY (placement_id) REFERENCES provider_placements(id),
+  FOREIGN KEY (torrent_file_id) REFERENCES torrent_files(id)
 );
+
+-- One present provider file per placement may map to a given TorrentFile. The
+-- partial unique index enforces that no two PRESENT provider_files rows on
+-- one placement can share a torrent_file_id; historical (present=0) rows are
+-- retained for provenance and provider-ID churn.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_files_one_current_mapping
+  ON provider_files(placement_id, torrent_file_id)
+  WHERE present = 1 AND torrent_file_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS provider_inventory_snapshots (
   placement_id TEXT PRIMARY KEY,
@@ -285,6 +313,10 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec('PRAGMA busy_timeout = 5000');
+  // Run column-level migrations BEFORE applying CONTROL_PLANE_SCHEMA so the
+  // fresh schema (partial unique index, FK to torrent_files) sees the
+  // backfilled columns.
+  migrateTorrentFileSchema(db);
   db.exec(CONTROL_PLANE_SCHEMA);
   migrateExposureSchema(db);
   let closed = false;
@@ -576,14 +608,38 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     if (current && options.enforceObservationOrder === true && observedAt < current.observedAt) {
       return listProviderFiles(placementId);
     }
+    const placement = requirePlacement(placementId);
     const seen = new Set();
+    // Pre-pass: detect duplicate canonical paths within this snapshot for
+    // this placement. Two distinct providerFileIds whose paths canonicalize
+    // to the same internal path produce a conflict; neither may become the
+    // authoritative mapped provider ref. Identifying them up front lets us
+    // demote all colliding rows before any partial unique index violation.
+    const canonicalOwners = new Map(); // canonical -> providerFileId
+    const conflictFileIds = new Set();
+    for (const file of files) {
+      const providerFileId = requireString(file.providerFileId, 'providerFileId');
+      if (seen.has(providerFileId)) throw new TypeError(`Duplicate providerFileId: ${providerFileId}`);
+      seen.add(providerFileId);
+      const size = file.size ?? null;
+      if (!isValidTorrentFileSize(size)) continue;
+      const canonical = canonicalizeInternalPath(file.path);
+      const prior = canonicalOwners.get(canonical);
+      if (prior) {
+        conflictFileIds.add(prior);
+        conflictFileIds.add(providerFileId);
+      } else {
+        canonicalOwners.set(canonical, providerFileId);
+      }
+    }
+    seen.clear();
     return transaction(() => {
       const upsert = db.prepare(`
         INSERT INTO provider_files (
           id, placement_id, provider_file_id, path, name, size, selected, media_hint,
           corpus_file_index, present, inventory_observed_at, inventory_expires_at,
-          missing_since, evidence
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)
+          missing_since, evidence, torrent_file_id, mapping_state, mapping_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?, ?)
         ON CONFLICT(placement_id, provider_file_id) DO UPDATE SET
           path = EXCLUDED.path,
           name = EXCLUDED.name,
@@ -595,20 +651,115 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
           inventory_observed_at = EXCLUDED.inventory_observed_at,
           inventory_expires_at = EXCLUDED.inventory_expires_at,
           missing_since = NULL,
-          evidence = EXCLUDED.evidence
+          evidence = EXCLUDED.evidence,
+          torrent_file_id = EXCLUDED.torrent_file_id,
+          mapping_state = EXCLUDED.mapping_state,
+          mapping_error = EXCLUDED.mapping_error
+      `);
+      const torrentFileByKey = db.prepare(`
+        SELECT * FROM torrent_files WHERE info_hash = ? AND internal_path = ?
+      `);
+      const insertTorrentFile = db.prepare(`
+        INSERT INTO torrent_files (id, info_hash, internal_path, size, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      const updateProviderMapping = db.prepare(`
+        UPDATE provider_files
+        SET torrent_file_id = ?, mapping_state = ?, mapping_error = ?
+        WHERE id = ?
       `);
       for (const file of files) {
         const providerFileId = requireString(file.providerFileId, 'providerFileId');
         if (seen.has(providerFileId)) throw new TypeError(`Duplicate providerFileId: ${providerFileId}`);
         seen.add(providerFileId);
+        const size = file.size ?? null;
+        const sizeValid = isValidTorrentFileSize(size);
+        // Always upsert provider_files; the inventory observation is the
+        // durable source of truth. The mapping columns are filled in below
+        // (placeholder 'unmapped') so the row is self-describing.
+        const providerFileRowId = `pf_${randomUUID()}`;
+        const canonical = sizeValid ? canonicalizeInternalPath(file.path) : null;
+        const inDuplicateSet = conflictFileIds.has(providerFileId);
+        const initialState = !sizeValid
+          ? 'incomplete'
+          : (inDuplicateSet ? 'conflict' : 'mapped');
+        const initialError = !sizeValid
+          ? 'invalid-size'
+          : (inDuplicateSet
+            ? JSON.stringify({
+              reason: 'duplicate-canonical-path',
+              canonicalPath: canonical,
+              conflictingProviderFileIds: [...conflictFileIds].filter((id) => id !== providerFileId),
+              observedAt,
+            })
+            : null);
         upsert.run(
-          `pf_${randomUUID()}`, placementId, providerFileId,
+          providerFileRowId, placementId, providerFileId,
           requireString(file.path, 'path', 2000), requireString(file.name, 'name', 1000),
-          file.size ?? null, booleanOrNull(file.selected), file.mediaHint ?? null,
+          size, booleanOrNull(file.selected), file.mediaHint ?? null,
           normalizeOptionalFileIndex(file.corpusFileIndex), observedAt,
           options.expiresAt ?? null,
           file.evidence == null ? null : JSON.stringify(file.evidence),
+          null, initialState, initialError,
         );
+        // Capture the actual row id: ON CONFLICT preserves the existing
+        // provider_files.id, so the pre-existing row's id stays in effect.
+        const actualRowId = db.prepare(
+          'SELECT id FROM provider_files WHERE placement_id = ? AND provider_file_id = ?',
+        ).get(placementId, providerFileId).id;
+        if (!sizeValid) continue;
+        if (inDuplicateSet) {
+          // No TorrentFile mapping; the conflict is durable on the
+          // provider_files row. Emit the lifecycle-event secondary
+          // telemetry when a library item exists for the hash.
+          applyMappingConflict(actualRowId, 'duplicate-canonical-path', {
+            canonicalPath: canonical,
+            conflictingProviderFileIds: [...conflictFileIds],
+            observedAt,
+          });
+          continue;
+        }
+        const existing = torrentFileByKey.get(placement.infoHash, canonical);
+        if (existing) {
+          if (existing.size !== size) {
+            // Same (info_hash, internal_path) but conflicting size. The
+            // existing TorrentFile is immutable: its size is preserved and
+            // the new provider_files row stays in a conflict state.
+            updateProviderMapping.run(existing.id, 'conflict',
+              JSON.stringify({
+                reason: 'size-conflict',
+                canonicalPath: canonical,
+                existingTorrentFileId: existing.id,
+                existingSize: existing.size,
+                observedSize: size,
+                observedAt,
+              }),
+              actualRowId);
+            applyMappingConflict(actualRowId, 'size-conflict', {
+              canonicalPath: canonical, existingTorrentFileId: existing.id,
+              existingSize: existing.size, observedSize: size, observedAt,
+            });
+            continue;
+          }
+          // Provider-ID churn within the same placement: the prior present
+          // provider_file for the same canonical must be demoted first so
+          // the partial unique index sees at most one present row per
+          // (placement, torrent_file_id).
+          db.prepare(`
+            UPDATE provider_files
+            SET present = 0, missing_since = COALESCE(missing_since, ?),
+              inventory_observed_at = ?, inventory_expires_at = ?
+            WHERE placement_id = ? AND torrent_file_id = ? AND present = 1
+              AND provider_file_id != ?
+          `).run(observedAt, observedAt, options.expiresAt ?? null,
+            placementId, existing.id, providerFileId);
+          // Idempotent reuse: same identity, same size, no size update.
+          updateProviderMapping.run(existing.id, 'mapped', null, actualRowId);
+        } else {
+          const torrentFileId = `tf_${randomUUID()}`;
+          insertTorrentFile.run(torrentFileId, placement.infoHash, canonical, size, observedAt);
+          updateProviderMapping.run(torrentFileId, 'mapped', null, actualRowId);
+        }
       }
       if (seen.size === 0) {
         db.prepare(`
@@ -647,12 +798,94 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     });
   }
 
+  // Slice 1.5: durable mapping conflict. The provider_files row is the
+  // source of truth: mapping_state='conflict' and mapping_error carry the
+  // full reason payload. Lifecycle events remain as secondary telemetry,
+  // emitted only when a library item exists for the hash; conflict visibility
+  // does NOT depend on library_item_id.
+  function applyMappingConflict(providerFileRowId, reason, payload) {
+    const evidence = JSON.stringify({ reason, ...payload });
+    db.prepare(`
+      UPDATE provider_files
+      SET mapping_state = 'conflict', mapping_error = ?
+      WHERE id = ?
+    `).run(evidence, providerFileRowId);
+    // Secondary telemetry when a library item exists. The provider_files
+    // state is the authoritative record and remains durable regardless.
+    const placementRow = db.prepare(`
+      SELECT p.info_hash FROM provider_files pf
+      JOIN provider_placements p ON p.id = pf.placement_id
+      WHERE pf.id = ?
+    `).get(providerFileRowId);
+    if (!placementRow) return;
+    const item = findLibraryItemByInfoHash(placementRow.info_hash);
+    if (!item) return;
+    const milestone = 'torrent-file-mapping-conflict';
+    db.prepare(`
+      INSERT INTO lifecycle_events (
+        library_item_id, milestone, status, occurred_at, failure_category,
+        retryable, retry_after_ms, source, reason, evidence, correlation_id, recorded_at
+      ) VALUES (?, ?, 'degraded', ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+    `).run(
+      item.id, milestone, payload.observedAt ?? now(),
+      requireString(reason, 'reason'),
+      0, 'control-plane-store', reason,
+      JSON.stringify({ ...payload, providerFileRowId }), null, now(),
+    );
+  }
+
+  function findLibraryItemByInfoHash(infoHash) {
+    const normalized = normalizeInfoHash(infoHash);
+    // library_items does not store info_hash directly; correlation uses
+    // bindings.active. We return null when no binding is present. Future
+    // reconciliation can extend this once canonical-library-item joins are
+    // authoritative.
+    const row = db.prepare(`
+      SELECT li.* FROM library_items li
+      JOIN bindings b ON b.library_item_id = li.id
+      WHERE b.info_hash = ? AND b.status = 'active'
+      LIMIT 1
+    `).get(normalized);
+    return row ? rowToLibraryItem(row) : null;
+  }
+
   function listProviderFiles(placementId, { includeMissing = false } = {}) {
     return db.prepare(`
       SELECT * FROM provider_files
       WHERE placement_id = ?${includeMissing ? '' : ' AND present = 1'}
       ORDER BY path, provider_file_id
     `).all(placementId).map(rowToProviderFile);
+  }
+
+  function getTorrentFile(id) {
+    const row = db.prepare('SELECT * FROM torrent_files WHERE id = ?')
+      .get(requireString(id, 'torrentFileId'));
+    return row ? rowToTorrentFile(row) : null;
+  }
+
+  function findTorrentFile(infoHash, internalPath) {
+    const normalizedHash = normalizeInfoHash(infoHash);
+    const canonical = canonicalizeInternalPath(internalPath);
+    const row = db.prepare(`
+      SELECT * FROM torrent_files WHERE info_hash = ? AND internal_path = ?
+    `).get(normalizedHash, canonical);
+    return row ? rowToTorrentFile(row) : null;
+  }
+
+  function listTorrentFilesForRelease(infoHash) {
+    const normalizedHash = normalizeInfoHash(infoHash);
+    return db.prepare(`
+      SELECT * FROM torrent_files WHERE info_hash = ? ORDER BY internal_path
+    `).all(normalizedHash).map(rowToTorrentFile);
+  }
+
+  function listProviderRefsForTorrentFile(torrentFileId) {
+    requireString(torrentFileId, 'torrentFileId');
+    return db.prepare(`
+      SELECT * FROM provider_files
+      WHERE torrent_file_id = ?
+      ORDER BY placement_id, provider_file_id
+    `).all(torrentFileId).map(rowToProviderFile);
   }
 
   function getProviderInventorySnapshot(placementId) {
@@ -1351,6 +1584,10 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     replaceProviderFileInventory,
     listProviderFiles,
     getProviderInventorySnapshot,
+    getTorrentFile,
+    findTorrentFile,
+    listTorrentFilesForRelease,
+    listProviderRefsForTorrentFile,
     recordFileMapping,
     recordExposure,
     recordZurgMetadataObservation,
@@ -1424,6 +1661,14 @@ function rowToReadinessObservation(row) {
   };
 }
 function rowToProviderFile(row) {
+  let mappingError = row.mapping_error;
+  if (mappingError) {
+    try {
+      mappingError = JSON.parse(mappingError);
+    } catch {
+      // mapping_error may be a legacy plain string from earlier versions.
+    }
+  }
   return {
     id: row.id, placementId: row.placement_id, providerFileId: row.provider_file_id,
     path: row.path, name: row.name, size: row.size, selected: fromSqlBoolean(row.selected),
@@ -1431,6 +1676,13 @@ function rowToProviderFile(row) {
     present: row.present === 1, inventoryObservedAt: row.inventory_observed_at,
     inventoryExpiresAt: row.inventory_expires_at, missingSince: row.missing_since,
     evidence: row.evidence ? JSON.parse(row.evidence) : null,
+    torrentFileId: row.torrent_file_id, mappingState: row.mapping_state, mappingError,
+  };
+}
+function rowToTorrentFile(row) {
+  return {
+    id: row.id, infoHash: row.info_hash, internalPath: row.internal_path,
+    size: row.size, createdAt: row.created_at,
   };
 }
 function rowToProviderInventorySnapshot(row) {
@@ -1592,12 +1844,122 @@ function migrateExposureSchema(db) {
     db.exec('PRAGMA foreign_keys = ON');
   }
 }
+// Slice 1.5: collapse the legacy torrent_file_provider_refs table into
+// provider_files. The migration is non-destructive for any prior inventory
+// observation and idempotent.
+function migrateTorrentFileSchema(db) {
+  const providerColumns = db.prepare('PRAGMA table_info(provider_files)').all();
+  const hasProviderFiles = providerColumns.length > 0;
+  if (hasProviderFiles) {
+    if (!providerColumns.some((row) => row.name === 'torrent_file_id')) {
+      db.exec('ALTER TABLE provider_files ADD COLUMN torrent_file_id TEXT');
+    }
+    if (!providerColumns.some((row) => row.name === 'mapping_state')) {
+      db.exec(`ALTER TABLE provider_files ADD COLUMN mapping_state TEXT NOT NULL DEFAULT 'unmapped'`);
+    }
+    if (!providerColumns.some((row) => row.name === 'mapping_error')) {
+      db.exec('ALTER TABLE provider_files ADD COLUMN mapping_error TEXT');
+    }
+  }
+  const hasLegacyRefs = db.prepare(`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'torrent_file_provider_refs'
+  `).get();
+  if (hasLegacyRefs) {
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      // Backfill: a legacy ref is "current" when its placement/provider_file
+      // pair still exists in provider_files and is present. We treat state
+      // 'mapped' as mapped; 'missing' and 'stale' become 'incomplete'. The
+      // torrent_file_id is the only durable link we need to preserve.
+      db.exec(`
+        UPDATE provider_files
+        SET torrent_file_id = (
+          SELECT tfr.torrent_file_id
+          FROM torrent_file_provider_refs tfr
+          WHERE tfr.placement_id = provider_files.placement_id
+            AND tfr.provider_file_id = provider_files.provider_file_id
+            AND tfr.torrent_file_id IS NOT NULL
+        ),
+        mapping_state = CASE
+          WHEN EXISTS (
+            SELECT 1 FROM torrent_file_provider_refs tfr
+            WHERE tfr.placement_id = provider_files.placement_id
+              AND tfr.provider_file_id = provider_files.provider_file_id
+              AND tfr.torrent_file_id IS NOT NULL
+          ) THEN CASE
+            WHEN EXISTS (
+              SELECT 1 FROM torrent_file_provider_refs tfr
+              WHERE tfr.placement_id = provider_files.placement_id
+                AND tfr.provider_file_id = provider_files.provider_file_id
+                AND tfr.state = 'mapped'
+            ) THEN 'mapped'
+            ELSE 'incomplete'
+          END
+          ELSE 'unmapped'
+        END
+        WHERE torrent_file_id IS NULL;
+      `);
+      db.exec('DROP TABLE IF EXISTS torrent_file_provider_refs');
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
+  // Slice 1.5 makes torrent_files.size immutable; drop the legacy updated_at
+  // column if it was carried over from a prior deployment.
+  const torrentColumns = db.prepare('PRAGMA table_info(torrent_files)').all();
+  if (torrentColumns.some((row) => row.name === 'updated_at')) {
+    // SQLite ALTER TABLE DROP COLUMN is supported (3.35+). node:sqlite is
+    // built against a recent SQLite; this is a no-op on fresh DBs.
+    db.exec('ALTER TABLE torrent_files DROP COLUMN updated_at');
+  }
+}
 function normalizeOptionalFileIndex(value) {
   if (value == null) return null;
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new TypeError('corpusFileIndex must be null or a non-negative safe integer');
   }
   return value;
+}
+
+// Slice 1.5: smallest-justified canonicalization for a provider-reported
+// torrent-relative path. Preserves case and Unicode exactly (the provider
+// path is the authoritative fact per Slice 0 evidence). Only collapses
+// observed syntactic equivalent forms: a single leading "/" (Real-Debrid
+// frames torrent-relative paths with a leading slash; TorBox omits it) and a
+// single leading "./" segment. Interior runs of slashes are preserved
+// because Slice 0 observed no provider reporting them.
+function canonicalizeInternalPath(rawPath) {
+  if (typeof rawPath !== 'string') {
+    throw new TypeError('internal path must be a string');
+  }
+  let p = rawPath;
+  if (p.length === 0) {
+    throw new TypeError('internal path must be a non-empty string');
+  }
+  // Reject backslashes and NULs. Providers in scope use forward slashes.
+  if (p.includes('\\') || p.includes('\0')) {
+    throw new TypeError('internal path must not contain backslashes or NULs');
+  }
+  // Strip a single leading "/" (RD vs TorBox framing artifact only).
+  if (p.startsWith('/')) p = p.slice(1);
+  // Strip a single leading "./" segment only. Do not collapse interior runs
+  // of slashes (no provider evidence of this) and do not strip basename-only
+  // forms.
+  if (p.startsWith('./')) p = p.slice(2);
+  if (p.length === 0 || p === '.' || p === '..' || p.includes('/../') || p.endsWith('/..')
+    || p.startsWith('../')) {
+    throw new TypeError('internal path must not resolve above the torrent root');
+  }
+  return p;
+}
+
+function isValidTorrentFileSize(value) {
+  return Number.isSafeInteger(value) && value > 0;
 }
 function normalizeIdentifier(value) {
   if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value.trim())) {
