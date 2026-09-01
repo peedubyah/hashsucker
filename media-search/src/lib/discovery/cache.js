@@ -2025,13 +2025,18 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       )
     ORDER BY h.media_id, h.season, h.episode
   `);
+  // Prefer the authoritative handoff (torrent_file_id IS NOT NULL) when one
+  // exists. This is needed because Slice 2.1 persisted authoritative handoffs
+  // (with torrent_file_id) alongside legacy ones (NULL). The legacy row was
+  // inserted first; without this ordering the WebDAV supersede path would read
+  // the stale legacy handoff and fail to reconcile the legacy VFS row.
   const getTvPlaybackHandoffStmt = db.prepare(`
     SELECT * FROM playback_handoffs
     WHERE media_id = @media_id
       AND season = @season
       AND episode = @episode
       AND media_type IN ('series', 'tv')
-    ORDER BY created_at DESC, id DESC
+    ORDER BY torrent_file_id IS NOT NULL DESC, created_at DESC, id DESC
     LIMIT 1
   `);
   const getVfsTvEntryStmt = db.prepare(`
