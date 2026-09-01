@@ -668,6 +668,16 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
         SET torrent_file_id = ?, mapping_state = ?, mapping_error = ?
         WHERE id = ?
       `);
+      // Conflict-only path: never assigns torrent_file_id. The provider_file
+      // row's torrent_file_id is preserved as-is (typically NULL for a fresh
+      // conflict row). This avoids assigning a TorrentFile id to a row that
+      // must remain unmapped, and prevents violating the partial unique
+      // index when a same-placement prior row already points at the same TF.
+      const markProviderFileConflict = db.prepare(`
+        UPDATE provider_files
+        SET mapping_state = ?, mapping_error = ?
+        WHERE id = ?
+      `);
       for (const file of files) {
         const providerFileId = requireString(file.providerFileId, 'providerFileId');
         if (seen.has(providerFileId)) throw new TypeError(`Duplicate providerFileId: ${providerFileId}`);
@@ -723,9 +733,19 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
         if (existing) {
           if (existing.size !== size) {
             // Same (info_hash, internal_path) but conflicting size. The
-            // existing TorrentFile is immutable: its size is preserved and
-            // the new provider_files row stays in a conflict state.
-            updateProviderMapping.run(existing.id, 'conflict',
+            // existing TorrentFile is immutable: its size is preserved. The
+            // new provider_files row becomes a size-conflict and MUST NOT
+            // receive a torrent_file_id, otherwise:
+            //   - within one placement, a previously-present row already
+            //     points at the same TorrentFile, which would violate the
+            //     partial unique index on (placement_id, torrent_file_id)
+            //     for present rows and roll back the transaction;
+            //   - across placements, the conflict row would pollute
+            //     listProviderRefsForTorrentFile with a row that is not a
+            //     valid current mapping.
+            // The existing valid historical provider_files mapping (if any)
+            // is left untouched.
+            markProviderFileConflict.run('conflict',
               JSON.stringify({
                 reason: 'size-conflict',
                 canonicalPath: canonical,

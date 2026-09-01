@@ -199,7 +199,64 @@ test('cross-placement same (infoHash, internalPath) with different size keeps th
   const p2Files = store.listProviderFiles(p2.id);
   assert.equal(p2Files.length, 1);
   assert.equal(p2Files[0].mappingState, 'conflict');
+  assert.equal(p2Files[0].torrentFileId, null,
+    'size-conflict row must NOT carry a torrent_file_id (would pollute listProviderRefsForTorrentFile)');
   assert.equal(p2Files[0].mappingError.reason, 'size-conflict');
+  assert.equal(p2Files[0].mappingError.existingTorrentFileId, tfs[0].id,
+    'mapping_error must reference the existing TorrentFile for context');
+  store.close();
+});
+
+test('same-placement INTER-CALL size conflict preserves historical mapping and surfaces new row as conflict', () => {
+  const store = createControlPlaneStore({ now: () => 1_000 });
+  const placement = setupPlacement(store, HASH, 'torrent-intercall');
+  // First inventory: providerFileId A is mapped to the (only) TorrentFile.
+  store.replaceProviderFileInventory(placement.id, [
+    { providerFileId: 'A', path: 'x.mkv', name: 'x.mkv', size: 5 },
+  ], { authoritative: true, complete: true, observedAt: 0, expiresAt: 9_999_999_999_999 });
+  const [torrentFile] = store.listTorrentFilesForRelease(HASH);
+  assert.equal(torrentFile.size, 5);
+  const firstRow = store.listProviderFiles(placement.id)[0];
+  assert.equal(firstRow.providerFileId, 'A');
+  assert.equal(firstRow.mappingState, 'mapped');
+  assert.equal(firstRow.torrentFileId, torrentFile.id);
+  // Second inventory under a NEW providerFileId but the same canonical path
+  // and a different positive size. The prior present row is the valid
+  // historical mapping for the only TorrentFile. Assigning a torrent_file_id
+  // to the new row would violate the partial unique index and roll back.
+  store.replaceProviderFileInventory(placement.id, [
+    { providerFileId: 'B', path: 'x.mkv', name: 'x.mkv', size: 9 },
+  ], { authoritative: true, complete: true, observedAt: 100, expiresAt: 9_999_999_999_999 });
+  // Still exactly one TorrentFile; its size is the first observed value and
+  // is never updated.
+  const tfsAfter = store.listTorrentFilesForRelease(HASH);
+  assert.equal(tfsAfter.length, 1);
+  assert.equal(tfsAfter[0].id, torrentFile.id);
+  assert.equal(tfsAfter[0].size, 5);
+  // The new providerFileId B is present=1, in 'conflict', with NO
+  // torrent_file_id; its mapping_error points at the existing TorrentFile.
+  const bRow = store.listProviderFiles(placement.id).find((f) => f.providerFileId === 'B');
+  assert.ok(bRow);
+  assert.equal(bRow.present, true);
+  assert.equal(bRow.mappingState, 'conflict');
+  assert.equal(bRow.torrentFileId, null,
+    'size-conflict row must NOT be assigned a torrent_file_id');
+  assert.equal(bRow.mappingError.reason, 'size-conflict');
+  assert.equal(bRow.mappingError.existingTorrentFileId, torrentFile.id);
+  assert.equal(bRow.mappingError.observedSize, 9);
+  // The historical provider_files row for A becomes present=0 (disappeared
+  // from this inventory) but RETAINS its torrent_file_id linkage, so
+  // listProviderRefsForTorrentFile still surfaces the historical ref.
+  const allRows = store.listProviderFiles(placement.id, { includeMissing: true });
+  const aRow = allRows.find((f) => f.providerFileId === 'A');
+  assert.ok(aRow);
+  assert.equal(aRow.present, false);
+  assert.equal(aRow.torrentFileId, torrentFile.id,
+    'historical mapping for A is preserved across the inter-call conflict');
+  const refs = store.listProviderRefsForTorrentFile(torrentFile.id);
+  const refIds = new Set(refs.map((r) => r.providerFileId));
+  assert.ok(refIds.has('A'),
+    'historical providerFileId A still appears in listProviderRefsForTorrentFile');
   store.close();
 });
 
