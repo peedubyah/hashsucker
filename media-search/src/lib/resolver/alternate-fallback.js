@@ -16,14 +16,12 @@
  * - Avoids duplicate hashes/releaseKeys in fallback chain
  *
  * Availability behavior:
- * - Fresh cached observation → usable immediately
+ * - Fresh TorBox cached observation → usable immediately (no RD calls)
  * - Stale/missing observation → use bounded playback revalidation
- * - Uncached → skip to next persisted candidate
- * - Provider-check error → record failure and continue only if another candidate exists
- * - Real-Debrid: if wired, attempt bounded RD resolution in addition to TorBox.
- *   TorBox usable + RD usable → prefer RD (debrid-first for non-TorBox-handoff
- *   sessions). TorBox unusable but RD usable → still return usable via RD.
- *   Neither usable → continue to next persisted candidate.
+ * - Uncached → attempt bounded RD resolution if wired; skip to next candidate if not
+ * - Provider-check error + RD wired → attempt bounded RD resolution; continue if not
+ * - Provider-check error + RD not wired → skip to next candidate
+ * - Neither TorBox nor RD usable → continue to next persisted candidate
  */
 
 import { createRevalidator, REVALIDATION_OUTCOME } from './availability-revalidation.js';
@@ -376,7 +374,12 @@ export function createAlternateFallback(dependencies = {}) {
 
   /**
    * Check availability of a candidate using the revalidator, and attempt
-   * bounded RD resolution when RD is wired.
+   * bounded RD resolution when RD is wired AND TorBox does not already
+   * confirm the candidate as cached.
+   *
+   * Milestone contract:
+   *   - Usable existing provider placement → use it (no RD calls)
+   *   - Provider unusable → bounded same-TorrentFile cross-provider fallback
    *
    * @param {Object} candidate - Filtered candidate
    * @returns {Promise<Object>} Availability result
@@ -390,16 +393,20 @@ export function createAlternateFallback(dependencies = {}) {
       provider: 'torbox',
     });
 
-    // Attempt RD resolution unconditionally when wired — both TorBox-usable
-    // and TorBox-unusable candidates may be RD-usable (RD can be cached where
-    // TorBox is uncached, or vice versa).
-    const rdResolution = await attemptRdResolutionFromAlternate(candidate);
+    const isTorBoxCached = revalidation.cacheState === REVALIDATION_OUTCOME.CACHED;
+
+    // Only attempt RD resolution when TorBox does NOT confirm the candidate
+    // as cached. A usable TorBox placement must be used as-is — no
+    // cross-provider calls merely because RD is wired.
+    const rdResolution = isTorBoxCached
+      ? null
+      : await attemptRdResolutionFromAlternate(candidate);
 
     return {
       candidate,
       revalidation,
       rdResolution,
-      isUsable: revalidation.cacheState === REVALIDATION_OUTCOME.CACHED,
+      isUsable: isTorBoxCached || (rdResolution && rdResolution.usable),
       isUncached: revalidation.cacheState === REVALIDATION_OUTCOME.UNCACHED,
       isUnknown: revalidation.cacheState === REVALIDATION_OUTCOME.UNKNOWN,
     };
@@ -408,11 +415,10 @@ export function createAlternateFallback(dependencies = {}) {
   /**
    * Find the first usable alternate candidate.
    *
-   * Selection rule:
-   *  - TorBox CACHED + RD usable → return with rdResolution (prefer RD)
-   *  - TorBox CACHED only (RD not wired or not usable) → return with revalidation
-   *  - TorBox UNCACHED/UNKNOWN + RD usable → return with rdResolution
-   *  - Both fail → continue to next candidate
+   * Selection rule (milestone contract):
+   *   - TorBox CACHED → use it (no RD calls, no cross-provider work)
+   *   - TorBox UNCACHED/UNKNOWN + RD usable → return usable via RD
+   *   - Both fail → continue to next candidate
    *
    * @param {Object} params
    * @param {string} params.mediaId - Media identifier
@@ -438,30 +444,30 @@ export function createAlternateFallback(dependencies = {}) {
     });
 
     for (const candidate of candidates) {
-      const availability = await checkCandidateAvailability(candidate);
-      const { rdResolution } = availability;
+      // Revalidate TorBox availability first.
+      const revalidation = await revalidator.revalidateAvailability({
+        cache: searchCache,
+        infoHash: candidate.info_hash,
+        mediaId: candidate.media_id || '',
+        releaseKey: candidate.releaseKey,
+        provider: 'torbox',
+      });
 
-      // TorBox CACHED → usable. If RD is also usable, prefer RD (debrid-first).
-      if (availability.isUsable) {
-        if (rdResolution && rdResolution.usable) {
-          return {
-            candidate: availability.candidate,
-            revalidation: availability.revalidation,
-            rdResolution,
-          };
-        }
+      // TorBox confirms cached → use it without any RD calls.
+      if (revalidation.cacheState === REVALIDATION_OUTCOME.CACHED) {
         return {
-          candidate: availability.candidate,
-          revalidation: availability.revalidation,
-          rdResolution: rdResolution && !rdResolution.usable ? rdResolution : null,
+          candidate,
+          revalidation,
+          rdResolution: null,
         };
       }
 
-      // TorBox UNCACHED/UNKNOWN but RD can resolve it → still return usable via RD.
+      // TorBox unavailable — attempt bounded RD resolution only when needed.
+      const rdResolution = await attemptRdResolutionFromAlternate(candidate);
       if (rdResolution && rdResolution.usable) {
         return {
-          candidate: availability.candidate,
-          revalidation: availability.revalidation,
+          candidate,
+          revalidation,
           rdResolution,
         };
       }
