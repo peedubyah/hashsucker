@@ -2,21 +2,42 @@
 /**
  * Direct-Play + Refresh-Invariant Canary
  *
- * Slice 2.5 / B7: prove that the direct-play session for Fleabag
- * S01E03 (tt5687612) opens, supports multiple seeks, stops cleanly,
- * and restarts. Crucially, NONE of these operations may trigger a
- * Plex partial-refresh. The notifier is publication-driven only.
+ * Slice 2.5 / B7 (orig) + Slice 2.9 stop/restart fix: prove that the
+ * direct-play session for Fleabag S01E03 (tt5687612) opens, supports
+ * multiple seeks, STOPS cleanly without poisoning the provider
+ * capability, and a FRESH session restarts.
  *
- * Sequence (B7):
- *   1. Source opens (Plex Part ID)
- *   2. Beginning bytes
- *   3. Forward seek
- *   4. Another forward seek
- *   5. Backward seek
- *   6. Near-tail seek
- *   7. Stop / connection close
- *   8. Restart (open again)
- *   9. Beginning / non-zero read again
+ * The fix (Slice 2.9): the prior revision called `controller.abort()`
+ * on a controller that timedFetch had already replaced with its own
+ * internal controller. That left the "stop" branch effectively a
+ * no-op against a header-only `Connection: close` — which technically
+ * worked but made the contract ambiguous: a future reader could not
+ * tell whether the abort was load-bearing for any subsequent request.
+ *
+ * This revision models the canary as TWO EXPLICIT SESSIONS:
+ *
+ *   SESSION 1 — opening + seeks + stop/close
+ *     - beginning Range  → 206
+ *     - forward seek 25% → 206
+ *     - forward seek 50% → 206
+ *     - backward seek ~10% → 206
+ *     - near-tail          → 206
+ *     - stop / close (Connection: close, no abort of anything)
+ *
+ *   SESSION 2 — independent fetch/connection
+ *     - reopen beginning or small nonzero range → 206
+ *     - seek once                              → 206
+ *     - stop cleanly
+ *
+ * CRITICAL: each session owns a private AbortController. We never
+ * call .abort() on a controller whose fetch has already returned,
+ * and we never share a single signal across the two sessions. The
+ * stop in session 1 sends `Connection: close` and discards the
+ * response body — it does NOT touch any external state.
+ *
+ * The canary MUST demonstrate that client stop/close does NOT
+ * poison the provider capability: session 2 sees a fresh 206
+ * from the same Plex Part.
  *
  * Bonus invariant (B11): refresh accounting does not change during
  * the canary. We pull /api/metrics before and after and assert the
@@ -47,6 +68,7 @@ const WITH_METRICS = !args['no-metrics'];
 const FLEABAG_MEDIA_ID = 'tt5687612';
 const FLEABAG_SECTION = process.env.PLEX_TV_SECTION_ID || '3';
 const MAX_BYTES = 1024 * 1024; // 1 MiB per read
+const FETCH_TIMEOUT_MS = 120_000; // 120s: accommodates cold capability + slow provider path
 
 const events = [];
 
@@ -82,9 +104,20 @@ function redactToken(value) {
   return value.split(PLEX_TOKEN).join('<PLEX_TOKEN>');
 }
 
-async function timedFetch(url, init = {}) {
+/**
+ * Session-scoped fetch. Each call constructs a brand-new AbortController
+ * bound to its OWN timeout. The signal is private to this call.
+ * The returned `controller` is exposed so the caller can decide
+ * whether to abort — but the contract here is: do NOT abort a
+ * controller whose fetch has already resolved.
+ *
+ * @returns {Promise<{response: Response, safeUrl: string, elapsedMs: number, controller: AbortController}>}
+ */
+async function sessionFetch(url, init = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15_000);
+  const timer = setTimeout(() => {
+    try { controller.abort(new Error('canary-fetch-timeout')); } catch { /* ignore */ }
+  }, FETCH_TIMEOUT_MS);
   try {
     const start = Date.now();
     const safeUrl = redactToken(url);
@@ -97,134 +130,120 @@ async function timedFetch(url, init = {}) {
         Accept: '*/*',
       },
     });
-    return { response, safeUrl, elapsedMs: Date.now() - start };
+    return { response, safeUrl, elapsedMs: Date.now() - start, controller };
   } finally {
     clearTimeout(timer);
   }
 }
 
+/**
+ * Read a single range. Each invocation is its own session.
+ * No shared AbortController across calls.
+ */
 async function readRange(partKey, { start, end, size }) {
   if (end >= size) end = size - 1;
   const expected = end - start + 1;
   const url = `${PLEX_URL}${partKey}?X-Plex-Token=${PLEX_TOKEN}`;
-  const { response, safeUrl, elapsedMs } = await timedFetch(url, {
+  const { response, safeUrl, elapsedMs, controller } = await sessionFetch(url, {
     headers: { range: `bytes=${start}-${end}` },
   });
-  const observed = Number(response.headers.get('content-length') || 0);
-  const buf = Buffer.from(await response.arrayBuffer());
-  const cr = response.headers.get('content-range');
-  const ok = response.status === 206
-    && observed === expected
-    && buf.length === expected
-    && cr === `bytes ${start}-${end}/${size}`;
-  // Discard the bytes — we don't need them in memory.
-  return { ok, status: response.status, contentRange: cr, expected, actual: buf.length, elapsedMs, safeUrl };
+  try {
+    const observed = Number(response.headers.get('content-length') || 0);
+    const buf = Buffer.from(await response.arrayBuffer());
+    const cr = response.headers.get('content-range');
+    const ok = response.status === 206
+      && observed === expected
+      && buf.length === expected
+      && cr === `bytes ${start}-${end}/${size}`;
+    return { ok, status: response.status, contentRange: cr, expected, actual: buf.length, elapsedMs, safeUrl };
+  } finally {
+    // The fetch has resolved and we have read the body. The signal
+    // is now attached to nothing observable; we still avoid calling
+    // .abort() on it because doing so is the exact pattern that
+    // conflated stop and abort in the prior revision. Letting the
+    // controller be GC'd is the cleanest expression of "done".
+    void controller;
+  }
 }
 
+/**
+ * Stop / close the current session. This is the SESSION 1 only.
+ *
+ * Strategy: a single GET with `Connection: close` so the underlying
+ * socket is closed by the server. We DO NOT abort any controller;
+ * we DO NOT touch session 2's state; we DO NOT touch any shared
+ * signal. The connection-level close is the only mechanism.
+ *
+ * Returns the final response status. The response body is discarded
+ * without being held beyond this function.
+ */
 async function stopSession(partKey) {
-  // Plex Part reads are stateless GET requests. "Stopping" the
-  // session is just closing the connection. We simulate by
-  // requesting with Connection: close and reading a 0-byte tail.
   const url = `${PLEX_URL}${partKey}?X-Plex-Token=${PLEX_TOKEN}`;
-  const controller = new AbortController();
-  const { response, safeUrl } = await timedFetch(url, {
+  // This fetch has its OWN AbortController inside sessionFetch.
+  // We never call .abort() externally. The Connection: close
+  // header asks the server to close the socket after the response.
+  const { response, safeUrl } = await sessionFetch(url, {
     headers: { range: 'bytes=0-0', connection: 'close' },
-    signal: controller.signal,
   });
-  controller.abort();
   return { status: response.status, safeUrl };
 }
 
 async function resolvePart() {
-  // Strategy 1: explicit env override
+  // Strategy 1: explicit env override with known size (avoids Plex metadata lookup)
   if (process.env.FLEABAG_PART_ID) {
     return {
       partId: Number(process.env.FLEABAG_PART_ID),
       partKey: `/library/parts/${process.env.FLEABAG_PART_ID}/file.mkv`,
-      partSize: 0, // unknown; resolved below
-      partFile: '<env override>',
+      partSize: Number(process.env.FLEABAG_E03_SIZE || 0),
+      partFile: process.env.FLEABAG_PART_FILE || '<env override>',
     };
   }
-  // Strategy 2: walk the section metadata for tt5687612 S01E03
-  const sectionUrl = `${PLEX_URL}/library/sections/${FLEABAG_SECTION}/all?X-Plex-Token=${PLEX_TOKEN}`;
-  const { response: sec, safeUrl: secUrl } = await timedFetch(sectionUrl);
-  if (!sec.ok) {
-    emit('canary.section_unreachable', { safe_url: secUrl, status: sec.status });
+  // Strategy 2: walk the season children (show->season->children).
+  // The season children response includes Part elements inline, so we can
+  // extract E03's Part from a single response without a separate metadata
+  // request (which can timeout on episodes with large metadata).
+  const showKey = '177';
+  const { response: seasonResp, safeUrl: seasonUrl } = await sessionFetch(
+    `${PLEX_URL}/library/metadata/${showKey}/children?X-Plex-Token=${PLEX_TOKEN}`,
+  );
+  if (!seasonResp.ok) {
+    emit('canary.season_unreachable', { safe_url: seasonUrl, status: seasonResp.status });
     return null;
   }
-  const xml = await sec.text();
-  // Find the show for tt5687612. Plex's section listing uses a
-  // `plex://show/...` GUID for the show; the IMDb GUID appears on
-  // <Guid> sub-elements or on individual <Video> (episode) entries.
-  // We match by the IMDb GUID first, falling back to the show slug
-  // or title (which is stable for this canary).
-  const imdbShowRe = new RegExp(`<Directory[^>]*guid="com\\.plexapp\\.agents\\.imdb:\\/\\/tt5687612"[^>]*key="\\/library\\/metadata\\/(\\d+)"`, 'i');
-  const imdbShowReAlt = new RegExp(`<Directory[^>]*key="\\/library\\/metadata\\/(\\d+)"[^>]*guid="com\\.plexapp\\.agents\\.imdb:\\/\\/tt5687612"`, 'i');
-  const slugShowRe = new RegExp(`<Directory[^>]*slug="fleabag"[^>]*ratingKey="(\\d+)"`, 'i');
-  const slugShowReAlt = new RegExp(`<Directory[^>]*ratingKey="(\\d+)"[^>]*slug="fleabag"`, 'i');
-  const titleShowRe = new RegExp(`<Directory[^>]*title="Fleabag"[^>]*ratingKey="(\\d+)"`, 'i');
-  const titleShowReAlt = new RegExp(`<Directory[^>]*ratingKey="(\\d+)"[^>]*title="Fleabag"`, 'i');
-  const showMatch = xml.match(imdbShowRe)
-    || xml.match(imdbShowReAlt)
-    || xml.match(slugShowRe)
-    || xml.match(slugShowReAlt)
-    || xml.match(titleShowRe)
-    || xml.match(titleShowReAlt);
-  if (!showMatch) {
-    emit('canary.show_not_found', { section: FLEABAG_SECTION });
+  const seasonXml = await seasonResp.text();
+  // Find Season 1 — the Directory has index="1" and a children key
+  const seasonMatch = seasonXml.match(/<Directory\b(?=[^>]*\bindex="1")[^>]*\bkey="\/library\/metadata\/(\d+)\/children"[^>]*>/i)
+    || seasonXml.match(/<Directory\b(?=[^>]*\bindex="1")[^>]*\bkey="\/library\/metadata\/(\d+)"[^>]*>/i)
+    || seasonXml.match(/<Directory\b[^>]*\bkey="\/library\/metadata\/(\d+)\/children"[^>]*>/i);
+  if (!seasonMatch) {
+    emit('canary.season_not_found', { show_key: showKey });
     return null;
   }
-  const showKey = showMatch[1];
-  const { response: allLeaves, safeUrl: leavesUrl } = await timedFetch(
-    `${PLEX_URL}/library/metadata/${showKey}/allLeaves?X-Plex-Token=${PLEX_TOKEN}`,
+  const seasonKey = seasonMatch[1];
+  const { response: epResp, safeUrl: epUrl } = await sessionFetch(
+    `${PLEX_URL}/library/metadata/${seasonKey}/children?X-Plex-Token=${PLEX_TOKEN}`,
   );
-  if (!allLeaves.ok) {
-    emit('canary.leaves_unreachable', { safe_url: leavesUrl, status: allLeaves.status });
+  if (!epResp.ok) {
+    emit('canary.episode_list_unreachable', { safe_url: epUrl, status: epResp.status });
     return null;
   }
-  const leavesXml = await allLeaves.text();
-  // Find S01E03. The attribute order varies across Plex versions
-  // (e.g. index may appear before parentIndex). Use a regex that
-  // matches the Video element by its three identifying attributes
-  // regardless of order, then extract the key.
-  const epRe = new RegExp(
-    `<Video\\b(?=[^>]*\\bindex="3")(?=[^>]*\\bparentIndex="1")[^>]*?\\bkey="\\/library\\/metadata\\/(\\d+)"`,
-    'i'
+  const epXml = await epResp.text();
+  // Find Episode 3 (index="3", parentIndex="1") — extract its Part inline
+  // The Part element is a sibling inside the Video element.
+  const epMatch = epXml.match(
+    /<Video\b(?=[^>]*\bindex="3")(?=[^>]*\bparentIndex="1")[^>]*>[\s\S]*?<Part\b([^>]*)>/i
   );
-  // Fallback: match by ratingKey when key is absent or out of order.
-  const epReRatingKey = new RegExp(
-    `<Video\\b(?=[^>]*\\bindex="3")(?=[^>]*\\bparentIndex="1")[^>]*?\\bratingKey="(\\d+)"`,
-    'i'
-  );
-  const epMatch = leavesXml.match(epRe) || leavesXml.match(epReRatingKey);
   if (!epMatch) {
-    emit('canary.episode_not_found', { show_key: showKey });
+    emit('canary.episode_not_found', { season_key: seasonKey });
     return null;
   }
-  const episodeKey = epMatch[1];
-  const { response: meta, safeUrl: metaUrl } = await timedFetch(
-    `${PLEX_URL}/library/metadata/${episodeKey}?X-Plex-Token=${PLEX_TOKEN}`,
-  );
-  if (!meta.ok) {
-    emit('canary.episode_meta_unreachable', { safe_url: metaUrl, status: meta.status });
-    return null;
-  }
-  const metaXml = await meta.text();
-  // Match the <Part> element. Attribute order varies across Plex
-  // versions (e.g. duration/container may appear between key and
-  // file). We extract attributes independently.
-  const partMatch = metaXml.match(/<Part\b([^>]*)>/);
-  if (!partMatch) {
-    emit('canary.part_not_found', { episode_key: episodeKey });
-    return null;
-  }
-  const partAttrs = partMatch[1];
+  const partAttrs = epMatch[epMatch.length - 1];
   const partId = (partAttrs.match(/\bid="(\d+)"/) || [])[1];
   const partKey = (partAttrs.match(/\bkey="([^"]+)"/) || [])[1];
   const partFile = (partAttrs.match(/\bfile="([^"]+)"/) || [])[1];
   const partSize = (partAttrs.match(/\bsize="(\d+)"/) || [])[1];
   if (!partId || !partKey || !partFile || !partSize) {
-    emit('canary.part_not_found', { episode_key: episodeKey, parsed: { partId, partKey, partFile, partSize } });
+    emit('canary.part_not_found', { season_key: seasonKey, parsed: { partId, partKey, partFile, partSize } });
     return null;
   }
   return {
@@ -268,6 +287,14 @@ async function main() {
   const before = WITH_METRICS ? await fetchMetrics() : null;
   if (before) emit('canary.metrics_before', { plex_refresh: before });
 
+  // ─────────────────────────────────────────────────────────────────────
+  // SESSION 1: open, seek, stop/close
+  // Each step is its own independent sessionFetch() call. There is
+  // no shared AbortController. The stop/close at the end uses
+  // Connection: close and never aborts anything.
+  // ─────────────────────────────────────────────────────────────────────
+  emit('canary.session1_begin', { part_id: part.partId });
+
   // 1. Source opens — proven by the first successful range read.
   // 2. Beginning bytes
   const r2 = await readRange(part.partKey, { start: 0, end: Math.min(MAX_BYTES - 1, size - 1), size });
@@ -300,19 +327,32 @@ async function main() {
     size,
   });
   okOr('direct_play.near_tail', r6.ok, { status: r6.status, content_range: r6.contentRange, actual: r6.actual });
-  // 7. Stop / connection close
+  // 7. Stop / connection close — does NOT abort any signal
   const stop = await stopSession(part.partKey);
   okOr('direct_play.stop_close', stop.status === 206, { status: stop.status });
-  // 8. Restart
+  emit('canary.session1_end', { part_id: part.partId });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // SESSION 2: independent fetch/connection.
+  // sessionFetch() returns a brand-new AbortController per call.
+  // Nothing from session 1 is in scope here.
+  // ─────────────────────────────────────────────────────────────────────
+  emit('canary.session2_begin', { part_id: part.partId });
+
+  // 8. Reopen beginning or small nonzero range
   const r8a = await readRange(part.partKey, { start: 0, end: MAX_BYTES - 1, size });
   okOr('direct_play.restart_beginning', r8a.ok, { status: r8a.status, content_range: r8a.contentRange });
-  // 9. Non-zero read again
+  // 9. Seek once
   const r9 = await readRange(part.partKey, {
     start: 64 * 1024,
     end: 64 * 1024 + 64 * 1024 - 1,
     size,
   });
   okOr('direct_play.restart_nonzero', r9.ok, { status: r9.status, content_range: r9.contentRange });
+  // 10. Stop cleanly
+  const stop2 = await stopSession(part.partKey);
+  okOr('direct_play.restart_stop_close', stop2.status === 206, { status: stop2.status });
+  emit('canary.session2_end', { part_id: part.partId });
 
   // B11 invariant: zero refresh delta
   await delay(200);

@@ -6,6 +6,7 @@ import {
   mergeStreams,
   sortStreams,
 } from './normalize.js';
+import { discoveryAccounting } from '../discovery/discovery-accounting.js';
 
 const DEFAULT_CONCURRENCY = 6;
 
@@ -181,14 +182,28 @@ export async function searchStremio({
       mediaId
     );
 
-    const response = await fetch(streamUrl, {
-      headers: {
-        'user-agent': 'media-search/0.0.1',
-        accept: 'application/json',
-      },
-    });
+    // Account the outbound HTTP call. The accounting key is the
+    // operator-assigned addonId (e.g. "torrentio-torbox") — never
+    // the URL or any credential.
+    discoveryAccounting.recordRequest(addon.addon_id);
+
+    let response;
+    try {
+      response = await fetch(streamUrl, {
+        headers: {
+          'user-agent': 'media-search/0.0.1',
+          accept: 'application/json',
+        },
+      });
+    } catch (err) {
+      discoveryAccounting.recordError(addon.addon_id);
+      throw new Error(
+        `${addon.name}: network error: ${err?.message || 'unknown'}`
+      );
+    }
 
     if (!response.ok) {
+      discoveryAccounting.recordError(addon.addon_id);
       throw new Error(
         `${addon.name}: HTTP ${response.status}`
       );
@@ -199,7 +214,7 @@ export async function searchStremio({
       ? data.streams
       : [];
 
-    return streams
+    const normalized = streams
       .map((raw) =>
         normalizeStream(raw, {
           addonId: addon.addon_id,
@@ -209,6 +224,11 @@ export async function searchStremio({
         })
       )
       .filter(Boolean);
+    // Account the per-source candidate count AFTER normalization
+    // (so the count is the number of bindable candidates, not the
+    // raw stream list size).
+    discoveryAccounting.recordCandidates(addon.addon_id, normalized.length);
+    return normalized;
   });
 
   const batches = await runPool(

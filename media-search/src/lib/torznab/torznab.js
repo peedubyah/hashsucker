@@ -1,5 +1,6 @@
 import { createReleaseIdentity } from '../../api/release-contract.js';
 import { normalizeInfoHash } from '../stremio/normalize.js';
+import { discoveryAccounting } from '../discovery/discovery-accounting.js';
 
 const TORZNAB_CAPS = '/api?t=capabilities';
 const TORZNAB_SEARCH = '/api?t=search';
@@ -160,21 +161,35 @@ export async function searchTorznab({ type, mediaId, indexers, concurrency = 3 }
         url.searchParams.set('q', mediaId);
         url.searchParams.set('cat', type === 'movie' ? '2000' : '5000');
 
-        const response = await fetch(url.toString(), {
-          headers: {
-            'user-agent': 'media-search/0.0.1',
-            accept: 'application/json, application/xml',
-          },
-          signal: AbortSignal.timeout(5000),
-        });
+        // Account the outbound HTTP call by the operator-assigned
+        // addonId (e.g. "torznab.0"). Never the URL.
+        discoveryAccounting.recordRequest(indexer.addonId);
 
-        if (!response.ok) return [];
+        let response;
+        try {
+          response = await fetch(url.toString(), {
+            headers: {
+              'user-agent': 'media-search/0.0.1',
+              accept: 'application/json, application/xml',
+            },
+            signal: AbortSignal.timeout(5000),
+          });
+        } catch (err) {
+          discoveryAccounting.recordError(indexer.addonId);
+          console.error(`Torznab search failed for ${indexer.name}: ${err.message}`);
+          return [];
+        }
+
+        if (!response.ok) {
+          discoveryAccounting.recordError(indexer.addonId);
+          return [];
+        }
 
         const data = await response.json();
         const items = data.rss?.channel?.item || [];
         const rawItems = Array.isArray(items) ? items : [items];
 
-        return rawItems
+        const normalized = rawItems
           .map((item) => normalizeTorznabItem(item, {
             addonId: indexer.addonId,
             name: indexer.name,
@@ -182,7 +197,10 @@ export async function searchTorznab({ type, mediaId, indexers, concurrency = 3 }
             role: indexer.role,
           }))
           .filter(Boolean);
+        discoveryAccounting.recordCandidates(indexer.addonId, normalized.length);
+        return normalized;
       } catch (error) {
+        discoveryAccounting.recordError(indexer.addonId);
         console.error(`Torznab search failed for ${indexer.name}: ${error.message}`);
         return [];
       }

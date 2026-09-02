@@ -74,6 +74,7 @@ import {
 import { isUrlLive } from '../lib/resolver/liveness.js';
 import { wrapTorBoxDownloadUrlCacheWithAccounting } from '../lib/providers/accounting-cache-wrapper.js';
 import { providerAccounting, formatProviderAccounting } from '../lib/providers/provider-accounting.js';
+import { discoveryAccounting, formatDiscoveryAccounting } from '../lib/discovery/discovery-accounting.js';
 import { createRealDebridClient, RdCooldownError } from '../lib/providers/realdebrid/client.js';
 import { attemptRdResolution, getRdObservationState, getRdPlaybackUrl } from '../lib/providers/realdebrid/resolve.js';
 import { getRdResolutionCache } from '../lib/providers/realdebrid/rd-resolution-cache.js';
@@ -146,6 +147,46 @@ function handleProviderAccountingDebug(response, url) {
     return;
   }
   return sendJson(response, 200, { ...body, since });
+}
+
+/**
+ * Discovery accounting debug endpoint.
+ *
+ * GET /api/debug/discovery-accounting
+ *   → current snapshot, JSON.
+ *   Shape: { timestamp, sources: { [name]: { requests, candidates, errors } } }
+ *
+ * GET /api/debug/discovery-accounting?since=<epochMs>
+ *   → informational; the registry is monotonic and the caller
+ *     computes the actual delta client-side. (Same contract as
+ *     provider-accounting.)
+ *
+ * GET /api/debug/discovery-accounting?format=text
+ *   → compact terminal report.
+ *
+ * The endpoint is secret-free. Source names are operator-assigned
+ * identifiers. No URLs, no API keys, no addon credentials.
+ */
+function handleDiscoveryAccountingDebug(response, url) {
+  const params = url.searchParams;
+  const sinceRaw = params.get('since');
+  const format = (params.get('format') || 'json').toLowerCase();
+  const showAll = params.get('all') === '1' || params.get('all') === 'true';
+  const current = discoveryAccounting.snapshot();
+  let since = null;
+  if (sinceRaw) {
+    const parsed = Number(sinceRaw);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return sendJson(response, 400, { error: 'invalid-since', message: 'since must be epoch ms' });
+    }
+    since = parsed;
+  }
+  if (format === 'text') {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    response.end(formatDiscoveryAccounting(current, { title: 'Live Discovery', showAll }));
+    return;
+  }
+  return sendJson(response, 200, { ...current, since });
 }
 
 /**
@@ -1799,6 +1840,13 @@ export function createRequestHandler(dependencies = {}) {
         // The reset call is bounded in scope: only zeros the in-memory
         // counter; the next call after reset observes a clean baseline.
         providerAccounting.reset();
+        return sendJson(response, 200, { ok: true, resetAt: new Date().toISOString() });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/debug/discovery-accounting') {
+        return handleDiscoveryAccountingDebug(response, url);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/debug/discovery-accounting/reset') {
+        discoveryAccounting.reset();
         return sendJson(response, 200, { ok: true, resetAt: new Date().toISOString() });
       }
       const debugMatch = request.method === 'GET' && url.pathname.match(/^\/api\/debug\/request\/([0-9a-f-]{36})$/i);
