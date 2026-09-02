@@ -27,6 +27,7 @@
 
 import { createCacheObservation } from '../observations.js';
 import { RdCooldownError } from './client.js';
+import { providerAccounting } from '../provider-accounting.js';
 
 const RD_OBSERVATION_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const PLAYABLE_VIDEO_EXTENSIONS = new Set([
@@ -101,12 +102,32 @@ function buildMagnetUri(infoHash) {
  *   2. If multiple files → match by filename (exact or basename) + size.
  *   3. If no confident match → return null (RD unusable).
  *
+ * Accounting:
+ *   Emits exactly one of realdebrid_file_{match,ambiguous,absent} under
+ *   the 'realdebrid' provider bucket. The function is the sole producer
+ *   of those three categories and is called only from attemptRdResolution.
+ *
  * @param {Object} rdFiles - Array of RD file objects { id, path, bytes, selected }
  * @param {Object} candidateMetadata - { filename, size } from Hashsucker corpus
  * @returns {string|null} RD file ID to select, or null if no confident match.
  */
 function mapCandidateToRdFile(rdFiles, candidateMetadata = {}) {
-  if (!Array.isArray(rdFiles) || rdFiles.length === 0) return null;
+  const result = classifyCandidateToRdFile(rdFiles, candidateMetadata);
+  // Accounting side effect: this function is the single source of truth
+  // for the three file-mapping categories. Emit exactly one per call.
+  providerAccounting.increment('realdebrid', `realdebrid_file_${result.classification}`);
+  return result.rdFileId;
+}
+
+/**
+ * Classify the candidate → RD-file mapping without accounting side effects.
+ * Exported for tests that need to assert the classification without
+ * polluting the live accounting counter.
+ */
+export function classifyCandidateToRdFile(rdFiles, candidateMetadata = {}) {
+  if (!Array.isArray(rdFiles) || rdFiles.length === 0) {
+    return { rdFileId: null, classification: 'absent' };
+  }
 
   // Filter to playable video files
   const playableFiles = rdFiles.filter(f => {
@@ -114,11 +135,13 @@ function mapCandidateToRdFile(rdFiles, candidateMetadata = {}) {
     return Array.from(PLAYABLE_VIDEO_EXTENSIONS).some(ext => path.endsWith(ext));
   });
 
-  if (playableFiles.length === 0) return null;
+  if (playableFiles.length === 0) {
+    return { rdFileId: null, classification: 'absent' };
+  }
 
   // Single playable video file → select it
   if (playableFiles.length === 1) {
-    return String(playableFiles[0].id);
+    return { rdFileId: String(playableFiles[0].id), classification: 'match' };
   }
 
   // Multiple files → attempt to match by filename + size
@@ -132,7 +155,9 @@ function mapCandidateToRdFile(rdFiles, candidateMetadata = {}) {
       const rdPath = (f.path || f.filename || '').toLowerCase();
       return rdPath === normalizedFilename || rdPath === basenameFilename;
     });
-    if (exactMatch) return String(exactMatch.id);
+    if (exactMatch) {
+      return { rdFileId: String(exactMatch.id), classification: 'match' };
+    }
 
     // Try basename match
     const basenameMatch = playableFiles.find(f => {
@@ -143,7 +168,7 @@ function mapCandidateToRdFile(rdFiles, candidateMetadata = {}) {
     if (basenameMatch) {
       // If size also matches, we're confident
       if (size != null && basenameMatch.bytes != null && basenameMatch.bytes === size) {
-        return String(basenameMatch.id);
+        return { rdFileId: String(basenameMatch.id), classification: 'match' };
       }
       // Without size confirmation, only match if it's the only basename match
       const allBasenameMatches = playableFiles.filter(f => {
@@ -152,8 +177,11 @@ function mapCandidateToRdFile(rdFiles, candidateMetadata = {}) {
         return rdBasename === basenameFilename;
       });
       if (allBasenameMatches.length === 1) {
-        return String(allBasenameMatches[0].id);
+        return { rdFileId: String(allBasenameMatches[0].id), classification: 'match' };
       }
+      // Multiple basename matches with the same name but different sizes
+      // (or the same name without size confirmation) → ambiguous. Fail closed.
+      return { rdFileId: null, classification: 'ambiguous' };
     }
   }
 
@@ -161,12 +189,16 @@ function mapCandidateToRdFile(rdFiles, candidateMetadata = {}) {
   if (size != null) {
     const sizeMatches = playableFiles.filter(f => f.bytes === size);
     if (sizeMatches.length === 1) {
-      return String(sizeMatches[0].id);
+      return { rdFileId: String(sizeMatches[0].id), classification: 'match' };
+    }
+    if (sizeMatches.length > 1) {
+      // Multiple files of the exact authoritative size → ambiguous.
+      return { rdFileId: null, classification: 'ambiguous' };
     }
   }
 
-  // Cannot map confidently
-  return null;
+  // Cannot map confidently (no filename match, no size match) → absent.
+  return { rdFileId: null, classification: 'absent' };
 }
 
 /**
@@ -192,16 +224,23 @@ export async function attemptRdResolution(client, searchCache, candidate, option
   const { now = () => Date.now() } = options;
   const { infoHash, fileIndex, filename, size } = candidate;
 
+  // Accounting: every entry into attemptRdResolution counts as a fallback
+  // attempt. The result category (resolved/failed) is decided below and
+  // recorded at each return site.
+  providerAccounting.increment('realdebrid', 'realdebrid_fallback_attempted');
+
   // Check current RD observation state
   const observationState = getRdObservationState(searchCache, infoHash, fileIndex, now());
 
   // Fresh infringing → skip RD entirely
   if (observationState === 'infringing') {
+    providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
     return { status: 'skipped', reason: 'infringing' };
   }
 
   // Fresh uncached/unavailable → skip RD
   if (observationState === 'uncached') {
+    providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
     return { status: 'skipped', reason: 'uncached' };
   }
 
@@ -226,6 +265,7 @@ export async function attemptRdResolution(client, searchCache, candidate, option
     // Step 3: Map candidate to RD file
     const rdFileId = mapCandidateToRdFile(rdFiles, { filename, size });
     if (!rdFileId) {
+      providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
       return {
         status: 'failed',
         error: new RdResolutionError(
@@ -264,6 +304,7 @@ export async function attemptRdResolution(client, searchCache, candidate, option
           rdErrorCode: classification.rdErrorCode,
           source: 'resolver:rd-resolution',
         });
+        providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
         return {
           status: 'failed',
           error: new RdResolutionError(
@@ -284,10 +325,12 @@ export async function attemptRdResolution(client, searchCache, candidate, option
 
     // Return the torrent info so the caller can get the playback URL
     // BEFORE the torrent is deleted
+    providerAccounting.increment('realdebrid', 'realdebrid_fallback_resolved');
     return { status: 'resolved', rdFileId, torrentId, torrentInfo: finalTorrentInfo, timing: rdTiming };
   } catch (error) {
     // Handle cooldown (fail fast)
     if (error instanceof RdCooldownError) {
+      providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
       return {
         status: 'failed',
         error: new RdResolutionError(
@@ -306,6 +349,7 @@ export async function attemptRdResolution(client, searchCache, candidate, option
         errorCategory: 'infringing',
         source: 'resolver:rd-resolution',
       });
+      providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
       return {
         status: 'failed',
         error: new RdResolutionError(
@@ -323,6 +367,7 @@ export async function attemptRdResolution(client, searchCache, candidate, option
         rdErrorCode: error.rdErrorCode,
         source: 'resolver:rd-resolution',
       });
+      providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
       return {
         status: 'failed',
         error: new RdResolutionError(
@@ -334,6 +379,7 @@ export async function attemptRdResolution(client, searchCache, candidate, option
     }
 
     // Generic RD error
+    providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
     return {
       status: 'failed',
       error: new RdResolutionError(

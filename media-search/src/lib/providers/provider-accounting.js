@@ -71,6 +71,22 @@ const CATEGORIES = Object.freeze([
   'background_transient',
   'background_rate_limited',
   'background_repair_seam_invoke',
+  // Real-Debrid same-TorrentFile fallback (Worker B). These are
+  // provider-accounted under the 'realdebrid' bucket so the canary
+  // can assert the RD fallback is observably narrow and never
+  // mutates VFS/TorrentFile identity.
+  // - realdebrid_fallback_attempted: attemptRdResolution entry
+  // - realdebrid_fallback_resolved: attemptRdResolution returned status='resolved'
+  // - realdebrid_fallback_failed:   attemptRdResolution returned status='failed' or 'skipped'
+  // - realdebrid_file_match:        mapCandidateToRdFile returned exactly one RD file id
+  // - realdebrid_file_ambiguous:    mapCandidateToRdFile returned null with multiple size matches
+  // - realdebrid_file_absent:       mapCandidateToRdFile returned null with zero size matches
+  'realdebrid_fallback_attempted',
+  'realdebrid_fallback_resolved',
+  'realdebrid_fallback_failed',
+  'realdebrid_file_match',
+  'realdebrid_file_ambiguous',
+  'realdebrid_file_absent',
 ]);
 
 const CATEGORY_SET = new Set(CATEGORIES);
@@ -261,6 +277,12 @@ export function formatProviderAccounting(snapshot, { title, provider = 'torbox' 
       'inventory_fetch',
       'requestdl_resolution',
       'requestdl_rate_limited_429',
+      'realdebrid_fallback_attempted',
+      'realdebrid_fallback_resolved',
+      'realdebrid_fallback_failed',
+      'realdebrid_file_match',
+      'realdebrid_file_ambiguous',
+      'realdebrid_file_absent',
     ];
     if (value === 0 && !alwaysRender.includes(cat)) continue;
     const label = cat.replaceAll('_', ' ');

@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import { createDiscoveryCache } from '../src/lib/discovery/cache.js';
 import { createTvWebDav, normalizeRange } from '../src/lib/vfs/tv-webdav.js';
+import { providerAccounting } from '../src/lib/providers/provider-accounting.js';
 
 const HASH = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const RELEASE_KEY = `${HASH}:12`;
@@ -657,5 +658,593 @@ test('TV VFS read 429 backoff expires after the window — capability is reused,
   await handler(createRangeRequest('bytes=10-19'), afterWindow, url);
   assert.equal(upstreamCalls, 2, 'upstream called exactly once after backoff expires');
   assert.equal(afterWindow._capture().status, 206, 'after window expires, the cached capability is reused and bytes flow');
+});
+
+
+// ---------------------------------------------------------------------------
+// Same-TorrentFile RD fallback wiring (Worker A, slice A1–A7)
+//
+// These proofs cover the bug where the in-loop 2-attempt retry in
+// openValidatedProviderRead re-used the backing returned by the 1st
+// resolveBacking call. When the 1st attempt fell through to TorBox and
+// TorBox returned protocol-invalid, the 2nd attempt never got a fresh
+// RD selection cycle. The fix moves resolveBacking inside the loop so
+// each attempt gets a fresh provider selection, with the in-loop 2nd
+// attempt using forceFresh=true (which deletes the cached RD entry
+// and re-tries RD for the SAME (infoHash, fileIndex) tuple before
+// falling through to TorBox).
+// ---------------------------------------------------------------------------
+
+const FALLBACK_SIZE = 100;
+const FALLBACK_HASH = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const FALLBACK_RELEASE_KEY = `${FALLBACK_HASH}:torrent`;
+const FALLBACK_TORRENT_FILE_ID = 'tf_e02_s01e02';
+const FALLBACK_URL = new URL(
+  'http://localhost/vfs/TV/When%20They%20See%20Us/Season%2001/When%20They%20See%20Us%20-%20S01E02.mkv',
+);
+
+function persistFallbackEpisode(cache, {
+  torrentFileId = FALLBACK_TORRENT_FILE_ID,
+  setHandoffTorrentFileId = true,
+} = {}) {
+  const requestId = cache.persistMediaRequest({
+    mediaId: 'tt7577910',
+    mediaType: 'series',
+    season: 1,
+    episode: 2,
+    source: 'test',
+  }, []);
+  // By default the handoff carries the torrentFileId so the getCatalog
+  // identity check at tv-webdav.js:291-296 sees matching identity on
+  // both sides. Tests that need a controlPlaneStore mock to validate
+  // the handoff can keep the default; tests that explicitly want to
+  // exercise the legacy-allow path (handoff.torrentFileId=null while
+  // vfs_tv_entries.torrent_file_id is set) opt out by passing
+  // setHandoffTorrentFileId=false.
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId: 'tt7577910',
+    mediaType: 'series',
+    season: 1,
+    episode: 2,
+    releaseKey: FALLBACK_RELEASE_KEY,
+    infoHash: FALLBACK_HASH,
+    fileIndex: null,
+    filename: 'When They See Us - S01E02.mkv',
+    provider: 'torbox',
+    providerState: 'cached',
+    identityTier: 'ProviderConfirmed',
+    resolutionState: 'confirmed',
+    selectionReason: 'worker-a-fallback',
+    selectedAt: 1_700_000_000_000,
+    ...(setHandoffTorrentFileId ? { torrentFileId } : {}),
+  });
+  cache.createVfsTvEntry({
+    mediaId: 'tt7577910',
+    season: 1,
+    episode: 2,
+    releaseKey: FALLBACK_RELEASE_KEY,
+    infoHash: FALLBACK_HASH,
+    fileIndex: null,
+    canonicalPath: 'TV/When They See Us/Season 01/When They See Us - S01E02.mkv',
+    size: FALLBACK_SIZE,
+    torrentFileId,
+    createdAt: 1_700_000_000_000,
+    updatedAt: 1_700_000_000_000,
+  });
+}
+
+/**
+ * Build a fetchFn for the fallback harness.
+ *
+ * - RD URL: serve the liveness probe with `bytes 0-1023/100`, and the
+ *   real byte-range request with a body whose length matches the
+ *   requested range exactly.
+ * - TorBox URL (or any other URL): serve a protocol-invalid 200 (which
+ *   the validate callback rejects as STATUS_NOT_206 → protocol-invalid).
+ *   Tests that need a healthy TorBox path pass `torBoxStatus: 206`
+ *   with matching headers and body.
+ */
+function makeFallbackFetchFn({
+  rdResolvedUrl = 'https://rd.test/playback',
+  torBoxStatus = 200,
+  torBoxBody = 'lie',
+  size = FALLBACK_SIZE,
+} = {}) {
+  return async (url, options) => {
+    if (url === rdResolvedUrl) {
+      // isUrlLive liveness probe (capital 'Range') vs fetchProvider byte
+      // read (lowercase 'range'). The production code paths are
+      // distinguishable by which header key is set.
+      const isLiveness = options?.headers?.Range && !options?.headers?.range;
+      if (isLiveness) {
+        return new Response('x'.repeat(1024), {
+          status: 206,
+          headers: { 'content-range': 'bytes 0-1023/' + size },
+        });
+      }
+      const requestedRange = options?.headers?.range;
+      const match = requestedRange && requestedRange.match(/^bytes=(\d+)-(\d+)$/);
+      if (match) {
+        const start = Number(match[1]);
+        const end = Number(match[2]);
+        const length = end - start + 1;
+        return new Response('x'.repeat(length), {
+          status: 206,
+          headers: {
+            'content-range': `bytes ${start}-${end}/${size}`,
+            'content-length': String(length),
+          },
+        });
+      }
+      return new Response('x'.repeat(10), {
+        status: 206,
+        headers: { 'content-range': 'bytes 10-19/' + size },
+      });
+    }
+    if (torBoxStatus === 206) {
+      // Healthy TorBox: 206 with correct Content-Range + body of the
+      // requested length.
+      const requestedRange = options?.headers?.range;
+      const match = requestedRange && requestedRange.match(/^bytes=(\d+)-(\d+)$/);
+      if (match) {
+        const start = Number(match[1]);
+        const end = Number(match[2]);
+        const length = end - start + 1;
+        return new Response('x'.repeat(length), {
+          status: 206,
+          headers: {
+            'content-range': `bytes ${start}-${end}/${size}`,
+            'content-length': String(length),
+          },
+        });
+      }
+      return new Response('x'.repeat(10), {
+        status: 206,
+        headers: { 'content-range': 'bytes 10-19/' + size },
+      });
+    }
+    return new Response(torBoxBody, { status: torBoxStatus });
+  };
+}
+
+/**
+ * Build a same-TorrentFile RD fallback harness.
+ *
+ * - rdClient is present (truthy) so the same-TorrentFile RD fallback
+ *   path is reachable in resolveBacking.
+ * - rdResolutionCache.getOrInFlight is the single seam for the test to
+ *   control RD resolution outcomes across attempts. Each call returns
+ *   the next item from `rdOutcomes`; if `rdOutcomes` is shorter than
+ *   the number of attempts, the last item is reused.
+ * - resolveTorBoxDeliverySeam is the seam that yields the TorBox
+ *   backing. The TorBox downstream URL is always "torbox.test/file";
+ *   `fetchFn` controls the upstream response.
+ */
+function buildFallbackHarness({
+  rdOutcomes,
+  fetchFn,
+  torBoxDeliveryResult = {
+    url: 'https://torbox.test/file',
+    size: FALLBACK_SIZE,
+    placementId: 'pl_fb',
+    providerFileId: 'pf_fb',
+    accountScope: 'default',
+    recovered: false,
+  },
+  resolveTorBoxDeliverySeam: customSeam = null,
+  torBoxDownloadUrlCache = {
+    delete() {},
+    get() { return null; },
+    async getOrInFlight() { throw new Error('unused'); },
+  },
+  torrentFileId = FALLBACK_TORRENT_FILE_ID,
+  setHandoffTorrentFileId = true,
+} = {}) {
+  const cache = createDiscoveryCache({ dbPath: ':memory:' });
+  persistFallbackEpisode(cache, { torrentFileId, setHandoffTorrentFileId });
+
+  let rdAttempt = 0;
+  const rdCallLog = [];
+  let torBoxDeliveryCalls = 0;
+
+  const rdResolutionCache = {
+    delete(infoHash, fileIndex) {
+      rdCallLog.push({ kind: 'delete', infoHash, fileIndex });
+    },
+    get() { return null; },
+    set() { /* no-op in tests */ },
+    async getOrInFlight(infoHash, fileIndex, factory) {
+      rdCallLog.push({ kind: 'getOrInFlight', infoHash, fileIndex });
+      const idx = Math.min(rdAttempt, rdOutcomes.length - 1);
+      rdAttempt += 1;
+      const outcome = rdOutcomes[idx];
+      if (typeof outcome === 'function') return outcome();
+      return outcome;
+    },
+  };
+
+  // The handoff carries a torrentFileId by default, so the materialize
+  // step on the byte path needs a controlPlaneStore that can validate
+  // it. When the handoff has no torrentFileId (setHandoffTorrentFileId=
+  // false) the mock is harmless and unused.
+  const controlPlaneStore = {
+    getTorrentFile: (id) => {
+      if (id !== torrentFileId) return null;
+      return {
+        id: torrentFileId,
+        infoHash: FALLBACK_HASH,
+        size: FALLBACK_SIZE,
+        internalPath: 'When They See Us S01 HDR WEB-DL 2160p/'
+          + 'When They See Us S01E02 WEB-DL 2160p.mkv',
+      };
+    },
+  };
+
+  const handler = createTvWebDav({
+    searchCache: cache,
+    rdClient: {
+      present: true,
+      // The same-TorrentFile RD fallback hits getRdPlaybackUrl, which
+      // calls client.unrestrictLink(rawLink, null, { resolverSafe: true }).
+      // Return a synthetic unrestricted download URL.
+      unrestrictLink: async (rawLink) => {
+        if (rawLink !== 'https://rd.test/raw-link') {
+          throw new Error(`unexpected unrestrictLink arg: ${rawLink}`);
+        }
+        return { download: 'https://rd.test/playback' };
+      },
+    },
+    rdResolutionCache,
+    controlPlaneStore,
+    resolveTorBoxDeliverySeam: customSeam
+      ? (async (...args) => {
+          torBoxDeliveryCalls += 1;
+          return customSeam(...args);
+        })
+      : (async () => {
+          torBoxDeliveryCalls += 1;
+          return torBoxDeliveryResult;
+        }),
+    torBoxDownloadUrlCache,
+    fetchFn,
+  });
+
+  return {
+    cache,
+    handler,
+    rdCallLog,
+    getTorBoxDeliveryCalls: () => torBoxDeliveryCalls,
+  };
+}
+
+test('A1 TV VFS same-TorrentFile RD fallback: TorBox protocol-invalid twice, RD resolves on 2nd attempt → HTTP 206 from RD', async (t) => {
+  providerAccounting.reset();
+  const rdResolvedUrl = 'https://rd.test/playback';
+  let fetchCalls = 0;
+  const { cache, handler, rdCallLog, getTorBoxDeliveryCalls } = buildFallbackHarness({
+    rdOutcomes: [
+      // 1st resolveBacking call: RD unresolvable for the SAME (infoHash, fileIndex).
+      { status: 'failed', reason: 'not_cached' },
+      // 2nd resolveBacking call (forceFresh=true): RD resolves successfully.
+      {
+        status: 'resolved',
+        torrentId: 'TT_RD',
+        rdFileId: '1',
+        torrentInfo: {
+          files: [{ id: '1', bytes: FALLBACK_SIZE, path: 'When They See Us - S01E02.mkv' }],
+          links: ['https://rd.test/raw-link'],
+        },
+      },
+    ],
+    fetchFn: (() => {
+      const fn = makeFallbackFetchFn({ rdResolvedUrl });
+      return async (url, options) => {
+        fetchCalls += 1;
+        return fn(url, options);
+      };
+    })(),
+  });
+  t.after(() => cache.close());
+
+  const res = createCapturingResponse();
+  await handler(createRangeRequest('bytes=10-19'), res, FALLBACK_URL);
+  const captured = res._capture();
+
+  // Assert: HTTP 206 ships to the client (the body byte-count check passed
+  // on the RD response).
+  assert.equal(captured.status, 206, 'client must receive 206 on RD fallback success');
+  // Assert: RD was probed twice (1st attempt — failed, 2nd attempt — resolved).
+  const rdGets = rdCallLog.filter((e) => e.kind === 'getOrInFlight');
+  assert.equal(rdGets.length, 2, 'RD resolution must be invoked once per loop attempt');
+  // Assert: the 1st RD attempt's cache entry was force-deleted before the
+  // 2nd attempt's getOrInFlight.
+  const deletes = rdCallLog.filter((e) => e.kind === 'delete');
+  assert.equal(deletes.length, 1, 'forceFresh must delete the cached RD entry exactly once');
+  // Assert: only one TorBox delivery seam call (the initial one). The 2nd
+  // attempt found RD and never re-entered the TorBox branch.
+  assert.equal(getTorBoxDeliveryCalls(), 1, 'TorBox delivery seam must be invoked exactly once');
+  // Assert: TorBox URL was hit exactly once (1st attempt only).
+  assert.ok(
+    fetchCalls >= 2,
+    'fetchFn must be called at least twice (1× TorBox upstream, 1× RD liveness probe)',
+  );
+  // Assert: provider-accounting counters reflect the RD fallback lifecycle.
+  const snap = providerAccounting.snapshot();
+  assert.equal(
+    snap.providers.realdebrid.perCategory.realdebrid_fallback_attempted,
+    1,
+    'one in-loop 2nd-attempt RD fallback should be recorded',
+  );
+  assert.equal(
+    snap.providers.realdebrid.perCategory.realdebrid_fallback_resolved,
+    1,
+    'the 2nd-attempt RD resolution succeeded',
+  );
+  assert.equal(
+    snap.providers.realdebrid.perCategory.realdebrid_fallback_failed,
+    0,
+    'no failed RD fallback to record (the 1st-attempt is not a fallback)',
+  );
+});
+
+test('A2 TV VFS same-TorrentFile RD fallback: no placement repair beyond initial resolution', async (t) => {
+  providerAccounting.reset();
+  let seamCallCount = 0;
+  const { cache, handler, getTorBoxDeliveryCalls } = buildFallbackHarness({
+    rdOutcomes: [
+      { status: 'failed', reason: 'not_cached' },
+      { status: 'failed', reason: 'not_cached' },
+    ],
+    // The mock seam is a no-repair function: it returns the same fixed
+    // backing on every call without consulting mylist, verifying the
+    // torrent, or otherwise touching the durable state. The bounded
+    // retry must hit it exactly once per loop attempt, never more.
+    resolveTorBoxDeliverySeam: async () => {
+      seamCallCount += 1;
+      return {
+        url: 'https://torbox.test/file',
+        size: FALLBACK_SIZE,
+        placementId: 'pl_fb',
+        providerFileId: 'pf_fb',
+        accountScope: 'default',
+        recovered: false,
+      };
+    },
+    fetchFn: async () => new Response('lie', { status: 200 }),
+  });
+  t.after(() => cache.close());
+
+  // Both RD attempts fail, both TorBox attempts fail (protocol-invalid).
+  // The bounded retry must call the seam at most once per loop attempt;
+  // it must never spiral into a 3rd or 4th placement repair.
+  await assert.rejects(
+    handler(createRangeRequest('bytes=10-19'), createCapturingResponse(), FALLBACK_URL),
+    (error) => error.status === 502,
+  );
+  assert.equal(
+    getTorBoxDeliveryCalls(),
+    2,
+    'seam is called once per loop attempt (max 2), never more — the bounded retry must not trigger a 3rd placement repair',
+  );
+  assert.equal(seamCallCount, 2, 'seam mock is called exactly twice');
+});
+
+test('A3 TV VFS same-TorrentFile RD fallback: retains exact TorrentFile ID', async (t) => {
+  providerAccounting.reset();
+  const { cache, handler } = buildFallbackHarness({
+    rdOutcomes: [
+      { status: 'failed', reason: 'not_cached' },
+      {
+        status: 'resolved',
+        torrentId: 'TT_RD',
+        rdFileId: '1',
+        torrentInfo: {
+          files: [{ id: '1', bytes: FALLBACK_SIZE, path: 'When They See Us - S01E02.mkv' }],
+          links: ['https://rd.test/raw-link'],
+        },
+      },
+    ],
+    fetchFn: makeFallbackFetchFn(),
+    torrentFileId: 'tf_exact_identity_lock',
+  });
+  t.after(() => cache.close());
+
+  const res = createCapturingResponse();
+  await handler(createRangeRequest('bytes=10-19'), res, FALLBACK_URL);
+
+  // The fallback must not change the durable TorrentFile ID. The VFS row
+  // in the discovery cache is the canonical place to read it from outside
+  // the handler.
+  const entry = cache.getVfsTvEntry('tt7577910', 1, 2);
+  assert.ok(entry, 'VFS TV row must still exist after fallback');
+  assert.equal(
+    entry.torrentFileId,
+    'tf_exact_identity_lock',
+    'exact TorrentFile ID must be preserved across same-TorrentFile RD fallback',
+  );
+});
+
+test('A4 TV VFS same-TorrentFile RD fallback: retains VFS logical path and exact size', async (t) => {
+  providerAccounting.reset();
+  const { cache, handler } = buildFallbackHarness({
+    rdOutcomes: [
+      { status: 'failed', reason: 'not_cached' },
+      {
+        status: 'resolved',
+        torrentId: 'TT_RD',
+        rdFileId: '1',
+        torrentInfo: {
+          files: [{ id: '1', bytes: FALLBACK_SIZE, path: 'When They See Us - S01E02.mkv' }],
+          links: ['https://rd.test/raw-link'],
+        },
+      },
+    ],
+    fetchFn: makeFallbackFetchFn(),
+  });
+  t.after(() => cache.close());
+
+  const res = createCapturingResponse();
+  await handler(createRangeRequest('bytes=10-19'), res, FALLBACK_URL);
+
+  const entry = cache.getVfsTvEntry('tt7577910', 1, 2);
+  assert.ok(entry, 'VFS TV row must still exist after fallback');
+  assert.equal(
+    entry.canonicalPath,
+    'TV/When They See Us/Season 01/When They See Us - S01E02.mkv',
+    'logical VFS path must be preserved across same-TorrentFile RD fallback',
+  );
+  assert.equal(entry.size, FALLBACK_SIZE, 'exact physical size must be preserved across same-TorrentFile RD fallback');
+});
+
+test('A5 TV VFS same-TorrentFile RD fallback: TorBox bad + RD exhausted → existing fail-closed 502', async (t) => {
+  providerAccounting.reset();
+  const { cache, handler, rdCallLog, getTorBoxDeliveryCalls } = buildFallbackHarness({
+    rdOutcomes: [
+      { status: 'failed', reason: 'not_cached' },
+      { status: 'failed', reason: 'cooldown' },
+    ],
+    fetchFn: async () => new Response('lie', { status: 200 }),
+  });
+  t.after(() => cache.close());
+
+  await assert.rejects(
+    handler(createRangeRequest('bytes=10-19'), createCapturingResponse(), FALLBACK_URL),
+    (error) => error.status === 502,
+    'TorBox bad + RD exhausted must surface the existing 502 fail-closed contract',
+  );
+
+  // The bounded retry must have run exactly twice and exhausted cleanly.
+  assert.equal(
+    rdCallLog.filter((e) => e.kind === 'getOrInFlight').length,
+    2,
+    'RD resolution must be invoked once per loop attempt',
+  );
+  assert.equal(
+    getTorBoxDeliveryCalls(),
+    2,
+    'seam is called once per loop attempt; bounded retry must not trigger a 3rd placement repair',
+  );
+  // Provider-accounting: two fallback attempts (1st and 2nd both
+  // forceFresh=false/true), but only the 2nd is a "fallback". The 1st
+  // attempt is a normal primary probe. So attempted=1, resolved=0,
+  // failed=1.
+  const snap = providerAccounting.snapshot();
+  assert.equal(snap.providers.realdebrid.perCategory.realdebrid_fallback_attempted, 1);
+  assert.equal(snap.providers.realdebrid.perCategory.realdebrid_fallback_resolved, 0);
+  assert.equal(snap.providers.realdebrid.perCategory.realdebrid_fallback_failed, 1);
+});
+
+test('A6 TV VFS healthy TorBox delivery → zero alternate-provider fallback work', async (t) => {
+  providerAccounting.reset();
+  const { cache, handler, rdCallLog, getTorBoxDeliveryCalls } = buildFallbackHarness({
+    rdOutcomes: [
+      // 1st RD probe happens BEFORE the TorBox seam (RD is the primary
+      // candidate probe in resolveBacking). It is allowed to be called
+      // once. Plant a sentinel that fails cheaply.
+      { status: 'failed', reason: 'rd-unavailable' },
+    ],
+    fetchFn: async (url) => {
+      // Healthy TorBox upstream on the only call we expect.
+      return new Response('x'.repeat(10), {
+        status: 206,
+        headers: {
+          'content-range': 'bytes 10-19/' + FALLBACK_SIZE,
+          'content-length': '10',
+        },
+      });
+    },
+  });
+  t.after(() => cache.close());
+
+  const res = createCapturingResponse();
+  await handler(createRangeRequest('bytes=10-19'), res, FALLBACK_URL);
+  const captured = res._capture();
+  assert.equal(captured.status, 206, 'healthy TorBox delivery must stream 206 directly');
+  // The 1st resolveBacking call is the primary RD probe (always
+  // attempted before TorBox). The 2nd attempt is the same-TorrentFile
+  // RD fallback, which only runs if the 1st attempt fails. With a
+  // healthy 1st attempt, the fallback MUST NOT be invoked.
+  const rdGets = rdCallLog.filter((e) => e.kind === 'getOrInFlight');
+  assert.equal(
+    rdGets.length,
+    1,
+    'RD resolution must be invoked exactly once (the 1st-attempt primary probe); the 2nd-attempt fallback must NOT run on a healthy 1st attempt',
+  );
+  const deletes = rdCallLog.filter((e) => e.kind === 'delete');
+  assert.equal(
+    deletes.length,
+    0,
+    'forceFresh delete must NOT run — the 2nd attempt (fallback) is not entered',
+  );
+  assert.equal(getTorBoxDeliveryCalls(), 1, 'TorBox seam is called once on the happy path');
+  const snap = providerAccounting.snapshot();
+  // The 1st attempt is the primary RD probe (forceFresh=false), not a
+  // same-TorrentFile fallback, so the fallback counters must all be 0.
+  assert.equal(
+    snap.providers.realdebrid.perCategory.realdebrid_fallback_attempted,
+    0,
+    'no fallback attempted — the 1st attempt succeeded without entering the fallback path',
+  );
+  assert.equal(
+    snap.providers.realdebrid.perCategory.realdebrid_fallback_resolved,
+    0,
+    'no fallback resolved',
+  );
+  assert.equal(
+    snap.providers.realdebrid.perCategory.realdebrid_fallback_failed,
+    0,
+    'no fallback failed (the 1st-attempt primary probe is not a "fallback")',
+  );
+});
+
+test('A7 TV VFS 429/backoff alone → no protocol-invalid misinterpretation; existing 429 surface preserved', async (t) => {
+  providerAccounting.reset();
+  const { cache, handler, rdCallLog, getTorBoxDeliveryCalls } = buildFallbackHarness({
+    rdOutcomes: [
+      { status: 'failed', reason: 'sentinel-must-not-be-touched' },
+    ],
+    fetchFn: async () => new Response('rate limited', { status: 429 }),
+  });
+  t.after(() => cache.close());
+
+  // The 1st attempt surfaces the existing 502 contract from the
+  // validate callback (the validate callback rejects 429 with
+  // STATUS_NOT_206 → PROVIDER_RANGE_FAILED). Critically, the 2nd-attempt
+  // RD fallback (the same-TorrentFile RD probe inside the loop) must
+  // NOT be invoked: 429 is a backoff signal, not a protocol-invalid
+  // signal. The in-loop retry classification treats 429 as the
+  // rate-limited branch and exits via the existing surface.
+  await assert.rejects(
+    handler(createRangeRequest('bytes=10-19'), createCapturingResponse(), FALLBACK_URL),
+    (error) => error.status === 502 && error.code === 'PROVIDER_RANGE_FAILED',
+  );
+  // The 1st resolveBacking call is the primary RD probe (always
+  // attempted before TorBox) — exactly 1 getOrInFlight. The 2nd attempt
+  // is the same-TorrentFile RD fallback, which is only entered for
+  // protocol-invalid / stale-capability classifications, never for 429.
+  const rdGets = rdCallLog.filter((e) => e.kind === 'getOrInFlight');
+  assert.equal(
+    rdGets.length,
+    1,
+    'RD resolution must be invoked exactly once (1st-attempt primary probe); the 2nd-attempt fallback must NOT be entered on 429',
+  );
+  assert.equal(
+    rdCallLog.filter((e) => e.kind === 'delete').length,
+    0,
+    'forceFresh delete must NOT run on 429 — the fallback path is not entered',
+  );
+  assert.equal(getTorBoxDeliveryCalls(), 1);
+  const snap = providerAccounting.snapshot();
+  // The 1st attempt is a primary RD probe, not a same-TorrentFile
+  // fallback, so the fallback counters must all be 0. The existing
+  // 429 surface is preserved.
+  assert.equal(
+    snap.providers.realdebrid.perCategory.realdebrid_fallback_attempted,
+    0,
+    'no fallback attempted on 429 — backoff is a separate path',
+  );
+  assert.equal(snap.providers.realdebrid.perCategory.realdebrid_fallback_resolved, 0);
+  assert.equal(snap.providers.realdebrid.perCategory.realdebrid_fallback_failed, 0);
 });
 

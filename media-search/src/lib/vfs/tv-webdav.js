@@ -17,6 +17,7 @@ import { finished } from 'node:stream/promises';
 import { attemptRdResolution, getRdPlaybackUrl } from '../providers/realdebrid/resolve.js';
 import { isUrlLive } from '../resolver/liveness.js';
 import { materializeVfsEntry } from './materialize.js';
+import { providerAccounting } from '../providers/provider-accounting.js';
 import {
   validateRangeResponseBody,
   validateRangeResponseHeaders,
@@ -325,6 +326,16 @@ export function createTvWebDav({
     }
 
     if (rdClient) {
+      // Same-TorrentFile RD fallback accounting: when the in-loop
+      // 2nd attempt (forceFresh) asks for a fresh backing for the
+      // SAME (infoHash, fileIndex) after a TorBox failure, that
+      // attempt is a same-TorrentFile RD fallback. The 1st-attempt
+      // path (forceFresh=false) is a normal primary RD probe and is
+      // NOT counted here.
+      const isRdFallback = forceFresh;
+      if (isRdFallback) {
+        providerAccounting.increment('realdebrid', 'realdebrid_fallback_attempted');
+      }
       const cached = forceFresh ? null : rdResolutionCache.get(handoff.infoHash, handoff.fileIndex);
       if (cached) {
         return { provider: 'realdebrid', url: cached.url, size: null, resolution: 'cache' };
@@ -345,6 +356,9 @@ export function createTvWebDav({
         const url = await getRdPlaybackUrl(rdClient, result.torrentInfo, result.rdFileId);
         if (await isUrlLive(url, { fetchFn })) {
           rdResolutionCache.set(handoff.infoHash, handoff.fileIndex, url, result.torrentId, result.rdFileId);
+          if (isRdFallback) {
+            providerAccounting.increment('realdebrid', 'realdebrid_fallback_resolved');
+          }
           return {
             provider: 'realdebrid',
             url,
@@ -356,6 +370,14 @@ export function createTvWebDav({
       } else {
         const reason = result.error?.code || result.reason || 'unavailable';
         console.warn('[vfs-tv] provider=realdebrid resolution=failed failure=' + reason + ' release=' + handoff.releaseKey);
+      }
+      // RD did not produce a usable backing on this attempt. If this
+      // was a same-TorrentFile fallback (in-loop 2nd attempt) the
+      // attempt is fully spent — record the negative outcome so the
+      // proof can assert the bounded retry did not silently swallow
+      // RD work, then fall through to TorBox.
+      if (isRdFallback) {
+        providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
       }
     }
 
