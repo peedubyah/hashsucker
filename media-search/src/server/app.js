@@ -76,7 +76,7 @@ import { wrapTorBoxDownloadUrlCacheWithAccounting } from '../lib/providers/accou
 import { providerAccounting, formatProviderAccounting } from '../lib/providers/provider-accounting.js';
 import { discoveryAccounting, formatDiscoveryAccounting } from '../lib/discovery/discovery-accounting.js';
 import { createRealDebridClient, RdCooldownError } from '../lib/providers/realdebrid/client.js';
-import { attemptRdResolution, getRdObservationState, getRdPlaybackUrl } from '../lib/providers/realdebrid/resolve.js';
+import { attemptRdResolution, getRdPlaybackUrl } from '../lib/providers/realdebrid/resolve.js';
 import { getRdResolutionCache } from '../lib/providers/realdebrid/rd-resolution-cache.js';
 import { createMovieWebDav } from '../lib/vfs/movie-webdav.js';
 import { createTvWebDav } from '../lib/vfs/tv-webdav.js';
@@ -1142,7 +1142,53 @@ async function tryAlternateCandidateFallback({
 
   if (!fallback) return false;
 
-  const { candidate, revalidation } = fallback;
+  const { candidate, revalidation, rdResolution } = fallback;
+
+  const fallbackReason = primaryRevalidation.cacheState === REVALIDATION_OUTCOME.UNCACHED
+    ? FALLBACK_REASON.PRIMARY_UNAVAILABLE
+    : FALLBACK_REASON.PRIMARY_PROVIDER_ERROR;
+  const fallbackTelemetry = alternateFallback.buildFallbackTelemetry({
+    originalReleaseKey: existingSelection.releaseKey,
+    selectedReleaseKey: candidate.releaseKey,
+    fallbackRank: candidate.rank,
+    reason: fallbackReason,
+  });
+
+  // Same-TorrentFile cross-provider path: when the alternate candidate's
+  // TorBox check was uncached/unknown but bounded RD resolution produced a
+  // usable URL, prefer RD over the TorBox seam. This handles the case where
+  // the same infoHash is cached on RD but not on TorBox — the legacy TorBox
+  // seam path would either retry placement (waste) or return a typed
+  // failure. Use RD directly with the same fallback telemetry envelope.
+  if (rdResolution && rdResolution.usable && rdResolution.url) {
+    recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
+      infoHash: candidate.info_hash,
+      releaseKey: candidate.releaseKey,
+      provider: 'realdebrid',
+      availabilitySource: revalidation.availabilitySource,
+      providerCheckOccurred: revalidation.providerCheckOccurred,
+      ...fallbackTelemetry,
+    });
+    const rdHeaders = {
+      location: rdResolution.url,
+      'cache-control': 'no-store',
+      'x-torrent-id': rdResolution.torrentId,
+      'x-file-id': rdResolution.rdFileId,
+      'x-availability-source': revalidation.availabilitySource,
+      'x-provider-check-occurred': revalidation.providerCheckOccurred ? 'true' : 'false',
+      'x-fallback-used': 'true',
+      'x-fallback-rank': String(candidate.rank),
+      'x-fallback-original-release-key': existingSelection.releaseKey,
+      'x-fallback-selected-release-key': candidate.releaseKey,
+      'x-url-live-checked': 'true',
+      'x-rd-torrent-id': rdResolution.torrentId,
+      'x-rd-file-id': rdResolution.rdFileId,
+      'x-rd-resolution-source': rdResolution.resolution === 'cache' ? 'cache' : 'fresh',
+    };
+    response.writeHead(307, rdHeaders);
+    response.end();
+    return true;
+  }
 
   // Alternate delivery seam: run the SAME authoritative TorBox delivery
   // seam used by the primary path. This reuses an existing control-plane
@@ -1154,16 +1200,6 @@ async function tryAlternateCandidateFallback({
   if (!controlPlaneStore || typeof resolveTorBoxDeliverySeam !== 'function') {
     return false;
   }
-
-  const fallbackReason = primaryRevalidation.cacheState === REVALIDATION_OUTCOME.UNCACHED
-    ? FALLBACK_REASON.PRIMARY_UNAVAILABLE
-    : FALLBACK_REASON.PRIMARY_PROVIDER_ERROR;
-  const fallbackTelemetry = alternateFallback.buildFallbackTelemetry({
-    originalReleaseKey: existingSelection.releaseKey,
-    selectedReleaseKey: candidate.releaseKey,
-    fallbackRank: candidate.rank,
-    reason: fallbackReason,
-  });
 
   try {
     const delivery = await resolveTorBoxDeliverySeam({
@@ -1527,6 +1563,18 @@ export function createRequestHandler(dependencies = {}) {
             episode: episode != null ? parseInt(episode, 10) : null,
           });
 
+          /* FOREGROUND RESOLUTION LADDER
+           * 1. Existing selection → if provider !== 'torbox' → 400
+           * 2. RD warm capability (rdResolutionCache hit) → 307 RD
+           * 3. RD stale capability → bounded attemptRdResolution → if resolved → 307 RD
+           * 4. TorBox warm capability (delivery-seam cache hit) → 307 TorBox
+           * 5. TorBox revalidation (fresh observation → 307; stale → bounded check)
+           * 6. TorBox unusable → tryAlternateCandidateFallback
+           *    a. Persisted ranked candidates (same infoHash, RD-usable) → 307 RD
+           *    b. Persisted ranked candidates (other candidate) → TorBox seam → 307
+           * 7. All fail → typed failure
+           */
+
           // 1. Check for existing persisted selection first
           // Series requests MUST be keyed on (mediaId, season, episode) because
           // each episode has its own playback_handoffs row. Using
@@ -1561,13 +1609,15 @@ export function createRequestHandler(dependencies = {}) {
                 mediaType,
               });
             }
-            // 1b. Attempt Real-Debrid as preferred delivery
-            // Ordering: fresh RD cached → RD; missing/stale RD → one bounded RD attempt
+            // 1b. Attempt Real-Debrid as preferred delivery.
+            // Ordering: rdResolutionCache hit → RD; miss → always attempt bounded
+            // attemptRdResolution. RD observations (5min TTL) must not gate the
+            // rdResolutionCache-miss path — the 30s RD resolution cache may be
+            // stale while the underlying RD torrent is still resolvable. The
+            // attemptRdResolution function handles stale/missing observations
+            // internally (e.g. cross-provider add for previously-uncached).
             // RD must not require TorBox revalidation to fail before being attempted.
             if (rdClient && controlPlaneStore) {
-              const rdObsState = getRdObservationState(searchCache, existingSelection.selectedHash, existingSelection.fileIndex, clock());
-              profiler.mark('rd-observation-lookup');
-
               // Check short-lived RD resolution cache first
               const cachedRd = rdResolutionCache.get(existingSelection.selectedHash, existingSelection.fileIndex);
               if (cachedRd) {
@@ -1596,75 +1646,78 @@ export function createRequestHandler(dependencies = {}) {
                 return;
               }
 
-              if (rdObsState === 'cached' || rdObsState === 'missing') {
-                try {
-                  const candidate = searchCache.getCandidate(existingSelection.selectedHash, existingSelection.fileIndex);
+              // RD resolution cache miss — always attempt bounded RD resolution.
+              // The attemptRdResolution function itself handles stale/missing
+              // observations correctly (e.g. uncached → resolve via cross-provider
+              // add). The rdObsState guard previously here was incorrect: when
+              // the cached RD URL expired (30s TTL) but the 5min RD observation
+              // was still 'uncached', RD was wrongly skipped even though it
+              // could resolve the same TorrentFile cross-provider.
+              try {
+                const candidate = searchCache.getCandidate(existingSelection.selectedHash, existingSelection.fileIndex);
 
-                  // Use in-flight coalescing for concurrent same-key requests
-                  const rdResult = await rdResolutionCache.getOrInFlight(
-                    existingSelection.selectedHash,
-                    existingSelection.fileIndex,
-                    async () => attemptRdResolution(rdClient, searchCache, {
-                      infoHash: existingSelection.selectedHash,
-                      fileIndex: existingSelection.fileIndex,
-                      filename: candidate?.filename ?? null,
-                      size: candidate?.size ?? null,
-                    }, { now: clock })
-                  );
+                // Use in-flight coalescing for concurrent same-key requests
+                const rdResult = await rdResolutionCache.getOrInFlight(
+                  existingSelection.selectedHash,
+                  existingSelection.fileIndex,
+                  async () => attemptRdResolution(rdClient, searchCache, {
+                    infoHash: existingSelection.selectedHash,
+                    fileIndex: existingSelection.fileIndex,
+                    filename: candidate?.filename ?? null,
+                    size: candidate?.size ?? null,
+                  }, { now: clock })
+                );
 
-                  profiler.mark('rd-resolution-attempt');
-                  if (rdResult.timing) {
-                    console.log('[resolver-profile] RD detail:', JSON.stringify(rdResult.timing));
-                  }
-
-                  if (rdResult.status === 'resolved') {
-                    const playbackUrl = await getRdPlaybackUrl(rdClient, rdResult.torrentInfo, rdResult.rdFileId);
-                    profiler.mark('rd-unrestrict');
-                    // Liveness check: verify the RD URL returns bytes before committing to 307
-                    const rdLive = await isUrlLive(playbackUrl);
-                    profiler.mark('rd-liveness-check');
-                    if (rdLive) {
-                      // Cache the successful resolution
-                      rdResolutionCache.set(
-                        existingSelection.selectedHash,
-                        existingSelection.fileIndex,
-                        playbackUrl,
-                        rdResult.torrentId,
-                        rdResult.rdFileId,
-                      );
-
-                      recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
-                        infoHash: existingSelection.selectedHash,
-                        releaseKey: existingSelection.releaseKey,
-                        provider: 'realdebrid',
-                        availabilitySource: 'observation',
-                        providerCheckOccurred: true,
-                      });
-                      profiler.mark('307-returned');
-                      response.writeHead(307, {
-                        location: playbackUrl,
-                        'cache-control': 'no-store',
-                        'x-torrent-id': rdResult.torrentId,
-                        'x-file-id': rdResult.rdFileId,
-                        'x-availability-source': 'observation',
-                        'x-provider-check-occurred': 'true',
-                        'x-url-live-checked': 'true',
-                        'x-rd-resolution-cache': 'miss',
-                        'x-resolver-profile': JSON.stringify(profiler.summary()),
-                      });
-                      response.end();
-                      return;
-                    }
-                    // RD URL dead — fall through to TorBox
-                  }
-                  // RD did not resolve — fall through to TorBox
-                } catch (rdError) {
-                  profiler.mark('rd-resolution-failed');
-                  // RD failure must never block TorBox fallback
+                profiler.mark('rd-resolution-attempt');
+                if (rdResult.timing) {
+                  console.log('[resolver-profile] RD detail:', JSON.stringify(rdResult.timing));
                 }
+
+                if (rdResult.status === 'resolved') {
+                  const playbackUrl = await getRdPlaybackUrl(rdClient, rdResult.torrentInfo, rdResult.rdFileId);
+                  profiler.mark('rd-unrestrict');
+                  // Liveness check: verify the RD URL returns bytes before committing to 307
+                  const rdLive = await isUrlLive(playbackUrl);
+                  profiler.mark('rd-liveness-check');
+                  if (rdLive) {
+                    // Cache the successful resolution
+                    rdResolutionCache.set(
+                      existingSelection.selectedHash,
+                      existingSelection.fileIndex,
+                      playbackUrl,
+                      rdResult.torrentId,
+                      rdResult.rdFileId,
+                    );
+
+                    recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
+                      infoHash: existingSelection.selectedHash,
+                      releaseKey: existingSelection.releaseKey,
+                      provider: 'realdebrid',
+                      availabilitySource: 'observation',
+                      providerCheckOccurred: true,
+                    });
+                    profiler.mark('307-returned');
+                    response.writeHead(307, {
+                      location: playbackUrl,
+                      'cache-control': 'no-store',
+                      'x-torrent-id': rdResult.torrentId,
+                      'x-file-id': rdResult.rdFileId,
+                      'x-availability-source': 'observation',
+                      'x-provider-check-occurred': 'true',
+                      'x-url-live-checked': 'true',
+                      'x-rd-resolution-cache': 'miss',
+                      'x-resolver-profile': JSON.stringify(profiler.summary()),
+                    });
+                    response.end();
+                    return;
+                  }
+                  // RD URL dead — fall through to TorBox
+                }
+                // RD did not resolve — fall through to TorBox
+              } catch (rdError) {
+                profiler.mark('rd-resolution-failed');
+                // RD failure must never block TorBox fallback
               }
-              // Missing/stale RD observation — skip RD, go straight to TorBox
-              // Fresh RD infringing/uncached/unavailable → skip RD, use TorBox
             }
 
             // 1c. Revalidate availability before redirect
