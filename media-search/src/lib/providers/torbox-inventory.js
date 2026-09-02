@@ -10,6 +10,21 @@ const DEFAULT_OBSERVATION_TTL_MS = 60_000;
  * TorBox account-inventory adapter backed by the repository-verified `mylist`
  * response consumed by torbox-importer. Inventory proves external placement,
  * readiness, and provider file identity; it never proves HashSucker ownership.
+ *
+ * Slice 2.7 — Provider API efficiency.
+ *
+ * The inventory provider threads all `mylist` fetches through an
+ * opt-in per-request coordinator. The coordinator handles:
+ *
+ *   - single-flight per request  (concurrent mylist calls share one fetch)
+ *   - request-scoped memoization (sequential mylist calls reuse the snapshot)
+ *   - bounded retry on 5xx / 429 (configurable via the coordinator)
+ *
+ * The coordinator and its budget are passed in by the request owner
+ * (a media-request handler, canary, or test). When no coordinator is
+ * provided, the provider falls back to direct fetchFn calls — the
+ * same behavior as pre-2.7 — so a long-lived provider instance never
+ * leaks memoization across unrelated requests.
  */
 export function createTorBoxInventoryProvider(options = {}) {
   const {
@@ -20,27 +35,65 @@ export function createTorBoxInventoryProvider(options = {}) {
     timeoutMs = REQUEST_TIMEOUT_MS,
     observationTtlMs = DEFAULT_OBSERVATION_TTL_MS,
     now = () => Date.now(),
+    coordinator,
   } = options;
   if (!apiKey) throw authenticationError('TORBOX_API_KEY is missing', 'configure');
 
+  // Coordinator is opt-in. When the request owner supplies a
+  // per-request coordinator, all mylist calls inside that request
+  // share a single fetch (single-flight + memoization + retry
+  // consolidation). When no coordinator is supplied, the provider
+  // falls back to direct fetchFn calls — the same behavior as
+  // pre-2.7 — so we never leak memoization across unrelated
+  // requests on a long-lived provider instance.
+  const useCoordinator = coordinator != null;
+  const activeCoordinator = coordinator ?? null;
+
+  /**
+   * Fetch a single mylist snapshot.
+   * - With a per-request coordinator: shared, retried, memoized.
+   * - Without one: direct fetchFn, no cross-call sharing.
+   */
+  async function fetchMylistSnapshot({ signal } = {}) {
+    if (!useCoordinator) {
+      return directMylistFetch(signal);
+    }
+    const args = [apiBase, apiKey, signal];
+    return activeCoordinator.run('mylist', args, (base, key, sig) => directMylistFetch(sig, base, key));
+  }
+
+  async function directMylistFetch(signal, baseOverride = apiBase, keyOverride = apiKey) {
+    const response = await fetchFn(`${baseOverride}/torrents/mylist?bypass_cache=true`, {
+      headers: {
+        Authorization: `Bearer ${keyOverride}`,
+        Accept: 'application/json',
+        'User-Agent': 'media-search/0.0.1',
+      },
+      signal: signal ?? AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) {
+      const err = new Error(`TorBox mylist failed: HTTP ${response.status}`);
+      err.status = response.status;
+      throw err;
+    }
+    const payload = await response.json();
+    if (payload?.success !== true || !Array.isArray(payload.data)) {
+      throw invalidResponse('TorBox mylist must return success with a data array', 'mylist');
+    }
+    return { observedAt: now(), resources: payload.data };
+  }
+
+  /**
+   * Backwards-compatible `getSnapshot` that adapts the new
+   * coordinator-shaped snapshot to the pre-2.7 interface that
+   * existing capabilities used. The shape is identical (observedAt
+   * + resources).
+   */
   async function getSnapshot(signal) {
-    const observedAt = now();
     try {
-      const response = await fetchFn(`${apiBase}/torrents/mylist?bypass_cache=true`, {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          Accept: 'application/json',
-          'User-Agent': 'media-search/0.0.1',
-        },
-        signal: signal ?? AbortSignal.timeout(timeoutMs),
-      });
-      if (!response.ok) throw Object.assign(new Error(`TorBox mylist failed: HTTP ${response.status}`), { status: response.status });
-      const payload = await response.json();
-      if (payload?.success !== true || !Array.isArray(payload.data)) {
-        throw invalidResponse('TorBox mylist must return success with a data array', 'mylist');
-      }
-      return { observedAt, resources: payload.data };
+      return await fetchMylistSnapshot({ signal });
     } catch (error) {
+      // The coordinator already retried; this is the final settled error.
       throw classifyProviderError(error, { provider: 'torbox', operation: 'mylist' });
     }
   }
