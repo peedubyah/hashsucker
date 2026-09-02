@@ -20,9 +20,19 @@
  * - Stale/missing observation → use bounded playback revalidation
  * - Uncached → skip to next persisted candidate
  * - Provider-check error → record failure and continue only if another candidate exists
+ * - Real-Debrid: if wired, attempt bounded RD resolution in addition to TorBox.
+ *   TorBox usable + RD usable → prefer RD (debrid-first for non-TorBox-handoff
+ *   sessions). TorBox unusable but RD usable → still return usable via RD.
+ *   Neither usable → continue to next persisted candidate.
  */
 
 import { createRevalidator, REVALIDATION_OUTCOME } from './availability-revalidation.js';
+import {
+  attemptRdResolution,
+  getRdPlaybackUrl,
+  RdResolutionError,
+} from '../providers/realdebrid/resolve.js';
+import { RdCooldownError } from '../providers/realdebrid/client.js';
 
 export const FALLBACK_REASON = Object.freeze({
   PRIMARY_UNAVAILABLE: 'primary unavailable; next persisted eligible cached candidate',
@@ -45,9 +55,17 @@ export class FallbackError extends Error {
  * @param {Object} dependencies.searchCache - Discovery cache for loading persisted results
  * @param {Object} dependencies.revalidator - Availability revalidator instance
  * @param {Function} [dependencies.now] - Clock function
+ * @param {Object} [dependencies.rdClient] - Real-Debrid client (resolver-safe). Optional.
+ * @param {Object} [dependencies.rdResolutionCache] - Short-lived RD resolved-URL cache. Optional.
  */
 export function createAlternateFallback(dependencies = {}) {
-  const { searchCache, revalidator, now = () => Date.now() } = dependencies;
+  const {
+    searchCache,
+    revalidator,
+    now = () => Date.now(),
+    rdClient = null,
+    rdResolutionCache = null,
+  } = dependencies;
 
   if (!searchCache) {
     throw new TypeError('searchCache is required');
@@ -173,7 +191,192 @@ export function createAlternateFallback(dependencies = {}) {
   }
 
   /**
-   * Check availability of a candidate using the revalidator.
+   * Attempt bounded Real-Debrid resolution for a fallback candidate.
+   *
+   * Mirrors the tv-webdav.js resolveBacking RD branch but is scoped to the
+   * alternate-fallback path. Never throws — always resolves to a structured
+   * result. Uses the in-memory rdResolutionCache (30s TTL) to coalesce
+   * concurrent and short-interval requests.
+   *
+   * @param {Object} candidate - Filtered candidate (with .info_hash, .fileIndex, .filename)
+   * @returns {Promise<{
+   *   usable: boolean,
+   *   provider: 'realdebrid' | null,
+   *   url: string | null,
+   *   releaseKey: string,
+   *   infoHash: string,
+   *   fileIndex: number | null,
+   *   rdFileId: string | null,
+   *   torrentId: string | null,
+   *   resolution: 'cache' | 'fresh' | null,
+   *   reason: string | null,
+   *   error: string | null,
+   * }>}
+   */
+  async function attemptRdResolutionFromAlternate(candidate) {
+    const empty = {
+      usable: false,
+      provider: null,
+      url: null,
+      releaseKey: candidate?.releaseKey ?? null,
+      infoHash: candidate?.info_hash ?? null,
+      fileIndex: candidate?.fileIndex ?? null,
+      rdFileId: null,
+      torrentId: null,
+      resolution: null,
+      reason: 'unwired',
+      error: null,
+    };
+
+    if (!rdClient || !rdResolutionCache) {
+      return { ...empty, reason: 'unwired' };
+    }
+    if (!candidate || !candidate.info_hash) {
+      return { ...empty, reason: 'invalid_candidate' };
+    }
+
+    const infoHash = candidate.info_hash;
+    const fileIndex = candidate.fileIndex ?? null;
+    const filename = candidate.filename ?? null;
+    const size = Number.isFinite(candidate.size) ? candidate.size : null;
+
+    try {
+      // (a) check rdResolutionCache for a fresh entry
+      const cached = rdResolutionCache.get(infoHash, fileIndex);
+      if (cached && cached.url) {
+        return {
+          usable: true,
+          provider: 'realdebrid',
+          url: cached.url,
+          releaseKey: candidate.releaseKey,
+          infoHash,
+          fileIndex,
+          rdFileId: cached.rdFileId ?? null,
+          torrentId: cached.torrentId ?? null,
+          resolution: 'cache',
+          reason: null,
+          error: null,
+        };
+      }
+
+      // (b) miss → attempt bounded RD resolution (single-flight)
+      const result = await rdResolutionCache.getOrInFlight(
+        infoHash,
+        fileIndex,
+        () => attemptRdResolution(
+          rdClient,
+          searchCache,
+          { infoHash, fileIndex, filename, size },
+          { now },
+        ),
+      );
+
+      if (!result || result.status === 'skipped') {
+        return {
+          ...empty,
+          releaseKey: candidate.releaseKey,
+          infoHash,
+          fileIndex,
+          reason: result?.reason ? `skipped:${result.reason}` : 'skipped',
+        };
+      }
+
+      if (result.status === 'failed') {
+        const code = result.error?.code || 'RD_ERROR';
+        return {
+          ...empty,
+          releaseKey: candidate.releaseKey,
+          infoHash,
+          fileIndex,
+          reason: code,
+          error: result.error?.message || null,
+        };
+      }
+
+      // (c) resolved → fetch unrestricted playback URL
+      let url;
+      try {
+        url = await getRdPlaybackUrl(rdClient, result.torrentInfo, result.rdFileId);
+      } catch (unrestrictError) {
+        const code = unrestrictError?.code || 'RD_UNRESTRICT_FAILED';
+        return {
+          ...empty,
+          releaseKey: candidate.releaseKey,
+          infoHash,
+          fileIndex,
+          reason: code,
+          error: unrestrictError?.message || null,
+        };
+      }
+
+      if (!url) {
+        return {
+          ...empty,
+          releaseKey: candidate.releaseKey,
+          infoHash,
+          fileIndex,
+          reason: 'RD_NO_URL',
+        };
+      }
+
+      // (d) cache the result (30s TTL default)
+      try {
+        rdResolutionCache.set(infoHash, fileIndex, url, result.torrentId, result.rdFileId, 30_000);
+      } catch (cacheError) {
+        // Cache failure must never block resolution success.
+        console.warn('[alternate-fallback] rdResolutionCache.set failed: ' + cacheError.message);
+      }
+
+      // (e) success
+      return {
+        usable: true,
+        provider: 'realdebrid',
+        url,
+        releaseKey: candidate.releaseKey,
+        infoHash,
+        fileIndex,
+        rdFileId: result.rdFileId ?? null,
+        torrentId: result.torrentId ?? null,
+        resolution: 'fresh',
+        reason: null,
+        error: null,
+      };
+    } catch (err) {
+      // Defensive: never throw. Cooldown / resolution errors get typed reasons.
+      if (err instanceof RdCooldownError) {
+        return {
+          ...empty,
+          releaseKey: candidate?.releaseKey ?? null,
+          infoHash,
+          fileIndex,
+          reason: 'RD_COOLDOWN',
+          error: err.message,
+        };
+      }
+      if (err instanceof RdResolutionError) {
+        return {
+          ...empty,
+          releaseKey: candidate?.releaseKey ?? null,
+          infoHash,
+          fileIndex,
+          reason: err.code || 'RD_ERROR',
+          error: err.message,
+        };
+      }
+      return {
+        ...empty,
+        releaseKey: candidate?.releaseKey ?? null,
+        infoHash,
+        fileIndex,
+        reason: 'RD_EXCEPTION',
+        error: err?.message || String(err),
+      };
+    }
+  }
+
+  /**
+   * Check availability of a candidate using the revalidator, and attempt
+   * bounded RD resolution when RD is wired.
    *
    * @param {Object} candidate - Filtered candidate
    * @returns {Promise<Object>} Availability result
@@ -187,9 +390,15 @@ export function createAlternateFallback(dependencies = {}) {
       provider: 'torbox',
     });
 
+    // Attempt RD resolution unconditionally when wired — both TorBox-usable
+    // and TorBox-unusable candidates may be RD-usable (RD can be cached where
+    // TorBox is uncached, or vice versa).
+    const rdResolution = await attemptRdResolutionFromAlternate(candidate);
+
     return {
       candidate,
       revalidation,
+      rdResolution,
       isUsable: revalidation.cacheState === REVALIDATION_OUTCOME.CACHED,
       isUncached: revalidation.cacheState === REVALIDATION_OUTCOME.UNCACHED,
       isUnknown: revalidation.cacheState === REVALIDATION_OUTCOME.UNKNOWN,
@@ -198,6 +407,12 @@ export function createAlternateFallback(dependencies = {}) {
 
   /**
    * Find the first usable alternate candidate.
+   *
+   * Selection rule:
+   *  - TorBox CACHED + RD usable → return with rdResolution (prefer RD)
+   *  - TorBox CACHED only (RD not wired or not usable) → return with revalidation
+   *  - TorBox UNCACHED/UNKNOWN + RD usable → return with rdResolution
+   *  - Both fail → continue to next candidate
    *
    * @param {Object} params
    * @param {string} params.mediaId - Media identifier
@@ -224,19 +439,34 @@ export function createAlternateFallback(dependencies = {}) {
 
     for (const candidate of candidates) {
       const availability = await checkCandidateAvailability(candidate);
+      const { rdResolution } = availability;
 
+      // TorBox CACHED → usable. If RD is also usable, prefer RD (debrid-first).
       if (availability.isUsable) {
+        if (rdResolution && rdResolution.usable) {
+          return {
+            candidate: availability.candidate,
+            revalidation: availability.revalidation,
+            rdResolution,
+          };
+        }
         return {
           candidate: availability.candidate,
           revalidation: availability.revalidation,
+          rdResolution: rdResolution && !rdResolution.usable ? rdResolution : null,
         };
       }
 
-      // Uncached → skip to next
-      if (availability.isUncached) continue;
+      // TorBox UNCACHED/UNKNOWN but RD can resolve it → still return usable via RD.
+      if (rdResolution && rdResolution.usable) {
+        return {
+          candidate: availability.candidate,
+          revalidation: availability.revalidation,
+          rdResolution,
+        };
+      }
 
-      // Unknown (provider check error) → skip to next
-      if (availability.isUnknown) continue;
+      // Both TorBox and RD unavailable → continue to next candidate.
     }
 
     return null;
@@ -271,5 +501,7 @@ export function createAlternateFallback(dependencies = {}) {
     checkCandidateAvailability,
     findUsableAlternate,
     buildFallbackTelemetry,
+    attemptRdResolutionFromAlternate,
+    attemptRdResolution,
   };
 }

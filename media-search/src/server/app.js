@@ -1302,13 +1302,6 @@ export function createRequestHandler(dependencies = {}) {
     apiKey: env.TORBOX_API_KEY,
   });
 
-  // Alternate candidate fallback for when primary selection is unavailable
-  const alternateFallback = dependencies.alternateFallback || createAlternateFallback({
-    searchCache,
-    revalidator,
-    now: clock,
-  });
-
   // Real-Debrid client for preferred delivery (resolver-safe mode)
   // Only created if API key is configured; otherwise RD delivery is skipped.
   // Interactive resolver uses lower min interval (100ms) for faster playback
@@ -1319,7 +1312,18 @@ export function createRequestHandler(dependencies = {}) {
 
   // Short-lived RD resolution cache to avoid repeated RD transactions for
   // media-server stream probing (multiple requests in <10s).
-  const rdResolutionCache = getRdResolutionCache();
+  const rdResolutionCache = dependencies.rdResolutionCache || getRdResolutionCache();
+
+  // Alternate candidate fallback for when primary selection is unavailable.
+  // Wire RD so the fallback chain can resolve via Real-Debrid when TorBox
+  // returns UNCACHED/UNKNOWN or its cached delivery URL is stale.
+  const alternateFallback = dependencies.alternateFallback || createAlternateFallback({
+    searchCache,
+    revalidator,
+    now: clock,
+    rdClient,
+    rdResolutionCache,
+  });
 
   // TorBox delivery owns placement creation and passive account-inventory recovery.
   const torBoxProvider = dependencies.torBoxProvider || createTorBoxProvider({
