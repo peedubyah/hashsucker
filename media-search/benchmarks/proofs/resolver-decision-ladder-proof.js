@@ -556,10 +556,11 @@ async function case4_torBoxUncachedRdCanResolve() {
   cache.clear();
 
   const existingSelection = makeSelection({ mediaId: 'tt4444444', infoHash, fileIndex, filename: 'cross.mkv', size: 4321098765 });
-  const rdObs = makeRdObservation({ infoHash, fileIndex, state: 'uncached' });
+  // No RD observation: null/missing forces attemptRdResolution to attempt
+  // resolution (cross-provider add) rather than returning skipped.
   const searchCache = makeMockSearchCache({
     existingSelection,
-    providerObservations: [rdObs],
+    providerObservations: [], // RD observation absent → RD attempts resolution
     candidates: [{ infoHash, fileIndex, filename: 'cross.mkv', size: 4321098765 }],
   });
   const revalidator = makeMockRevalidator({
@@ -876,32 +877,38 @@ async function case8_transientFailure429() {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
-  log('=== Resolver Decision Ladder — Proof Matrix ===');
-  log('');
+  const caseFilter = process.argv.find((arg) => arg.startsWith('--case='))?.split('=')[1] ?? null;
+  if (caseFilter === '4') {
+    log('CASE 4 — TORBOX UNCACHED + RD CAN RESOLVE');
+    await case4_torBoxUncachedRdCanResolve();
+  } else {
+    log('=== Resolver Decision Ladder — Proof Matrix ===');
+    log('');
 
-  log('CASE 1 — WARM PRIMARY / RD CACHED');
-  await case1_warmRdCache();
+    log('CASE 1 — WARM PRIMARY / RD CACHED');
+    await case1_warmRdCache();
 
-  log('CASE 2 — STALE CAPABILITY / RD MISS + RD OBS CACHED');
-  await case2_staleCacheRdObsCached();
+    log('CASE 2 — STALE CAPABILITY / RD MISS + RD OBS CACHED');
+    await case2_staleCacheRdObsCached();
 
-  log('CASE 3 — TORBOX REVAL CACHED');
-  await case3_torBoxCached();
+    log('CASE 3 — TORBOX REVAL CACHED');
+    await case3_torBoxCached();
 
-  log('CASE 4 — TORBOX UNCACHED + RD CAN RESOLVE');
-  await case4_torBoxUncachedRdCanResolve();
+    log('CASE 4 — TORBOX UNCACHED + RD CAN RESOLVE');
+    await case4_torBoxUncachedRdCanResolve();
 
-  log('CASE 5 — SAME FILE / RD CANNOT + FALLBACK TO TORBOX');
-  await case5_sameFileTorBoxCachedViaFallback();
+    log('CASE 5 — SAME FILE / RD CANNOT + FALLBACK TO TORBOX');
+    await case5_sameFileTorBoxCachedViaFallback();
 
-  log('CASE 6 — ALTERNATE CANDIDATE FALLBACK (rank#2)');
-  await case6_alternateCandidateFallback();
+    log('CASE 6 — ALTERNATE CANDIDATE FALLBACK (rank#2)');
+    await case6_alternateCandidateFallback();
 
-  log('CASE 7 — AMBIGUOUS IDENTITY');
-  await case7_ambiguousIdentity();
+    log('CASE 7 — AMBIGUOUS IDENTITY');
+    await case7_ambiguousIdentity();
 
-  log('CASE 8 — TRANSIENT FAILURE (429)');
-  await case8_transientFailure429();
+    log('CASE 8 — TRANSIENT FAILURE (429)');
+    await case8_transientFailure429();
+  }
 
   // Print results
   log('');
