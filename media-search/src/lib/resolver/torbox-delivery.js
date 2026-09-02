@@ -419,6 +419,40 @@ async function runStaleRecoveryOnce({
     // Classify the requestdl failure before invoking repair so that
     // observability does not depend on the repair branch succeeding.
     if (error instanceof TorBoxDownloadUrlError) {
+      // Protocol-invalid takes priority over 5xx because it is
+      // structurally a 502 (the wrapper maps every non-HTTP failure
+      // to 502) but the failure class is the SAME as 401/403/404:
+      // the cached URL is not a usable capability and must be
+      // invalidated so the next call re-resolves once.
+      if (error.code === 'TORBOX_REQUESTDL_PROTOCOL_INVALID') {
+        const capability = {
+          provider: delivery.provider,
+          accountScope: delivery.accountScope,
+          placementId: delivery.placementId,
+          providerFileId: delivery.providerFileId,
+        };
+        torBoxDownloadUrlCache.invalidateByCapability?.(capability);
+        recordRepairEvent(controlPlaneStore, {
+          failureCategory: REPAIR_FAILURE_CATEGORIES.DELIVERY_CAPABILITY_PROTOCOL_INVALID,
+          infoHash,
+          reason: 'torbox-requestdl-protocol-invalid',
+          evidence: {
+            stage: 'requestdl',
+            status: error.status ?? null,
+            code: error.code,
+            reason: error.protocolInvalidReason ?? null,
+            placementId: delivery.placementId,
+            providerFileId: delivery.providerFileId,
+          },
+          retryable: true,
+          observedAt: now(),
+          now,
+        });
+        // Surface the protocol-invalid error unchanged. The same call
+        // does NOT retry; the next call's getOrInFlightByCapability
+        // will not find a cached entry and re-resolve exactly once.
+        throw error;
+      }
       if (error.status === 429) {
         recordRepairEvent(controlPlaneStore, {
           failureCategory: REPAIR_FAILURE_CATEGORIES.REQUESTDL_RATE_LIMITED,

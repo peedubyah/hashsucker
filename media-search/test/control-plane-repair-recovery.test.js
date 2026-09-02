@@ -1093,3 +1093,386 @@ test('network failure (fetch throws) + mylist present: surface original, no repa
   assert.equal(repaired, undefined,
     'network failure + mylist present must not record stale-placement-repaired');
 });
+
+// ---------------------------------------------------------------------------
+// Hardening B.1 — protocol-invalid response from requestdl (2xx but not
+// a real binary download stream). Mirrors the 401/403/404 contract
+// exactly: invalidate the cached capability, record a single
+// delivery-capability-protocol-invalid event, surface the original
+// error unchanged, do NOT loop within the same call.
+//
+// The same (provider, accountScope, placementId, providerFileId) key is
+// used for the capability so the next call re-resolves once. The
+// recovery branch in the seam (destructive repair) is suppressed
+// because the placement is still valid upstream — the failure is at
+// the URL-resolution layer, not at the resource layer.
+// ---------------------------------------------------------------------------
+test('requestdl protocol-invalid: capability invalidated, single re-resolution, no loop', async (t) => {
+  withTorboxApiKey(t);
+  const infoHash = 'c'.repeat(40);
+  const store = createStore();
+  const previousPlacement = seedPlacement(store, infoHash, 'res-OLD-c');
+  const cache = makeCache();
+  const createCalls = [];
+  const torBoxProvider = makeTorBoxProvider({
+    onCreatePlacement: () => createCalls.push('create'),
+  });
+  // mylist is PRESENT — the resource still exists upstream. The
+  // protocol-invalid response is a CDN-side captive page or redirect
+  // loop, not a stale-resource signal. The placement must not be
+  // marked removed.
+  const torBoxInventoryProvider = makeTorBoxInventoryProvider({
+    mylistResources: [{ provider: 'torbox', providerResourceId: 'res-OLD-c', infoHash }],
+  });
+  let requestdlCalls = 0;
+  const resolveTorBoxDownloadUrl = async () => {
+    requestdlCalls += 1;
+    if (requestdlCalls === 1) {
+      // First call: 2xx with HTML body (CDN interstitial / login
+      // wall). The seam must invalidate the capability and surface
+      // the original error unchanged.
+      throw new TorBoxDownloadUrlError(
+        'TorBox requestdl returned a protocol-invalid response: non-binary-content-type:text/html',
+        'TORBOX_REQUESTDL_PROTOCOL_INVALID',
+        502,
+        { protocolInvalidReason: 'non-binary-content-type:text/html' },
+      );
+    }
+    return 'https://cdn.example/dld/res-OLD-c';
+  };
+
+  // First call: surface protocol-invalid, no repair, no replacement,
+  // no in-call retry. Mirrors the 401/403/404 contract.
+  await assert.rejects(
+    () => resolveTorBoxDeliveryWithStaleRecovery({
+      infoHash, fileIndex: 0, releaseKey: `${infoHash}:0`, filename: FILENAME,
+      controlPlaneStore: store, torBoxProvider, torBoxInventoryProvider,
+      torBoxDownloadUrlCache: cache, resolveTorBoxDownloadUrl, isUrlLive: undefined,
+      fetchFn: async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { [infoHash]: { name: 'Series' } } }) }),
+      now: () => OBSERVED_AT + 1_000,
+    }),
+    (error) => error instanceof TorBoxDownloadUrlError
+      && error.code === 'TORBOX_REQUESTDL_PROTOCOL_INVALID',
+  );
+
+  // First call: requestdl invoked exactly once (no in-call loop).
+  assert.equal(requestdlCalls, 1, 'protocol-invalid must not loop within the same call');
+  // Placement must remain untouched: protocol-invalid is not a
+  // destructive-repair trigger.
+  const placement = store.findPlacementByInfoHash('torbox', infoHash);
+  assert.equal(placement.state, 'ready',
+    'protocol-invalid must not mark placement removed');
+  assert.equal(placement.providerResourceId, previousPlacement.providerResourceId,
+    'protocol-invalid must not rotate providerResourceId');
+  assert.equal(createCalls.length, 0,
+    'protocol-invalid must not invoke createPlacement');
+
+  // Capability cache was invalidated for the next call.
+  const newPlacement = store.findPlacementByInfoHash('torbox', infoHash);
+  const newProviderFiles = store.listProviderFiles(newPlacement.id);
+  const matched = newProviderFiles.find((f) => f.size === FILE_SIZE);
+  const capability = {
+    provider: 'torbox', accountScope: 'default',
+    placementId: newPlacement.id, providerFileId: matched.providerFileId,
+  };
+  assert.equal(cache.getByCapability(capability), null,
+    'capability must be invalidated on protocol-invalid');
+
+  // Exactly one delivery-capability-protocol-invalid event recorded.
+  const events = repairEvents(store);
+  const protocolInvalidEvents = events.filter(
+    (e) => e.failure_category === REPAIR_FAILURE_CATEGORIES.DELIVERY_CAPABILITY_PROTOCOL_INVALID,
+  );
+  assert.equal(protocolInvalidEvents.length, 1,
+    'exactly one delivery-capability-protocol-invalid event on first call');
+  // The repair event row records the resolved reason and evidence.
+  // There is no library_item_id at this seam, so the row lands in
+  // repair_evidence (lifecycle_events is gated on library-item
+  // resolution). The category is its own failure class: distinct
+  // from DELIVERY_CAPABILITY_EXPIRED (401/403/404) and
+  // REQUESTDL_UPSTREAM_5XX (5xx).
+  const evidenceRow = store.db.prepare(
+    `SELECT failure_category, reason, evidence FROM repair_evidence
+     WHERE failure_category = ?`,
+  ).all(REPAIR_FAILURE_CATEGORIES.DELIVERY_CAPABILITY_PROTOCOL_INVALID);
+  assert.equal(evidenceRow.length, 1,
+    'protocol-invalid event lands in repair_evidence');
+  assert.equal(evidenceRow[0].reason, 'torbox-requestdl-protocol-invalid',
+    'protocol-invalid event reason is stable');
+  const evidence = JSON.parse(evidenceRow[0].evidence);
+  assert.equal(evidence.code, 'TORBOX_REQUESTDL_PROTOCOL_INVALID');
+  assert.equal(evidence.reason, 'non-binary-content-type:text/html',
+    'protocolInvalidReason is captured in evidence');
+  assert.equal(typeof evidence.placementId, 'string');
+  assert.equal(typeof evidence.providerFileId, 'string');
+
+  // No stale-placement-repaired event must be recorded: the
+  // mylist is present upstream, so destructive repair is wrong.
+  const repaired = events.find(
+    (e) => e.failure_category === REPAIR_FAILURE_CATEGORIES.STALE_PLACEMENT_REPAIRED,
+  );
+  assert.equal(repaired, undefined,
+    'protocol-invalid must not trigger stale-placement-repaired');
+
+  // No DELIVERY_CAPABILITY_EXPIRED event: protocol-invalid is its
+  // own failure class, distinct from 401/403/404.
+  const expired = events.find(
+    (e) => e.failure_category === REPAIR_FAILURE_CATEGORIES.DELIVERY_CAPABILITY_EXPIRED,
+  );
+  assert.equal(expired, undefined,
+    'protocol-invalid must not be classified as delivery-capability-expired');
+
+  // No REQUESTDL_UPSTREAM_5XX event: protocol-invalid is NOT a 5xx
+  // (the upstream returned 2xx). Even though our wrapper maps the
+  // error to status=502, the seam must classify by code, not status.
+  const upstream5xx = events.find(
+    (e) => e.failure_category === REPAIR_FAILURE_CATEGORIES.REQUESTDL_UPSTREAM_5XX,
+  );
+  assert.equal(upstream5xx, undefined,
+    'protocol-invalid must not be classified as requestdl-upstream-5xx');
+
+  // Second call: cache empty after invalidation → exactly one
+  // re-resolution succeeds. Mirrors the 401/403/404 contract.
+  const result = await resolveTorBoxDeliveryWithStaleRecovery({
+    infoHash, fileIndex: 0, releaseKey: `${infoHash}:0`, filename: FILENAME,
+    controlPlaneStore: store, torBoxProvider, torBoxInventoryProvider,
+    torBoxDownloadUrlCache: cache, resolveTorBoxDownloadUrl, isUrlLive: undefined,
+    fetchFn: async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { [infoHash]: { name: 'Series' } } }) }),
+    now: () => OBSERVED_AT + 2_000,
+  });
+  assert.equal(result.recovered, false,
+    'second call must succeed (resource still present upstream)');
+  assert.equal(requestdlCalls, 2,
+    'requestdl ran exactly twice across both calls (one protocol-invalid + one 200)');
+
+  // The recovery event is DELIVERY_CAPABILITY_RECOVERED, not
+  // protocol-invalid (the recovery is a successful re-resolution).
+  const recovered = repairEvents(store).filter(
+    (e) => e.failure_category === REPAIR_FAILURE_CATEGORIES.DELIVERY_CAPABILITY_RECOVERED,
+  );
+  assert.equal(recovered.length, 1,
+    'protocol-invalid path records exactly one delivery-capability-recovered event');
+});
+
+// ---------------------------------------------------------------------------
+// Hardening B.2 — protocol-invalid: redirect loop back to the TorBox
+// API hostname. requestdl permalinks always redirect to a CDN host;
+// landing back on api.torbox.app means the URL we just resolved is
+// not a usable capability.
+// ---------------------------------------------------------------------------
+test('requestdl protocol-invalid: redirect loop to TorBox API', async (t) => {
+  withTorboxApiKey(t);
+  const infoHash = 'd'.repeat(40);
+  const store = createStore();
+  const previousPlacement = seedPlacement(store, infoHash, 'res-OLD-d');
+  const cache = makeCache();
+  const torBoxProvider = makeTorBoxProvider();
+  const torBoxInventoryProvider = makeTorBoxInventoryProvider({
+    mylistResources: [{ provider: 'torbox', providerResourceId: 'res-OLD-d', infoHash }],
+  });
+  let requestdlCalls = 0;
+  const resolveTorBoxDownloadUrl = async () => {
+    requestdlCalls += 1;
+    throw new TorBoxDownloadUrlError(
+      'TorBox requestdl returned a protocol-invalid response: redirect-loops-to-torbox-api',
+      'TORBOX_REQUESTDL_PROTOCOL_INVALID',
+      502,
+      { protocolInvalidReason: 'redirect-loops-to-torbox-api' },
+    );
+  };
+
+  await assert.rejects(
+    () => resolveTorBoxDeliveryWithStaleRecovery({
+      infoHash, fileIndex: 0, releaseKey: `${infoHash}:0`, filename: FILENAME,
+      controlPlaneStore: store, torBoxProvider, torBoxInventoryProvider,
+      torBoxDownloadUrlCache: cache, resolveTorBoxDownloadUrl, isUrlLive: undefined,
+      fetchFn: async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { [infoHash]: { name: 'Series' } } }) }),
+      now: () => OBSERVED_AT + 1_000,
+    }),
+    (error) => error instanceof TorBoxDownloadUrlError
+      && error.code === 'TORBOX_REQUESTDL_PROTOCOL_INVALID'
+      && error.protocolInvalidReason === 'redirect-loops-to-torbox-api',
+  );
+  assert.equal(requestdlCalls, 1, 'redirect-loop must not loop within the same call');
+  // Placement unchanged (mylist present).
+  const placement = store.findPlacementByInfoHash('torbox', infoHash);
+  assert.equal(placement.state, 'ready');
+  assert.equal(placement.providerResourceId, previousPlacement.providerResourceId);
+  // The event must record the protocolInvalidReason in evidence.
+  const events = repairEvents(store);
+  const protocolInvalid = events.find(
+    (e) => e.failure_category === REPAIR_FAILURE_CATEGORIES.DELIVERY_CAPABILITY_PROTOCOL_INVALID,
+  );
+  assert.ok(protocolInvalid, 'redirect-loop records a protocol-invalid event');
+  const evidence = JSON.parse(protocolInvalid.evidence);
+  assert.equal(evidence.reason, 'redirect-loops-to-torbox-api',
+    'evidence must capture the protocolInvalidReason');
+});
+
+// ---------------------------------------------------------------------------
+// Hardening B.3 — protocol-invalid: same-call does NOT loop. If the
+// second requestdl also returns protocol-invalid, the seam must NOT
+// keep retrying. The same call does exactly one requestdl call,
+// surfaces the original error, and the next call gets the same
+// exactly-one-retry contract.
+// ---------------------------------------------------------------------------
+test('requestdl protocol-invalid: same-call bounded, no multi-retry', async (t) => {
+  withTorboxApiKey(t);
+  const infoHash = 'f'.repeat(40);
+  const store = createStore();
+  seedPlacement(store, infoHash, 'res-OLD-f');
+  const cache = makeCache();
+  const torBoxProvider = makeTorBoxProvider();
+  const torBoxInventoryProvider = makeTorBoxInventoryProvider({
+    mylistResources: [{ provider: 'torbox', providerResourceId: 'res-OLD-f', infoHash }],
+  });
+  let requestdlCalls = 0;
+  const resolveTorBoxDownloadUrl = async () => {
+    requestdlCalls += 1;
+    throw new TorBoxDownloadUrlError(
+      'TorBox requestdl returned a protocol-invalid response: empty-body',
+      'TORBOX_REQUESTDL_PROTOCOL_INVALID',
+      502,
+      { protocolInvalidReason: 'empty-body' },
+    );
+  };
+
+  // First call: requestdl invoked exactly once.
+  await assert.rejects(
+    () => resolveTorBoxDeliveryWithStaleRecovery({
+      infoHash, fileIndex: 0, releaseKey: `${infoHash}:0`, filename: FILENAME,
+      controlPlaneStore: store, torBoxProvider, torBoxInventoryProvider,
+      torBoxDownloadUrlCache: cache, resolveTorBoxDownloadUrl, isUrlLive: undefined,
+      fetchFn: async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { [infoHash]: { name: 'Series' } } }) }),
+      now: () => OBSERVED_AT + 1_000,
+    }),
+    (error) => error instanceof TorBoxDownloadUrlError
+      && error.code === 'TORBOX_REQUESTDL_PROTOCOL_INVALID',
+  );
+  assert.equal(requestdlCalls, 1, 'first call: exactly one requestdl, no in-call retry');
+
+  // Second call: cache empty after invalidation, requestdl invoked
+  // exactly once more. Still no multi-retry within the same call.
+  await assert.rejects(
+    () => resolveTorBoxDeliveryWithStaleRecovery({
+      infoHash, fileIndex: 0, releaseKey: `${infoHash}:0`, filename: FILENAME,
+      controlPlaneStore: store, torBoxProvider, torBoxInventoryProvider,
+      torBoxDownloadUrlCache: cache, resolveTorBoxDownloadUrl, isUrlLive: undefined,
+      fetchFn: async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { [infoHash]: { name: 'Series' } } }) }),
+      now: () => OBSERVED_AT + 2_000,
+    }),
+    (error) => error instanceof TorBoxDownloadUrlError
+      && error.code === 'TORBOX_REQUESTDL_PROTOCOL_INVALID',
+  );
+  assert.equal(requestdlCalls, 2,
+    'second call: exactly one more requestdl (no multi-retry amplification)');
+
+  // Two protocol-invalid events recorded (one per call).
+  const events = repairEvents(store).filter(
+    (e) => e.failure_category === REPAIR_FAILURE_CATEGORIES.DELIVERY_CAPABILITY_PROTOCOL_INVALID,
+  );
+  assert.equal(events.length, 2,
+    'one protocol-invalid event per call, never a single-call amplification');
+});
+
+// ---------------------------------------------------------------------------
+// Hardening B.4 — direct seam-level detection. Verifies the
+// protocol-invalid detector in torbox-download-url-cache.js
+// distinguishes a real binary stream (application/octet-stream on a
+// CDN host) from a captive page (text/html on any host) and an
+// empty body (200 with content-length: 0). This is the unit-level
+// invariant; the seam-level contract is exercised in B.1–B.3.
+// ---------------------------------------------------------------------------
+test('requestdl resolveTorBoxDownloadUrl: protocol-invalid detector', async (t) => {
+  withTorboxApiKey(t);
+  const { resolveTorBoxDownloadUrl } = await import('../src/lib/resolver/torbox-download-url-cache.js');
+
+  // Helper: build a stub Response with the fields the detector reads.
+  function stubResponse({ status = 200, url, contentType, contentLength } = {}) {
+    const headers = new Map();
+    if (contentType != null) headers.set('content-type', contentType);
+    if (contentLength != null) headers.set('content-length', String(contentLength));
+    return {
+      status,
+      url,
+      headers: { get: (name) => headers.get(String(name).toLowerCase()) ?? null },
+      body: null,
+    };
+  }
+  // Capture the fetchFn invocations so we can return per-call responses.
+  const responses = [];
+  const fetchFn = async () => {
+    const next = responses.shift();
+    if (!next) throw new Error('fetchFn called more times than stubbed');
+    return next();
+  };
+
+  // Case A: real binary download stream on a CDN host → success.
+  responses.push(() => stubResponse({
+    status: 206,
+    url: 'https://cdn.torbox.example/dl/abc?token=ephemeral',
+    contentType: 'application/octet-stream',
+    contentLength: 1024,
+  }));
+  const okUrl = await resolveTorBoxDownloadUrl('https://api.torbox.app/v1/api/requestdl?token=x&torrent_id=res-OLD', { fetchFn });
+  assert.equal(okUrl, 'https://cdn.torbox.example/dl/abc?token=ephemeral');
+
+  // Case B: 2xx but text/html on a CDN host → protocol-invalid
+  // (CAPTCHA / login wall / error page).
+  responses.push(() => stubResponse({
+    status: 200,
+    url: 'https://cdn.torbox.example/wall',
+    contentType: 'text/html; charset=utf-8',
+    contentLength: 4096,
+  }));
+  await assert.rejects(
+    () => resolveTorBoxDownloadUrl('https://api.torbox.app/v1/api/requestdl?token=x&torrent_id=res-OLD', { fetchFn }),
+    (err) => err instanceof TorBoxDownloadUrlError
+      && err.code === 'TORBOX_REQUESTDL_PROTOCOL_INVALID'
+      && err.protocolInvalidReason === 'non-binary-content-type:text/html',
+  );
+
+  // Case C: 2xx but JSON body (CDN returning a structured error
+  // masquerading as 200).
+  responses.push(() => stubResponse({
+    status: 200,
+    url: 'https://cdn.torbox.example/dl/json-error',
+    contentType: 'application/json',
+    contentLength: 64,
+  }));
+  await assert.rejects(
+    () => resolveTorBoxDownloadUrl('https://api.torbox.app/v1/api/requestdl?token=x&torrent_id=res-OLD', { fetchFn }),
+    (err) => err instanceof TorBoxDownloadUrlError
+      && err.code === 'TORBOX_REQUESTDL_PROTOCOL_INVALID'
+      && err.protocolInvalidReason === 'non-binary-content-type:application/json',
+  );
+
+  // Case D: redirect loop back to the TorBox API hostname.
+  responses.push(() => stubResponse({
+    status: 200,
+    url: 'https://api.torbox.app/v1/api/oops',
+    contentType: 'application/octet-stream',
+    contentLength: 1024,
+  }));
+  await assert.rejects(
+    () => resolveTorBoxDownloadUrl('https://api.torbox.app/v1/api/requestdl?token=x&torrent_id=res-OLD', { fetchFn }),
+    (err) => err instanceof TorBoxDownloadUrlError
+      && err.code === 'TORBOX_REQUESTDL_PROTOCOL_INVALID'
+      && err.protocolInvalidReason === 'redirect-loops-to-torbox-api',
+  );
+
+  // Case E: 2xx with empty body.
+  responses.push(() => stubResponse({
+    status: 200,
+    url: 'https://cdn.torbox.example/dl/empty',
+    contentType: 'application/octet-stream',
+    contentLength: 0,
+  }));
+  await assert.rejects(
+    () => resolveTorBoxDownloadUrl('https://api.torbox.app/v1/api/requestdl?token=x&torrent_id=res-OLD', { fetchFn }),
+    (err) => err instanceof TorBoxDownloadUrlError
+      && err.code === 'TORBOX_REQUESTDL_PROTOCOL_INVALID'
+      && err.protocolInvalidReason === 'empty-body',
+  );
+});
+

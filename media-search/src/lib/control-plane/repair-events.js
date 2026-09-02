@@ -34,6 +34,11 @@
  *      401/403/404 and was invalidated; the next call re-resolves once.
  *   - delivery-capability-recovered:     a fresh CDN URL was re-resolved
  *      after the previous capability was invalidated.
+ *   - delivery-capability-protocol-invalid: a 2xx response from requestdl
+ *      was NOT a real binary download stream (HTML/JSON error page,
+ *      redirect loop back to TorBox API, empty body, malformed final
+ *      URL). The cached capability was invalidated; the next call
+ *      re-resolves once. Mirrors the 401/403/404 contract.
  *   - provider-byte-read-failure:        a 4xx/5xx response from the
  *      upstream byte read; never poisons a valid capability.
  */
@@ -48,6 +53,7 @@ export const REPAIR_FAILURE_CATEGORIES = Object.freeze({
   REQUESTDL_UPSTREAM_5XX: 'requestdl-upstream-5xx',
   DELIVERY_CAPABILITY_EXPIRED: 'delivery-capability-expired',
   DELIVERY_CAPABILITY_RECOVERED: 'delivery-capability-recovered',
+  DELIVERY_CAPABILITY_PROTOCOL_INVALID: 'delivery-capability-protocol-invalid',
   PROVIDER_BYTE_READ_FAILURE: 'provider-byte-read-failure',
 });
 
