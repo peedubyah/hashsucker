@@ -4,6 +4,141 @@ import {
   addDeterministicCollisionSuffix,
   buildPreferredCanonicalPath,
 } from '../control-plane/canonical-path.js';
+import { notifyBindingActivated } from '../control-plane/durability-enroller.js';
+
+function isRealControlPlaneStore(store) {
+  // Legacy / test stubs expose only getTorrentFile(). The authoritative
+  // binding write requires the full store surface
+  // (ensureLibraryItem / ensureCanonicalPath / recordExposure /
+  // activateBinding). Skip the write when any of those are missing so
+  // legacy readback paths and stubbed unit tests continue to behave
+  // exactly as before.
+  return Boolean(store)
+    && typeof store.ensureLibraryItem === 'function'
+    && typeof store.ensureCanonicalPath === 'function'
+    && typeof store.recordExposure === 'function'
+    && typeof store.activateBinding === 'function';
+}
+
+/**
+ * Activate a durable control-plane binding for a freshly-materialized
+ * authoritative VFS row. Idempotent under replay: re-running this on
+ * the same (libraryItem, releaseKey, placement, providerFile, exposure)
+ * returns the existing active binding without creating a new version.
+ *
+ * Failure is logged and swallowed: the VFS row is the source of truth
+ * for playback, and a binding-write failure must not regress that path.
+ * The 429 causality proof (requestdl-429-binding-causality-proof.test.js)
+ * guarantees that no upstream error path can reach this helper; only
+ * successful authoritative fulfillments do.
+ *
+ * The notifyBindingActivated() shim is a no-op when the durability
+ * scheduler is not registered (default-disabled mode), so this call is
+ * side-effect-free outside the observe / execute durability modes.
+ */
+function tryActivateAuthoritativeBinding({
+  controlPlaneStore,
+  handoff,
+  torrentFile,
+  canonicalPath,
+  mediaItemFactory,
+  reason,
+  observedAt,
+}) {
+  if (!isRealControlPlaneStore(controlPlaneStore)) return null;
+  const identity = handoff?.torrentFileIdentity;
+  const placementId = identity?.placementId ?? null;
+  const providerFileId = identity?.providerFileId ?? null;
+  if (!placementId || !providerFileId) return null;
+  if (!torrentFile || !torrentFile.id) return null;
+
+  const item = mediaItemFactory();
+  if (!item) return null;
+  let libraryPath;
+  try {
+    libraryPath = controlPlaneStore.ensureCanonicalPath(item.id, { canonicalPath });
+  } catch (error) {
+    console.warn(`[vfs] binding write: ensureCanonicalPath failed: ${error.message}`);
+    return null;
+  }
+  let exposure;
+  try {
+    exposure = controlPlaneStore.recordExposure({
+      placementId,
+      providerFileId,
+      accountScope: 'default',
+      mountScope: 'default',
+      transport: 'zurg-rclone',
+      // Deterministic exposureKey keeps the exposure idempotent across
+      // replays: same placement + same provider file => same key.
+      exposureKey: `${placementId}:${providerFileId}`,
+      relativePath: canonicalPath,
+      state: 'visible',
+      readOnly: true,
+      observedAt,
+      // 6h TTL covers one durability pass and is comfortably longer
+      // than the requestdl cache TTL (10min) so a re-fetch never
+      // observes an expired exposure on a still-fresh inventory.
+      expiresAt: observedAt + 6 * 60 * 60 * 1000,
+    });
+  } catch (error) {
+    console.warn(`[vfs] binding write: recordExposure failed: ${error.message}`);
+    return null;
+  }
+  let binding;
+  try {
+    binding = controlPlaneStore.activateBinding({
+      libraryItemId: item.id,
+      libraryPathId: libraryPath.id,
+      releaseKey: handoff.releaseKey,
+      infoHash: handoff.infoHash,
+      fileIndex: handoff.fileIndex ?? null,
+      placementId,
+      providerFileId,
+      exposureId: exposure.id,
+      reason,
+    });
+  } catch (error) {
+    console.warn(`[vfs] binding write: activateBinding failed: ${error.message}`);
+    return null;
+  }
+  try {
+    notifyBindingActivated({ libraryItemId: item.id, binding, observedAt });
+  } catch (error) {
+    // The enroller shim is allowed to throw; log and continue.
+    console.warn(`[vfs] binding write: notifyBindingActivated failed: ${error.message}`);
+  }
+  return binding;
+}
+
+/**
+ * Build the (mediaType, title, year) for ensureLibraryItem() from a handoff.
+ * The library item is the semantic identity (movie / episode), distinct
+ * from the VFS canonical path. We use:
+ *   - handoff.canonicalTitle / canonicalYear when supplied (Seerr detail body)
+ *   - the provider release basename when not (legacy TV/Movie path)
+ *   - the mediaId as last resort
+ */
+function libraryItemInputFromHandoff(handoff) {
+  const base = {
+    mediaType: handoff.mediaType === 'movie' ? 'movie' : 'episode',
+    mediaId: handoff.mediaId,
+    desiredState: 'present',
+  };
+  if (handoff.mediaType === 'movie') {
+    return {
+      ...base,
+      title: handoff.canonicalTitle || handoff.title || handoff.mediaId,
+      year: Number.isSafeInteger(handoff.canonicalYear) ? handoff.canonicalYear : null,
+    };
+  }
+  return {
+    ...base,
+    title: handoff.canonicalTitle || handoff.title || handoff.mediaId,
+    season: handoff.season,
+    episode: handoff.episode,
+  };
+}
 
 function releaseKeyFor(handoff) {
   return `${handoff.infoHash.toLowerCase()}:${handoff.fileIndex == null ? 'torrent' : handoff.fileIndex}`;
@@ -175,6 +310,30 @@ export function materializeVfsEntry(
   { allowLegacy = true } = {},
 ) {
   const torrentFile = torrentFileForHandoff(controlPlaneStore, handoff, allowLegacy);
+  // The binding write needs an item factory that closes over the handoff's
+  // presentation identity. We attach it as a method on the handoff so the
+  // result finalization below can run tryActivateAuthoritativeBinding on
+  // every return path (success, idempotent, legacy supersede, race recovery)
+  // without duplicating the call.
+  const mediaItemFactory = () => {
+    if (!isRealControlPlaneStore(controlPlaneStore)) return null;
+    return controlPlaneStore.ensureLibraryItem(libraryItemInputFromHandoff(handoff));
+  };
+  const finalize = (entry, reason) => {
+    if (!entry) return entry;
+    const observedAt = entry.updatedAt ?? entry.createdAt ?? now();
+    tryActivateAuthoritativeBinding({
+      controlPlaneStore,
+      handoff,
+      torrentFile,
+      canonicalPath: entry.canonicalPath,
+      mediaItemFactory,
+      reason,
+      observedAt,
+    });
+    return entry;
+  };
+
   if (handoff.mediaType === 'movie') {
     const existing = searchCache.getVfsMovieEntry(handoff.mediaId);
     if (existing) {
@@ -187,19 +346,22 @@ export function materializeVfsEntry(
         );
         if (replaced) {
           console.log(`[vfs] superseded legacy media=${replaced.mediaId} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
-          return replaced;
+          return finalize(replaced, 'vfs-legacy-supersede');
         }
         // Race: another writer converted the row to authoritative between
         // the SELECT and the UPDATE. Re-read and assert against the
         // authoritative identity.
-        return assertExistingIdentityOrThrow(
-          searchCache.getVfsMovieEntry(handoff.mediaId),
-          handoff,
-          torrentFile,
+        return finalize(
+          assertExistingIdentityOrThrow(
+            searchCache.getVfsMovieEntry(handoff.mediaId),
+            handoff,
+            torrentFile,
+          ),
+          'vfs-movie-race',
         );
       }
       assertExistingIdentity(existing, handoff, torrentFile);
-      return existing;
+      return finalize(existing, 'vfs-movie-idempotent');
     }
     if (handoff.releaseKey !== releaseKeyFor(handoff)) {
       throw new Error(`Durable movie handoff identity is inconsistent for ${handoff.mediaId}`);
@@ -258,8 +420,8 @@ export function materializeVfsEntry(
         throw error;
       }
     }
-    console.log(`[vfs] materialized media=${created.mediaId} path="${created.canonicalPath}" release=${created.releaseKey}`);
-    return created;
+    console.log(`[vfs] materialized media=${created.mediaId} path="${created.canonicalPath}" release=${created.releaseKey} torrentFileId=${created.torrentFileId}`);
+    return finalize(created, 'vfs-movie-materialize');
   }
 
   if (!['series', 'tv'].includes(handoff.mediaType)
@@ -279,19 +441,22 @@ export function materializeVfsEntry(
       );
       if (replaced) {
         console.log(`[vfs-tv] superseded legacy media=${replaced.mediaId} S${replaced.season}E${replaced.episode} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
-        return replaced;
+        return finalize(replaced, 'vfs-tv-legacy-supersede');
       }
       // Race: another writer converted the row to authoritative between
       // the SELECT and the UPDATE. Re-read and assert against the
       // authoritative identity.
-      return assertExistingIdentityOrThrow(
-        searchCache.getVfsTvEntry(handoff.mediaId, handoff.season, handoff.episode),
-        handoff,
-        torrentFile,
+      return finalize(
+        assertExistingIdentityOrThrow(
+          searchCache.getVfsTvEntry(handoff.mediaId, handoff.season, handoff.episode),
+          handoff,
+          torrentFile,
+        ),
+        'vfs-tv-race',
       );
     }
     assertExistingIdentity(existing, handoff, torrentFile);
-    return existing;
+    return finalize(existing, 'vfs-tv-idempotent');
   }
   const episode = episodeIdentity(torrentFile?.internalPath ?? handoff.filename, handoff.mediaId);
   const presentationTitle = typeof handoff.canonicalTitle === 'string' && handoff.canonicalTitle.trim()
@@ -338,6 +503,6 @@ export function materializeVfsEntry(
       throw error;
     }
   }
-  console.log(`[vfs-tv] materialized media=${created.mediaId} S${created.season}E${created.episode} path="${created.canonicalPath}" release=${created.releaseKey}`);
-  return created;
+  console.log(`[vfs-tv] materialized media=${created.mediaId} S${created.season}E${created.episode} path="${created.canonicalPath}" release=${created.releaseKey} torrentFileId=${created.torrentFileId}`);
+  return finalize(created, 'vfs-tv-materialize');
 }
