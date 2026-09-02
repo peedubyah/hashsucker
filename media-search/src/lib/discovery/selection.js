@@ -12,6 +12,8 @@
  * - Ineligible candidates can never win
  */
 
+import { isPlayableVideoTorrentFile } from '../resolver/tv-episode-resolver.js';
+
 /**
  * Select the best candidate from ranked results.
  *
@@ -217,8 +219,102 @@ export async function selectBindableCandidate(results, options = {}) {
           break;
         }
       } catch {
-        // exact-size failed; fall through to try TV resolution
+        // exact-size failed; fall through to try TV/movie PATH B
       }
+    }
+
+    // ---- PATH B (movie): cached-only single-file binding fallback ----
+    // Slice 2.7: when discovery did not provide a trustworthy exact
+    // selected-file size (e.g. behaviorHints.videoSize absent on a cold
+    // Stremio stream) we cannot use the exact-size fast path. For a movie
+    // we therefore consult the authoritative TorBox inventory that the
+    // cached-only placement already populated: the candidate is bindable
+    // when the durable TorrentFile inventory contains EXACTLY ONE playable
+    // video file. Zero files → unbindable; >1 files → ambiguous; both
+    // unbindable paths fall through to the next already-ranked candidate.
+    // The provider call surface is identical to the TV PATH B: one
+    // cached-only placement create (addOnlyIfCached=true; never an
+    // uncached download) plus the inventory fetch driven by the same
+    // ensureTorBoxFileIdentityFn factory. No nested retries.
+    if (!tvCoordinates
+        && selectedFileSize == null
+        && typeof ensureTorBoxFileIdentityFn === 'function'
+        && controlPlaneStore) {
+      let placementId = null;
+      let placementTorrentFiles = null;
+      try {
+        const result = await ensureTorBoxFileIdentityFn({
+          infoHash: candidate.infoHash,
+          controlPlaneStore,
+          skipSizeMatch: true,
+        });
+        placementId = result?.placementId ?? null;
+        // Prefer the inventory returned by the helper, but fall back to a
+        // authoritative listTorrentFilesForRelease read so the cardinality
+        // check always sees the freshly-persisted TorrentFile rows
+        // (replaceProviderFileInventory may have assigned torrent_file_id
+        // mapping state the in-memory `files` array doesn't reflect yet).
+        placementTorrentFiles = result?.torrentFiles
+          ?? controlPlaneStore.listTorrentFilesForRelease(candidate.infoHash);
+      } catch (err) {
+        // Placement create refused (release not cached) or inventory fetch
+        // failed. Either way, this candidate cannot be bound authoritatively;
+        // continue to the next already-ranked candidate.
+        skipped.push({
+          infoHash: candidate.infoHash,
+          rank: candidate.rank,
+          torboxState: candidate.availability?.torbox?.state || 'unknown',
+          reason: 'movie-cached-placement-failed',
+        });
+        continue;
+      }
+
+      if (!Array.isArray(placementTorrentFiles) || placementTorrentFiles.length === 0) {
+        skipped.push({
+          infoHash: candidate.infoHash,
+          rank: candidate.rank,
+          torboxState: candidate.availability?.torbox?.state || 'unknown',
+          reason: 'movie-no-torrent-files',
+        });
+        continue;
+      }
+
+      // Use the same playable-video filter as TV PATH B so the project
+      // rules (video extensions + non-sample + positive integer size) are
+      // honored uniformly across media types.
+      const playable = placementTorrentFiles.filter(isPlayableVideoTorrentFile);
+      if (playable.length !== 1) {
+        skipped.push({
+          infoHash: candidate.infoHash,
+          rank: candidate.rank,
+          torboxState: candidate.availability?.torbox?.state || 'unknown',
+          reason: playable.length === 0 ? 'movie-no-playable' : 'movie-ambiguous',
+        });
+        continue;
+      }
+
+      // Cardinality == 1 → bind authoritatively. Map the chosen
+      // TorrentFile back to its present provider_file (within the placement
+      // we just created) so the durable handoff carries the full
+      // (placement, providerFile, torrentFile) identity triple.
+      const torrentFile = playable[0];
+      let providerFileId = null;
+      if (placementId && typeof controlPlaneStore.listProviderRefsForTorrentFile === 'function') {
+        const refs = controlPlaneStore.listProviderRefsForTorrentFile(torrentFile.id) || [];
+        const present = refs.find((r) => r.placementId === placementId && r.present);
+        providerFileId = present?.providerFileId ?? null;
+      }
+      selected = formatSelection(candidate);
+      selected._torrentFileId = torrentFile.id;
+      selected._binding = {
+        status: 'movie-cached-single-file',
+        torrentFileId: torrentFile.id,
+        placementId,
+        providerFileId,
+        size: torrentFile.size,
+      };
+      reason = 'movie-cached-single-file bound';
+      break;
     }
 
     // ---- PATH B: TV episode resolution from cached-only TorBox inventory ----
@@ -309,9 +405,15 @@ export async function selectBindableCandidate(results, options = {}) {
     });
   }
 
-  // ---- FALLBACK: preserve cached-first selection when bindability cannot be determined ----
-  // (movies without exactFileSize; TV when no controlPlaneStore is available)
-  if (!selected && eligible.length > 0) {
+  // ---- FALLBACK: preserve cached-first selection only when bindability cannot
+  // be determined at all. Movies no longer fall through here because the movie
+  // PATH B has now consumed every ranked candidate with a cached-only
+  // placement attempt; if no candidate is bindable we leave `selected` null
+  // so the orchestrator (media-request.js) does NOT build a handoff with
+  // torrent_file_id=NULL. TV still uses the fallback when no controlPlaneStore
+  // is available (PATH B cannot run), preserving the original behavior for
+  // that branch.
+  if (!selected && eligible.length > 0 && tvCoordinates) {
     const byState = { cached: [], unknown: [], uncached: [] };
     for (const candidate of eligible) {
       const state = candidate.availability?.torbox?.state || 'unknown';
