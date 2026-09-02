@@ -218,12 +218,21 @@ test('classifyReadFailure: 404 -> stale', () => {
 test('classifyReadFailure: 410 -> stale', () => {
   assert.equal(classifyReadFailure({ status: 410 }), 'stale');
 });
-test('classifyReadFailure: 200 -> invalid', () => {
-  assert.equal(classifyReadFailure({ status: 200 }), 'invalid');
+test('classifyReadFailure: 200 -> protocol-invalid', () => {
+  assert.equal(classifyReadFailure({ status: 200 }), 'protocol-invalid');
 });
-test('classifyReadFailure: 502 -> invalid', () => {
-  assert.equal(classifyReadFailure({ status: 502 }), 'invalid');
+test('classifyReadFailure: 500 -> transient', () => {
+  assert.equal(classifyReadFailure({ status: 500 }), 'transient');
 });
-test('classifyReadFailure: null -> invalid', () => {
-  assert.equal(classifyReadFailure(null), 'invalid');
+test('classifyReadFailure: 502 -> transient', () => {
+  assert.equal(classifyReadFailure({ status: 502 }), 'transient');
+});
+test('classifyReadFailure: 503 -> transient', () => {
+  assert.equal(classifyReadFailure({ status: 503 }), 'transient');
+});
+test('classifyReadFailure: 504 -> transient', () => {
+  assert.equal(classifyReadFailure({ status: 504 }), 'transient');
+});
+test('classifyReadFailure: null -> protocol-invalid', () => {
+  assert.equal(classifyReadFailure(null), 'protocol-invalid');
 });

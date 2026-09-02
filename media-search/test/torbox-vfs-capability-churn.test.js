@@ -167,6 +167,21 @@ function makeCapturingResponse() {
 }
 
 /**
+ * Build a body of exactly the byte length that the requested Range
+ * advertises (end - start + 1). The body validator enforces this
+ * strictly, so test mocks must not invent shorter / longer payloads
+ * just to be readable — they have to match the requested Range or
+ * the response is correctly rejected as protocol-invalid. For a
+ * full-file (no Range) request we return the full SIZE.
+ */
+function bodyForRange(rangeHeader) {
+  const match = String(rangeHeader ?? '').match(/bytes=(\d+)-(\d+)/);
+  if (!match) return Buffer.alloc(SIZE);
+  const length = Number(match[2]) - Number(match[1]) + 1;
+  return Buffer.alloc(length);
+}
+
+/**
  * Build a seam that mirrors the real one: it consults
  * torBoxDownloadUrlCache first, then on a miss it performs a single
  * requestdl (counted by `requestdlCalls`) and stores the result. This
@@ -282,7 +297,7 @@ test('B1: warm sequential range reads reuse the cached capability — no extra r
     torBoxDownloadUrlCache,
     fetchFn: async (_url, options) => {
       providerOpens += 1;
-      return new Response('hello world', {
+      return new Response(bodyForRange(options.headers.range), {
         status: 206,
         headers: { 'content-range': `bytes ${options.headers.range.split('=')[1]}/${SIZE}` },
       });
@@ -327,7 +342,7 @@ test('B2: warm concurrent range reads reuse the cached capability — one reques
     torBoxDownloadUrlCache,
     fetchFn: async (_url, options) => {
       providerOpens += 1;
-      return new Response('warm', {
+      return new Response(bodyForRange(options.headers.range), {
         status: 206,
         headers: { 'content-range': `bytes ${options.headers.range.split('=')[1]}/${SIZE}` },
       });
@@ -402,7 +417,7 @@ test('B3: cold same-file five-way single-flight yields exactly one requestdl', a
     torBoxDownloadUrlCache,
     fetchFn: async (_url, options) => {
       providerOpens += 1;
-      return new Response('bytes', {
+      return new Response(bodyForRange(options.headers.range), {
         status: 206,
         headers: { 'content-range': `bytes ${options.headers.range.split('=')[1]}/${SIZE}` },
       });
@@ -473,7 +488,7 @@ test('B4: four cold siblings (distinct providerFileIds) — one resolution each,
         return result;
       },
       torBoxDownloadUrlCache,
-      fetchFn: async (_url, options) => new Response('sibling', {
+      fetchFn: async (_url, options) => new Response(bodyForRange(options.headers.range), {
         status: 206,
         headers: { 'content-range': `bytes ${options.headers.range.split('=')[1]}/${SIZE}` },
       }),
@@ -517,14 +532,14 @@ test('B5: client abort retains the capability', async (t) => {
     rdResolutionCache: { delete() {} },
     resolveTorBoxDeliverySeam: seam,
     torBoxDownloadUrlCache,
-    fetchFn: async (_url, _options) => {
+    fetchFn: async (_url, options) => {
       providerOpens += 1;
       if (providerOpens === 1) {
         const err = new Error('aborted');
         err.name = 'AbortError';
         throw err;
       }
-      return new Response('ok', {
+      return new Response(bodyForRange(options.headers.range), {
         status: 206,
         headers: { 'content-range': `bytes 0-99/${SIZE}` },
       });
@@ -565,14 +580,14 @@ test('B6: transport throw (network reset / DNS) retains the capability', async (
     rdResolutionCache: { delete() {} },
     resolveTorBoxDeliverySeam: seam,
     torBoxDownloadUrlCache,
-    fetchFn: async (_url, _options) => {
+    fetchFn: async (_url, options) => {
       providerOpens += 1;
       if (providerOpens === 1) {
         const err = new Error('socket hang up');
         err.code = 'ECONNRESET';
         throw err;
       }
-      return new Response('ok', {
+      return new Response(bodyForRange(options.headers.range), {
         status: 206,
         headers: { 'content-range': `bytes 0-99/${SIZE}` },
       });
@@ -613,12 +628,12 @@ test('B7: upstream 5xx retains the capability', async (t) => {
     rdResolutionCache: { delete() {} },
     resolveTorBoxDeliverySeam: seam,
     torBoxDownloadUrlCache,
-    fetchFn: async (_url, _options) => {
+    fetchFn: async (_url, options) => {
       providerOpens += 1;
       if (providerOpens === 1) {
         return new Response('bad gateway', { status: 502 });
       }
-      return new Response('ok', {
+      return new Response(bodyForRange(options.headers.range), {
         status: 206,
         headers: { 'content-range': `bytes 0-99/${SIZE}` },
       });
@@ -735,7 +750,7 @@ test('B9: definitive upstream 404 invalidates exact key and the next read re-res
       // Extract start/end from the requested range so the response is
       // consistent across both the retry and the follow-up read.
       const [, start, end] = (options.headers.range ?? 'bytes=0-0').match(/bytes=(\d+)-(\d+)/) ?? [];
-      return new Response('ok', {
+      return new Response(bodyForRange(options.headers.range), {
         status: 206,
         headers: { 'content-range': `bytes ${start}-${end}/${SIZE}` },
       });

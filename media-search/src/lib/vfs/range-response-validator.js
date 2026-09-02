@@ -27,12 +27,21 @@
  *       durable size — body is NOT buffered.
  *   - classifyReadFailure(upstream)
  *       Maps an upstream status to one of: 'rate-limited' | 'stale' |
- *       'invalid'. Mirrors the inline classification that used to
- *       live in openValidatedProviderRead.
- *
- * The 502 status is preserved for every failure mode so the existing
- * openValidatedProviderRead escalation surface (and Worker B's
- * bounded-retry contract) is unchanged.
+ *       'transient' | 'protocol-invalid'. The movie/TV WebDAV byte
+ *       path uses this to decide whether the cached capability is
+ *       trustworthy after a header-class validation failure:
+ *         - 'rate-limited'  → mark the handoff rate-limited, retain
+ *         - 'stale'         → the capability is definitively invalid
+ *                            (401/403/404/410) — invalidate it
+ *         - 'transient'     → 5xx blip, retain the capability
+ *         - 'protocol-invalid' → the upstream is lying (e.g. ignored
+ *                              Range and returned a 200) — invalidate
+ *                              it. The body-class check in
+ *                              validateRangeResponseBody additionally
+ *                              invalidates on body-length mismatch.
+ *       Mirrors the inline classification that used to live in
+ *       openValidatedProviderRead so the bounded-retry contract
+ *       remains the same.
  */
 
 export const RANGE_VALIDATION_REASONS = Object.freeze({
@@ -51,6 +60,9 @@ export const RANGE_VALIDATION_REASONS = Object.freeze({
 });
 
 const STALE_PROVIDER_STATUSES = new Set([401, 403, 404, 410]);
+// Transient 5xx statuses: the upstream is overloaded / unavailable,
+// not stale — the cached capability is still trustworthy, retain it.
+const TRANSIENT_PROVIDER_STATUSES = new Set([500, 502, 503, 504]);
 
 /**
  * Parse a Content-Range header value of the form
@@ -325,5 +337,6 @@ export async function validateRangeResponseBody(upstream, requestedRange, metada
 export function classifyReadFailure(upstream) {
   if (upstream?.status === 429) return 'rate-limited';
   if (upstream && STALE_PROVIDER_STATUSES.has(upstream.status)) return 'stale';
-  return 'invalid';
+  if (upstream && TRANSIENT_PROVIDER_STATUSES.has(upstream.status)) return 'transient';
+  return 'protocol-invalid';
 }

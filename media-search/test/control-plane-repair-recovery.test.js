@@ -1475,4 +1475,3 @@ test('requestdl resolveTorBoxDownloadUrl: protocol-invalid detector', async (t) 
       && err.protocolInvalidReason === 'empty-body',
   );
 });
-
