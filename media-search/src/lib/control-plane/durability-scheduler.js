@@ -327,9 +327,17 @@ export function createDurabilityScheduler(options = {}) {
    *      without calling executor). Update last_run_at / outcome.
    *   5. Update scheduler_state with pass results.
    *
+   * @param {Object} [options]
+   * @param {Array<{row: object, outcome: string, error?: string}>} [options.rowResults]
+   *        Pre-computed per-row outcomes from a batch-oriented runtime
+   *        seam (e.g. durability-runtime). When provided, the scheduler
+   *        does NOT invoke the per-item executor callback and instead
+   *        writes the supplied outcomes directly via writeRunResult. This
+   *        is the seam the named repair uses so Worker B's runBatch is
+   *        invoked at most once per (provider, accountScope) group.
    * @returns {Promise<PassSummary>}
    */
-  async function runPass() {
+  async function runPass(options = {}) {
     if (passInFlight) {
       return { ran: false, reason: 'pass-in-flight', passInFlightId: passInFlight.id };
     }
@@ -355,12 +363,43 @@ export function createDurabilityScheduler(options = {}) {
     let failed = 0;
     let skipped = 0;
 
+    const providedResults = options?.rowResults;
+    const useProvided = Array.isArray(providedResults);
+
     try {
-      for (const row of due) {
-        const summary = await invokeForRow(row, currentMode);
-        if (summary.outcome === 'succeeded') succeeded += 1;
-        else if (summary.outcome === 'failed') failed += 1;
-        else skipped += 1;
+      if (useProvided) {
+        // Fast path: a batch-oriented runtime seam already produced the
+        // per-row outcomes for the full pass. The runtime guarantees one
+        // Worker B runBatch per (provider, accountScope) group; this
+        // method only writes the per-row results to durability_due_state.
+        const byRow = new Map();
+        for (const entry of providedResults) {
+          if (entry?.row) byRow.set(entry.row.library_item_id, entry);
+        }
+        for (const row of due) {
+          const entry = byRow.get(row.library_item_id);
+          if (!entry) {
+            writeRunResult(row, { outcome: 'skipped', error: 'no-runtime-result' });
+            skipped += 1;
+            continue;
+          }
+          const outcome = entry.outcome === 'succeeded'
+            || entry.outcome === 'failed'
+            || entry.outcome === 'skipped'
+            ? entry.outcome
+            : 'skipped';
+          writeRunResult(row, { outcome, error: entry.error ?? null });
+          if (outcome === 'succeeded') succeeded += 1;
+          else if (outcome === 'failed') failed += 1;
+          else skipped += 1;
+        }
+      } else {
+        for (const row of due) {
+          const summary = await invokeForRow(row, currentMode);
+          if (summary.outcome === 'succeeded') succeeded += 1;
+          else if (summary.outcome === 'failed') failed += 1;
+          else skipped += 1;
+        }
       }
     } finally {
       clearTimeout(timeoutHandle);

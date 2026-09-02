@@ -27,6 +27,7 @@ import {
   REPAIR_FAILURE_CATEGORIES,
   recordRepairEvent,
 } from '../control-plane/repair-events.js';
+import { notifyStalePlacementRepaired } from '../control-plane/durability-enroller.js';
 import { TorBoxDownloadUrlError } from './torbox-download-url-cache.js';
 import { providerAccounting } from '../providers/provider-accounting.js';
 
@@ -716,6 +717,7 @@ async function recoverStalePlacement({
   // re-used by canonical (infoHash, internal_path, size) within the new
   // placement's authoritative inventory refresh). Record the success.
   const newPlacementRow = controlPlaneStore.findPlacementByInfoHash('torbox', infoHash);
+  const repairedAt = now();
   recordRepairEvent(controlPlaneStore, {
     failureCategory: REPAIR_FAILURE_CATEGORIES.STALE_PLACEMENT_REPAIRED,
     infoHash,
@@ -728,8 +730,27 @@ async function recoverStalePlacement({
       newProviderFileId: recoveredDelivery.providerFileId,
     },
     retryable: false,
-    observedAt: now(),
+    observedAt: repairedAt,
     now,
   });
+  // Notify the durability enroller so a freshly-repaired authoritative
+  // item is enrolled for its next durability pass. No-op when the
+  // scheduler is not registered (default-disabled mode). Failure here
+  // is non-fatal: the repair itself already succeeded.
+  try {
+    const libraryItem = typeof controlPlaneStore.findLibraryItemByInfoHash === 'function'
+      ? controlPlaneStore.findLibraryItemByInfoHash(infoHash)
+      : null;
+    if (libraryItem) {
+      notifyStalePlacementRepaired({
+        libraryItemId: libraryItem.id,
+        failureCategory: REPAIR_FAILURE_CATEGORIES.STALE_PLACEMENT_REPAIRED,
+        infoHash,
+        occurredAt: repairedAt,
+      });
+    }
+  } catch {
+    // durability enrollment is best-effort; never poison the repair
+  }
   return recoveredUrl;
 }

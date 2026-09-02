@@ -1,4 +1,5 @@
 import { validateReleaseIdentity } from '../../api/release-contract.js';
+import { notifyBindingActivated } from './durability-enroller.js';
 
 export const RECONCILIATION_ACTIONS = Object.freeze([
   'no-op',
@@ -346,7 +347,7 @@ export function executeReconciliation(plan, store, options = {}) {
         // Active binding is current; nothing to materialize.
         break;
       case 'bind': {
-        store.activateBinding({
+        const binding = store.activateBinding({
           libraryItemId: action.libraryItemId,
           libraryPathId: action.libraryPathId,
           releaseKey: action.releaseKey,
@@ -357,10 +358,11 @@ export function executeReconciliation(plan, store, options = {}) {
           exposureId: action.exposureId,
           reason: action.reason,
         });
+        notifyBindingActivated({ libraryItemId: action.libraryItemId, binding });
         break;
       }
       case 'rebind': {
-        store.activateBinding({
+        const binding = store.activateBinding({
           libraryItemId: action.libraryItemId,
           libraryPathId: action.libraryPathId,
           releaseKey: action.releaseKey,
@@ -372,6 +374,7 @@ export function executeReconciliation(plan, store, options = {}) {
           reason: action.reason,
           expectedBindingVersion: action.expectedBindingVersion,
         });
+        notifyBindingActivated({ libraryItemId: action.libraryItemId, binding });
         break;
       }
       case 'mark-degraded': {
