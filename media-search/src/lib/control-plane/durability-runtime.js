@@ -36,22 +36,20 @@
  * partitionDueItemsByClass, never to the background snapshot seam.
  *
  * Event-driven enrollment is wired into existing fulfillment/repair
- * seams by a small shim (enrollFromNewlyFulfilledBinding /
- * enrollFromStalePlacementRepairedEvent) that the reconciler /
- * torbox-delivery.js call sites invoke. The shim never invents
- * playback tracking: enrollment is keyed on the persisted
- * binding-id+version or repair event id, exactly as the scheduler
- * already expects.
+ * seams by a small shim (notifyBindingActivated /
+ * notifyStalePlacementRepaired) defined in ./durability-enroller.js.
+ * The reconciler (reconciler.js) and torbox-delivery.js call sites
+ * invoke that shim; createDurabilityRuntime() below registers the
+ * scheduler with the shim via registerDurabilityScheduler(scheduler)
+ * so the registry holds a live reference until runtime.dispose() calls
+ * clearDurabilityScheduler. The shim never invents playback tracking:
+ * enrollment is keyed on the persisted binding-id+version or repair
+ * event id, exactly as the scheduler already expects.
  */
 import { createBackgroundDurabilityExecutor } from './background-durability-executor.js';
 import { createProviderAdapter, PROVIDER_CAPABILITIES } from '../providers/capabilities.js';
 import { classifyProviderDurability, evaluateProviderForBackground } from './durability-provider-classifier.js';
-import { REPAIR_FAILURE_CATEGORIES } from './repair-events.js';
 import { registerDurabilityScheduler } from './durability-enroller.js';
-
-const REPAIR_ENROLL_CATEGORIES = Object.freeze(new Set([
-  REPAIR_FAILURE_CATEGORIES.STALE_PLACEMENT_REPAIRED,
-]));
 
 function requireStore(store) {
   if (!store || typeof store !== 'object' || typeof store.db !== 'object') {
@@ -438,42 +436,6 @@ export function createDurabilityRuntime(options = {}) {
 }
 
 /**
- * Minimal enrollment shim used by the existing reconciler / repair
- * seams. The scheduler already exposes enrollNewlyFulfilled and
- * enrollRecentlyRepaired; this helper computes the durable
- * enrollment-key without inventing playback tracking. The function is
- * a no-op when the scheduler is not configured or when the binding /
- * event is not durable.
- */
-export function enrollFromNewlyFulfilledBinding(scheduler, input) {
-  if (!scheduler || typeof scheduler.enrollNewlyFulfilled !== 'function') return null;
-  const libraryItemId = requireString(input?.libraryItemId, 'libraryItemId');
-  const binding = input?.binding;
-  if (!binding || !binding.id || binding.version == null) {
-    return { enrolled: false, reason: 'binding-missing-id' };
-  }
-  return scheduler.enrollNewlyFulfilled({
-    libraryItemId,
-    enrollmentKey: `binding:${binding.id}:${binding.version}`,
-    observedAt: input?.observedAt ?? Date.now(),
-  });
-}
-
-export function enrollFromStalePlacementRepairedEvent(scheduler, input) {
-  if (!scheduler || typeof scheduler.enrollRecentlyRepaired !== 'function') return null;
-  const libraryItemId = requireString(input?.libraryItemId, 'libraryItemId');
-  if (!REPAIR_ENROLL_CATEGORIES.has(input?.failureCategory)) {
-    return { enrolled: false, reason: 'not-stale-placement-repaired' };
-  }
-  const infoHash = normalizeInfoHash(input?.infoHash);
-  return scheduler.enrollRecentlyRepaired({
-    libraryItemId,
-    infoHash,
-    occurredAt: input?.occurredAt ?? Date.now(),
-  });
-}
-
-/**
  * Resolve the runtime mode from an env-style flag. Default: 'disabled'
  * (no provider work, no library scan, no snapshot adapter wired).
  */
@@ -499,7 +461,5 @@ export const _internal = Object.freeze({
 
 export default {
   createDurabilityRuntime,
-  enrollFromNewlyFulfilledBinding,
-  enrollFromStalePlacementRepairedEvent,
   resolveDurabilityMode,
 };
