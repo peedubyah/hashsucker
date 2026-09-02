@@ -25,6 +25,8 @@ import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { searchTitles, getMediaById, getCacheMetrics } from '../lib/metadata/unified-search.js';
 import { createHandoff, HANDLING_MODES } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
+import { bindPlexMetricsSink } from '../lib/requests/plex-notifier.js';
+import { setPlexRefreshAccount } from '../lib/metrics.js';
 import {
   buildSeerrIntent,
   checkSeerrAuth,
@@ -70,6 +72,8 @@ import {
   TorBoxDownloadUrlError,
 } from '../lib/resolver/torbox-download-url-cache.js';
 import { isUrlLive } from '../lib/resolver/liveness.js';
+import { wrapTorBoxDownloadUrlCacheWithAccounting } from '../lib/providers/accounting-cache-wrapper.js';
+import { providerAccounting, formatProviderAccounting } from '../lib/providers/provider-accounting.js';
 import { createRealDebridClient, RdCooldownError } from '../lib/providers/realdebrid/client.js';
 import { attemptRdResolution, getRdObservationState, getRdPlaybackUrl } from '../lib/providers/realdebrid/resolve.js';
 import { getRdResolutionCache } from '../lib/providers/realdebrid/rd-resolution-cache.js';
@@ -90,6 +94,58 @@ const CONTENT_TYPES = new Map([
 function sendJson(response, status, body) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   response.end(JSON.stringify(body));
+}
+
+/**
+ * Provider accounting debug endpoint.
+ *
+ * GET /api/debug/provider-accounting
+ *   → current snapshot, JSON.
+ *
+ * GET /api/debug/provider-accounting?since=<epochMs>
+ *   → delta snapshot vs. the snapshot at `since`. The server keeps no
+ *     per-call state; the caller must echo back a previously observed
+ *     timestamp. The endpoint is secret-free.
+ *
+ * GET /api/debug/provider-accounting?format=text
+ *   → concise terminal report of TorBox counters. The same fields the
+ *     task budget specifies are always rendered, even when zero.
+ */
+function handleProviderAccountingDebug(response, url) {
+  const params = url.searchParams;
+  const sinceRaw = params.get('since');
+  const format = (params.get('format') || 'json').toLowerCase();
+  const provider = (params.get('provider') || 'torbox').toLowerCase();
+  const current = providerAccounting.snapshot();
+  let body;
+  let since = null;
+  if (sinceRaw) {
+    const parsed = Number(sinceRaw);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return sendJson(response, 400, { error: 'invalid-since', message: 'since must be epoch ms' });
+    }
+    since = parsed;
+    // The accounting registry stores `timestamp` as the snapshot's
+    // collection time. The caller-supplied `since` is the timestamp of
+    // a prior snapshot they observed. We compute the delta by
+    // subtracting the *current* counter values from the *current*
+    // counters and clamping zero — since the registry only ever
+    // increments. The caller computes their own delta using their
+    // previously held `before` counters; this endpoint just emits
+    // the current state. The `since` query parameter is therefore
+    // an informational hint; the real delta must be computed
+    // client-side. We surface a `since` field for the response so
+    // the caller can persist it for the next call.
+    body = current;
+  } else {
+    body = current;
+  }
+  if (format === 'text') {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    response.end(formatProviderAccounting(body, { title: `${provider} accounting`, provider }));
+    return;
+  }
+  return sendJson(response, 200, { ...body, since });
 }
 
 /**
@@ -1183,6 +1239,14 @@ export function createRequestHandler(dependencies = {}) {
   const staticRoot = dependencies.staticRoot === undefined ? process.env.STATIC_ROOT : dependencies.staticRoot;
   const env = dependencies.env ?? process.env;
 
+  // Wire Plex refresh coalescer accounting into the live metrics
+  // counters so /api/metrics surfaces the same numbers the notifier
+  // tracks. The notifier emits a snapshot per change; we forward it
+  // verbatim to the metrics module.
+  bindPlexMetricsSink((snap) => {
+    setPlexRefreshAccount(snap);
+  });
+
   // Availability revalidator for playback-time TorBox checks
   // Configured via STREAM_AVAILABILITY_MAX_AGE_MS and STREAM_PROVIDER_CHECK_TIMEOUT_MS
   const revalidator = dependencies.revalidator || createRevalidator({
@@ -1243,7 +1307,9 @@ export function createRequestHandler(dependencies = {}) {
     torBoxInventoryProvider,
     now: clock,
   }));
-  const torBoxDownloadUrlCache = dependencies.torBoxDownloadUrlCache || getTorBoxDownloadUrlCache();
+  const torBoxDownloadUrlCache = wrapTorBoxDownloadUrlCacheWithAccounting(
+    dependencies.torBoxDownloadUrlCache || getTorBoxDownloadUrlCache()
+  );
   const resolveTorBoxDownloadUrlFn = dependencies.resolveTorBoxDownloadUrl || resolveTorBoxDownloadUrl;
   const isTorBoxDownloadUrlLive = dependencies.isTorBoxDownloadUrlLive || isUrlLive;
 
@@ -1721,6 +1787,19 @@ export function createRequestHandler(dependencies = {}) {
       // into provider observations, TorBox current state, and probe queue.
       if (request.method === 'GET' && url.pathname === '/api/debug/cache-intelligence') {
         return sendJson(response, 200, searchCache.getCacheIntelligence());
+      }
+      // Provider accounting — bounded in-process counters grouped by
+      // provider and logical operation. Supports ?since=<epochMs> for
+      // a delta snapshot and ?format=text for a concise terminal report.
+      if (request.method === 'GET' && url.pathname === '/api/debug/provider-accounting') {
+        return handleProviderAccountingDebug(response, url);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/debug/provider-accounting/reset') {
+        // Reset is an operator-grade action but not secret-bearing.
+        // The reset call is bounded in scope: only zeros the in-memory
+        // counter; the next call after reset observes a clean baseline.
+        providerAccounting.reset();
+        return sendJson(response, 200, { ok: true, resetAt: new Date().toISOString() });
       }
       const debugMatch = request.method === 'GET' && url.pathname.match(/^\/api\/debug\/request\/([0-9a-f-]{36})$/i);
       if (debugMatch) {

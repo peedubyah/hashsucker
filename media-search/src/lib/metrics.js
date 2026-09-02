@@ -42,6 +42,31 @@ const counters = {
   winner_cache_unknown: 0,
 };
 
+// Plex refresh coalescer snapshot. Mirrored from
+// createRefreshCoalescer via bindPlexMetricsSink(). Snapshot, not
+// monotonic counters — the coalescer owns the source of truth.
+let plexRefreshAccount = {
+  refresh_requested: 0,
+  refresh_coalesced: 0,
+  actual_refresh_sent: 0,
+  full_section_refresh: 0,
+  refresh_failed: 0,
+  pending: 0,
+};
+
+export function setPlexRefreshAccount(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return;
+  plexRefreshAccount = {
+    refresh_requested: Number(snapshot.refresh_requested) || 0,
+    refresh_coalesced: Number(snapshot.refresh_coalesced) || 0,
+    actual_refresh_sent: Number(snapshot.actual_refresh_sent) || 0,
+    full_section_refresh: Number(snapshot.full_section_refresh) || 0,
+    refresh_failed: Number(snapshot.refresh_failed) || 0,
+    pending: Number(snapshot.pending) || 0,
+  };
+  emitter.emit('change', 'plex_refresh', plexRefreshAccount);
+}
+
 // ─── Histograms (for score distribution) ────────────────────────────────────
 const scoreBuckets = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
 const scoreDistribution = new Array(scoreBuckets.length).fill(0);
@@ -98,6 +123,7 @@ export function getMetrics() {
   return {
     timestamp: new Date().toISOString(),
     counters: { ...counters },
+    plex_refresh: { ...plexRefreshAccount },
     ranking: {
       score_distribution: {
         buckets: scoreBuckets,

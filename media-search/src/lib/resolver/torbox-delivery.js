@@ -28,6 +28,7 @@ import {
   recordRepairEvent,
 } from '../control-plane/repair-events.js';
 import { TorBoxDownloadUrlError } from './torbox-download-url-cache.js';
+import { providerAccounting } from '../providers/provider-accounting.js';
 
 const TORBOX_API_BASE = 'https://api.torbox.app/v1/api';
 
@@ -105,6 +106,7 @@ export async function ensureTorBoxDelivery({
   // mylist?bypass_cache=true is authoritative but can exceed the default 5s timeout.
   if (!placement && torBoxInventoryProvider) {
     const recoverySignal = combinedSignal(15_000);
+    providerAccounting.increment('torbox', 'placement_lookup_mylist');
     const observedPlacement = await torBoxInventoryProvider
       .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
       .lookupPlacement({ infoHash }, { signal: recoverySignal });
@@ -125,6 +127,7 @@ export async function ensureTorBoxDelivery({
 
   if (!placement) {
     // Step 3: Creation remains cached-only when no account placement exists.
+    providerAccounting.increment('torbox', 'availability_checkcached');
     const cacheResult = await checkTorBoxCached([infoHash], { fetchFn });
     if (!cacheResult.cached.has(infoHash.toLowerCase())) {
       throw new TorBoxDeliveryError(
@@ -138,6 +141,7 @@ export async function ensureTorBoxDelivery({
     const placementCapability = torBoxProvider.require(PROVIDER_CAPABILITIES.PLACEMENT_CREATE);
     let placementResult;
     try {
+      providerAccounting.increment('torbox', 'placement_create');
       placementResult = await placementCapability.createPlacement({
         magnet,
         addOnlyIfCached: true,
@@ -147,6 +151,7 @@ export async function ensureTorBoxDelivery({
       // Perform a fresh recovery lookup before retrying creation.
       if (torBoxInventoryProvider) {
         const recoverySignal = combinedSignal(15_000);
+        providerAccounting.increment('torbox', 'placement_lookup_mylist');
         const observedPlacement = await torBoxInventoryProvider
           .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
           .lookupPlacement({ infoHash }, { signal: recoverySignal });
@@ -197,6 +202,7 @@ export async function ensureTorBoxDelivery({
       );
     }
     const inventorySignal = combinedSignal(15_000);
+    providerAccounting.increment('torbox', 'inventory_fetch');
     const inventory = await torBoxInventoryProvider
       .require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
       .getFileInventory(placement, { signal: inventorySignal });
@@ -598,6 +604,7 @@ async function recoverStalePlacement({
   const lookupSignal = signal ? AbortSignal.any([lookupTimeout, signal]) : lookupTimeout;
   let observedPlacement = null;
   try {
+    providerAccounting.increment('torbox', 'placement_lookup_mylist');
     observedPlacement = await torBoxInventoryProvider
       .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
       .lookupPlacement({ infoHash }, { signal: lookupSignal });
