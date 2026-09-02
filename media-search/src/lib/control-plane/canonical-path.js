@@ -62,10 +62,24 @@ export function stableLibraryItemId(identityKey) {
   return `li_${createHash('sha256').update(identityKey).digest('hex').slice(0, 24)}`;
 }
 
-export function createLibraryIdentityKey({ mediaType, mediaId, editionKey = 'default' }) {
+export function createLibraryIdentityKey({ mediaType, mediaId, season, episode, editionKey = 'default' }) {
   const type = normalizeMediaType(mediaType);
   const id = normalizeIdentityPart(mediaId, 'mediaId');
   const edition = normalizeIdentityPart(editionKey, 'editionKey').toLowerCase();
+  // Episode identity must include (season, episode) so a season pack yields
+  // a distinct library_items row per episode. Without this, all episodes
+  // collapse into one row keyed only by mediaId, and the per-episode
+  // canonical path / exposure / binding all collide. The DB columns were
+  // always there; the identity key just failed to include them.
+  if (type === 'episode') {
+    if (!Number.isSafeInteger(season) || season < 0) {
+      throw new TypeError('season must be a non-negative safe integer for episode identity');
+    }
+    if (!Number.isSafeInteger(episode) || episode < 1) {
+      throw new TypeError('episode must be a positive safe integer for episode identity');
+    }
+    return `${type}:${id}:${edition}:${season}:${episode}`;
+  }
   return `${type}:${id}:${edition}`;
 }
 

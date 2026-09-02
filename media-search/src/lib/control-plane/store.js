@@ -1079,11 +1079,53 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     const inventorySnapshot = db.prepare(
       'SELECT * FROM provider_inventory_snapshots WHERE placement_id = ?',
     ).get(placement.id);
+    // Authoritative per-file mapping evidence. There are two valid evidence
+    // paths and either is sufficient:
+    //
+    //   (a) candidate_file_mappings  — the resolver's inference table, keyed
+    //       by (release_key, placement_id). This is the natural evidence for
+    //       single-file releases where the resolver made one decision.
+    //
+    //   (b) provider_files.torrent_file_id  — the inventory's own mapping
+    //       (already populated by replaceProviderFileInventory when
+    //       authoritative inventory arrives), keyed by
+    //       (placement_id, provider_file_id). This is the natural evidence
+    //       for torrent-level handoffs (releaseKey = `${infoHash}:torrent`,
+    //       fileIndex NULL), where the resolver's releaseKey is shared
+    //       across every file in the torrent and the
+    //       UNIQUE(release_key, placement_id) constraint on
+    //       candidate_file_mappings can only carry ONE row per torrent.
+    //       Without path (b), a season pack of N episodes can only ever
+    //       bind the episode whose candidate_file_mappings write survived
+    //       the upsert sequence; every other episode fails closed with
+    //       "Binding requires an authoritative exact file mapping".
+    //
+    // Both paths require:
+    //   - state = 'mapped', authoritative = 1
+    //   - mapping_state = 'mapped'  (provider file, not 'unmapped' /
+    //     'incomplete' / 'conflict')
+    //   - inventory_expires_at > now()  (freshness — preserves the
+    //     authoritative-inventory TTL guard, see A5 fail-closed path)
+    //
+    // Either path satisfies the activation. This is the smallest owning
+    // seam: the schema is unchanged, the bindings table is unchanged, and
+    // the freshness / visibility / readiness guards below are unchanged.
     const mapping = db.prepare(`
       SELECT * FROM candidate_file_mappings
       WHERE release_key = ? AND placement_id = ? AND provider_file_id = ?
         AND state = 'mapped' AND authoritative = 1
     `).get(identity.releaseKey, input.placementId, file.providerFileId);
+    const timestamp = now();
+    const providerFileMapping = db.prepare(`
+      SELECT torrent_file_id, mapping_state, inventory_expires_at
+      FROM provider_files
+      WHERE placement_id = ? AND provider_file_id = ? AND present = 1
+    `).get(input.placementId, file.providerFileId);
+    const providerFileMappingIsAuthoritative = !!providerFileMapping
+      && providerFileMapping.torrent_file_id != null
+      && providerFileMapping.mapping_state === 'mapped'
+      && providerFileMapping.inventory_expires_at != null
+      && providerFileMapping.inventory_expires_at > timestamp;
     const exposure = db.prepare(`
       SELECT * FROM exposures
       WHERE id = ? AND placement_id = ? AND provider_file_id = ?
@@ -1094,8 +1136,9 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     }
     if (exposure.state !== 'visible') throw new Error('Cannot bind a provider file without visible exposure');
     if (exposure.read_only !== 1) throw new Error('Cannot bind a provider file through writable exposure');
-    if (!mapping) throw new Error('Binding requires an authoritative exact file mapping');
-    const timestamp = now();
+    if (!mapping && !providerFileMappingIsAuthoritative) {
+      throw new Error('Binding requires an authoritative exact file mapping');
+    }
     if (readiness) {
       if (readiness.state !== 'ready') throw new Error('Cannot bind before provider readiness');
       if (readiness.expires_at <= timestamp) {
