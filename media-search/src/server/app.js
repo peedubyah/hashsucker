@@ -25,7 +25,7 @@ import { getMedia, searchCatalog } from '../lib/metadata/cinemeta.js';
 import { searchTitles, getMediaById, getCacheMetrics } from '../lib/metadata/unified-search.js';
 import { createHandoff, HANDLING_MODES } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
-import { bindPlexMetricsSink } from '../lib/requests/plex-notifier.js';
+import { bindPlexMetricsSink, openSeasonFanOutScope } from '../lib/requests/plex-notifier.js';
 import { setPlexRefreshAccount } from '../lib/metrics.js';
 import {
   buildSeerrIntent,
@@ -753,6 +753,13 @@ async function handleSeerrIngress(
   //    whole attempt; per-episode failures below are isolated.
   const childResults = [];
   let structurallyFailed = null;
+  // Open a season fan-out scope so every per-child notifyPlex() call
+  // for this mediaId is buffered; on close() the coalescer dispatches
+  // exactly one targeted Plex partial-refresh per (collection, scanPath)
+  // bucket instead of one per child. N children spanning seconds
+  // collapse to a single HTTP call. Scope is closed after the
+  // season loop completes (structurally or normally) below.
+  const seasonScope = openSeasonFanOutScope(operationalIntent.mediaId);
   for (const seasonNum of seasonParse.seasons) {
     let episodes;
     try {
@@ -882,6 +889,21 @@ async function handleSeerrIngress(
   }
 
   // 10. Mark parent processing outcome.
+  // Close the season fan-out scope BEFORE recording the parent
+  // outcome and before any return path. close() awaits the
+  // dispatched refreshes so the operator sees a consistent state:
+  // either the Plex partial-refresh has been sent (and the
+  // coalescer accounting reflects it) or it has not. This is the
+  // lifecycle-semantics seam: N child notifies → one HTTP call.
+  try {
+    await seasonScope.close();
+  } catch (scopeCloseErr) {
+    // A failed close() is non-fatal for the Seerr response. The
+    // season-fan-out outcome (success / partial failure) is
+    // independent of whether the refresh dispatch itself failed.
+    console.error(`[Plex] season-fan-out scope close error for ${operationalIntent.mediaId}: ${scopeCloseErr.message}`);
+  }
+
   if (structurallyFailed) {
     searchCache.db.prepare(
       'UPDATE media_intents SET last_error = ?, last_processed_at = ? WHERE id = ?'

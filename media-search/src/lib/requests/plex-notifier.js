@@ -205,3 +205,43 @@ export async function notifyPlex({ mediaId, mediaType, canonicalPath }) {
   }
   return { notified: false, method: settled.method, error: settled.error || 'refresh-failed' };
 }
+
+/**
+ * Open a season fan-out scope for `mediaId`. While the returned scope
+ * is open, every notifyPlex() call for that mediaId is buffered in a
+ * per-(collection, scanPath) bucket. On close() each non-empty bucket
+ * dispatches exactly one targeted Plex partial-refresh — collapsing
+ * the whole season publication to one HTTP call.
+ *
+ * The fan-out lifecycle (e.g. Seerr season webhook) MUST open a scope
+ * before fanning out across children and MUST close() it after the
+ * last child has finished publishing. close() returns a Promise that
+ * resolves when all dispatched refreshes have settled; callers may
+ * await it (or fire-and-forget) safely.
+ *
+ * If Plex is disabled, the scope is a no-op on close() (it simply
+ * discards buffered requests).
+ */
+export function openSeasonFanOutScope(mediaId) {
+  if (!isPlexEnabled()) {
+    return {
+      mediaId: mediaId || null,
+      close: async () => [],
+      plexEnabled: false,
+    };
+  }
+  const coalescer = getCoalescer();
+  const scope = coalescer.fanOutScope(mediaId);
+  return {
+    mediaId: scope.mediaId,
+    plexEnabled: true,
+    close: async () => {
+      const results = await scope.close();
+      const dispatched = results.length;
+      if (dispatched > 0) {
+        console.log(`[Plex] season-fan-out close media=${mediaId} buckets=${dispatched}`);
+      }
+      return results;
+    },
+  };
+}
