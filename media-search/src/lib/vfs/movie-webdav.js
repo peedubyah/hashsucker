@@ -4,6 +4,11 @@ import { finished } from 'node:stream/promises';
 import { attemptRdResolution, getRdPlaybackUrl } from '../providers/realdebrid/resolve.js';
 import { isUrlLive } from '../resolver/liveness.js';
 import { materializeVfsEntry } from './materialize.js';
+import {
+  validateRangeResponseBody,
+  validateRangeResponseHeaders,
+  classifyReadFailure,
+} from './range-response-validator.js';
 
 const DAV_ROOT = '/vfs';
 const MOVIES_PATH = `${DAV_ROOT}/Movies`;
@@ -94,8 +99,12 @@ async function sendDavXml(response, entries, metadataForEntry) {
 }
 
 function sendError(response, error, { size = null, retryAfterSeconds = null } = {}) {
-  const status = error instanceof VfsError ? error.status : 500;
-  const code = error instanceof VfsError ? error.code : 'INTERNAL_ERROR';
+  // VfsError carries the canonical status/code. RangeResponseValidationError
+  // (from the shared Range response validator) duck-types the same
+  // surface so the byte path can surface 502 + structured codes
+  // without depending on the VfsError class hierarchy.
+  const status = error instanceof VfsError ? error.status : (Number.isFinite(error?.status) ? error.status : 500);
+  const code = error instanceof VfsError ? error.code : (typeof error?.code === 'string' ? error.code : 'INTERNAL_ERROR');
   if (response.headersSent) {
     response.destroy(error);
     return;
@@ -426,14 +435,7 @@ export function createMovieWebDav({
       try {
         upstream = await fetchProvider(backing, rangeHeader);
       } catch (error) {
-        // Transport-level failure (DNS / TCP reset / TLS / timeout).
-        // The capability URL itself is opaque to the transport — it
-        // may still be perfectly valid for a subsequent attempt, and
-        // the next iteration of this loop already runs with forceFresh
-        // (which re-invokes the seam under the same URL cache). Never
-        // invalidate a valid capability on a transport blip; that
-        // would amplify every Plex range probe into a fresh
-        // requestdl call.
+        // A transport failure is not proof that the capability is invalid.
         firstFailure ||= error;
         if (!forceFresh) continue;
         throw new VfsError('Provider read failed after fresh resolution', 502, 'PROVIDER_READ_FAILED');
@@ -444,48 +446,29 @@ export function createMovieWebDav({
       await cancelBody(upstream);
       firstFailure ||= validationError;
       if (!forceFresh) {
-        // Capability-churn rule: only a definitive upstream capability
-        // failure (401 / 403 / 404 / 410) actually evicts the cached
-        // CDN URL. Everything else — 5xx (transient), 200/206 with a
-        // local range/metadata mismatch (validate callback rejected
-        // the response but the capability is still valid), 429
-        // (handled below), or other 4xx — leaves the capability in
-        // place. The retry still runs because forceFresh is true on
-        // the next attempt, so the in-loop single-flight re-resolves
-        // once; but a successful retry reuses whatever URL the seam
-        // hands back without an extra requestdl round-trip when the
-        // TTL is still in flight.
-        if (STALE_PROVIDER_STATUSES.has(upstream.status)) {
-          const readFailure = 'stale';
-          console.warn(`[vfs] provider=${backing.provider} read=${readFailure} status=${upstream.status} release=${state.entry.releaseKey}`);
-          invalidateTorBoxCapability(backing);
+        const readFailure = classifyReadFailure(upstream);
+        console.warn(
+          `[vfs] provider=${backing.provider} read=${readFailure} reason=${validationError.validationReason || validationError.code} `
+          + `status=${upstream.status} release=${state.entry.releaseKey}`,
+        );
+        if (upstream.status !== 429) {
+          // Definitive status and protocol-invalid byte semantics distrust
+          // this exact capability. Transient 5xx responses retain it.
+          if (STALE_PROVIDER_STATUSES.has(upstream.status)
+              || readFailure === 'protocol-invalid') {
+            invalidateTorBoxCapability(backing);
+          }
           continue;
         }
-        if (upstream.status === 429) {
-          // Read 429 — the capability itself is still valid; it is
-          // just currently being throttled. Mark the state
-          // rate-limited so concurrent and subsequent reads in the
-          // backoff window short-circuit BEFORE the seam is invoked.
-          // Do not retry within this loop — the next call after the
-          // window is the correct retry boundary. Do not invalidate.
-          const readFailure = 'rate-limited';
-          console.warn(`[vfs] provider=${backing.provider} read=${readFailure} status=${upstream.status} release=${state.entry.releaseKey}`);
-          const upstreamRetryAfterMs = parseReadRetryAfter(upstream);
-          markReadRateLimited(state, upstreamRetryAfterMs);
-          sawReadRateLimit = true;
-        } else {
-          // Non-definitive non-429 failure: a local validate
-          // rejection (e.g. PROVIDER_RANGE_MISMATCH against a 206
-          // response), a 5xx upstream, or another transient 4xx.
-          // The capability URL itself is still authoritative — the
-          // next attempt with forceFresh reuses whatever the seam
-          // returns. Do not invalidate.
-          const readFailure = upstream.status >= 500 && upstream.status < 600
-            ? 'upstream-5xx'
-            : 'invalid';
-          console.warn(`[vfs] provider=${backing.provider} read=${readFailure} status=${upstream.status} release=${state.entry.releaseKey}`);
-          continue;
-        }
+        // Read 429 — the capability itself is still valid; it is just
+        // currently being throttled. Mark the state rate-limited so
+        // concurrent and subsequent reads in the backoff window
+        // short-circuit BEFORE the seam is invoked. Do not retry within
+        // this loop — the next call after the window is the correct
+        // retry boundary.
+        const upstreamRetryAfterMs = parseReadRetryAfter(upstream);
+        markReadRateLimited(state, upstreamRetryAfterMs);
+        sawReadRateLimit = true;
       }
       throw validationError;
     }
@@ -612,25 +595,11 @@ export function createMovieWebDav({
         return await openValidatedProviderRead(
           state,
           requestedRange?.header,
-          (upstream) => {
-            if (requestedRange) {
-              const upstreamRange = parseContentRange(upstream.headers.get('content-range'));
-              if (upstream.status !== 206) {
-                return new VfsError('Provider did not honor the requested byte range', 502, 'PROVIDER_RANGE_FAILED');
-              }
-              if (!upstreamRange
-                || upstreamRange.start !== requestedRange.start
-                || upstreamRange.end !== requestedRange.end
-                || upstreamRange.total !== metadata.size) {
-                return new VfsError('Provider returned inconsistent range metadata', 502, 'PROVIDER_RANGE_MISMATCH');
-              }
-            } else if (upstream.status !== 200) {
-              return new VfsError(`Provider returned HTTP ${upstream.status}`, 502, 'PROVIDER_READ_FAILED');
-            }
-            return upstream.body
-              ? null
-              : new VfsError('Provider response had no body', 502, 'PROVIDER_EMPTY_BODY');
-          },
+          (upstream) => validateRangeResponseHeaders(
+            upstream,
+            requestedRange ?? null,
+            { size: metadata.size },
+          ),
         );
       } catch (error) {
         if (error instanceof VfsError && error.code === 'PROVIDER_READ_RATE_LIMITED') {
@@ -641,7 +610,35 @@ export function createMovieWebDav({
       }
     })();
     if (!opened) return;
-    const { backing, upstream } = opened;
+    let { backing, upstream } = opened;
+
+    // Body byte-count check. For Range requests the validator buffers
+    // the body, asserts the byte count matches the requested range,
+    // and returns a re-wrapped upstream whose body is the buffered
+    // bytes. For full-file (no Range) requests the body is NOT
+    // buffered; only the Content-Length header was already checked by
+    // validateRangeResponseHeaders above.
+    const bodyCheck = await validateRangeResponseBody(
+      upstream,
+      requestedRange ?? null,
+      { size: metadata.size },
+    );
+    if (!bodyCheck.ok) {
+      console.warn(
+        `[vfs] provider=${backing.provider} read=body-${bodyCheck.error.validationReason} `
+        + `status=${upstream.status} release=${state.entry.releaseKey}`,
+      );
+      // A protocol-invalid 206 with the right Content-Range but the
+      // wrong body is a boundedly-distrustful signal: invalidate the
+      // capability once and let the next read re-resolve. We are past
+      // openValidatedProviderRead so the retry is the caller's
+      // responsibility; here we escalate to 502 so the bounded-retry
+      // policy (Worker B) can decide.
+      invalidateTorBoxCapability(backing);
+      sendError(response, bodyCheck.error, { size: metadata.size });
+      return;
+    }
+    upstream = bodyCheck.upstream;
 
     const contentLength = requestedRange
       ? requestedRange.end - requestedRange.start + 1

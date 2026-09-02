@@ -364,12 +364,20 @@ test('TV VFS rejects malformed multipart range with 416 before calling provider'
   assert.equal(providerOpens, 0);
 });
 
-test('TV VFS does not buffer full-file body and stops reading on client close', async (t) => {
-  // Verifies the streaming pipeline: provider body is piped to the response,
-  // and destroying the response tears the upstream body down without pulling
-  // more bytes. We do NOT pull a multi-GB body here — that is the
-  // production-path canary. This test only proves the contract that the
-  // pipeline relies on streaming, not buffering.
+test('TV VFS full-file body streams and stops reading on client close', async (t) => {
+  // Verifies the streaming pipeline for full-file (no Range) requests:
+  // provider body is piped to the response, and destroying the response
+  // tears the upstream body down without pulling more bytes. We do NOT
+  // pull a multi-GB body here — that is the production-path canary.
+  // This test only proves the contract that the full-file pipeline
+  // relies on streaming, not buffering.
+  //
+  // Note: Range requests are intentionally buffered (see
+  // validateRangeResponseBody) so the body byte count can be checked
+  // before any bytes are shipped to the client. Range sizes are
+  // bounded by client requests (KB to MB) so the buffer cost is
+  // bounded. Full-file requests stay streaming because a multi-GB
+  // buffer is infeasible.
   const { cache } = buildRangeHarness({ size: 1024 * 1024 * 1024 });
   t.after(() => cache.close());
 
@@ -410,15 +418,15 @@ test('TV VFS does not buffer full-file body and stops reading on client close', 
         },
       });
       return new Response(stream, {
-        status: 206,
-        headers: { 'content-range': 'bytes 0-1048575/1073741824' },
+        status: 200,
+        headers: { 'content-length': '1073741824' },
       });
     },
   });
 
   const response = createCapturingResponse();
   const handlerPromise = handler(
-    createRangeRequest('bytes=0-1048575'),
+    createRangeRequest(undefined),
     response,
     new URL('http://localhost/vfs/TV/Family%20Guy/Season%2005/Family%20Guy%20-%20S05E12.mkv'),
   );
@@ -617,7 +625,7 @@ test('TV VFS read 429 backoff expires after the window — capability is reused,
       if (upstreamCalls === 1) {
         return new Response('rate limited', { status: 429 });
       }
-      return new Response('hello world', {
+      return new Response('hellohello', {
         status: 206,
         headers: { 'content-range': 'bytes 10-19/100' },
       });
