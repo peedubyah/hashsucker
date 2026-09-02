@@ -27,7 +27,7 @@ import test from 'node:test';
 import { PROVIDER_CAPABILITIES } from '../src/lib/providers/capabilities.js';
 import { createControlPlaneStore } from '../src/lib/control-plane/store.js';
 import { REPAIR_FAILURE_CATEGORIES } from '../src/lib/control-plane/repair-events.js';
-import { resolveTorBoxDeliveryWithStaleRecovery } from '../src/lib/resolver/torbox-delivery.js';
+import { resolveTorBoxDeliveryWithStaleRecovery, TorBoxDeliveryError } from '../src/lib/resolver/torbox-delivery.js';
 import { TorBoxDownloadUrlError } from '../src/lib/resolver/torbox-download-url-cache.js';
 
 const FILENAME = 'Series.S01E03.2160p.mkv';
@@ -842,4 +842,254 @@ test('client cancellation: cached capability remains valid', async (t) => {
   );
   assert.equal(rateLimitedOrExpired.length, 0,
     'aborted call must not produce a 429/5xx/expired event');
+});
+
+// ---------------------------------------------------------------------------
+// Hardening A.1 — valid placement + stale capability (403) causes one
+// bounded re-resolution on the next call. Mirrors the 401 contract; both
+// 401 and 403 must invalidate the capability and surface the original
+// error without triggering destructive repair.
+// ---------------------------------------------------------------------------
+test('requestdl 403: capability invalidated, single re-resolution, no loop', async (t) => {
+  withTorboxApiKey(t);
+  const infoHash = 'b'.repeat(40);
+  const store = createStore();
+  seedPlacement(store, infoHash, 'res-OLD-b');
+  const cache = makeCache();
+  const torBoxProvider = makeTorBoxProvider();
+  const torBoxInventoryProvider = makeTorBoxInventoryProvider({
+    mylistResources: [{ provider: 'torbox', providerResourceId: 'res-OLD-b', infoHash }],
+  });
+  let requestdlCalls = 0;
+  const resolveTorBoxDownloadUrl = async () => {
+    requestdlCalls += 1;
+    if (requestdlCalls === 1) {
+      throw new TorBoxDownloadUrlError(
+        'TorBox requestdl returned HTTP 403', 'TORBOX_REQUESTDL_FAILED', 403,
+      );
+    }
+    return 'https://cdn.example/dld/res-OLD-b';
+  };
+
+  // First call: surface 403, no repair, no replacement.
+  await assert.rejects(
+    () => resolveTorBoxDeliveryWithStaleRecovery({
+      infoHash, fileIndex: 0, releaseKey: `${infoHash}:0`, filename: FILENAME,
+      controlPlaneStore: store, torBoxProvider, torBoxInventoryProvider,
+      torBoxDownloadUrlCache: cache, resolveTorBoxDownloadUrl, isUrlLive: undefined,
+      fetchFn: async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { [infoHash]: { name: 'Series' } } }) }),
+      now: () => OBSERVED_AT + 1_000,
+    }),
+    (error) => error instanceof TorBoxDownloadUrlError && error.status === 403,
+  );
+  assert.equal(requestdlCalls, 1, 'first call must surface 403 without retry');
+  // Placement unchanged, capability invalidated.
+  const placement = store.findPlacementByInfoHash('torbox', infoHash);
+  assert.equal(placement.state, 'ready', '403 must not mark placement removed');
+  assert.equal(placement.providerResourceId, 'res-OLD-b', '403 must not rotate providerResourceId');
+  const expired = repairEvents(store).find(
+    (e) => e.failure_category === REPAIR_FAILURE_CATEGORIES.DELIVERY_CAPABILITY_EXPIRED,
+  );
+  assert.ok(expired, '403 must record a delivery-capability-expired event');
+
+  // Second call: cache empty after invalidation → exactly one re-resolution
+  // succeeds. No repair attempted.
+  const result = await resolveTorBoxDeliveryWithStaleRecovery({
+    infoHash, fileIndex: 0, releaseKey: `${infoHash}:0`, filename: FILENAME,
+    controlPlaneStore: store, torBoxProvider, torBoxInventoryProvider,
+    torBoxDownloadUrlCache: cache, resolveTorBoxDownloadUrl, isUrlLive: undefined,
+    fetchFn: async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { [infoHash]: { name: 'Series' } } }) }),
+    now: () => OBSERVED_AT + 2_000,
+  });
+  assert.equal(result.recovered, false, 'second call must succeed (resource still present)');
+  assert.equal(requestdlCalls, 2, 'requestdl ran exactly twice across both calls (one 403 + one 200)');
+  const recovered = repairEvents(store).filter(
+    (e) => e.failure_category === REPAIR_FAILURE_CATEGORIES.DELIVERY_CAPABILITY_RECOVERED,
+  );
+  assert.equal(recovered.length, 1, '403 path records exactly one delivery-capability-recovered event');
+});
+
+// ---------------------------------------------------------------------------
+// Hardening A.2 — transport-level downstream URL missing (502) is never
+// treated as a stale-resource signal. Destructive repair must not fire
+// when requestdl returned 200 but the URL did not resolve to a downstream
+// download target. The mylist is the sole authoritative signal of
+// upstream resource presence; a malformed URL alone must not rotate the
+// durable placement identity.
+// ---------------------------------------------------------------------------
+test('requestdl downstream-URL-missing (502): no destructive repair, even when mylist is absent', async (t) => {
+  withTorboxApiKey(t);
+  const infoHash = 'c'.repeat(40);
+  const store = createStore();
+  const previousPlacement = seedPlacement(store, infoHash, 'res-OLD-c');
+  const cache = makeCache();
+  const createCalls = [];
+  const torBoxProvider = makeTorBoxProvider({
+    onCreatePlacement: () => createCalls.push('create'),
+  });
+  // mylist says absent — but the requestdl failure is a transport-level
+  // malformed URL, not a real stale signal. The seam must not repair.
+  const torBoxInventoryProvider = makeTorBoxInventoryProvider({ mylistResources: [] });
+  const resolveTorBoxDownloadUrl = async () => {
+    throw new TorBoxDownloadUrlError(
+      'TorBox requestdl did not resolve to a downstream download URL',
+      'TORBOX_DOWNSTREAM_URL_MISSING',
+      502,
+    );
+  };
+
+  await assert.rejects(
+    () => resolveTorBoxDeliveryWithStaleRecovery({
+      infoHash, fileIndex: 0, releaseKey: `${infoHash}:0`, filename: FILENAME,
+      controlPlaneStore: store, torBoxProvider, torBoxInventoryProvider,
+      torBoxDownloadUrlCache: cache, resolveTorBoxDownloadUrl, isUrlLive: undefined,
+      fetchFn: async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { [infoHash]: { name: 'Series' } } }) }),
+      now: () => OBSERVED_AT + 1_000,
+    }),
+    (error) => error instanceof TorBoxDownloadUrlError
+      && error.code === 'TORBOX_DOWNSTREAM_URL_MISSING',
+  );
+
+  // The placement must remain in 'ready' with the original
+  // providerResourceId. A 502 transport failure must never rotate
+  // durable identity even when mylist is transiently empty.
+  const placement = store.findPlacementByInfoHash('torbox', infoHash);
+  assert.equal(placement.state, 'ready', 'transport-level 502 must not mark placement removed');
+  assert.equal(placement.providerResourceId, previousPlacement.providerResourceId,
+    'transport-level 502 must not rotate providerResourceId');
+  assert.equal(createCalls.length, 0, 'transport-level 502 must not trigger createPlacement');
+  const repaired = repairEvents(store).find(
+    (e) => e.failure_category === REPAIR_FAILURE_CATEGORIES.STALE_PLACEMENT_REPAIRED,
+  );
+  assert.equal(repaired, undefined,
+    'transport-level 502 must not record a stale-placement-repaired event');
+});
+
+// ---------------------------------------------------------------------------
+// Hardening A.3 — ambiguous same-name mapping fails closed without
+// mutating TorrentFile/VFS identity. When TorBox reports multiple
+// provider files matching the candidate filename exactly, the seam
+// must NOT pick one, must NOT bind a fresh TorrentFile, and must NOT
+// record a file mapping. The pre-existing TorrentFile row must remain
+// durable and untouched on the (infoHash, internal_path, size) tuple.
+// ---------------------------------------------------------------------------
+test('ambiguous same-name mapping: fails closed, durable TorrentFile preserved, no mapping recorded', async (t) => {
+  withTorboxApiKey(t);
+  const infoHash = 'd'.repeat(40);
+  const store = createStore();
+  // No prior placement — we are exercising the create+map path.
+  const cache = makeCache();
+  const torBoxProvider = makeTorBoxProvider();
+  // Two distinct providerFileIds with the SAME name and the SAME
+  // canonical path. findExactProviderFile will treat this as
+  // ambiguous and throw FILE_MAPPING_AMBIGUOUS.
+  const torBoxInventoryProvider = makeTorBoxInventoryProvider({
+    mylistResources: [],
+    inventory: {
+      authoritative: true, complete: true,
+      files: [
+        { providerFileId: 'file-AMB-1', path: `/${INTERNAL_PATH}`, name: FILENAME, size: FILE_SIZE, selected: true },
+        { providerFileId: 'file-AMB-2', path: `/${INTERNAL_PATH}`, name: FILENAME, size: FILE_SIZE, selected: true },
+      ],
+    },
+  });
+  const requestdlCalls = [];
+  const resolveTorBoxDownloadUrl = async () => {
+    requestdlCalls.push('once');
+    return 'https://cdn.example/dld/never-reached';
+  };
+
+  await assert.rejects(
+    () => resolveTorBoxDeliveryWithStaleRecovery({
+      infoHash, fileIndex: 0, releaseKey: `${infoHash}:0`, filename: FILENAME,
+      controlPlaneStore: store, torBoxProvider, torBoxInventoryProvider,
+      torBoxDownloadUrlCache: cache, resolveTorBoxDownloadUrl, isUrlLive: undefined,
+      fetchFn: async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { [infoHash]: { name: 'Series' } } }) }),
+      now: () => OBSERVED_AT + 1_000,
+    }),
+    (error) => error instanceof TorBoxDeliveryError
+      && error.code === 'FILE_MAPPING_AMBIGUOUS',
+  );
+
+  // No file mapping was recorded.
+  const mapping = store.db.prepare(
+    'SELECT * FROM candidate_file_mappings WHERE release_key = ?',
+  ).get(`${infoHash}:0`);
+  assert.equal(mapping, undefined, 'ambiguous mapping must not be persisted');
+  // No requestdl call was made (the seam failed before the download step).
+  assert.equal(requestdlCalls.length, 0, 'requestdl must not run when mapping is ambiguous');
+  // The new placement exists (cached-only create succeeded) but is in
+  // a partially-mapped state. The provider_files rows are persisted
+  // (with mapping_state='conflict' for the colliding canonical path),
+  // but NO TorrentFile row was created.
+  const placement = store.findPlacementByInfoHash('torbox', infoHash);
+  assert.ok(placement, 'cached-only placement was created');
+  const torrentFileRows = store.db.prepare(
+    'SELECT * FROM torrent_files WHERE info_hash = ?',
+  ).all(infoHash);
+  assert.equal(torrentFileRows.length, 0,
+    'ambiguous mapping must NOT create a TorrentFile row');
+  // The placement's provider files reflect the inventory but no torrent_file_id.
+  const providerFiles = store.listProviderFiles(placement.id, { includeMissing: true });
+  assert.ok(providerFiles.length >= 2, 'inventory rows are persisted');
+  for (const pf of providerFiles) {
+    assert.equal(pf.torrentFileId, null,
+      'ambiguous mapping must not bind a provider file to a TorrentFile');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Hardening A.4 — network failure (fetch throws, no HTTP response) +
+// mylist present does NOT trigger destructive repair. This is the
+// "network failure, temporary 5xx" class: status alone is not
+// sufficient; the mylist is the authoritative signal.
+// ---------------------------------------------------------------------------
+test('network failure (fetch throws) + mylist present: surface original, no repair', async (t) => {
+  withTorboxApiKey(t);
+  const infoHash = 'e'.repeat(40);
+  const store = createStore();
+  const previousPlacement = seedPlacement(store, infoHash, 'res-OLD-e');
+  const cache = makeCache();
+  const createCalls = [];
+  const torBoxProvider = makeTorBoxProvider({
+    onCreatePlacement: () => createCalls.push('create'),
+  });
+  // mylist is PRESENT — the resource still exists upstream. The fetch
+  // throw is a transient transport-level failure.
+  const torBoxInventoryProvider = makeTorBoxInventoryProvider({
+    mylistResources: [{ provider: 'torbox', providerResourceId: 'res-OLD-e', infoHash }],
+  });
+  const resolveTorBoxDownloadUrl = async () => {
+    throw new TorBoxDownloadUrlError(
+      'TorBox requestdl resolution failed',
+      'TORBOX_REQUESTDL_FAILED',
+      502,
+    );
+  };
+
+  await assert.rejects(
+    () => resolveTorBoxDeliveryWithStaleRecovery({
+      infoHash, fileIndex: 0, releaseKey: `${infoHash}:0`, filename: FILENAME,
+      controlPlaneStore: store, torBoxProvider, torBoxInventoryProvider,
+      torBoxDownloadUrlCache: cache, resolveTorBoxDownloadUrl, isUrlLive: undefined,
+      fetchFn: async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { [infoHash]: { name: 'Series' } } }) }),
+      now: () => OBSERVED_AT + 1_000,
+    }),
+    (error) => error instanceof TorBoxDownloadUrlError && error.status === 502,
+  );
+
+  // Placement must remain untouched: status alone (5xx/network) is
+  // not a destructive-repair trigger.
+  const placement = store.findPlacementByInfoHash('torbox', infoHash);
+  assert.equal(placement.state, 'ready',
+    'network failure + mylist present must not mark placement removed');
+  assert.equal(placement.providerResourceId, previousPlacement.providerResourceId,
+    'network failure + mylist present must not rotate providerResourceId');
+  assert.equal(createCalls.length, 0,
+    'network failure + mylist present must not invoke createPlacement');
+  const repaired = repairEvents(store).find(
+    (e) => e.failure_category === REPAIR_FAILURE_CATEGORIES.STALE_PLACEMENT_REPAIRED,
+  );
+  assert.equal(repaired, undefined,
+    'network failure + mylist present must not record stale-placement-repaired');
 });

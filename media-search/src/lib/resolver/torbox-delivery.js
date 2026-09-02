@@ -583,14 +583,29 @@ async function recoverStalePlacement({
   signal,
 }) {
   // Recovery is bounded and selective. The seam never re-creates on
-  // 429 (throttling) or for timeout-class failures. The seam only
-  // repairs when the failing call had reused an existing placement.
+  // 429 (throttling), timeout-class failures, or transport-level
+  // network failures (no HTTP response). The mylist lookup is the
+  // sole authoritative signal for whether the upstream resource is
+  // gone; status alone is not sufficient to trigger destructive
+  // repair. The seam only repairs when the failing call had reused
+  // an existing placement.
   if (!reusedExistingPlacementId) throw originalError;
   if (isClientAbortError(originalError)) throw originalError;
   if (originalError instanceof TorBoxDownloadUrlError && originalError.status === 429) {
     throw originalError;
   }
   if (originalError instanceof TorBoxDownloadUrlError && originalError.code === 'TORBOX_REQUESTDL_TIMEOUT') {
+    throw originalError;
+  }
+  // Transport-level network failure (resolveTorBoxDownloadUrl wraps
+  // any non-HTTP fetch throw as a 502 with code TORBOX_REQUESTDL_FAILED
+  // and the DOWNSTREAM_URL_MISSING branch is 502 as well). Suppress
+  // destructive repair for transport-level errors so a transient
+  // network blip cannot rotate the durable placement identity.
+  if (originalError instanceof TorBoxDownloadUrlError
+      && (originalError.code === 'TORBOX_DOWNSTREAM_URL_MISSING'
+        || (originalError.status === 502
+            && originalError.code !== 'TORBOX_REQUESTDL_FAILED'))) {
     throw originalError;
   }
   if (!(originalError instanceof TorBoxDownloadUrlError)) throw originalError;
