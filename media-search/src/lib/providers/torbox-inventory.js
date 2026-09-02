@@ -154,6 +154,26 @@ export function createTorBoxInventoryProvider(options = {}) {
           });
         },
       },
+      // Background durability seam: the snapshot itself, with no per-infoHash
+      // filtering. The caller (background-durability-executor) fetches ONE
+      // snapshot per (provider, accountScope, scope) and evaluates every due
+      // placement locally. Read-only; never mutates upstream state.
+      [PROVIDER_CAPABILITIES.MYLIST_SNAPSHOT]: {
+        async getMylistSnapshot(context = {}) {
+          const snapshot = await getSnapshot(context.signal);
+          return Object.freeze({
+            provider: 'torbox',
+            accountScope,
+            observedAt: snapshot.observedAt,
+            resources: Object.freeze(snapshot.resources.map((resource) => Object.freeze({
+              providerResourceId: requireProviderId(resource?.id, 'resource.id'),
+              infoHash: normalizeOptionalInfoHash(resource?.hash),
+              name: typeof resource?.name === 'string' ? resource.name : null,
+              downloadState: firstString(resource?.download_state, resource?.state, resource?.download_status, resource?.status),
+            }))),
+          });
+        },
+      },
     },
   });
 }

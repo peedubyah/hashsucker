@@ -8,6 +8,11 @@ export const PROVIDER_CAPABILITIES = Object.freeze({
   REPAIR_REQUEST: 'repair-request',
   EXPOSURE: 'exposure',
   REMOVAL: 'removal',
+  // Authoritative read-only account-scope snapshot of every active placement
+  // for the provider. BACKGROUND_SAFE classifiers depend on this capability
+  // being present so one cheap fetch can validate multiple due placements
+  // without polling per-infoHash endpoints. Read-only; never mutates.
+  MYLIST_SNAPSHOT: 'mylist-snapshot',
 });
 
 const KNOWN_CAPABILITIES = new Set(Object.values(PROVIDER_CAPABILITIES));
@@ -71,6 +76,7 @@ function validateCapability(name, implementation) {
     [PROVIDER_CAPABILITIES.REPAIR_REQUEST]: ['requestRepair'],
     [PROVIDER_CAPABILITIES.EXPOSURE]: ['observeExposure'],
     [PROVIDER_CAPABILITIES.REMOVAL]: ['removeOwnedResource'],
+    [PROVIDER_CAPABILITIES.MYLIST_SNAPSHOT]: ['getMylistSnapshot'],
   }[name];
 
   for (const method of requiredMethods) {

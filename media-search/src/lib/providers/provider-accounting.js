@@ -60,6 +60,17 @@ const CATEGORIES = Object.freeze([
   'requestdl_retry',
   'upstream_retry',
   'provider_error_other',
+  // Background Durability V1 (Worker B): read-only mylist snapshot evaluation
+  // and existing-repair seam invoke. These are provider-accounted because the
+  // background path shares the same TorBox upstream budget and may surface
+  // in the same canary / rate-limit panels as on-demand accounting.
+  'background_snapshot_fetch',
+  'background_healthy',
+  'background_stale_confirmed',
+  'background_ambiguous',
+  'background_transient',
+  'background_rate_limited',
+  'background_repair_seam_invoke',
 ]);
 
 const CATEGORY_SET = new Set(CATEGORIES);
