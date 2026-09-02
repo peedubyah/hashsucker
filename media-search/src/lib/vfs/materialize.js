@@ -52,8 +52,19 @@ function tryActivateAuthoritativeBinding({
   if (!placementId || !providerFileId) return null;
   if (!torrentFile || !torrentFile.id) return null;
 
-  const item = mediaItemFactory();
-  if (!item) return null;
+  const itemInput = libraryItemInputFromHandoff(handoff);
+  let item;
+  try {
+    item = controlPlaneStore.ensureLibraryItem(itemInput);
+  } catch (error) {
+    console.warn(`[vfs] binding write: ensureLibraryItem failed: ${error.message}`);
+    return null;
+  }
+  const itemFactoryResult = mediaItemFactory?.();
+  if (itemFactoryResult && itemFactoryResult.id !== item.id) {
+    console.warn('[vfs] binding write: media item identity mismatch');
+    return null;
+  }
   let libraryPath;
   try {
     libraryPath = controlPlaneStore.ensureCanonicalPath(item.id, { canonicalPath });
