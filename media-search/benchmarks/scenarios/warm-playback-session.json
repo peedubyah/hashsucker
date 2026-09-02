@@ -1,0 +1,9 @@
+{
+  "name": "warm-playback-session", "description": "Validate a warm playback session without new provider resolution.", "tier": 2,
+  "target": { "state": "warm", "operator_selected": true }, "required_start_state": "warm",
+  "action": "open, forward seek, backward seek, near-tail, close, reopen",
+  "observers": ["vfs", "bytes", "provider-accounting", "plex-refresh"],
+  "success": { "authoritative_torrent_file": true, "provider_429": 0, "playback_provider_resolution_delta": 0 },
+  "budget": { "provider_calls": 0, "full_section_refresh": 0 },
+  "timeout": "120s", "cleanup_policy": "close session; do not mutate publication state", "operator_authorization_required": true
+}
