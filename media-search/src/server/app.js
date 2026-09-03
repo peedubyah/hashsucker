@@ -1355,7 +1355,7 @@ export function createRequestHandler(dependencies = {}) {
   const terminalEvidenceStore = dependencies.terminalEvidenceStore
     || createTerminalDeliveryEvidenceStore({
       controlPlaneStore,
-      defaultTerminalTtlMs: terminalEvidenceTtlMs,
+      terminalTtlMs: terminalEvidenceTtlMs,
       now: clock,
     });
   const revalidator = dependencies.revalidator || createRevalidator({
@@ -1370,17 +1370,17 @@ export function createRequestHandler(dependencies = {}) {
     apiKey: env.TORBOX_API_KEY,
     terminalEvidenceStore,
     placementLookup: (infoHash, fileIndex) => {
-      const placement = controlPlaneStore.findPlacementByInfoHash(infoHash);
+      const placement = controlPlaneStore.findPlacementByInfoHash('torbox', infoHash);
       if (!placement) return null;
       const files = controlPlaneStore.listProviderFiles(placement.id);
-      const match = files.find((f) => Number(f.fileIndex) === Number(fileIndex))
-        || files[0];
+      const match = files.find((f) => Number(f.corpusFileIndex) === Number(fileIndex))
+        || (files.length === 1 ? files[0] : null);
       if (!match) return null;
       return {
         provider: placement.provider,
         accountScope: placement.accountScope || 'default',
         placementId: placement.id,
-        providerFileId: match.id,
+        providerFileId: match.providerFileId,
       };
     },
   });
