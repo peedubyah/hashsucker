@@ -755,7 +755,70 @@ export function createConfidenceProjection(cache) {
         return 0;
       }
     },
+    computeHistoricalProviderPrior: (cache, infoHash, fileIndex = null, options = {}) => {
+      if (!cache || typeof cache.getHistoricalProviderEvidence !== 'function') {
+        return { torbox: 0, realdebrid: 0 };
+      }
+      try {
+        const projection = project(infoHash, fileIndex, { now: options.now });
+        return computePerProviderHistoricalPrior(projection, options);
+      } catch {
+        return { torbox: 0, realdebrid: 0 };
+      }
+    },
   };
+}
+
+// Per-provider historical prior breakdown — shared implementation.
+// Reuses the same proven projection machinery; no independent confidence math.
+function computePerProviderHistoricalPrior(projection, options = {}) {
+  if (!projection || typeof projection !== 'object') {
+    return { torbox: 0, realdebrid: 0 };
+  }
+  const { maxPrior = 0.4 } = options;
+  const now = typeof options.now === 'number' ? options.now : Date.now();
+
+  // Fresh authoritative evidence outranks historical prior per provider.
+  const freshByProvider = {};
+  for (const ev of projection.evidence || []) {
+    if (ev.kind === 'PROVIDER_FRESH_POSITIVE') {
+      freshByProvider[ev.source] = 'positive';
+    } else if (ev.kind === 'PROVIDER_FRESH_NEGATIVE') {
+      freshByProvider[ev.source] = 'negative';
+    } else if (ev.kind === 'PROVIDER_STALE' && !freshByProvider[ev.source]) {
+      freshByProvider[ev.source] = 'stale';
+    }
+  }
+
+  // Per-provider historical sums — reuse decayFactor from projection scope.
+  const providerHistorical = {};
+  const historicalSourceIds = {};
+  for (const ev of projection.evidence || []) {
+    if (ev.kind !== 'PROVIDER_HISTORICAL') continue;
+    const provider = ev.source;
+    if (!provider) continue;
+    const sourceUnit = typeof ev.historicalSourceId === 'string' && ev.historicalSourceId.length > 0
+      ? ev.historicalSourceId
+      : (ev.source ?? 'unknown');
+    historicalSourceIds[provider] = historicalSourceIds[provider] || new Set();
+    if (historicalSourceIds[provider].has(sourceUnit)) continue;
+    historicalSourceIds[provider].add(sourceUnit);
+    const ageMs = Math.max(0, now - (ev.observedAt || 0));
+    const factor = decayFactor(ageMs, DEFAULT_TTL_MS.PROVIDER_HISTORICAL);
+    providerHistorical[provider] = (providerHistorical[provider] || 0) + 0.20 * factor;
+  }
+
+  // Apply fresh-evidence precedence.
+  const result = { torbox: 0, realdebrid: 0 };
+  for (const provider of ['torbox', 'realdebrid']) {
+    const fresh = freshByProvider[provider];
+    if (fresh === 'positive' || fresh === 'negative' || fresh === 'stale') {
+      result[provider] = 0;
+    } else {
+      result[provider] = Math.max(0, Math.min(maxPrior, providerHistorical[provider] || 0));
+    }
+  }
+  return result;
 }
 
 /**
@@ -862,6 +925,40 @@ export function computeHistoricalAvailabilityPrior(cache, infoHash, fileIndex = 
   } catch {
     // Never let historical evidence computation break ranking.
     return 0;
+  }
+}
+
+/**
+ * Compute per-provider historical priors for provider attempt ordering.
+ *
+ * Standalone wrapper around the factory's computeHistoricalProviderPrior.
+ * This is the PROVIDER-ORDER INTEGRATION SEAM. It returns bounded
+ * { torbox, realdebrid } priors that determine TRY ORDER only — never
+ * cache state, never placement, never ranking score.
+ *
+ * Rules (mirror historicalAvailabilityPriorContribution precedence):
+ *   - Fresh authoritative evidence for a provider outranks its history.
+ *   - Fresh negative for a provider suppresses its historical optimism.
+ *   - Stale alone cannot claim availability.
+ *   - No fresh evidence → bounded prior from historical projection.
+ *
+ * @param {Object} cache — discovery cache instance (must expose getHistoricalProviderEvidence)
+ * @param {string} infoHash
+ * @param {number|null} [fileIndex]
+ * @param {Object} [options]
+ * @param {number} [options.now] — pinned clock
+ * @param {number} [options.maxPrior=0.4] — hard cap per provider
+ * @returns {{ torbox: number, realdebrid: number }} bounded priors in [0, 1]
+ */
+export function computeHistoricalProviderPrior(cache, infoHash, fileIndex = null, options = {}) {
+  if (!cache || typeof cache.getHistoricalProviderEvidence !== 'function') {
+    return { torbox: 0, realdebrid: 0 };
+  }
+  try {
+    const factory = createConfidenceProjection(cache);
+    return factory.computeHistoricalProviderPrior(cache, infoHash, fileIndex, options);
+  } catch {
+    return { torbox: 0, realdebrid: 0 };
   }
 }
 

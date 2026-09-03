@@ -31,6 +31,7 @@ import {
   RdResolutionError,
 } from '../providers/realdebrid/resolve.js';
 import { RdCooldownError } from '../providers/realdebrid/client.js';
+import { computeHistoricalProviderPrior } from '../discovery/confidence-projection.js';
 
 export const FALLBACK_REASON = Object.freeze({
   PRIMARY_UNAVAILABLE: 'primary unavailable; next persisted eligible cached candidate',
@@ -491,11 +492,24 @@ export function createAlternateFallback(dependencies = {}) {
       attemptedReleaseKeys,
     });
 
-    // Determine provider attempt order based on historical evidence.
-    // Default is TorBox-first; historical priors may reorder.
-    const attemptOrder = determineProviderAttemptOrder(historicalProviderPrior);
-
     for (const candidate of candidates) {
+      // Compute per-provider historical priors from the candidate identity.
+      // This is the production integration point: the helper consumes the
+      // same proven projection machinery as ranking. Falls back to
+      // default order when no historical evidence exists.
+      const candidatePrior = computeHistoricalProviderPrior(
+        searchCache,
+        candidate.info_hash,
+        candidate.fileIndex,
+      );
+      // Merge caller-supplied priors (if any) with computed priors.
+      // Caller values take precedence when provided.
+      const mergedPrior = {
+        torbox: historicalProviderPrior?.torbox ?? candidatePrior.torbox,
+        realdebrid: historicalProviderPrior?.realdebrid ?? candidatePrior.realdebrid,
+      };
+      const attemptOrder = determineProviderAttemptOrder(mergedPrior);
+
       // Try providers in the determined order. The first usable provider wins.
       // Both providers are still attempted if the first fails.
       for (const provider of attemptOrder) {

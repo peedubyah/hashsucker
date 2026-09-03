@@ -18,6 +18,7 @@ import { evaluateObservationFreshness } from '../lib/providers/observations.js';
 import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
 import { createAvailabilityChecker } from '../lib/intents/availability.js';
 import { selectBestCandidate, selectBindableCandidate } from '../lib/discovery/selection.js';
+import { computeHistoricalAvailabilityPrior } from '../lib/discovery/confidence-projection.js';
 import { resolveTvTorrentFile } from '../lib/resolver/tv-episode-resolver.js';
 import { buildPlaybackHandoff } from '../lib/discovery/playback-handoff.js';
 import { publishStrm } from '../lib/requests/strm-publisher.js';
@@ -300,6 +301,15 @@ export async function searchByMedia(cache, request) {
     let liveEligibleCount = 0;
     const liveMetadataByHash = new Map();
     const liveEligibilityByHash = new Map();
+    // Audit: ranking-determinism — live-vs-live dedup.
+    // runLiveDiscovery aggregates Stremio + Torznab; both may return the
+    // same (infoHash, fileIndex). Without this Set, identical releaseKeys
+    // would be pushed into rankingInputs, the comparator returns 0
+    // (tied at all 5 tie-breakers), and JS stable sort preserves
+    // input-arrival order — defeating the deterministic ordering
+    // invariant. The Set is keyed on releaseKey, the canonical
+    // identity produced by createReleaseIdentity.
+    const seenLiveKeys = new Set();
     let liveDiscoveryTriggered = true;
     let requestId = null;
 
@@ -308,6 +318,10 @@ export async function searchByMedia(cache, request) {
       for (const live of liveResults) {
         const key = live.releaseKey;
         if (!key || !live.infoHash) continue;
+        // Skip duplicate live entries (same infoHash+fileIndex from
+        // multiple live providers or repeated within one provider).
+        if (seenLiveKeys.has(key)) continue;
+        seenLiveKeys.add(key);
 
         const releaseAttrs = {
           title: live.title || live.filename,
@@ -750,6 +764,15 @@ export async function searchByMedia(cache, request) {
     );
     eligibilityByHash.set(key, eligibility);
 
+    // Historical evidence prior: bounded contribution folded into
+    // providerAvailability by rankHit(). Fresh authoritative evidence
+    // always outranks this; it only modestly influences close candidates.
+    const historicalPrior = computeHistoricalAvailabilityPrior(
+      cache,
+      candidate.infoHash,
+      candidate.fileIndex,
+    );
+
     return {
       hash: candidate.infoHash,
       fileIndex: candidate.fileIndex,
@@ -769,6 +792,7 @@ export async function searchByMedia(cache, request) {
       sources: candidate.sources || [{ origin: 'corpus', evidence: [], confidence: 0.5 }],
       selectedMediaId: mediaId,
       hasLiveDiscovery: false,
+      historicalPrior,
     };
   });
 
@@ -784,6 +808,13 @@ export async function searchByMedia(cache, request) {
   let liveEligibleCount = 0;
   const liveMetadataByHash = new Map();
   const liveEligibilityByHash = new Map();
+  // Audit: ranking-determinism — live-vs-live dedup AND corpus-vs-live dedup.
+  // seenLiveKeys extends the corpus-via-eligibilityByHash check: a release
+  // already known to corpus is skipped (corpus wins — it has authoritative
+  // mediaAssociations and providerObservations), AND any duplicate
+  // releaseKey appearing twice in the live stream is skipped so the
+  // ranking set never contains two equal (hash, fileIndex) pairs.
+  const seenLiveKeys = new Set();
 
   if (!skipLiveDiscovery && corpusEligibleCount < liveDiscoveryThreshold) {
     liveDiscoveryTriggered = true;
@@ -799,6 +830,14 @@ export async function searchByMedia(cache, request) {
           liveMetadataByHash.set(key, { ...liveMetadataByHash.get(key), live: true });
           continue;
         }
+        // Skip duplicate live entries (same infoHash+fileIndex from
+        // multiple live providers or repeated within one provider).
+        // Marking the key seen after the corpus-check ensures a later
+        // corpus row never overwrites a kept live entry either, but
+        // corpus is populated before this loop runs so the inner
+        // check above already handles the corpus side.
+        if (seenLiveKeys.has(key)) continue;
+        seenLiveKeys.add(key);
 
         const releaseAttrs = {
           title: live.title || live.filename,
@@ -848,6 +887,11 @@ export async function searchByMedia(cache, request) {
           sources: [{ origin: 'live', evidence: [], confidence: live.confidence ?? 0.5 }],
           selectedMediaId: mediaId,
           hasLiveDiscovery: true,
+          historicalPrior: computeHistoricalAvailabilityPrior(
+            cache,
+            live.infoHash,
+            live.fileIndex,
+          ),
         };
 
         rankingInputs.push(rankingInput);
