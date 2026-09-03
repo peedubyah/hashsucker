@@ -180,6 +180,63 @@ function clearDeliveryRateLimited(capability) {
   deliveryRateLimited.delete(tupleKey(capability));
 }
 
+// Per-capability post-gate delivery owner lock.
+//
+// When the per-capability delivery backoff window expires, the FIRST
+// caller past the window is the single retry owner. Every concurrent
+// sibling past expiry MUST NOT fire its own upstream byte GET — that
+// would amplify the throttled upstream. The lock exposes:
+//   - `acquirePostGateDeliveryOwner(capability)` returns
+//       { isOwner: boolean, settled: Promise<{ok: boolean}>, release: fn, reject: fn }
+//     The first caller past expiry becomes the owner. Concurrent
+//     siblings see isOwner=false and await `settled`.
+//   - The owner calls `release({ok: true})` on success (clears the
+//     cache-level gate from its outcome) or `reject(error)` on a
+//     retry failure (the failure path inside VFS also re-arms the
+//     gate, so siblings wake up to a fresh gate).
+// Siblings that await `settled` may either short-circuit 429 (the
+// common path) or join the owner by reusing its outcome. Both are
+// acceptable as long as they do not amplify the upstream.
+const deliveryPostGateInFlight = new Map(); // tupleKey(capability) -> { promise, resolve, reject, ownerKey }
+
+function _newPostGateLock() {
+  let resolveSettled;
+  let rejectSettled;
+  const promise = new Promise((resolve, reject) => {
+    resolveSettled = resolve;
+    rejectSettled = reject;
+  });
+  return { promise, resolve: resolveSettled, reject: rejectSettled };
+}
+
+function acquirePostGateDeliveryOwner(capability) {
+  const key = tupleKey(capability);
+  const existing = deliveryPostGateInFlight.get(key);
+  if (existing) {
+    return { isOwner: false, settled: existing.promise };
+  }
+  const lock = _newPostGateLock();
+  deliveryPostGateInFlight.set(key, lock);
+  return {
+    isOwner: true,
+    settled: lock.promise,
+    release(result) {
+      // Delete first so a sibling that re-acquires after settle gets a
+      // fresh owner slot rather than observing the still-locked key.
+      if (deliveryPostGateInFlight.get(key) === lock) {
+        deliveryPostGateInFlight.delete(key);
+      }
+      lock.resolve(result);
+    },
+    reject(error) {
+      if (deliveryPostGateInFlight.get(key) === lock) {
+        deliveryPostGateInFlight.delete(key);
+      }
+      lock.reject(error);
+    },
+  };
+}
+
 export class TorBoxDownloadUrlError extends Error {
   constructor(message, code, status, extra = {}) {
     super(message);
@@ -488,6 +545,16 @@ export function getTorBoxDownloadUrlCache() {
       clearDeliveryRateLimited(capability);
     },
 
+    // Per-capability post-gate delivery owner lock. See
+    // acquirePostGateDeliveryOwner above. The lock guarantees that
+    // exactly one caller past the delivery gate window fires the
+    // upstream byte retry; concurrent siblings see isOwner=false and
+    // may either short-circuit 429 or await `settled` and join the
+    // owner's outcome. The lock is process-local and per-capability.
+    acquirePostGateDeliveryOwner(capability) {
+      return acquirePostGateDeliveryOwner(capability);
+    },
+
     async getOrInFlightByCapability(capability, factory) {
       const key = tupleKey(capability);
 
@@ -555,6 +622,7 @@ export function getTorBoxDownloadUrlCache() {
       inFlight.clear();
       rateLimited.clear();
       deliveryRateLimited.clear();
+      deliveryPostGateInFlight.clear();
     },
 
     size() {

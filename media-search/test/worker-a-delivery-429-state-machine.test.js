@@ -286,11 +286,20 @@ test('A2: delivery 429 does not trigger requestdl, VFS mutation, or terminal evi
 test('A3: delivery 429 parses Retry-After and the gate is active for that window', async (t) => {
   const cache = createDiscoveryCache({ dbPath: ':memory:' });
   t.after(() => cache.close());
+  t.after(() => _resetTorboxCacheNow());
   const infoHash = 'cccc3333cccc3333cccc3333cccc3333cccc3333';
   persistEpisode(cache, { infoHash, fileIndex: 1 });
 
   const torBoxDownloadUrlCache = getTorBoxDownloadUrlCache();
   torBoxDownloadUrlCache.clear();
+
+  // Drive a deterministic virtual clock on BOTH the VFS layer and the
+  // URL cache so the gate's `until` timestamp and the post-arm query
+  // agree to the millisecond. Without this the wall-clock elapse
+  // between arming and querying can drift gate.retryAfterMs below the
+  // upstream-asserted floor (flaky).
+  let now = 1_700_000_000_000;
+  _setTorboxCacheNow(() => now);
 
   const seam = makeSeam();
   const handler = createTvWebDav({
@@ -299,6 +308,7 @@ test('A3: delivery 429 parses Retry-After and the gate is active for that window
     rdResolutionCache: { delete() {} },
     resolveTorBoxDeliverySeam: seam,
     torBoxDownloadUrlCache,
+    now: () => now,
     fetchFn: async (_url, _options) =>
       new Response('rate limited', {
         status: 429,
@@ -319,15 +329,23 @@ test('A3: delivery 429 parses Retry-After and the gate is active for that window
   assert.equal(after.delivery_backoff_enter - before.delivery_backoff_enter, 1, 'A3: one Delivery_backoff_enter');
   assert.equal(after.delivery_retry_after_ms - before.delivery_retry_after_ms, 120_000, 'A3: Retry-After=120s → 120_000ms');
   // Floor is 30_000 so the gate is at least 120_000ms (the upstream value).
+  // Query on the SAME virtual clock used to arm the gate, so
+  // gate.retryAfterMs is the exact upstream value with no wall-clock
+  // erosion.
   const gate = torBoxDownloadUrlCache.isDeliveryRateLimited({
     provider: 'torbox',
     accountScope: 'default',
     placementId: 'placement-1',
     providerFileId: 'file-1',
-  });
+  }, now);
   assert.ok(gate, 'A3: delivery gate is active');
-  assert.ok(gate.retryAfterMs >= 120_000, 'A3: gate window honors upstream Retry-After (>=120s)');
-  assert.ok(gate.retryAfterMs <= 120_000, 'A3: gate window is not larger than the upstream value (no amplification)');
+  // Bounded tolerance: the gate must honor the upstream value, not
+  // shrink it. The cache clamps the upstream value into
+  // [MIN_BACKOFF_MS, MAX_BACKOFF_MS] but does not amplify it.
+  assert.ok(gate.retryAfterMs >= 120_000,
+    `A3: gate window honors upstream Retry-After (>=120s); got ${gate.retryAfterMs}ms`);
+  assert.ok(gate.retryAfterMs <= 120_000,
+    `A3: gate window is not larger than the upstream value (no amplification); got ${gate.retryAfterMs}ms`);
 });
 
 // ============================================================================
@@ -435,9 +453,9 @@ test('A5: ten concurrent callers during the gate share the gate (no upstream sto
 });
 
 // ============================================================================
-// A6 — exactly one retry owner past the gate
+// A6 — exactly one retry owner past the gate, under true concurrency
 // ============================================================================
-test('A6: after gate expiry, exactly one caller is the post-gate retry owner', async (t) => {
+test('A6: at gate expiry, exactly one of N concurrent callers is the post-gate retry owner', async (t) => {
   const cache = createDiscoveryCache({ dbPath: ':memory:' });
   t.after(() => cache.close());
   t.after(() => _resetTorboxCacheNow());
@@ -480,32 +498,59 @@ test('A6: after gate expiry, exactly one caller is the post-gate retry owner', a
     handler(makeRangeRequest('bytes=0-99'), makeCapturingResponse(), url),
     (error) => error.status === 502 && error.code === 'PROVIDER_RANGE_FAILED',
   );
-  assert.equal(providerOpens, 1);
+  assert.equal(providerOpens, 1, 'A6: gate primed by exactly one upstream 429');
 
   // Advance past the gate window (60s + 1s margin).
   now += 61_000;
 
-  // First call after expiry is the post-gate retry owner.
+  // Launch CONCURRENT callers at gate expiry. The per-capability
+  // post-gate ownership lock must elect exactly ONE retry owner; the
+  // rest must short-circuit 429 without amplifying the upstream. We
+  // launch ten concurrent callers via Promise.all so the lock is
+  // exercised under true contention, not sequential.
+  const CONCURRENT = 10;
   const before = snapshotDeliveryAccounting();
-  const respOwner = makeCapturingResponse();
-  await handler(makeRangeRequest('bytes=0-99'), respOwner, url);
-  const afterOwner = snapshotDeliveryAccounting();
-  assert.equal(respOwner._capture().status, 206, 'A6: post-gate owner succeeds');
-  assert.equal(afterOwner.delivery_post_backoff_retry - before.delivery_post_backoff_retry, 1,
-    'A6: exactly one Delivery_post_backoff_retry emission');
-  assert.equal(providerOpens, 2, 'A6: the post-gate owner made one upstream retry');
+  const results = await Promise.all(
+    Array.from({ length: CONCURRENT }, async () => {
+      const resp = makeCapturingResponse();
+      await handler(makeRangeRequest('bytes=0-99'), resp, url);
+      return resp._capture();
+    }),
+  );
+  const after = snapshotDeliveryAccounting();
 
-  // A second concurrent call after expiry is NOT a second retry owner.
-  // It reuses the now-cleared gate and emits NO new
-  // Delivery_post_backoff_retry.
-  const before2 = snapshotDeliveryAccounting();
-  const respSibling = makeCapturingResponse();
-  await handler(makeRangeRequest('bytes=0-99'), respSibling, url);
-  const after2 = snapshotDeliveryAccounting();
-  assert.equal(respSibling._capture().status, 206, 'A6: sibling reuses the now-successful capability');
-  assert.equal(after2.delivery_post_backoff_retry - before2.delivery_post_backoff_retry, 0,
-    'A6: subsequent post-expiry calls do NOT emit Delivery_post_backoff_retry (only the owner does)');
-  assert.equal(providerOpens, 3, 'A6: sibling made its own upstream read but is not a retry owner');
+  // Exactly ONE upstream retry owner (the lock-elected first caller).
+  // The owner made providerOpens === 2; everyone else short-circuited.
+  assert.equal(after.delivery_post_backoff_retry - before.delivery_post_backoff_retry, 1,
+    'A6: exactly ONE Delivery_post_backoff_retry emission under concurrency');
+  assert.equal(providerOpens, 2,
+    'A6: exactly ONE upstream byte GET past the gate; the other 9 short-circuit');
+
+  // The owner got 206; every other concurrent caller got 429.
+  const successes = results.filter((r) => r.status === 206);
+  const shortCircuits = results.filter((r) => r.status === 429);
+  assert.equal(successes.length, 1,
+    `A6: exactly one of ${CONCURRENT} concurrent callers got 206; got ${successes.length}`);
+  assert.equal(shortCircuits.length, CONCURRENT - 1,
+    `A6: the other ${CONCURRENT - 1} concurrent callers short-circuit to 429`);
+
+  // Each short-circuit emits Delivery_backoff_short_circuit.
+  assert.equal(after.delivery_backoff_short_circuit - before.delivery_backoff_short_circuit, CONCURRENT - 1,
+    'A6: each non-owner emits one Delivery_backoff_short_circuit');
+
+  // After the owner releases, a fresh call (cache gate now cleared)
+  // proceeds normally — NOT a retry owner, NO new post_backoff_retry.
+  // The single retry slot was consumed by the lock-elected owner.
+  const beforeFollowup = snapshotDeliveryAccounting();
+  const respFollowup = makeCapturingResponse();
+  await handler(makeRangeRequest('bytes=0-99'), respFollowup, url);
+  const afterFollowup = snapshotDeliveryAccounting();
+  assert.equal(respFollowup._capture().status, 206,
+    'A6: follow-up call after the lock release succeeds (gate cleared)');
+  assert.equal(afterFollowup.delivery_post_backoff_retry - beforeFollowup.delivery_post_backoff_retry, 0,
+    'A6: follow-up call does NOT emit Delivery_post_backoff_retry (retry slot already consumed)');
+  assert.equal(providerOpens, 3,
+    'A6: follow-up call makes its own normal upstream read (post-gate retry slot is one-shot)');
 });
 
 // ============================================================================
@@ -768,4 +813,126 @@ test('A10: Delivery_* accounting categories fire on the delivery 429 lifecycle',
     'A10.9: Delivery_range_request fires on the post-gate read');
   assert.equal(afterPost.delivery_success_after_backoff - beforePost.delivery_success_after_backoff, 1,
     'A10.10: Delivery_success_after_backoff fires when the success clears the gate');
+});
+
+// ============================================================================
+// Movie parity — same concurrent post-gate single-owner guarantee
+// ============================================================================
+test('Movie parity: concurrent post-expiry callers elect exactly one retry owner', async (t) => {
+  const { createMovieWebDav } = await import('../src/lib/vfs/movie-webdav.js');
+  const cache = createDiscoveryCache({ dbPath: ':memory:' });
+  t.after(() => cache.close());
+  t.after(() => _resetTorboxCacheNow());
+  const infoHash = 'dddddddddddddddddddddddddddddddddddddddd';
+  const movieRequestId = cache.persistMediaRequest({
+    mediaId: 'tt9988776',
+    mediaType: 'movie',
+    source: 'test',
+  }, []);
+  cache.persistPlaybackHandoff({
+    requestId: movieRequestId,
+    mediaId: 'tt9988776',
+    mediaType: 'movie',
+    season: null,
+    episode: null,
+    releaseKey: `${infoHash}:torrent`,
+    infoHash,
+    fileIndex: null,
+    filename: 'Movie.2024.1080p.mkv',
+    provider: 'torbox',
+    providerState: 'cached',
+    identityTier: 'Verified',
+    resolutionState: 'confirmed',
+    selectionReason: 'test',
+    selectedAt: 1_700_000_000_000,
+  });
+  cache.createVfsMovieEntry({
+    mediaId: 'tt9988776',
+    releaseKey: `${infoHash}:torrent`,
+    infoHash,
+    canonicalPath: 'Movies/Movie/Movie.2024.1080p.mkv',
+    size: SIZE,
+    createdAt: 1_700_000_000_000,
+    updatedAt: 1_700_000_000_000,
+  });
+
+  const torBoxDownloadUrlCache = getTorBoxDownloadUrlCache();
+  torBoxDownloadUrlCache.clear();
+
+  let now = 1_700_000_000_000;
+  _setTorboxCacheNow(() => now);
+  const seam = makeSeam();
+  let providerOpens = 0;
+  const handler = createMovieWebDav({
+    searchCache: cache,
+    controlPlaneStore: {
+      findPlacementByInfoHash(provider, hash) {
+        return provider === 'torbox' && hash === infoHash
+          ? { id: 'placement-1', providerResourceId: 'torrent-1' }
+          : null;
+      },
+      findFileMapping(releaseKey, placementId) {
+        return releaseKey === `${infoHash}:torrent` && placementId === 'placement-1'
+          ? { state: 'mapped', providerFileId: 'file-1' }
+          : null;
+      },
+      listProviderFiles(placementId) {
+        return placementId === 'placement-1' ? [{ providerFileId: 'file-1', size: SIZE }] : [];
+      },
+    },
+    rdClient: null,
+    rdResolutionCache: { delete() {} },
+    resolveTorBoxDeliverySeam: seam,
+    torBoxDownloadUrlCache,
+    now: () => now,
+    fetchFn: async (_url, options) => {
+      providerOpens += 1;
+      const range = options?.headers?.range;
+      if (providerOpens === 1) {
+        return new Response('rate limited', { status: 429, headers: { 'retry-after': '60' } });
+      }
+      const [, start, end] = String(range).match(/bytes=(\d+)-(\d+)/) ?? [];
+      return new Response(bodyForRange(range), {
+        status: 206,
+        headers: { 'content-range': `bytes ${start}-${end}/${SIZE}` },
+      });
+    },
+  });
+
+  const url = new URL('http://localhost/vfs/Movies/Movie/Movie.2024.1080p.mkv');
+
+  // Prime the gate. Movie-webdav catches provider errors and emits them
+  // as 502 responses (the legacy contract); we observe the response
+  // status instead of asserting a rejection.
+  const primeResp = makeCapturingResponse();
+  await handler(makeRangeRequest('bytes=0-99'), primeResp, url);
+  const prime = primeResp._capture();
+  assert.equal(prime.status, 502, 'Movie parity: prime read surfaces 502 (provider 429)');
+  assert.equal(providerOpens, 1, 'Movie parity: gate primed by one upstream 429');
+
+  // Advance past the gate.
+  now += 61_000;
+
+  // Launch 10 concurrent post-expiry callers.
+  const CONCURRENT = 10;
+  const before = snapshotDeliveryAccounting();
+  const results = await Promise.all(
+    Array.from({ length: CONCURRENT }, async () => {
+      const resp = makeCapturingResponse();
+      await handler(makeRangeRequest('bytes=0-99'), resp, url);
+      return resp._capture();
+    }),
+  );
+  const after = snapshotDeliveryAccounting();
+
+  assert.equal(after.delivery_post_backoff_retry - before.delivery_post_backoff_retry, 1,
+    'Movie parity: exactly one Delivery_post_backoff_retry under concurrency');
+  assert.equal(providerOpens, 2,
+    'Movie parity: exactly one upstream byte GET past the gate; the other 9 short-circuit');
+  const successes = results.filter((r) => r.status === 206);
+  const shortCircuits = results.filter((r) => r.status === 429);
+  assert.equal(successes.length, 1,
+    `Movie parity: exactly one of ${CONCURRENT} concurrent callers got 206; got ${successes.length}`);
+  assert.equal(shortCircuits.length, CONCURRENT - 1,
+    `Movie parity: the other ${CONCURRENT - 1} short-circuit to 429`);
 });

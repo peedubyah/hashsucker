@@ -467,6 +467,9 @@ export function createMovieWebDav({
     let firstFailure = null;
     let sawReadRateLimit = false;
     let firstFailureDefinitive = false;
+    let earlyBacking = null;
+    let postGateOwnership = null;
+    try {
     // Bounded read-429 back-pressure: if a prior byte read against the
     // same capability already returned 429 within the backoff window,
     // refuse the call without re-resolving requestdl and without
@@ -499,7 +502,6 @@ export function createMovieWebDav({
       providerAccounting.increment('torbox', 'delivery_backoff_short_circuit');
       throw error;
     }
-    let earlyBacking = null;
     let earlyGate = null;
     try {
       earlyBacking = await resolveBacking(state, { forceFresh: false });
@@ -532,20 +534,64 @@ export function createMovieWebDav({
       }
       throw error;
     }
-    // Track whether this call is the first one past the backoff
-    // window so we can attribute `delivery_post_backoff_retry` to
-    // exactly the first retry owner. The signal is
-    // `state._deliveryRecentlyGated`: set on every fresh 429
-    // observation, cleared on the next successful byte read. The
-    // signal is independent of the cache-level gate state (which
-    // may have been lazily evicted by the time the post-gate owner
-    // enters) and is therefore the durable identifier of the
-    // first caller past the window.
-    const isPostGateOwner = Boolean(earlyCapability)
-      && state?._deliveryRecentlyGated === true
-      && !earlyGate;
+    // Post-gate ownership lock. When the per-capability delivery
+    // gate has expired and `state._deliveryRecentlyGated` is set,
+    // this call is entering the post-gate retry window. The first
+    // caller past expiry is the single retry owner; concurrent
+    // siblings must NOT amplify the throttled upstream. The
+    // per-capability lock in `torBoxDownloadUrlCache` makes that
+    // guarantee: the first caller is the owner, every other
+    // concurrent caller becomes a sibling and short-circuits to 429
+    // without firing its own byte GET.
+    let isPostGateOwner = false;
+    if (earlyCapability && state?._deliveryRecentlyGated === true && !earlyGate) {
+      if (torBoxDownloadUrlCache
+        && typeof torBoxDownloadUrlCache.acquirePostGateDeliveryOwner === 'function') {
+        postGateOwnership = torBoxDownloadUrlCache.acquirePostGateDeliveryOwner(earlyCapability);
+        isPostGateOwner = Boolean(postGateOwnership?.isOwner);
+      } else {
+        // No lock available — preserve the existing single-attempt
+        // behavior so the VFS never amplifies the upstream in this
+        // branch even without the lock helper.
+        isPostGateOwner = true;
+      }
+    }
     if (isPostGateOwner && earlyBacking?.provider) {
       providerAccounting.increment(earlyBacking.provider, 'delivery_post_backoff_retry');
+    } else if (postGateOwnership && !isPostGateOwner) {
+      // Sibling: do NOT fire upstream. Await the owner's outcome,
+      // then short-circuit 429 with the same surface a normal
+      // gated caller would see. The owner's release cleared the
+      // per-capability cache gate on success (so the next sibling
+      // call past this turn proceeds normally) or re-armed it on
+      // failure (so this sibling's 429 is the correct response).
+      try {
+        await postGateOwnership.settled;
+      } catch {
+        // Owner failed; the VFS layer will have re-armed the cache
+        // gate from the failure path. Fall through to 429.
+      }
+      const siblingGate = earlyCapability
+        ? gateReadRateLimited(state, earlyCapability)
+        : null;
+      const retryAfterSeconds = siblingGate
+        ? Math.max(1, Math.ceil((siblingGate.until - now()) / 1000))
+        : 1;
+      const error = new VfsError(
+        'Provider byte reads are currently rate-limited',
+        429,
+        'PROVIDER_READ_RATE_LIMITED',
+      );
+      error.retryAfterMs = siblingGate
+        ? Math.max(0, siblingGate.until - now())
+        : 0;
+      error.retryAfterSeconds = retryAfterSeconds;
+      if (earlyBacking?.provider) {
+        providerAccounting.increment(earlyBacking.provider, 'delivery_backoff_short_circuit');
+      } else {
+        providerAccounting.increment('torbox', 'delivery_backoff_short_circuit');
+      }
+      throw error;
     }
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const forceFresh = attempt === 1;
@@ -688,6 +734,24 @@ export function createMovieWebDav({
       throw firstFailure;
     }
     throw firstFailure || new VfsError('Provider read failed', 502, 'PROVIDER_READ_FAILED');
+    } finally {
+      // Always release the per-capability post-gate ownership lock so
+      // concurrent siblings wake up to a settled promise (success or
+      // failure). The lock is the durable single-owner guarantee; the
+      // release is the unblock boundary.
+      if (postGateOwnership?.isOwner) {
+        const releasedCapability = deliveryCapabilityFor(earlyBacking);
+        const releasedGate = releasedCapability
+          ? gateReadRateLimited(state, releasedCapability)
+          : null;
+        const ok = !releasedGate;
+        if (ok) {
+          postGateOwnership.release({ ok: true });
+        } else {
+          postGateOwnership.release({ ok: false });
+        }
+      }
+    }
   }
 
   function invalidateTorBoxCapability(backing) {
