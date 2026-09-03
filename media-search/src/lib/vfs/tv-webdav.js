@@ -534,11 +534,11 @@ export function createTvWebDav({
         const reason = firstFailureDefinitive
           ? 'protocol-invalid-after-fresh-retry'
           : 'read-' + (upstream.status === 429 ? '429' : 'transient') + '-after-fresh-retry';
-        const state = firstFailureDefinitive
+        const evidenceState = firstFailureDefinitive
           ? 'terminal'
           : 'temporary';
         try {
-          if (state === 'terminal') {
+          if (evidenceState === 'terminal') {
             terminalEvidenceStore.recordTerminal({
               provider: backing.provider,
               accountScope: backing.accountScope ?? 'default',
