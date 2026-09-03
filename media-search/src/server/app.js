@@ -59,6 +59,7 @@ import { resolveStream, parseMediaIdentity, StreamResolverError } from '../lib/s
 import { resolveTorBoxRedirect, RedirectResolutionError, formatRedirectLog } from '../lib/resolver/torbox-redirect.js';
 import { createAlternateFallback, FALLBACK_REASON } from '../lib/resolver/alternate-fallback.js';
 import { createRevalidator, mapRevalidationToHttp, REVALIDATION_SOURCE, REVALIDATION_OUTCOME } from '../lib/resolver/availability-revalidation.js';
+import { createTerminalDeliveryEvidenceStore } from '../lib/resolver/terminal-delivery-evidence.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
 import { createResolverTelemetry, getRecentResolverTelemetry, RESOLVER_OUTCOME } from '../lib/resolver/telemetry.js';
 import { createResolverProfiler } from '../lib/resolver/profiler.js';
@@ -1348,6 +1349,15 @@ export function createRequestHandler(dependencies = {}) {
 
   // Availability revalidator for playback-time TorBox checks
   // Configured via STREAM_AVAILABILITY_MAX_AGE_MS and STREAM_PROVIDER_CHECK_TIMEOUT_MS
+  const terminalEvidenceTtlMs = env.STREAM_TERMINAL_EVIDENCE_TTL_MS
+    ? parseInt(env.STREAM_TERMINAL_EVIDENCE_TTL_MS, 10)
+    : 10 * 60 * 1000;
+  const terminalEvidenceStore = dependencies.terminalEvidenceStore
+    || createTerminalDeliveryEvidenceStore({
+      controlPlaneStore,
+      defaultTerminalTtlMs: terminalEvidenceTtlMs,
+      now: clock,
+    });
   const revalidator = dependencies.revalidator || createRevalidator({
     checkTorBoxCached,
     now: clock,
@@ -1358,6 +1368,21 @@ export function createRequestHandler(dependencies = {}) {
       ? parseInt(env.STREAM_PROVIDER_CHECK_TIMEOUT_MS, 10)
       : 3000,
     apiKey: env.TORBOX_API_KEY,
+    terminalEvidenceStore,
+    placementLookup: (infoHash, fileIndex) => {
+      const placement = controlPlaneStore.findPlacementByInfoHash(infoHash);
+      if (!placement) return null;
+      const files = controlPlaneStore.listProviderFiles(placement.id);
+      const match = files.find((f) => Number(f.fileIndex) === Number(fileIndex))
+        || files[0];
+      if (!match) return null;
+      return {
+        provider: placement.provider,
+        accountScope: placement.accountScope || 'default',
+        placementId: placement.id,
+        providerFileId: match.id,
+      };
+    },
   });
 
   // Real-Debrid client for preferred delivery (resolver-safe mode)
@@ -1460,6 +1485,7 @@ export function createRequestHandler(dependencies = {}) {
     rdResolutionCache,
     resolveTorBoxDeliverySeam,
     torBoxDownloadUrlCache,
+    terminalEvidenceStore,
     now: clock,
   });
   const handleTvWebDav = createTvWebDav({
@@ -1469,6 +1495,7 @@ export function createRequestHandler(dependencies = {}) {
     rdResolutionCache,
     resolveTorBoxDeliverySeam,
     torBoxDownloadUrlCache,
+    terminalEvidenceStore,
     now: clock,
   });
 
@@ -1746,6 +1773,7 @@ export function createRequestHandler(dependencies = {}) {
             const revalidation = await revalidator.revalidateAvailability({
               cache: searchCache,
               infoHash: existingSelection.selectedHash,
+              fileIndex: existingSelection.fileIndex,
               mediaId: rawId,
               releaseKey: existingSelection.releaseKey,
               provider: existingSelection.provider,

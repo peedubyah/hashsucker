@@ -411,6 +411,7 @@ export function createMovieWebDav({
   async function openValidatedProviderRead(state, rangeHeader, validate) {
     let firstFailure = null;
     let sawReadRateLimit = false;
+    let firstFailureDefinitive = false;
     // Bounded read-429 back-pressure: if a prior byte read against the
     // same playback handoff already returned 429 within the backoff
     // window, refuse the call without re-resolving requestdl and
@@ -456,6 +457,7 @@ export function createMovieWebDav({
           // this exact capability. Transient 5xx responses retain it.
           if (STALE_PROVIDER_STATUSES.has(upstream.status)
               || readFailure === 'protocol-invalid') {
+            firstFailureDefinitive = true;
             invalidateTorBoxCapability(backing);
           }
           continue;
@@ -469,6 +471,52 @@ export function createMovieWebDav({
         const upstreamRetryAfterMs = parseReadRetryAfter(upstream);
         markReadRateLimited(state, upstreamRetryAfterMs);
         sawReadRateLimit = true;
+      }
+      // Second (forceFresh) attempt also failed validation. If the
+      // first failure was a definitive protocol-invalid / stale
+      // mapping, the bounded fresh capability retry also failed
+      // protocol validation, and the current exact mapping is
+      // terminal: record durable evidence so the normal resolver
+      // ladder skips this capability without repeating the byte-
+      // path probe. A 429/transient first failure means the
+      // second attempt is also transient — record temporary, not
+      // terminal.
+      if (terminalEvidenceStore && backing?.provider === 'torbox' && backing.placementId && backing.providerFileId) {
+        const reason = firstFailureDefinitive
+          ? 'protocol-invalid-after-fresh-retry'
+          : 'read-' + (upstream.status === 429 ? '429' : 'transient') + '-after-fresh-retry';
+        const state = firstFailureDefinitive
+          ? 'terminal'
+          : 'temporary';
+        try {
+          if (state === 'terminal') {
+            terminalEvidenceStore.recordTerminal({
+              provider: backing.provider,
+              accountScope: backing.accountScope ?? 'default',
+              placementId: backing.placementId,
+              providerFileId: backing.providerFileId,
+              infoHash: state.entry.infoHash,
+              fileIndexKey: state.entry.fileIndex ?? -1,
+              reason,
+              failureCategory: 'delivery-capability-protocol-invalid',
+              observedAt: now(),
+            });
+          } else {
+            terminalEvidenceStore.recordTemporary({
+              provider: backing.provider,
+              accountScope: backing.accountScope ?? 'default',
+              placementId: backing.placementId,
+              providerFileId: backing.providerFileId,
+              infoHash: state.entry.infoHash,
+              fileIndexKey: state.entry.fileIndex ?? -1,
+              reason,
+              failureCategory: 'delivery-capability-transient',
+              observedAt: now(),
+            });
+          }
+        } catch (error) {
+          console.warn('[vfs] failed to record delivery evidence: ' + error.message);
+        }
       }
       throw validationError;
     }

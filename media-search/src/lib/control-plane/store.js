@@ -306,6 +306,36 @@ CREATE TABLE IF NOT EXISTS lifecycle_events (
 );
 CREATE INDEX IF NOT EXISTS idx_lifecycle_events_item
   ON lifecycle_events(library_item_id, milestone, occurred_at DESC);
+
+-- Terminal delivery evidence. Stores provider-specific, capability-
+-- specific, mapping-coordinate-specific evidence about a delivery
+-- capability. Used by the resolver availability revalidation ladder
+-- to override stale cached-state observations when the byte path
+-- has proven the current exact mapping is unusable. One row per
+-- (provider, account_scope, placement_id, provider_file_id) tuple;
+-- the mapping coordinate is recorded on the row but does not
+-- participate in the primary key because the (placement, file) tuple
+-- IS the mapping coordinate at the seam boundary. A future mapping
+-- change to a different provider_file_id will create a new row.
+CREATE TABLE IF NOT EXISTS provider_delivery_evidence (
+  provider TEXT NOT NULL,
+  account_scope TEXT NOT NULL,
+  placement_id TEXT NOT NULL,
+  provider_file_id TEXT NOT NULL,
+  info_hash TEXT,
+  file_index_key INTEGER NOT NULL DEFAULT -1,
+  state TEXT NOT NULL CHECK (state IN ('usable', 'temporary', 'terminal')),
+  reason TEXT,
+  failure_category TEXT,
+  observed_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  PRIMARY KEY (provider, account_scope, placement_id, provider_file_id)
+);
+CREATE INDEX IF NOT EXISTS idx_provider_delivery_evidence_expiry
+  ON provider_delivery_evidence(expires_at);
+CREATE INDEX IF NOT EXISTS idx_provider_delivery_evidence_hash
+  ON provider_delivery_evidence(info_hash, file_index_key);
 `;
 
 export function createControlPlaneStore({ dbPath = ':memory:', database = null, now = () => Date.now() } = {}) {
@@ -514,6 +544,89 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       WHERE release_key = ? AND placement_id = ?
     `).get(releaseKey, placementId);
     return row ? rowToFileMapping(row) : null;
+  }
+
+  // ----- provider delivery evidence (terminal / temporary / usable) -----
+  //
+  // The VFS byte path proves a delivery capability is invalid (or has
+  // recovered) and that fact must survive a restart. The row is keyed
+  // on the capability tuple (provider, accountScope, placementId,
+  // providerFileId); the (infoHash, fileIndexKey) is recorded on the
+  // row for diagnostic lookup but is not part of the key because the
+  // (placement, file) tuple IS the durable capability identity. A
+  // different providerFileId for the same placement will produce a
+  // new row.
+  //
+  // The revalidation ladder in availability-revalidation.js reads
+  // these rows first; a fresh `terminal` row for the current exact
+  // capability override a cached provider observation and forces
+  // the resolver to fall through to alternate candidates without
+  // initiating any placement / inventory / requestdl work.
+  function recordDeliveryEvidence(input) {
+    const provider = normalizeIdentifier(input.provider);
+    const accountScope = normalizeIdentifier(input.accountScope ?? 'default');
+    const placement = requirePlacement(input.placementId);
+    if (placement.provider !== provider || placement.accountScope !== accountScope) {
+      throw new Error('Delivery evidence scope does not match placement');
+    }
+    const state = requireEnum(
+      input.state, ['usable', 'temporary', 'terminal'], 'delivery evidence state',
+    );
+    const observedAt = requireTimestamp(input.observedAt, 'observedAt');
+    const expiresAt = requireBoundedExpiry(input.expiresAt, observedAt, 'delivery evidence');
+    const providerFileId = requireString(input.providerFileId, 'providerFileId');
+    const timestamp = now();
+    const infoHash = input.infoHash != null ? normalizeInfoHash(input.infoHash) : null;
+    const fileIndexKey = input.fileIndexKey == null ? -1 : input.fileIndexKey;
+    db.prepare(`
+      INSERT INTO provider_delivery_evidence (
+        provider, account_scope, placement_id, provider_file_id,
+        info_hash, file_index_key, state, reason, failure_category,
+        observed_at, expires_at, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(provider, account_scope, placement_id, provider_file_id) DO UPDATE SET
+        info_hash = excluded.info_hash,
+        file_index_key = excluded.file_index_key,
+        state = excluded.state,
+        reason = excluded.reason,
+        failure_category = excluded.failure_category,
+        observed_at = excluded.observed_at,
+        expires_at = excluded.expires_at,
+        recorded_at = excluded.recorded_at
+    `).run(
+      provider, accountScope, placement.id, providerFileId,
+      infoHash, fileIndexKey, state, input.reason ?? null, input.failureCategory ?? null,
+      observedAt, expiresAt, timestamp,
+    );
+    return rowToDeliveryEvidence(db.prepare(`
+      SELECT * FROM provider_delivery_evidence
+      WHERE provider = ? AND account_scope = ? AND placement_id = ? AND provider_file_id = ?
+    `).get(provider, accountScope, placement.id, providerFileId));
+  }
+
+  function findDeliveryEvidence({ provider, accountScope = 'default', placementId, providerFileId }) {
+    const p = normalizeIdentifier(provider);
+    const a = normalizeIdentifier(accountScope);
+    const row = db.prepare(`
+      SELECT * FROM provider_delivery_evidence
+      WHERE provider = ? AND account_scope = ? AND placement_id = ? AND provider_file_id = ?
+    `).get(p, a, placementId, providerFileId);
+    return row ? rowToDeliveryEvidence(row) : null;
+  }
+
+  function listDeliveryEvidenceForHash(infoHash, fileIndexKey) {
+    const rows = db.prepare(`
+      SELECT * FROM provider_delivery_evidence
+      WHERE info_hash = ? AND file_index_key = ?
+    `).all(normalizeInfoHash(infoHash), fileIndexKey ?? -1);
+    return rows.map(rowToDeliveryEvidence);
+  }
+
+  function pruneExpiredDeliveryEvidence(asOf) {
+    const cutoff = asOf ?? now();
+    return db.prepare(`
+      DELETE FROM provider_delivery_evidence WHERE expires_at <= ?
+    `).run(cutoff).changes;
   }
 
   function recordPlacementLookupObservation(input) {
@@ -1642,6 +1755,10 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     findPlacement,
     findPlacementByInfoHash,
     findFileMapping,
+    recordDeliveryEvidence,
+    findDeliveryEvidence,
+    listDeliveryEvidenceForHash,
+    pruneExpiredDeliveryEvidence,
     recordPlacementLookupObservation,
     recordReadinessObservation,
     markPlacementRemoved,
@@ -1715,6 +1832,22 @@ function rowToPlacementLookupObservation(row) {
     observationState: row.observation_state, placementId: row.placement_id,
     observedAt: row.observed_at, expiresAt: row.expires_at, source: row.source,
     failureCategory: row.failure_category, retryable: fromSqlBoolean(row.retryable),
+  };
+}
+function rowToDeliveryEvidence(row) {
+  return {
+    provider: row.provider,
+    accountScope: row.account_scope,
+    placementId: row.placement_id,
+    providerFileId: row.provider_file_id,
+    infoHash: row.info_hash,
+    fileIndexKey: row.file_index_key,
+    state: row.state,
+    reason: row.reason,
+    failureCategory: row.failure_category,
+    observedAt: row.observed_at,
+    expiresAt: row.expires_at,
+    recordedAt: row.recorded_at,
   };
 }
 function rowToReadinessObservation(row) {

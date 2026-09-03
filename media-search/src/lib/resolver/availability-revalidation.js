@@ -36,6 +36,7 @@ import { createCacheObservation, evaluateObservationFreshness } from '../provide
 export const REVALIDATION_SOURCE = Object.freeze({
   STORED_FRESH: 'stored-fresh',
   PLAYBACK_REVALIDATION: 'playback-revalidation',
+  TERMINAL_DELIVERY_EVIDENCE: 'terminal-delivery-evidence',
 });
 
 export const REVALIDATION_OUTCOME = Object.freeze({
@@ -72,10 +73,55 @@ export function createRevalidator(dependencies = {}) {
     checkTimeoutMs = 3000,
     apiKey,
     fetchFn,
+    terminalEvidenceStore = null,
+    placementLookup = null,
   } = dependencies;
 
   if (typeof checkTorBoxCached !== 'function') {
     throw new TypeError('checkTorBoxCached function is required');
+  }
+
+  /**
+   * Return a fresh terminal evidence override for the current mapping
+   * coordinate, or null if none is durable.
+   *
+   * Two lookup paths are supported, in order of authority:
+   *
+   *   1. placementLookup(infoHash, fileIndex) -> { placementId,
+   *      providerFileId, accountScope } | null
+   *      The strict capability-tuple path. This is the only way to
+   *      guarantee that a "changed authoritative mapping" (different
+   *      providerFileId for the same placement) does NOT inherit
+   *      old poison — the old row's primary key includes the
+   *      providerFileId, so the new mapping will not find it.
+   *
+   *   2. terminalEvidenceStore.listForCoordinate({ infoHash, fileIndexKey })
+   *      A coordinate-only scan. Used as a fallback when the
+   *      placement lookup is not wired (e.g. legacy callers) or
+   *      returns null. The scan is strictly per-(infoHash, fileIndexKey)
+   *      so a different fileIndexKey returns no row.
+   *
+   * @returns {Object|null} terminal evidence row, or null
+   */
+  function lookupTerminalOverride(infoHash, fileIndex) {
+    if (!terminalEvidenceStore) return null;
+    if (typeof placementLookup === 'function') {
+      const placement = placementLookup(infoHash, fileIndex);
+      if (placement) {
+        const override = terminalEvidenceStore.findTerminalEvidence({
+          provider: 'torbox',
+          accountScope: placement.accountScope ?? 'default',
+          placementId: placement.placementId,
+          providerFileId: placement.providerFileId,
+        });
+        if (override) return override;
+      }
+      // Fall through to coordinate-based lookup below.
+    }
+    const list = terminalEvidenceStore.listForCoordinate?.({ infoHash, fileIndexKey: fileIndex ?? -1 });
+    if (!list) return null;
+    const fresh = list.find((row) => row.expiresAt > now());
+    return fresh ?? null;
   }
 
   /**
@@ -240,11 +286,40 @@ export function createRevalidator(dependencies = {}) {
    * @param {string} params.provider - Provider name for telemetry
    * @returns {Promise<Object>} Revalidation result with telemetry
    */
-  async function revalidateAvailability({ cache, infoHash, mediaId, releaseKey, provider }) {
+  async function revalidateAvailability({ cache, infoHash, fileIndex = null, mediaId, releaseKey, provider }) {
     const latestObservation = getLatestTorBoxObservation(cache, infoHash, null);
     const previousObservationAge = latestObservation
       ? now() - latestObservation.observedAt
       : null;
+
+    // Case 0: Terminal delivery evidence override. The VFS byte path
+    // has proven the current exact mapping is unusable, the durable
+    // evidence is still fresh, and a cached `cached` provider
+    // observation must not poison the resolver into returning the
+    // poisoned primary. The override is consumed here so a normal
+    // GET /stream/... enters the persisted alternate-candidate rung
+    // without any placement / inventory / requestdl work.
+    //
+    // Only `terminal` state triggers the override. A `temporary`
+    // row (transient 429/5xx) or a `usable` row MUST NOT poison a
+    // fresh cached observation; the capability is not yet proven
+    // unusable.
+    const terminalOverride = lookupTerminalOverride(infoHash, fileIndex);
+    if (terminalOverride && terminalOverride.state === 'terminal') {
+      return {
+        availabilitySource: REVALIDATION_SOURCE.TERMINAL_DELIVERY_EVIDENCE,
+        cacheState: REVALIDATION_OUTCOME.UNCACHED,
+        mediaId,
+        releaseKey,
+        infoHash,
+        provider,
+        previousObservationAge,
+        providerCheckOccurred: false,
+        checkLatencyMs: null,
+        observation: latestObservation ?? null,
+        terminalEvidence: terminalOverride,
+      };
+    }
 
     // Case 1: Fresh observation exists — reuse it, zero provider calls
     if (latestObservation && isFreshEnough(latestObservation)) {
