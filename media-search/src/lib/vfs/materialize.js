@@ -226,6 +226,49 @@ function isLegacyVfsEntry(existing) {
   return existing && existing.torrentFileId == null;
 }
 
+/**
+ * Worker A — Defect A: rejection-supersede check.
+ *
+ * The VFS row is bound to an authoritative TorrentFile that has
+ * been proven invalid (terminal evidence, alternate-rank-5
+ * promotion, or any other authoritative replacement signal). The
+ * new handoff carries a different (infoHash, torrentFileId) and
+ * is itself authoritative (torrentFileIdentity.status === 'mapped'
+ * or the candidate was promoted through the normal lifecycle).
+ *
+ * In that case we may atomically replace the existing row's
+ * physical identity while keeping the stable canonical_path
+ * (the library alias). This is the same contract as the
+ * legacy-supersede path; the only difference is the existing row
+ * already has a torrentFileId, but that id is now known to be the
+ * wrong physical identity.
+ *
+ * Returns true if the new (handoff, torrentFile) is an authoritative
+ * rejection of the existing row. The caller proceeds with the
+ * supersede. Returns false otherwise (caller falls through to
+ * the existing assertExistingIdentity safety net).
+ */
+function isRejectionSupersede(existing, handoff, torrentFile) {
+  if (!torrentFile) return false;
+  if (!existing || !existing.torrentFileId) return false; // legacy case handled separately
+  if (existing.torrentFileId === torrentFile.id) return false; // idempotent, not a rejection
+  // The new handoff must carry an authoritative identity (i.e.
+  // the promotion came from a real lifecycle path, not a stray
+  // ad-hoc buildPlaybackHandoff call). When status is 'skipped'
+  // or unset, we still allow the supersede iff the existing row's
+  // infoHash differs from the new handoff's infoHash — a
+  // different physical identity is a definite signal.
+  const status = handoff?.torrentFileIdentity?.status;
+  const identityChanged = existing.infoHash?.toLowerCase() !== torrentFile.infoHash?.toLowerCase();
+  if (status === 'mapped' || status === 'active') return identityChanged;
+  // No explicit identity status: only supersede when the new
+  // handoff's infoHash differs from the existing row's infoHash.
+  // Same infoHash but different torrentFileId is a re-mapping
+  // within the same physical release and is rejected (the
+  // existing assertion will catch it).
+  return identityChanged;
+}
+
 function authoritativeTvFields(torrentFile, handoff, canonicalPath, timestamp) {
   return {
     mediaId: handoff.mediaId,
@@ -284,12 +327,14 @@ function raceRecoverVfsMovieEntry(searchCache, handoff, torrentFile, now, canoni
   if (!existing) {
     throw new Error(`VFS race recovery could not find media_id=${handoff.mediaId}`);
   }
-  if (torrentFile && isLegacyVfsEntry(existing)) {
+  if (torrentFile && (isLegacyVfsEntry(existing) || isRejectionSupersede(existing, handoff, torrentFile))) {
+    const supersedeOptions = { allowRejectionSupersede: !isLegacyVfsEntry(existing) };
     const replaced = searchCache.replaceVfsMovieEntry(
       authoritativeMovieFields(torrentFile, handoff, existing.canonicalPath, now()),
+      supersedeOptions,
     );
     if (replaced) {
-      console.log(`[vfs] race-recovered legacy media=${replaced.mediaId} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
+      console.log(`[vfs] race-recovered ${isLegacyVfsEntry(existing) ? 'legacy' : 'rejected'} media=${replaced.mediaId} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
       return replaced;
     }
   }
@@ -301,12 +346,14 @@ function raceRecoverVfsTvEntry(searchCache, handoff, torrentFile, now) {
   if (!existing) {
     throw new Error(`VFS race recovery could not find media_id=${handoff.mediaId} S${handoff.season}E${handoff.episode}`);
   }
-  if (torrentFile && isLegacyVfsEntry(existing)) {
+  if (torrentFile && (isLegacyVfsEntry(existing) || isRejectionSupersede(existing, handoff, torrentFile))) {
+    const supersedeOptions = { allowRejectionSupersede: !isLegacyVfsEntry(existing) };
     const replaced = searchCache.replaceVfsTvEntry(
       authoritativeTvFields(torrentFile, handoff, existing.canonicalPath, now()),
+      supersedeOptions,
     );
     if (replaced) {
-      console.log(`[vfs-tv] race-recovered legacy media=${replaced.mediaId} S${replaced.season}E${replaced.episode} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
+      console.log(`[vfs-tv] race-recovered ${isLegacyVfsEntry(existing) ? 'legacy' : 'rejected'} media=${replaced.mediaId} S${replaced.season}E${replaced.episode} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
       return replaced;
     }
   }
@@ -348,16 +395,23 @@ export function materializeVfsEntry(
   if (handoff.mediaType === 'movie') {
     const existing = searchCache.getVfsMovieEntry(handoff.mediaId);
     if (existing) {
-      if (torrentFile && isLegacyVfsEntry(existing)) {
+      if (torrentFile && (isLegacyVfsEntry(existing) || isRejectionSupersede(existing, handoff, torrentFile))) {
         // Legacy supersede: keep the existing canonical_path so the published
         // library alias stays stable, and atomically replace the physical
         // identity with the validated TorrentFile bundle.
+        //
+        // Worker A — Defect A: rejection-supersede is also taken when
+        // the new handoff is authoritative and the existing row's
+        // infoHash differs.
+        const supersedeOptions = { allowRejectionSupersede: !isLegacyVfsEntry(existing) };
         const replaced = searchCache.replaceVfsMovieEntry(
           authoritativeMovieFields(torrentFile, handoff, existing.canonicalPath, now()),
+          supersedeOptions,
         );
         if (replaced) {
-          console.log(`[vfs] superseded legacy media=${replaced.mediaId} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
-          return finalize(replaced, 'vfs-legacy-supersede');
+          const action = isLegacyVfsEntry(existing) ? 'vfs-legacy-supersede' : 'vfs-rejection-supersede';
+          console.log(`[vfs] superseded ${isLegacyVfsEntry(existing) ? 'legacy' : 'rejected'} media=${replaced.mediaId} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
+          return finalize(replaced, action);
         }
         // Race: another writer converted the row to authoritative between
         // the SELECT and the UPDATE. Re-read and assert against the
@@ -443,16 +497,26 @@ export function materializeVfsEntry(
 
   const existing = searchCache.getVfsTvEntry(handoff.mediaId, handoff.season, handoff.episode);
   if (existing) {
-    if (torrentFile && isLegacyVfsEntry(existing)) {
+    if (torrentFile && (isLegacyVfsEntry(existing) || isRejectionSupersede(existing, handoff, torrentFile))) {
       // Legacy supersede: keep the existing canonical_path so the published
       // library alias stays stable, and atomically replace the physical
       // identity with the validated TorrentFile bundle.
+      //
+      // Worker A — Defect A: rejection-supersede path is also taken
+      // when the existing row's infoHash differs from the new
+      // handoff's infoHash AND the new handoff is authoritative
+      // (e.g. the rank-5 alternate was promoted through the
+      // normal lifecycle after the bad primary was terminal-
+      // evidenced). The canonical_path alias stays stable.
+      const supersedeOptions = { allowRejectionSupersede: !isLegacyVfsEntry(existing) };
       const replaced = searchCache.replaceVfsTvEntry(
         authoritativeTvFields(torrentFile, handoff, existing.canonicalPath, now()),
+        supersedeOptions,
       );
       if (replaced) {
-        console.log(`[vfs-tv] superseded legacy media=${replaced.mediaId} S${replaced.season}E${replaced.episode} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
-        return finalize(replaced, 'vfs-tv-legacy-supersede');
+        const action = isLegacyVfsEntry(existing) ? 'vfs-tv-legacy-supersede' : 'vfs-tv-rejection-supersede';
+        console.log(`[vfs-tv] superseded ${isLegacyVfsEntry(existing) ? 'legacy' : 'rejected'} media=${replaced.mediaId} S${replaced.season}E${replaced.episode} path="${replaced.canonicalPath}" release=${replaced.releaseKey} torrentFileId=${replaced.torrentFileId}`);
+        return finalize(replaced, action);
       }
       // Race: another writer converted the row to authoritative between
       // the SELECT and the UPDATE. Re-read and assert against the

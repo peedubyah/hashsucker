@@ -1984,6 +1984,24 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       AND torrent_file_id IS NULL
   `);
 
+  // Worker A — Defect A: rejection-supersede path for movies.
+  // Mirrors the TV variant. Triggered when the existing row's infoHash
+  // differs from the new handoff (a previous TorrentFile was terminal-
+  // evidenced) and the new handoff is authoritative (carries
+  // torrentFileIdentity). The canonical_path alias stays stable.
+  const supersedeVfsMovieEntryRejectionStmt = db.prepare(`
+    UPDATE vfs_movie_entries
+    SET release_key = @release_key,
+        info_hash = @info_hash,
+        file_index = NULL,
+        canonical_path = @canonical_path,
+        torrent_file_id = @torrent_file_id,
+        size = @size,
+        updated_at = @updated_at
+    WHERE media_id = @media_id
+      AND info_hash != @info_hash
+  `);
+
   function persistPlaybackHandoff(handoff) {
     return upsertPlaybackHandoff(handoff).id;
   }
@@ -2135,8 +2153,22 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
    * not touched here — those are reconciled in application code with a
    * fail-closed conflict check.
    */
-  function replaceVfsMovieEntry(entry) {
-    const info = supersedeVfsMovieEntryStmt.run({
+  /**
+   * Atomically supersede a legacy movie VFS row (torrent_file_id IS NULL) with
+   * a TorrentFile-backed authoritative row. The existing canonical_path is
+   * preserved verbatim so the published library alias stays stable.
+   *
+   * Worker A — Defect A: when { allowRejectionSupersede: true } is passed and
+   * the existing row's info_hash differs from the incoming handoff, the row
+   * is replaced even though its torrent_file_id IS NOT NULL. This is the
+   * only way a previously-terminal-evidenced TorrentFile can be replaced by
+   * a promoted alternate through the normal lifecycle.
+   */
+  function replaceVfsMovieEntry(entry, options = {}) {
+    const stmt = options.allowRejectionSupersede === true
+      ? supersedeVfsMovieEntryRejectionStmt
+      : supersedeVfsMovieEntryStmt;
+    const info = stmt.run({
       media_id: entry.mediaId,
       release_key: entry.releaseKey,
       info_hash: entry.infoHash,
@@ -2254,6 +2286,26 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       AND torrent_file_id IS NULL
   `);
 
+  // Worker A — Defect A: rejection-supersede path for TV.
+  // Triggered when the existing VFS row points at a TorrentFile that
+  // was terminal-evidenced and the new handoff's infoHash differs (a
+  // promoted rank-5 alternate). The canonical_path alias is preserved
+  // so published clients retain the same URI.
+  const supersedeVfsTvEntryRejectionStmt = db.prepare(`
+    UPDATE vfs_tv_entries
+    SET release_key = @release_key,
+        info_hash = @info_hash,
+        file_index = NULL,
+        canonical_path = @canonical_path,
+        torrent_file_id = @torrent_file_id,
+        size = @size,
+        updated_at = @updated_at
+    WHERE media_id = @media_id
+      AND season = @season
+      AND episode = @episode
+      AND info_hash != @info_hash
+  `);
+
   function listTvPlaybackHandoffs() {
     return listTvPlaybackHandoffsStmt.all().map(rowToPlaybackHandoff);
   }
@@ -2319,8 +2371,11 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
    * not touched here — those are reconciled in application code with a
    * fail-closed conflict check.
    */
-  function replaceVfsTvEntry(entry) {
-    const info = supersedeVfsTvEntryStmt.run({
+  function replaceVfsTvEntry(entry, options = {}) {
+    const stmt = options.allowRejectionSupersede === true
+      ? supersedeVfsTvEntryRejectionStmt
+      : supersedeVfsTvEntryStmt;
+    const info = stmt.run({
       media_id: entry.mediaId,
       season: entry.season,
       episode: entry.episode,

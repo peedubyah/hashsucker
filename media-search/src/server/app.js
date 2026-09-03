@@ -58,6 +58,7 @@ import { getEnrichmentDiagnostics, formatEnrichmentDiagnostics } from '../lib/di
 import { resolveStream, parseMediaIdentity, StreamResolverError } from '../lib/stream-resolver/index.js';
 import { resolveTorBoxRedirect, RedirectResolutionError, formatRedirectLog } from '../lib/resolver/torbox-redirect.js';
 import { createAlternateFallback, FALLBACK_REASON } from '../lib/resolver/alternate-fallback.js';
+import { materializeVfsEntry } from '../lib/vfs/materialize.js';
 import { createRevalidator, mapRevalidationToHttp, REVALIDATION_SOURCE, REVALIDATION_OUTCOME } from '../lib/resolver/availability-revalidation.js';
 import { createTerminalDeliveryEvidenceStore } from '../lib/resolver/terminal-delivery-evidence.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
@@ -1232,6 +1233,65 @@ async function tryAlternateCandidateFallback({
       filename: candidate.filename,
     });
 
+    // Worker A — Defect A: do NOT promote on redirect URL existence alone.
+    // Verify a single bounded byte response from the delivery URL before
+    // committing the alternate to the durable handoff / VFS / binding /
+    // exposure / durability path. Mirrors the primary RD liveness check.
+    let validatedBytes = false;
+    try {
+      validatedBytes = await isUrlLive(delivery.url);
+    } catch (liveErr) {
+      validatedBytes = false;
+    }
+
+    // Wire the existing promoteAlternate helper into the alternate TorBox
+    // success path. The helper is idempotent under replay; on success it
+    // persists the canonical handoff and the caller is responsible for
+    // materializing the VFS row + binding + exposure. A failed gate is
+    // non-fatal: we still 307 the user to the (now-known-live) URL so the
+    // bounded redirect semantics are preserved.
+    if (validatedBytes) {
+      try {
+        const promotion = alternateFallback.promoteAlternate({
+          candidate,
+          delivery,
+          controlPlaneStore,
+          evidence: { validatedBytes: true },
+          mediaRequest: {
+            mediaId: rawId,
+            media_type: mediaType,
+            season: persistedRequest?.season ?? null,
+            episode: persistedRequest?.episode ?? null,
+          },
+          now: clock,
+        });
+        if (promotion?.promoted) {
+          // The handoff returned by promoteAlternate carries
+          // torrentFileIdentity (placement + providerFile + torrentFileId).
+          // materializeVfsEntry is the single owner of the VFS row update
+          // and the binding write. Reuse normal machinery — no parallel
+          // writer.
+          try {
+            materializeVfsEntry(
+              searchCache,
+              promotion.handoff,
+              controlPlaneStore,
+              clock,
+              { allowLegacy: true },
+            );
+          } catch (vfsErr) {
+            console.warn(`[alternate-fallback] VFS materialize failed: ${vfsErr.message}`);
+          }
+        } else {
+          console.warn(`[alternate-fallback] promoteAlternate refused: ${promotion?.reason ?? 'unknown'}`);
+        }
+      } catch (promoteErr) {
+        // Promotion failure must never block the 307 — the bounded
+        // redirect is still the user-facing contract.
+        console.warn(`[alternate-fallback] promoteAlternate threw: ${promoteErr.message}`);
+      }
+    }
+
     recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
       infoHash: candidate.info_hash,
       releaseKey: candidate.releaseKey,
@@ -1251,7 +1311,7 @@ async function tryAlternateCandidateFallback({
       'x-fallback-rank': String(candidate.rank),
       'x-fallback-original-release-key': existingSelection.releaseKey,
       'x-fallback-selected-release-key': candidate.releaseKey,
-      'x-url-live-checked': 'true',
+      'x-url-live-checked': validatedBytes ? 'true' : 'false',
     };
     response.writeHead(307, headers);
     response.end();

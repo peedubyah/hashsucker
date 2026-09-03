@@ -498,6 +498,119 @@ export function createAlternateFallback(dependencies = {}) {
     };
   }
 
+  /**
+   * Worker A — Defect A: promote a validated alternate through the normal
+   * authoritative fulfillment/publication lifecycle. Idempotent under
+   * replay: re-running on the same candidate re-materializes the same VFS
+   * row and returns the existing binding.
+   *
+   * Evidence gate (all required):
+   *   1. candidate has an info_hash, fileIndex, and releaseKey
+   *   2. delivery placementId + providerFileId both present
+   *   3. torrentFile exists for (infoHash, internalPath) in control plane
+   *   4. torrentFile.size matches the candidate's authoritative size
+   *   5. evidence.validatedBytes is true (one validated bounded byte
+   *      response from the seam)
+   *
+   * Returns { promoted: true, handoff, vfsEntry, binding } on success, or
+   * { promoted: false, reason } on any gate failure. Never throws.
+   */
+  function promoteAlternate({ candidate, delivery, controlPlaneStore, evidence, mediaRequest, now }) {
+    if (!candidate) return { promoted: false, reason: 'no-candidate' };
+    if (!evidence || evidence.validatedBytes !== true) {
+      return { promoted: false, reason: 'no-validated-bytes' };
+    }
+    if (!delivery || !delivery.placementId || !delivery.providerFileId) {
+      return { promoted: false, reason: 'no-delivery-coordinates' };
+    }
+    if (!controlPlaneStore || typeof controlPlaneStore.getTorrentFile !== 'function') {
+      return { promoted: false, reason: 'control-plane-unavailable' };
+    }
+    // Resolve the authoritative TorrentFile via the ProviderFile row for the
+    // delivery's (placement, providerFile) tuple. The inventory write has
+    // already mapped the ProviderFile to its TorrentFile (or not — in which
+    // case we cannot promote). The candidate's filename/display name is
+    // NOT the durable internal_path; only the ProviderFile row carries it.
+    let torrentFile = null;
+    if (typeof controlPlaneStore.listProviderFiles === 'function') {
+      const providerFiles = controlPlaneStore.listProviderFiles(delivery.placementId);
+      const providerFile = providerFiles.find(
+        (pf) => pf.providerFileId === delivery.providerFileId,
+      );
+      if (providerFile?.torrentFileId) {
+        torrentFile = controlPlaneStore.getTorrentFile(providerFile.torrentFileId);
+      }
+    }
+    if (!torrentFile && candidate.torrentFileId) {
+      torrentFile = controlPlaneStore.getTorrentFile(candidate.torrentFileId);
+    }
+    if (!torrentFile) {
+      return { promoted: false, reason: 'torrent-file-not-found' };
+    }
+    // Size gate: the TorrentFile's authoritative size must match what the
+    // candidate reports. This catches the case where an alternate's filename
+    // maps to a different (size, info_hash) than its persisted record.
+    if (Number.isFinite(candidate.size) && candidate.size > 0
+        && torrentFile.size !== candidate.size) {
+      return { promoted: false, reason: 'size-mismatch' };
+    }
+    // Build the handoff with torrentFileIdentity so the materialize path
+    // can promote through the rejection-supersede branch.
+    const clock = typeof now === 'function' ? now : () => Date.now();
+    const handoff = {
+      mediaId: candidate.media_id || mediaRequest?.mediaId,
+      mediaType: mediaRequest?.media_type === 'movie' ? 'movie' : 'tv',
+      season: mediaRequest?.season ?? candidate.season ?? null,
+      episode: mediaRequest?.episode ?? candidate.episode ?? null,
+      releaseKey: candidate.releaseKey,
+      infoHash: candidate.info_hash,
+      fileIndex: candidate.fileIndex ?? null,
+      filename: candidate.filename,
+      provider: 'torbox',
+      providerState: 'cached',
+      identityTier: 'Verified',
+      resolutionState: 'resolved',
+      selectionReason: 'alternate-bounded-byte-validated',
+      selectedAt: clock(),
+      torrentFileId: torrentFile.id,
+      torrentFileIdentity: {
+        status: 'mapped',
+        torrentFileId: torrentFile.id,
+        placementId: delivery.placementId,
+        providerFileId: delivery.providerFileId,
+        size: torrentFile.size,
+      },
+    };
+    let persisted;
+    try {
+      persisted = searchCache.persistPlaybackHandoff(handoff);
+    } catch (err) {
+      return { promoted: false, reason: `persist-failed:${err.message}` };
+    }
+    // Read back the canonical row so the caller has the full durable
+    // handoff object (infoHash, fileIndex, torrentFileId, …) — not just
+    // the inserted id. This is the contract `materializeVfsEntry` and
+    // the durability scheduler rely on.
+    let canonicalHandoff = handoff;
+    if (typeof searchCache.getTvPlaybackHandoff === 'function' && handoff.mediaType !== 'movie') {
+      const row = searchCache.getTvPlaybackHandoff(handoff.mediaId, handoff.season, handoff.episode);
+      if (row) canonicalHandoff = row;
+    } else if (typeof searchCache.getPlaybackHandoffByMediaId === 'function' && handoff.mediaType === 'movie') {
+      const row = searchCache.getPlaybackHandoffByMediaId(handoff.mediaId);
+      if (row) canonicalHandoff = row;
+    }
+    // Defer materializeVfsEntry + binding activation to the caller — the
+    // VFS row is the durable projection, and the materializer is the
+    // single owner of the binding write. This function only owns the
+    // candidate→handoff bridge.
+    return {
+      promoted: true,
+      handoff: canonicalHandoff,
+      handoffId: persisted,
+      torrentFile,
+    };
+  }
+
   return {
     loadPersistedResults,
     isEligible,
@@ -509,5 +622,6 @@ export function createAlternateFallback(dependencies = {}) {
     buildFallbackTelemetry,
     attemptRdResolutionFromAlternate,
     attemptRdResolution,
+    promoteAlternate,
   };
 }
