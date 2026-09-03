@@ -36,6 +36,16 @@ const inFlight = new Map();
 // throttle; it is scoped to the specific capability that the upstream
 // just refused.
 const rateLimited = new Map();
+// Per-capability DELIVERY (byte-read) rate-limit gate. When a byte
+// Range GET against the cached CDN URL returns 429 from the upstream
+// CDN/edge, the VFS byte path records a gate here. The requestdl
+// gate and the delivery gate are intentionally separate maps so the
+// two layers can be independently cleared: a successful requestdl
+// does not retroactively clear a delivery 429, and vice versa. The
+// delivery gate is keyed on the same `(provider, accountScope,
+// placementId, providerFileId)` tuple, scoped as narrowly as the
+// evidence supports.
+const deliveryRateLimited = new Map();
 // Floor for the backoff window when upstream omits Retry-After. The
 // same floor protects against tiny Retry-After values that would
 // produce a 1–2 second backoff and immediately re-trigger upstream.
@@ -57,20 +67,29 @@ function nowMs() {
   return Date.now();
 }
 
+// Optional clock injection so tests (and any future operator harness)
+// can drive the gate deterministically without monkey-patching
+// Date.now. The default keeps the existing behavior: real wall clock.
+let nowFn = nowMs;
+function setNowFn(fn) {
+  if (typeof fn === 'function') nowFn = fn;
+  else nowFn = nowMs;
+}
+
 /**
  * Per-capability backoff gate. Returns `{ until, retryAfterMs }` when
  * the gate is active, or `null` when it has expired or was never set.
  * Lazy-evicts expired entries so the Map does not grow unbounded.
  */
-function checkRateLimited(capability) {
+function checkRateLimited(capability, now = nowFn()) {
   const key = tupleKey(capability);
   const entry = rateLimited.get(key);
   if (!entry) return null;
-  if (!Number.isFinite(entry.until) || nowMs() >= entry.until) {
+  if (!Number.isFinite(entry.until) || now >= entry.until) {
     rateLimited.delete(key);
     return null;
   }
-  return { until: entry.until, retryAfterMs: entry.until - nowMs() };
+  return { until: entry.until, retryAfterMs: entry.until - now };
 }
 
 /**
@@ -78,17 +97,87 @@ function checkRateLimited(capability) {
  * `Retry-After` (clamped to `[MIN_BACKOFF_MS, MAX_BACKOFF_MS]`) when
  * present, or the floor when absent. The window is the MAX of any
  * existing gate so repeated 429s do not shrink the backoff.
+ *
+ * Optional `now` argument overrides the module-level clock for
+ * the recorded `until` timestamp. Production callers pass
+ * nothing; tests pass the same `now` they use everywhere else.
  */
-function markRateLimited(capability, retryAfterMs) {
+function markRateLimited(capability, retryAfterMs, now = nowFn()) {
   const key = tupleKey(capability);
   const requested = Number.isFinite(retryAfterMs) && retryAfterMs > 0
     ? retryAfterMs
     : MIN_BACKOFF_MS;
   const clamped = Math.min(MAX_BACKOFF_MS, Math.max(MIN_BACKOFF_MS, requested));
-  const until = nowMs() + clamped;
+  const until = now + clamped;
   const existing = rateLimited.get(key);
   const newUntil = existing?.until && existing.until > until ? existing.until : until;
   rateLimited.set(key, { until: newUntil, retryAfterMs: clamped });
+}
+
+/**
+ * Per-capability DELIVERY (byte-read) backoff gate. Returns
+ * `{ until, retryAfterMs }` when the gate is active, or `null`
+ * when it has expired or was never set. Lazy-evicts expired
+ * entries so the Map does not grow unbounded.
+ *
+ * The delivery gate is independent from the requestdl gate: a
+ * requestdl 429 does NOT arm the delivery gate, and a delivery
+ * 429 does NOT arm the requestdl gate. The two surfaces can be
+ * concurrently throttled (requestdl API throttle vs CDN/edge
+ * throttle) and the accounting/canary visibility must be able to
+ * distinguish them.
+ *
+ * Optional `now` argument overrides the module-level clock for
+ * this single check. Production callers pass nothing; tests that
+ * drive a virtual clock on the VFS layer pass the same `now` so
+ * the gate's window and the VFS state machine advance together.
+ */
+function checkDeliveryRateLimited(capability, now = nowFn()) {
+  const key = tupleKey(capability);
+  const entry = deliveryRateLimited.get(key);
+  if (!entry) return null;
+  if (!Number.isFinite(entry.until) || now >= entry.until) {
+    deliveryRateLimited.delete(key);
+    return null;
+  }
+  return { until: entry.until, retryAfterMs: entry.until - now };
+}
+
+/**
+ * Record a per-capability delivery backoff gate. The window is the
+ * upstream `Retry-After` (clamped to `[MIN_BACKOFF_MS, MAX_BACKOFF_MS]`)
+ * when present, or the floor when absent. The window is the MAX of
+ * any existing gate so repeated 429s do not shrink the backoff.
+ *
+ * Returns the recorded retryAfterMs (post-clamp) so the caller can
+ * surface it on the response (Retry-After header) and in the
+ * accounting counter without re-parsing the upstream header.
+ *
+ * Optional `now` argument overrides the module-level clock for
+ * the recorded `until` timestamp. Production callers pass
+ * nothing; tests pass the same `now` they use everywhere else.
+ */
+function markDeliveryRateLimited(capability, retryAfterMs, now = nowFn()) {
+  const key = tupleKey(capability);
+  const requested = Number.isFinite(retryAfterMs) && retryAfterMs > 0
+    ? retryAfterMs
+    : MIN_BACKOFF_MS;
+  const clamped = Math.min(MAX_BACKOFF_MS, Math.max(MIN_BACKOFF_MS, requested));
+  const until = now + clamped;
+  const existing = deliveryRateLimited.get(key);
+  const newUntil = existing?.until && existing.until > until ? existing.until : until;
+  deliveryRateLimited.set(key, { until: newUntil, retryAfterMs: clamped });
+  return clamped;
+}
+
+/**
+ * Clear a per-capability delivery backoff gate. Called by the VFS
+ * byte path when a successful byte read follows a 429 — the
+ * capability is demonstrably usable again, so the next delivery
+ * call does not need to honor a stale window.
+ */
+function clearDeliveryRateLimited(capability) {
+  deliveryRateLimited.delete(tupleKey(capability));
 }
 
 export class TorBoxDownloadUrlError extends Error {
@@ -368,16 +457,35 @@ export function getTorBoxDownloadUrlCache() {
     // concurrent and subsequent requestdl attempt on that tuple until
     // the window expires (or the gate is explicitly cleared after a
     // successful re-resolution).
-    isRateLimited(capability) {
-      return checkRateLimited(capability);
+    isRateLimited(capability, now) {
+      return checkRateLimited(capability, now);
     },
 
-    markRateLimited(capability, retryAfterMs) {
-      markRateLimited(capability, retryAfterMs);
+    markRateLimited(capability, retryAfterMs, now) {
+      markRateLimited(capability, retryAfterMs, now);
     },
 
     clearRateLimited(capability) {
       rateLimited.delete(tupleKey(capability));
+    },
+
+    // Per-capability DELIVERY (byte-read) rate-limit gate. The gate
+    // is keyed on the same capability tuple as the cache entries, so
+    // a single 429 observation against the CDN/edge URL covers every
+    // concurrent and subsequent byte read against the same capability.
+    // The gate is independent from the requestdl gate: a requestdl
+    // 429 does not arm the delivery gate, and a delivery 429 does not
+    // arm the requestdl gate.
+    isDeliveryRateLimited(capability, now) {
+      return checkDeliveryRateLimited(capability, now);
+    },
+
+    markDeliveryRateLimited(capability, retryAfterMs, now) {
+      return markDeliveryRateLimited(capability, retryAfterMs, now);
+    },
+
+    clearDeliveryRateLimited(capability) {
+      clearDeliveryRateLimited(capability);
     },
 
     async getOrInFlightByCapability(capability, factory) {
@@ -446,6 +554,7 @@ export function getTorBoxDownloadUrlCache() {
       cache.clear();
       inFlight.clear();
       rateLimited.clear();
+      deliveryRateLimited.clear();
     },
 
     size() {
@@ -455,3 +564,19 @@ export function getTorBoxDownloadUrlCache() {
 }
 
 export const TORBOX_DOWNLOAD_URL_CACHE_TTL_MS = DEFAULT_TTL_MS;
+export const TORBOX_DELIVERY_BACKOFF_MIN_MS = MIN_BACKOFF_MS;
+export const TORBOX_DELIVERY_BACKOFF_MAX_MS = MAX_BACKOFF_MS;
+
+/**
+ * Test/clock-injection helpers. Production code should never call
+ * these — they exist so a deterministic harness can drive the
+ * delivery/requestdl gate window without monkey-patching Date.now.
+ * They are NOT part of the cache's observable surface.
+ */
+export function _setTorboxCacheNow(fn) {
+  setNowFn(fn);
+}
+
+export function _resetTorboxCacheNow() {
+  setNowFn(null);
+}

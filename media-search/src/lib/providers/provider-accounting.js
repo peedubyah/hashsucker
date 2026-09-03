@@ -103,6 +103,44 @@ const CATEGORIES = Object.freeze([
   'realdebrid_file_match',
   'realdebrid_file_ambiguous',
   'realdebrid_file_absent',
+  // Worker A — delivery/CDN byte-read 429 state machine. The
+  // requestdl-layer 429 categories above account for the provider
+  // API; the Delivery_* categories below account for the byte-read
+  // path that reads from the cached CDN URL (the URL is a different
+  // network surface and can independently return 429 from the
+  // CDN/edge). The two layers are intentionally distinguished so a
+  // canary can isolate the source of the throttle.
+  //
+  // - delivery_range_request:          a byte Range GET was attempted
+  //                                     against the upstream CDN URL.
+  // - delivery_429:                    the upstream byte read returned
+  //                                     HTTP 429 (the upstream throttled
+  //                                     the byte path itself).
+  // - delivery_backoff_enter:          a fresh 429 observation armed
+  //                                     a per-capability delivery
+  //                                     backoff gate.
+  // - delivery_backoff_short_circuit:  a follow-up caller hit the
+  //                                     active delivery backoff gate
+  //                                     and short-circuited without
+  //                                     issuing an upstream byte read.
+  // - delivery_retry_after_ms:         the parsed Retry-After (ms)
+  //                                     from the most recent delivery
+  //                                     429 — surfaces the upstream-
+  //                                     declared backoff window.
+  // - delivery_post_backoff_retry:     a call after the delivery
+  //                                     backoff window expired; the
+  //                                     first caller past the window
+  //                                     is the one retry owner.
+  // - delivery_success_after_backoff:  a successful byte read that
+  //                                     cleared the delivery backoff
+  //                                     gate for the capability.
+  'delivery_range_request',
+  'delivery_429',
+  'delivery_backoff_enter',
+  'delivery_backoff_short_circuit',
+  'delivery_retry_after_ms',
+  'delivery_post_backoff_retry',
+  'delivery_success_after_backoff',
 ]);
 
 const CATEGORY_SET = new Set(CATEGORIES);

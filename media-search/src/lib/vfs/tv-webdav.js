@@ -428,12 +428,51 @@ export function createTvWebDav({
   }
 
   // Bounded read-429 back-pressure. When a byte read against a cached
-  // capability returns 429, mark the state as rate-limited. Subsequent
-  // reads in the backoff window short-circuit BEFORE the seam is
-  // invoked — no new requestdl, no upstream call.
+  // capability returns 429, arm a per-capability DELIVERY backoff gate
+  // in the TorBox download URL cache. Subsequent reads in the backoff
+  // window short-circuit BEFORE the seam is invoked — no new requestdl,
+  // no upstream byte GET. The capability itself is NOT invalidated
+  // (a 429 is a transient throttle, not proof the URL is bad).
+  //
+  // Gate keying — the gate is keyed on the same capability tuple
+  // (provider, accountScope, placementId, providerFileId) used for
+  // requestdl backoff. The two gates are independent maps so a
+  // requestdl 429 does not arm the delivery gate, and vice versa.
+  // The capability tuple is the narrowest key supported by the
+  // evidence we have: a 429 from the upstream CDN is per-URL, and
+  // a per-URL observation safely narrows to the cached capability
+  // tuple (one capability → one URL at any time).
+  //
+  // Process-local by design: the gate is short-lived (bounded by
+  // the upstream Retry-After header or a conservative floor) so a
+  // process restart naturally clears it without operator action.
+  //
+  // The pre-existing in-state `state.rateLimited` flag is preserved
+  // for back-compat with any test that introspects it, but the
+  // authoritative gate now lives in the cache so the contract is
+  // shared across all VFS state instances and so the gate can be
+  // surfaced in accounting without any VFS-specific wiring.
   const MIN_READ_RETRY_AFTER_MS = 30_000; // 30s floor when upstream omits Retry-After.
 
-  function gateRateLimited(state) {
+  function deliveryCapabilityFor(backing) {
+    if (!backing) return null;
+    if (backing.provider !== 'torbox') return null;
+    if (!backing.placementId || !backing.providerFileId) return null;
+    return {
+      provider: 'torbox',
+      accountScope: backing.accountScope ?? 'default',
+      placementId: backing.placementId,
+      providerFileId: backing.providerFileId,
+    };
+  }
+
+  function gateReadRateLimited(state, capability) {
+    if (torBoxDownloadUrlCache
+        && typeof torBoxDownloadUrlCache.isDeliveryRateLimited === 'function'
+        && capability) {
+      const gate = torBoxDownloadUrlCache.isDeliveryRateLimited(capability, now());
+      if (gate) return gate;
+    }
     const rl = state?.rateLimited;
     if (!rl || !Number.isFinite(rl.until)) return null;
     if (now() >= rl.until) {
@@ -443,7 +482,12 @@ export function createTvWebDav({
     return rl;
   }
 
-  function markReadRateLimited(state, retryAfterMs) {
+  function markReadRateLimited(state, capability, retryAfterMs) {
+    if (torBoxDownloadUrlCache
+        && typeof torBoxDownloadUrlCache.markDeliveryRateLimited === 'function'
+        && capability) {
+      torBoxDownloadUrlCache.markDeliveryRateLimited(capability, retryAfterMs, now());
+    }
     if (!state) return;
     const until = now() + (Number.isFinite(retryAfterMs) && retryAfterMs > 0
       ? retryAfterMs
@@ -452,17 +496,65 @@ export function createTvWebDav({
     state.rateLimited = { until: Math.max(until, existing?.until || 0) };
   }
 
+  function clearReadRateLimited(state, capability) {
+    if (torBoxDownloadUrlCache
+        && typeof torBoxDownloadUrlCache.clearDeliveryRateLimited === 'function'
+        && capability) {
+      torBoxDownloadUrlCache.clearDeliveryRateLimited(capability);
+    }
+    if (state) state.rateLimited = null;
+  }
+
   async function openValidatedProviderRead(state, rangeHeader, validate) {
     let firstFailure = null;
     let sawReadRateLimit = false;
     let firstFailureDefinitive = false;
     let firstBacking = null;
     // Bounded read-429 back-pressure: if a prior byte read against the
-    // same playback handoff already returned 429 within the backoff
-    // window, refuse the call without re-resolving requestdl and
-    // without hitting the upstream URL again. The capability itself
-    // remains valid — once the window expires the next read reuses it.
-    const earlyGate = gateRateLimited(state);
+    // same capability already returned 429 within the backoff window,
+    // refuse the call without re-resolving requestdl and without
+    // hitting the upstream URL again. The capability itself remains
+    // valid — once the window expires the next read reuses it.
+    //
+    // The gate is checked against the state-level flag FIRST so the
+    // gate check does NOT trigger an extra resolveBacking call (which
+    // would amplify into a fresh requestdl stampede). The cache-level
+    // gate is consulted as a secondary check after resolveBacking so
+    // a 429 observed on a sibling VFS state is still honored.
+    //
+    // The cache-level gate is keyed on the resolved capability tuple
+    // so a single 429 observation covers every concurrent and
+    // subsequent byte read against the SAME (provider, accountScope,
+    // placementId, providerFileId).
+    const stateGate = gateReadRateLimited(state, null);
+    if (stateGate) {
+      const retryAfterSeconds = Math.max(1, Math.ceil((stateGate.until - now()) / 1000));
+      const error = new VfsError(
+        'Provider byte reads are currently rate-limited',
+        429,
+        'PROVIDER_READ_RATE_LIMITED',
+      );
+      error.retryAfterMs = Math.max(0, stateGate.until - now());
+      error.retryAfterSeconds = retryAfterSeconds;
+      providerAccounting.increment('torbox', 'delivery_backoff_short_circuit');
+      throw error;
+    }
+    let earlyBacking = null;
+    let earlyGate = null;
+    try {
+      earlyBacking = await resolveBacking(state, { forceFresh: false });
+    } catch (error) {
+      // resolveBacking may throw when the requestdl seam refuses
+      // (requestdl 429 → fromGate throw). That throw is the
+      // authoritative 429 signal for the capability; surface it
+      // unchanged. No upstream byte GET is attempted in this path.
+      throw error;
+    }
+    const earlyCapability = deliveryCapabilityFor(earlyBacking);
+    // Now consult the cache-level gate (cross-VFS-state shared
+    // signal). If a sibling already armed it for this capability,
+    // we still short-circuit without an upstream byte GET.
+    earlyGate = earlyCapability ? gateReadRateLimited(state, earlyCapability) : null;
     if (earlyGate) {
       const retryAfterSeconds = Math.max(1, Math.ceil((earlyGate.until - now()) / 1000));
       const error = new VfsError(
@@ -472,13 +564,37 @@ export function createTvWebDav({
       );
       error.retryAfterMs = Math.max(0, earlyGate.until - now());
       error.retryAfterSeconds = retryAfterSeconds;
+      if (earlyBacking?.provider) {
+        providerAccounting.increment(earlyBacking.provider, 'delivery_backoff_short_circuit');
+      } else {
+        providerAccounting.increment('torbox', 'delivery_backoff_short_circuit');
+      }
       throw error;
+    }
+    // Track whether this call is the first one past the backoff
+    // window so we can attribute `delivery_post_backoff_retry` to
+    // exactly the first retry owner. The signal is
+    // `state._deliveryRecentlyGated`: set on every fresh 429
+    // observation, cleared on the next successful byte read. The
+    // signal is independent of the cache-level gate state (which
+    // may have been lazily evicted by the time the post-gate owner
+    // enters) and is therefore the durable identifier of the
+    // first caller past the window.
+    const isPostGateOwner = Boolean(earlyCapability)
+      && state?._deliveryRecentlyGated === true
+      && !earlyGate;
+    if (isPostGateOwner && earlyBacking?.provider) {
+      providerAccounting.increment(earlyBacking.provider, 'delivery_post_backoff_retry');
     }
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const forceFresh = attempt === 1;
-      const backing = await resolveBacking(state, { forceFresh });
+      // Reuse the backing we resolved in the gate-check above on
+      // the first iteration; on the second (forceFresh) iteration
+      // we re-resolve so the bounded retry path is preserved.
+      const backing = attempt === 0 ? earlyBacking : await resolveBacking(state, { forceFresh: true });
       let upstream;
       try {
+        providerAccounting.increment(backing?.provider ?? 'torbox', 'delivery_range_request');
         upstream = await fetchProvider(backing, rangeHeader);
       } catch (error) {
         // A transport failure is not proof that the capability is invalid.
@@ -488,7 +604,28 @@ export function createTvWebDav({
       }
 
       const validationError = validate(upstream);
-      if (!validationError) return { backing, upstream };
+      if (!validationError) {
+        // Success — clear any stale delivery gate for this capability
+        // so a later 429 from a different surface re-arms it cleanly.
+        const okCapability = deliveryCapabilityFor(backing);
+        const wasGated = gateReadRateLimited(state, okCapability);
+        // We attribute Delivery_success_after_backoff to the FIRST
+        // successful read after a 429. The signal is the state-level
+        // "recently gated" hint (set on 429, cleared on the next
+        // success) — the cache-level gate may have already been
+        // lazily evicted by the time the post-gate owner enters, so
+        // we cannot rely on `wasGated` alone to identify the owner.
+        if (state?._deliveryRecentlyGated || wasGated) {
+          if (wasGated) clearReadRateLimited(state, okCapability);
+          if (backing?.provider) {
+            providerAccounting.increment(backing.provider, 'delivery_success_after_backoff');
+          } else {
+            providerAccounting.increment('torbox', 'delivery_success_after_backoff');
+          }
+        }
+        if (state) state._deliveryRecentlyGated = false;
+        return { backing, upstream };
+      }
       await cancelBody(upstream);
       firstFailure ||= validationError;
       if (!forceFresh) {
@@ -511,15 +648,30 @@ export function createTvWebDav({
           continue;
         }
         // Read 429 — the capability itself is still valid (not stale),
-        // it is just currently being throttled by the upstream. Mark
-        // the state rate-limited so concurrent and subsequent reads in
-        // the backoff window short-circuit BEFORE the seam is invoked.
-        // Do not invalidate the capability — after the window it should
-        // be reused. Do not retry within this loop — the next call
-        // after the window is the correct retry boundary.
+        // it is just currently being throttled by the upstream. Arm a
+        // per-capability delivery backoff gate so concurrent and
+        // subsequent reads in the backoff window short-circuit BEFORE
+        // the seam is invoked. Do not invalidate the capability — after
+        // the window it should be reused. Do not retry within this loop
+        // — the next call after the window is the correct retry
+        // boundary. Do not write terminal/temporary evidence — a 429 is
+        // a transient throttle, not proof of capability invalidity.
+        const capability = deliveryCapabilityFor(backing);
         const upstreamRetryAfterMs = parseReadRetryAfter(upstream);
-        markReadRateLimited(state, upstreamRetryAfterMs);
+        const provider = backing?.provider ?? 'torbox';
+        providerAccounting.increment(provider, 'delivery_429');
+        if (Number.isFinite(upstreamRetryAfterMs)) {
+          providerAccounting.increment(provider, 'delivery_retry_after_ms', upstreamRetryAfterMs);
+        }
+        markReadRateLimited(state, capability, upstreamRetryAfterMs);
+        providerAccounting.increment(provider, 'delivery_backoff_enter');
+        if (state) state._deliveryRecentlyGated = true;
         sawReadRateLimit = true;
+        // First observer of the 429: surface the existing typed
+        // error (preserves the established 502 contract for the
+        // first observer). Subsequent readers in the window see a
+        // 429 from the gate short-circuit path.
+        throw validationError;
       }
       // Second (forceFresh) attempt also failed validation. If the
       // first failure was a definitive protocol-invalid / stale
@@ -527,13 +679,13 @@ export function createTvWebDav({
       // protocol validation, and the current exact mapping is
       // terminal: record durable evidence so the normal resolver
       // ladder skips this capability without repeating the byte-
-      // path probe. A 429/transient first failure means the
-      // second attempt is also transient — record temporary, not
-      // terminal.
+      // path probe. A 429 first failure short-circuits above, so
+      // this branch only handles definitive / transient non-429
+      // failures.
       if (terminalEvidenceStore && backing?.provider === 'torbox' && backing.placementId && backing.providerFileId) {
         const reason = firstFailureDefinitive
           ? 'protocol-invalid-after-fresh-retry'
-          : 'read-' + (upstream.status === 429 ? '429' : 'transient') + '-after-fresh-retry';
+          : 'read-transient-after-fresh-retry';
         const evidenceState = firstFailureDefinitive
           ? 'terminal'
           : 'temporary';
