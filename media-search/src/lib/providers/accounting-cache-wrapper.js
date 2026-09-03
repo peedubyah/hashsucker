@@ -41,6 +41,16 @@ export function wrapTorBoxDownloadUrlCacheWithAccounting(cache, hooks = {}) {
       // to a single-flight join, the factory is NOT invoked. We infer
       // the path by wrapping the factory with a synchronous flag.
       const existingHit = cache.getByCapability?.(capability);
+      if (existingHit) {
+        // A cache hit short-circuits without invoking the factory
+        // and without triggering a fresh upstream call. The
+        // underlying cache's getOrInFlightByCapability does NOT
+        // consult its cache entries (only in-flight promises), so
+        // we must return the hit here to avoid an unnecessary
+        // factory invocation that would defeat the cache.
+        providerAccounting.increment(PROVIDER, 'requestdl_cache_hit');
+        return existingHit.url;
+      }
       let factoryInvoked = false;
       const guardedFactory = async () => {
         factoryInvoked = true;
@@ -53,20 +63,17 @@ export function wrapTorBoxDownloadUrlCacheWithAccounting(cache, hooks = {}) {
         categorizeError(error, capability, hooks);
         throw error;
       }
-      if (existingHit) {
-        // The cache had a settled entry and short-circuited; that
-        // path is also a hit.
-        providerAccounting.increment(PROVIDER, 'requestdl_cache_hit');
-        return result;
-      }
       if (factoryInvoked) {
         providerAccounting.increment(PROVIDER, 'requestdl_resolution');
       } else {
         // Another caller was already resolving this capability; the
         // single-flight reuse path. Count it so a canary can assert
         // that concurrent source opens produce one upstream call, not
-        // many.
+        // many. We also emit requestdl_singleflight_join so the
+        // per-call join event is observable distinctly from the
+        // single-flight reuse tally.
         providerAccounting.increment(PROVIDER, 'requestdl_single_flight_reuse');
+        providerAccounting.increment(PROVIDER, 'requestdl_singleflight_join');
       }
       return result;
     },
@@ -109,7 +116,19 @@ function categorizeError(error, capability, hooks) {
     return;
   }
   if (error?.status === 429) {
-    providerAccounting.increment('torbox', 'requestdl_rate_limited_429');
+    // Distinguish a fresh 429 observation (the upstream JUST refused
+    // a real requestdl call) from a back-pressure short-circuit
+    // (the per-capability gate blocked this caller before the
+    // factory could run). The cache tags gate short-circuits with
+    // `fromGate: true`. The two categories are mutually exclusive
+    // per call: a fresh 429 emits rate_limited_429 + records the
+    // gate; a subsequent caller that hits the active gate emits
+    // backoff_short_circuit and does NOT touch the gate further.
+    if (error.fromGate) {
+      providerAccounting.increment('torbox', 'requestdl_backoff_short_circuit');
+    } else {
+      providerAccounting.increment('torbox', 'requestdl_rate_limited_429');
+    }
     return;
   }
   if (typeof error?.status === 'number' && error.status >= 500 && error.status < 600) {
@@ -118,6 +137,12 @@ function categorizeError(error, capability, hooks) {
   }
   if (error?.status === 401 || error?.status === 403 || error?.status === 404) {
     providerAccounting.increment('torbox', 'requestdl_capability_invalidate');
+    // Distinct general-purpose counter: a capability invalidation
+    // event (caller-agnostic, capability-scoped) for the same
+    // class of upstream refusal. The two counters together prove
+    // the wrapper observed an invalidation AND tagged it with the
+    // correct class.
+    providerAccounting.increment('torbox', 'capability_invalidation');
     // The single bounded retry attempt was already authorized by the
     // seam's runStaleRecoveryOnce path. Do NOT invalidate here — that
     // is owned by the seam so accounting remains single-source.

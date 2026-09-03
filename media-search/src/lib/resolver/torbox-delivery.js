@@ -333,6 +333,7 @@ export async function resolveTorBoxDeliveryWithStaleRecovery({
   fetchFn = fetch,
   now = () => Date.now(),
   signal,
+  terminalEvidenceStore = null,
 }) {
   // Process-local single-flight: concurrent calls for the same (provider,
   // accountScope, infoHash) reuse one in-flight repair promise. This stops
@@ -350,7 +351,7 @@ export async function resolveTorBoxDeliveryWithStaleRecovery({
         infoHash, fileIndex, releaseKey, filename,
         controlPlaneStore, torBoxProvider, torBoxInventoryProvider,
         torBoxDownloadUrlCache, resolveTorBoxDownloadUrl, isUrlLive,
-        fetchFn, now, signal,
+        fetchFn, now, signal, terminalEvidenceStore,
       });
     } finally {
       repairInFlight.delete(key);
@@ -364,7 +365,7 @@ async function runStaleRecoveryOnce({
   infoHash, fileIndex, releaseKey, filename,
   controlPlaneStore, torBoxProvider, torBoxInventoryProvider,
   torBoxDownloadUrlCache, resolveTorBoxDownloadUrl, isUrlLive,
-  fetchFn, now, signal,
+  fetchFn, now, signal, terminalEvidenceStore,
 }) {
   // Detect whether the current call will reuse an existing placement.
   // If the call enters the creation path (no existing placement) and
@@ -409,6 +410,7 @@ async function runStaleRecoveryOnce({
       infoHash,
       controlPlaneStore,
       now,
+      terminalEvidenceStore,
     });
     return { ...downloadUrl, recovered: false };
   } catch (error) {
@@ -454,20 +456,92 @@ async function runStaleRecoveryOnce({
         throw error;
       }
       if (error.status === 429) {
-        recordRepairEvent(controlPlaneStore, {
-          failureCategory: REPAIR_FAILURE_CATEGORIES.REQUESTDL_RATE_LIMITED,
-          infoHash,
-          reason: 'torbox-requestdl-429',
-          evidence: {
-            stage: 'requestdl',
-            retryAfterMs: error.retryAfterMs ?? null,
-            placementId: delivery.placementId,
-            providerFileId: delivery.providerFileId,
-          },
-          retryable: false,
-          observedAt: now(),
-          now,
-        });
+        // Record the per-capability 429 backoff gate so subsequent
+        // callers within the window short-circuit without re-invoking
+        // the upstream requestdl endpoint. The gate is keyed on the
+        // SAME (provider, accountScope, placementId, providerFileId)
+        // tuple used by the cache, so a single 429 observation covers
+        // every concurrent and subsequent requestdl attempt on this
+        // capability — including VFS byte-read, resolver, and
+        // revalidation paths. The capability itself is NOT
+        // invalidated; the placement, inventory, and TorrentFile rows
+        // are NOT mutated. The repair event records the 429 with the
+        // Retry-After (when present) so observability sees the gate
+        // window. A successful re-resolution after expiry clears the
+        // gate automatically.
+        //
+        // We only record the gate + repair event for a FRESH 429 from
+        // upstream (error.fromGate is not set). A gate short-circuit
+        // throw (error.fromGate === true) re-uses the same code path
+        // because the cache emits the same TorBoxDownloadUrlError
+        // shape; in that case the gate is already set so the mark +
+        // evidence write are skipped — no double-recording, no
+        // placement / inventory / TorrentFile mutation.
+        if (error.fromGate) {
+          // Gate short-circuit throw: do not re-arm the gate, do not
+          // write a second repair event, do not record a second
+          // temporary evidence row. Surface the error unchanged so
+          // the caller (resolver / VFS) returns the same typed
+          // 429-with-retry-after contract.
+        } else {
+          if (typeof torBoxDownloadUrlCache.markRateLimited === 'function') {
+            // The capability tuple is built below; inline the same
+            // shape here so the gate is keyed on the SAME
+            // (provider, accountScope, placementId, providerFileId)
+            // tuple used by the cache.
+            torBoxDownloadUrlCache.markRateLimited({
+              provider: delivery.provider,
+              accountScope: delivery.accountScope,
+              placementId: delivery.placementId,
+              providerFileId: delivery.providerFileId,
+            }, error.retryAfterMs);
+          }
+          recordRepairEvent(controlPlaneStore, {
+            failureCategory: REPAIR_FAILURE_CATEGORIES.REQUESTDL_RATE_LIMITED,
+            infoHash,
+            reason: 'torbox-requestdl-429',
+            evidence: {
+              stage: 'requestdl',
+              retryAfterMs: error.retryAfterMs ?? null,
+              placementId: delivery.placementId,
+              providerFileId: delivery.providerFileId,
+              fromGate: false,
+            },
+            retryable: false,
+            observedAt: now(),
+            now,
+          });
+          // Record a TEMPORARY delivery evidence row keyed on the
+          // exact (provider, accountScope, placementId, providerFileId)
+          // capability tuple. A `temporary` row tells the
+          // availability-revalidation ladder: "this exact capability
+          // is currently rate-limited; trust a fresh cached
+          // observation only when it is a `cached` provider check
+          // and the revalidator's terminal override is not in play".
+          // A temporary row NEVER poisons a normal cached
+          // observation; the revalidator's `Case 0` only honors
+          // `terminal` state. After the TTL expires the row is
+          // pruned lazily on read.
+          if (terminalEvidenceStore && typeof terminalEvidenceStore.recordTemporary === 'function') {
+            try {
+              terminalEvidenceStore.recordTemporary({
+                provider: delivery.provider,
+                accountScope: delivery.accountScope,
+                placementId: delivery.placementId,
+                providerFileId: delivery.providerFileId,
+                infoHash: infoHash ?? null,
+                fileIndexKey: fileIndex ?? -1,
+                reason: 'torbox-requestdl-429',
+                failureCategory: 'delivery-capability-rate-limited',
+                observedAt: now(),
+              });
+            } catch (evidenceError) {
+              // Recording evidence is best-effort. A failure here
+              // must not mask the original 429.
+              console.warn('[torbox-delivery] failed to record temporary evidence on 429: ' + evidenceError.message);
+            }
+          }
+        }
       } else if (typeof error.status === 'number' && error.status >= 500 && error.status < 600) {
         recordRepairEvent(controlPlaneStore, {
           failureCategory: REPAIR_FAILURE_CATEGORIES.REQUESTDL_UPSTREAM_5XX,
@@ -539,6 +613,7 @@ async function resolveCachedDownloadUrl({
   infoHash,
   controlPlaneStore,
   now,
+  terminalEvidenceStore = null,
 }) {
   const capability = {
     provider: delivery.provider,

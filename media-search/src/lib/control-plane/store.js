@@ -511,6 +511,36 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     return row ? rowToPlacement(row) : null;
   }
 
+  /**
+   * Resolve the authoritative (placementId, providerFileId) for a handoff's
+   * delivery coordinates. Used when a playback_handoffs row lacks embedded
+   * delivery coordinates (legacy) and materializeVfsEntry needs them to
+   * activate the binding.
+   *
+   * Strategy:
+   * 1. Use the TorrentFile to find its controlling placement (infoHash).
+   * 2. Use the placement + provider_files.present=1.mapping_state='mapped' to find
+   *    the current mapped provider_file row.
+   *
+   * Returns null when no authoritative mapping exists (e.g., expired inventory).
+   */
+  function resolveDeliveryCoordinates(infoHash, torrentFileId) {
+    if (!torrentFileId) return null;
+    const tf = getTorrentFile(torrentFileId);
+    if (!tf) return null;
+    const placement = findPlacementByInfoHash('torbox', tf.infoHash);
+    if (!placement) return null;
+    // Find the mapped present provider_file for this placement.
+    // This is the same tuple that activateBinding uses for binding validation.
+    const pf = db.prepare(`
+      SELECT provider_file_id FROM provider_files
+      WHERE placement_id = ? AND torrent_file_id = ? AND present = 1
+        AND mapping_state = 'mapped'
+    `).get(placement.id, torrentFileId);
+    if (!pf) return null;
+    return { placementId: placement.id, providerFileId: pf.provider_file_id };
+  }
+
   function markPlacementRemoved(placementId, options = {}) {
     const reason = options.reason ?? 'stale-resource';
     const observedAt = options.observedAt ?? now();
@@ -1754,6 +1784,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     recordPlacement,
     findPlacement,
     findPlacementByInfoHash,
+    resolveDeliveryCoordinates,
     findFileMapping,
     recordDeliveryEvidence,
     findDeliveryEvidence,

@@ -564,7 +564,7 @@ export function createAlternateFallback(dependencies = {}) {
       episode: mediaRequest?.episode ?? candidate.episode ?? null,
       releaseKey: candidate.releaseKey,
       infoHash: candidate.info_hash,
-      fileIndex: candidate.fileIndex ?? null,
+      fileIndex: candidate.fileIndex ?? (candidate.releaseKey ? Number(candidate.releaseKey.split(':')[1]) : null),
       filename: candidate.filename,
       provider: 'torbox',
       providerState: 'cached',

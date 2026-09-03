@@ -21,6 +21,29 @@ const LIVENESS_RANGE_BYTES = 1024;
 
 const cache = new Map();
 const inFlight = new Map();
+// Per-capability requestdl rate-limit gate. When requestdl returns 429,
+// the seam records a gate here so subsequent `getOrInFlightByCapability`
+// callers short-circuit without invoking the factory (no upstream
+// requestdl call). Process-local by design: the gate is short-lived
+// (bounded by the upstream Retry-After header or the conservative
+// floor) so a process restart naturally clears it.
+//
+// The gate key is the same `(provider, accountScope, placementId,
+// providerFileId)` tuple used for cache entries, which means a single
+// gate covers ALL callers targeting the SAME exact capability tuple —
+// including concurrent VFS byte-read, resolver, and revalidation
+// paths. The gate is intentionally NOT a global or account-wide
+// throttle; it is scoped to the specific capability that the upstream
+// just refused.
+const rateLimited = new Map();
+// Floor for the backoff window when upstream omits Retry-After. The
+// same floor protects against tiny Retry-After values that would
+// produce a 1–2 second backoff and immediately re-trigger upstream.
+const MIN_BACKOFF_MS = 30_000;
+// Ceiling for the backoff window. A 24h Retry-After (legal per RFC
+// 7231) would otherwise freeze the cache for a day; this ceiling
+// keeps the gate bounded so a stuck entry clears itself.
+const MAX_BACKOFF_MS = 5 * 60_000;
 
 function tupleKey({ provider, accountScope, placementId, providerFileId }) {
   return `${provider}:${accountScope}:${placementId}:${providerFileId}`;
@@ -28,6 +51,44 @@ function tupleKey({ provider, accountScope, placementId, providerFileId }) {
 
 function legacyKey(releaseKey, providerFileId) {
   return `legacy:${releaseKey}:${providerFileId}`;
+}
+
+function nowMs() {
+  return Date.now();
+}
+
+/**
+ * Per-capability backoff gate. Returns `{ until, retryAfterMs }` when
+ * the gate is active, or `null` when it has expired or was never set.
+ * Lazy-evicts expired entries so the Map does not grow unbounded.
+ */
+function checkRateLimited(capability) {
+  const key = tupleKey(capability);
+  const entry = rateLimited.get(key);
+  if (!entry) return null;
+  if (!Number.isFinite(entry.until) || nowMs() >= entry.until) {
+    rateLimited.delete(key);
+    return null;
+  }
+  return { until: entry.until, retryAfterMs: entry.until - nowMs() };
+}
+
+/**
+ * Record a per-capability rate-limit gate. The window is the upstream
+ * `Retry-After` (clamped to `[MIN_BACKOFF_MS, MAX_BACKOFF_MS]`) when
+ * present, or the floor when absent. The window is the MAX of any
+ * existing gate so repeated 429s do not shrink the backoff.
+ */
+function markRateLimited(capability, retryAfterMs) {
+  const key = tupleKey(capability);
+  const requested = Number.isFinite(retryAfterMs) && retryAfterMs > 0
+    ? retryAfterMs
+    : MIN_BACKOFF_MS;
+  const clamped = Math.min(MAX_BACKOFF_MS, Math.max(MIN_BACKOFF_MS, requested));
+  const until = nowMs() + clamped;
+  const existing = rateLimited.get(key);
+  const newUntil = existing?.until && existing.until > until ? existing.until : until;
+  rateLimited.set(key, { until: newUntil, retryAfterMs: clamped });
 }
 
 export class TorBoxDownloadUrlError extends Error {
@@ -301,15 +362,67 @@ export function getTorBoxDownloadUrlCache() {
       cache.delete(legacyKey(releaseKey, providerFileId));
     },
 
+    // Per-capability rate-limit gate — direct accessors. The gate is
+    // process-local and shared by all callers that target the same
+    // capability tuple, so a single 429 observation protects every
+    // concurrent and subsequent requestdl attempt on that tuple until
+    // the window expires (or the gate is explicitly cleared after a
+    // successful re-resolution).
+    isRateLimited(capability) {
+      return checkRateLimited(capability);
+    },
+
+    markRateLimited(capability, retryAfterMs) {
+      markRateLimited(capability, retryAfterMs);
+    },
+
+    clearRateLimited(capability) {
+      rateLimited.delete(tupleKey(capability));
+    },
+
     async getOrInFlightByCapability(capability, factory) {
       const key = tupleKey(capability);
+
+      // Per-capability 429 back-pressure. When the previous requestdl
+      // attempt for this capability returned 429 and the gate is still
+      // active, refuse the call WITHOUT invoking the factory — no
+      // upstream requestdl call, no provider storm. The capability is
+      // not invalidated and the cache entry (if any) is not touched;
+      // only new resolution attempts are blocked. The factory is never
+      // invoked when the gate is active.
+      // If a caller is already resolving this capability, join the
+      // in-flight promise — even when the gate is active. This
+      // ensures concurrent callers during a backoff do NOT each
+      // throw a fresh 429; they observe the in-flight resolve
+      // (which itself will clear the gate on success).
       const existing = inFlight.get(key);
       if (existing) return existing;
+
+      const gate = checkRateLimited(capability);
+      if (gate) {
+        const error = new TorBoxDownloadUrlError(
+          'TorBox requestdl is currently rate-limited for this capability',
+          'TORBOX_REQUESTDL_RATE_LIMITED',
+          429,
+          { retryAfterMs: gate.retryAfterMs },
+        );
+        // Annotate the gate metadata so downstream accounting can
+        // distinguish a back-pressure short-circuit from a fresh 429
+        // observation. `fromGate: true` is consumed by the accounting
+        // wrapper to emit `requestdl_backoff_short_circuit` instead of
+        // `requestdl_rate_limited_429`.
+        error.fromGate = true;
+        throw error;
+      }
 
       try {
         const promise = factory();
         inFlight.set(key, promise);
-        return await promise;
+        const result = await promise;
+        // A successful resolution supersedes any prior gate. The next
+        // 429 is the only thing that re-arms it.
+        rateLimited.delete(key);
+        return result;
       } finally {
         inFlight.delete(key);
       }
@@ -332,6 +445,7 @@ export function getTorBoxDownloadUrlCache() {
     clear() {
       cache.clear();
       inFlight.clear();
+      rateLimited.clear();
     },
 
     size() {

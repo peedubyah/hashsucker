@@ -47,8 +47,20 @@ function tryActivateAuthoritativeBinding({
 }) {
   if (!isRealControlPlaneStore(controlPlaneStore)) return null;
   const identity = handoff?.torrentFileIdentity;
-  const placementId = identity?.placementId ?? null;
-  const providerFileId = identity?.providerFileId ?? null;
+  let placementId = identity?.placementId ?? null;
+  let providerFileId = identity?.providerFileId ?? null;
+  // Defect B repair: when torrentFileIdentity was not persisted
+  // (rank-5 promotion path where only torrentFileId is in playback_handoffs),
+  // derive placementId and providerFileId from the TorrentFile + control-plane state.
+  // This is safe: the provider_files row exists because the same inventory
+  // observation that created the TorrentFile also created the provider_file mapping.
+  if ((!placementId || !providerFileId) && typeof controlPlaneStore.resolveDeliveryCoordinates === 'function') {
+    const coords = controlPlaneStore.resolveDeliveryCoordinates(handoff.infoHash, handoff.torrentFileId);
+    if (coords) {
+      placementId = coords.placementId;
+      providerFileId = coords.providerFileId;
+    }
+  }
   if (!placementId || !providerFileId) return null;
   if (!torrentFile || !torrentFile.id) return null;
 

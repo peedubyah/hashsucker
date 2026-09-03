@@ -1522,6 +1522,7 @@ export function createRequestHandler(dependencies = {}) {
     resolveTorBoxDownloadUrl: resolveTorBoxDownloadUrlFn,
     isUrlLive: isTorBoxDownloadUrlLive,
     now: clock,
+    terminalEvidenceStore,
   }));
 
   // Slice 1.75: pre-publication TorBox file identity binding seam. The

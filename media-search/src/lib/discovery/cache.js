@@ -1866,8 +1866,17 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       selection_reason = excluded.selection_reason,
       selected_at = excluded.selected_at,
       torrent_file_id = excluded.torrent_file_id
-    WHERE playback_handoffs.torrent_file_id IS NULL
-      AND excluded.torrent_file_id IS NOT NULL
+    WHERE
+      (
+        playback_handoffs.torrent_file_id IS NULL
+        AND excluded.torrent_file_id IS NOT NULL
+      )
+      OR
+      (
+        playback_handoffs.torrent_file_id IS NOT NULL
+        AND excluded.torrent_file_id IS NOT NULL
+        AND playback_handoffs.torrent_file_id != excluded.torrent_file_id
+      )
     ;
   `;
 
@@ -2065,10 +2074,33 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     const info = insertPlaybackHandoffStmt.run(params);
     const id = Number(info.lastInsertRowid);
     if (!existedBefore) {
-      return { id, status: 'inserted' };
+      const inserted = rowToPlaybackHandoff(
+        getPlaybackHandoffByMediaIdentityStmt.get({
+          media_id: params.media_id,
+          media_type: params.media_type,
+          season: params.season,
+          episode: params.episode,
+        }),
+      );
+      return { id, status: 'inserted', handoff: inserted };
     }
     if (existedBefore.id === id) {
-      return { id, status: 'noop' };
+      // Conflict: the ON CONFLICT DO UPDATE fired (same row id was
+      // updated in-place). Re-read the canonical row so callers always
+      // receive the authoritative state after upsert — not the stale
+      // pre-update handoff object. This matters for the rank-5
+      // promotion path (Defect B): the existing authoritative handoff's
+      // torrent_file_id must be replaced by the new one, and the returned
+      // object must reflect the updated row.
+      const updated = rowToPlaybackHandoff(
+        getPlaybackHandoffByMediaIdentityStmt.get({
+          media_id: params.media_id,
+          media_type: params.media_type,
+          season: params.season,
+          episode: params.episode,
+        }),
+      );
+      return { id, status: 'noop', handoff: updated };
     }
     // Conflict: classify the upsert outcome relative to the new payload.
     const wasAuthoritative = existedBefore.torrent_file_id != null;
@@ -2082,7 +2114,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       season: params.season,
       episode: params.episode,
     });
-    return { id: Number(after.id), status };
+    return { id: Number(after.id), status, handoff: rowToPlaybackHandoff(after) };
   }
 
   function getPlaybackHandoffByRequestId(requestId) {

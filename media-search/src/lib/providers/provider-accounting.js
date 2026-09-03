@@ -52,10 +52,26 @@ const CATEGORIES = Object.freeze([
   'requestdl_resolution',
   'requestdl_cache_hit',
   'requestdl_single_flight_reuse',
+  // Distinct from requestdl_single_flight_reuse: a singleflight
+  // JOIN observes the inflight promise and waits for it to settle
+  // without contributing a fresh upstream call. The accounting
+  // wrapper emits this when the cache reports a settled hit OR an
+  // existing inflight factory — both are "no new upstream" but
+  // observed through different control paths.
+  'requestdl_singleflight_join',
   'requestdl_capability_invalidate',
+  'capability_invalidation',
   'requestdl_capability_expired',
   'requestdl_preserved_after_cancel',
   'requestdl_rate_limited_429',
+  // Distinct from requestdl_rate_limited_429: this counter only
+  // fires when a requestdl attempt was suppressed by an active
+  // per-capability 429 backoff gate. A fresh 429 from upstream
+  // emits requestdl_rate_limited_429; a follow-up caller that
+  // short-circuited on the active gate emits
+  // requestdl_backoff_short_circuit. The two together prove the
+  // gate is honored by every subsequent caller.
+  'requestdl_backoff_short_circuit',
   'requestdl_upstream_5xx',
   'requestdl_retry',
   'upstream_retry',
@@ -93,12 +109,32 @@ const CATEGORY_SET = new Set(CATEGORIES);
 
 const PROVIDERS = Object.freeze(['torbox', 'realdebrid', 'other']);
 
+// Endpoint class — coarse, non-secret taxonomy that names the
+// network surface the accounting counters measure. Surface this
+// in snapshots so canary scripts and observability can correlate
+// a counter with the kind of upstream call it represents without
+// touching the API token or the signed CDN URL.
+//
+//   torbox:     authenticated-rest   (TorBox v1 API; requestdl is a
+//                                      short-lived permalink; CDN
+//                                      URLs are ephemeral redirected
+//                                      redirects, not a stable host.)
+//   realdebrid: authenticated-rest   (Real-Debrid v1 API; same shape.)
+//   other:      unknown              (uncategorized provider or
+//                                      unknown-account fallback.)
+const ENDPOINT_CLASS_BY_PROVIDER = Object.freeze({
+  torbox: 'authenticated-rest',
+  realdebrid: 'authenticated-rest',
+  other: 'unknown',
+});
+
 function emptyProvider(provider) {
   const perCategory = {};
   for (const cat of CATEGORIES) perCategory[cat] = 0;
   return Object.freeze({
     provider,
     perCategory: Object.freeze(perCategory),
+    endpointClass: ENDPOINT_CLASS_BY_PROVIDER[provider] ?? 'unknown',
   });
 }
 
@@ -114,7 +150,8 @@ function emptySnapshot() {
 function safeCopy(snapshot) {
   // Defensive: callers may hold a frozen snapshot but we re-emit a new
   // mutable per-provider object so canaries can re-format without
-  // mutating the canonical state. Counters are integers.
+  // mutating the canonical state. Counters are integers. endpointClass
+  // is a fixed per-provider tag and survives the copy unchanged.
   const providers = {};
   for (const provider of PROVIDERS) {
     const src = snapshot.providers[provider];
@@ -123,6 +160,7 @@ function safeCopy(snapshot) {
     providers[provider] = Object.freeze({
       provider,
       perCategory: Object.freeze(perCategory),
+      endpointClass: src.endpointClass ?? 'unknown',
     });
   }
   return Object.freeze({
@@ -170,6 +208,7 @@ class ProviderAccounting {
     providers[provider] = Object.freeze({
       provider,
       perCategory: Object.freeze(perCategory),
+      endpointClass: ENDPOINT_CLASS_BY_PROVIDER[provider] ?? 'unknown',
     });
     this._state = Object.freeze({
       timestamp: Date.now(),
@@ -206,9 +245,14 @@ class ProviderAccounting {
         const c = currentCat[cat];
         perCategory[cat] = Math.max(0, c - b);
       }
+      // endpointClass is a fixed per-provider tag; carry it through
+      // the delta so canary scripts can correlate counters with the
+      // kind of upstream call they represent without touching the
+      // API token or the signed CDN URL.
       providers[provider] = Object.freeze({
         provider,
         perCategory: Object.freeze(perCategory),
+        endpointClass: this._state.providers[provider].endpointClass ?? 'unknown',
       });
     }
     return Object.freeze({
