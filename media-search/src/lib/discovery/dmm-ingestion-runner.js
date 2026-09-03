@@ -524,8 +524,16 @@ export class DMMIngestionRunner {
 
   /**
    * Flush a batch of entries through the ingestion boundary.
+   *
+   * The whole batch is wrapped in a single BEGIN IMMEDIATE / COMMIT
+   * so that a process death or SQL error mid-batch leaves the corpus
+   * in either the pre-batch or the post-batch state — never a partial
+   * batch. ingestCandidates itself loops per-record and does not own a
+   * transaction; this wrapper is what gives the batch its atomicity.
    */
   async flushBatch(batch) {
+    const db = this.cache.db;
+    db.exec('BEGIN IMMEDIATE');
     try {
       // Use existing ingestCandidates boundary
       const result = ingestCandidates(this.cache, {
@@ -538,7 +546,9 @@ export class DMMIngestionRunner {
       for (let i = 0; i < (result.updated || 0); i++) {
         this.metrics.recordUpdated();
       }
+      db.exec('COMMIT');
     } catch (error) {
+      db.exec('ROLLBACK');
       this.metrics.recordsFailed += batch.length;
       this.metrics.addError(error);
     }

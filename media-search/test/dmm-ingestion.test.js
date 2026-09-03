@@ -618,3 +618,106 @@ test('DMMIngestionRunner metrics include attribute stats', async () => {
 
   cache.close();
 });
+
+// =============================================================================
+// Corpus lifecycle / batch atomicity proof
+// =============================================================================
+//
+// Audit finding D2 (corpus lifecycle): a process death or SQL error
+// mid-batch in the in-tree runner could leave the corpus with a partial
+// batch — some records from a batch visible, others not. The patch wraps
+// flushBatch in BEGIN IMMEDIATE / COMMIT, so a batch is all-or-nothing.
+//
+// Proof: wrap the cache so its 3rd upsertCandidate throws, then call
+// flushBatch with a 5-record batch. Pre-patch, 2 records would be
+// committed. Post-patch, 0 records persist (transaction rolled back).
+
+test('flushBatch is atomic: a mid-batch failure rolls back the entire batch', async () => {
+  const cache = createDiscoveryCache();
+  const realUpsert = cache.upsertCandidate.bind(cache);
+  let upsertCalls = 0;
+  cache.upsertCandidate = (entry) => {
+    upsertCalls += 1;
+    if (upsertCalls === 3) {
+      throw new Error('simulated mid-batch failure');
+    }
+    return realUpsert(entry);
+  };
+
+  const runner = new DMMIngestionRunner({ cache, batchSize: 1000 });
+  const batch = [
+    { infoHash: HASH, fileIndex: null, filename: 'a.mkv', sources: [] },
+    { infoHash: HASH.replace(/.$/, '2'), fileIndex: null, filename: 'b.mkv', sources: [] },
+    { infoHash: HASH.replace(/.$/, '3'), fileIndex: null, filename: 'c.mkv', sources: [] },
+    { infoHash: HASH.replace(/.$/, '4'), fileIndex: null, filename: 'd.mkv', sources: [] },
+    { infoHash: HASH.replace(/.$/, '5'), fileIndex: null, filename: 'e.mkv', sources: [] },
+  ];
+
+  await runner.flushBatch(batch);
+
+  // After the failure, NO records from the batch should be visible.
+  // Pre-patch behaviour: 2 records would be present (autocommit per record).
+  // Post-patch behaviour: 0 records present (transaction rolled back).
+  const remaining = cache.db
+    .prepare('SELECT COUNT(*) AS c FROM candidates')
+    .get().c;
+  assert.equal(remaining, 0, 'mid-batch failure must leave zero committed records');
+
+  // The failure must be reflected in metrics.
+  assert.equal(runner.metrics.recordsFailed, batch.length);
+
+  cache.close();
+});
+
+test('flushBatch is atomic on SIGKILL-equivalent: re-running the same batch yields the same corpus', async () => {
+  // Simulates "process was killed mid-batch, then restarted and re-ingested
+  // the same fragment". The final corpus must be identical to a single
+  // successful run, regardless of where the previous run was killed.
+  // The two runs use different batches so that a partially-committed
+  // second run would change the corpus (which must not happen).
+  const cache = createDiscoveryCache();
+  const realUpsert = cache.upsertCandidate.bind(cache);
+  let callCount = 0;
+  cache.upsertCandidate = (entry) => {
+    callCount += 1;
+    // Kill halfway through the second batch.
+    if (callCount === 7) {
+      throw new Error('simulated SIGKILL');
+    }
+    return realUpsert(entry);
+  };
+
+  const runner = new DMMIngestionRunner({ cache, batchSize: 1000 });
+  const batchA = [
+    { infoHash: HASH.replace(/.$/, 'a'), fileIndex: null, filename: 'a1.mkv', sources: [] },
+    { infoHash: HASH.replace(/.$/, 'b'), fileIndex: null, filename: 'a2.mkv', sources: [] },
+    { infoHash: HASH.replace(/.$/, 'c'), fileIndex: null, filename: 'a3.mkv', sources: [] },
+    { infoHash: HASH.replace(/.$/, 'd'), fileIndex: null, filename: 'a4.mkv', sources: [] },
+    { infoHash: HASH.replace(/.$/, 'e'), fileIndex: null, filename: 'a5.mkv', sources: [] },
+  ];
+  const batchB = [
+    { infoHash: HASH.replace(/.$/, '1'), fileIndex: null, filename: 'b1.mkv', sources: [] },
+    { infoHash: HASH.replace(/.$/, '2'), fileIndex: null, filename: 'b2.mkv', sources: [] },
+    { infoHash: HASH.replace(/.$/, '3'), fileIndex: null, filename: 'b3.mkv', sources: [] },
+    { infoHash: HASH.replace(/.$/, '4'), fileIndex: null, filename: 'b4.mkv', sources: [] },
+    { infoHash: HASH.replace(/.$/, '5'), fileIndex: null, filename: 'b5.mkv', sources: [] },
+  ];
+
+  // Run #1: completes successfully, all 5 records from batchA persist.
+  await runner.flushBatch(batchA);
+  const afterRun1 = cache.db
+    .prepare('SELECT info_hash FROM candidates ORDER BY info_hash')
+    .all().map((r) => r.info_hash);
+
+  // Run #2: batchB, fails on its 2nd record. Transaction must roll back
+  // and the corpus must remain identical to after Run #1.
+  await runner.flushBatch(batchB);
+  const afterRun2 = cache.db
+    .prepare('SELECT info_hash FROM candidates ORDER BY info_hash')
+    .all().map((r) => r.info_hash);
+
+  assert.deepEqual(afterRun1, afterRun2, 'failed re-run must not change the corpus');
+  assert.equal(afterRun2.length, 5);
+
+  cache.close();
+});
