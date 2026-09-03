@@ -437,7 +437,7 @@ CREATE INDEX IF NOT EXISTS idx_dmm_obs_candidate
 CREATE INDEX IF NOT EXISTS idx_dmm_obs_fragment
   ON dmm_source_observations(generation_id, source, fragment_name);
 
--- Historical provider evidence
+-- Historical provider evidence (source-vs-snapshot model)
 --
 -- Stores persistent corpus-membership signals such as:
 --   "Real-Debrid has seen/served this release before"
@@ -445,24 +445,66 @@ CREATE INDEX IF NOT EXISTS idx_dmm_obs_fragment
 --   current cache hit, current placement, current availability, or
 --   current delivery capability.
 --
--- The (provider, source_id) axis is the identity of the *historical
--- source* (e.g. an export file from RD, a different corpus). Multiple
--- historical sources for the same release remain distinct rows so
--- corroboration across independent sources is observable at query time.
+-- Identity model — two layers:
 --
--- Identity: PRIMARY KEY (info_hash, file_index_key, provider,
---                   evidence_type, source_id, source_version)
--- where file_index_key=-1 is the canonical release-level coordinate
+--   source_id        = identity of an INDEPENDENT witness/source
+--                        (e.g. "rd-history-import"). Two distinct
+--                        source_ids count as two corroborating
+--                        witnesses at query time.
+--   source_version    = version/generation/snapshot of that same
+--                        witness. Different versions of the SAME
+--                        source_id are NOT independent corroboration;
+--                        they are repeated sightings from the same
+--                        witness. source_version participates only
+--                        in snapshot-membership identity (the
+--                        sightings table below).
+--
+-- Replay semantics:
+--   Replaying the same (source_id, source_version) snapshot is a
+--   no-op at both tables. The PRIMARY KEY of the sightings table
+--   is the snapshot-membership identity; replay cannot create new
+--   rows or bump counters on existing rows.
+--
+-- Two tables:
+--
+--   historical_provider_evidence_sightings
+--     one row per (provider, source_id, source_version, info_hash,
+--                  file_index_key, evidence_type). This is the
+--                  idempotency boundary. New row = "this snapshot
+--                  of this source reports this sighting".
+--
+--   historical_provider_evidence
+--     one row per (provider, source_id, info_hash, file_index_key,
+--                  evidence_type). Source version is NOT in the key.
+--     Maintained deterministically from the sightings table.
+--     distinct_snapshot_count = COUNT(*) of sightings for the same
+--     (provider, source_id) identity; first_seen_at / last_seen_at
+--     aggregate across snapshots.
+--
+-- file_index_key=-1 is the canonical release-level coordinate
 -- (matching the convention used throughout dmm_source_observations,
--- candidates, etc.). Re-ingesting the same snapshot updates
--- last_seen_at and bumps observation_count; it does not append
--- duplicate rows.
+-- candidates, etc.).
 --
--- source_version is part of the primary key only when the source
--- itself evolves. If the caller does not track a version, pass ''.
---
--- metadata_json is intentionally absent. The spec allows it only if
--- genuinely required. We do not persist URLs, filenames, or ordinals.
+-- metadata_json is intentionally absent. We do not persist URLs,
+-- filenames, or ordinals.
+CREATE TABLE IF NOT EXISTS historical_provider_evidence_sightings (
+  info_hash TEXT NOT NULL,
+  file_index_key INTEGER NOT NULL DEFAULT -1,
+  provider TEXT NOT NULL,
+  evidence_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  source_version TEXT NOT NULL,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  observation_count INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (info_hash, file_index_key, provider, evidence_type, source_id, source_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hpe_sightings_candidate
+  ON historical_provider_evidence_sightings(info_hash, file_index_key);
+CREATE INDEX IF NOT EXISTS idx_hpe_sightings_source
+  ON historical_provider_evidence_sightings(provider, source_id, source_version);
+
 CREATE TABLE IF NOT EXISTS historical_provider_evidence (
   info_hash TEXT NOT NULL,
   file_index_key INTEGER NOT NULL DEFAULT -1,
@@ -470,17 +512,16 @@ CREATE TABLE IF NOT EXISTS historical_provider_evidence (
   account_scope TEXT,
   evidence_type TEXT NOT NULL,
   source_id TEXT NOT NULL,
-  source_version TEXT NOT NULL DEFAULT '',
   first_seen_at INTEGER NOT NULL,
   last_seen_at INTEGER NOT NULL,
-  observation_count INTEGER NOT NULL DEFAULT 1,
-  PRIMARY KEY (info_hash, file_index_key, provider, evidence_type, source_id, source_version)
+  distinct_snapshot_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (info_hash, file_index_key, provider, evidence_type, source_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_historical_provider_evidence_candidate
   ON historical_provider_evidence(info_hash, file_index_key);
 CREATE INDEX IF NOT EXISTS idx_historical_provider_evidence_source
-  ON historical_provider_evidence(provider, source_id, source_version);
+  ON historical_provider_evidence(provider, source_id);
 `;
 
 // ============================================================================
@@ -624,58 +665,106 @@ SELECT COUNT(*) AS n FROM dmm_source_observations WHERE generation_id = ?;
 `;
 
 // ============================================================================
-// Historical provider evidence SQL
+// Historical provider evidence SQL — source-vs-snapshot model
 //
-// Idempotency strategy: single INSERT ... ON CONFLICT DO UPDATE.
+// Idempotency strategy (the design contract this slice repairs):
 //
-// The ON CONFLICT DO UPDATE path fires ONLY when a row with the same
-// (info_hash, file_index_key, provider, evidence_type, source_id,
-// source_version) already exists — which is the INSERT that just failed.
-// This means:
-//   - First ingest of a new composite identity → INSERT fires, count = delta
-//   - Re-ingest of the same identity             → UPDATE fires, count += delta
-//   - Re-ingest of a new source_id               → INSERT fires again, new row
+//     Sightings table = the idempotency boundary.
+//       PRIMARY KEY (info_hash, file_index_key, provider, evidence_type,
+//                    source_id, source_version)
 //
-// first_seen_at is protected by MIN() — a re-import with an earlier
-// last_seen_at never rewinds the first-sight timestamp.
-// last_seen_at uses MAX() — a re-import with an earlier timestamp is absorbed.
-// observation_count accumulates so repeated giant snapshots increase the
-// "strength" signal without duplicating rows.
-// account_scope uses COALESCE() — the first non-null scope wins.
+//       This identity is "snapshot membership": a row exists iff THIS
+//       (source_id, source_version) snapshot reports THIS sighting.
+//       Re-ingesting the SAME (source_id, source_version) is a no-op
+//       (ON CONFLICT DO NOTHING). Replay cannot create new rows or
+//       bump counters — replay is genuinely idempotent.
 //
-// This is equivalent to the dmm_source_observations INSERT-OR-IGNORE + UPDATE
-// two-step pattern, but expressed as a single SQLite upsert statement.
+//       A NEW source_version (e.g. snapshot-2025-02) creates a NEW
+//       sightings row. A genuinely distinct source_id creates a NEW
+//       sightings row. Both are "more evidence" but only a distinct
+//       source_id is "more corroboration".
+//
+//     Aggregate table = a deterministic projection over the sightings.
+//       PRIMARY KEY (info_hash, file_index_key, provider, evidence_type,
+//                    source_id)
+//       — note: source_version is NOT in the key. distinct_snapshot_count
+//       = COUNT(*) of sightings for the same (provider, source_id).
+//
+//     observation_count in the sightings row preserves the per-snapshot
+//     delta. The aggregate does NOT sum observation_count across snapshots;
+//     it counts the number of distinct snapshots that reported the
+//     sighting. This means replay is idempotent and snapshot evolution
+//     is observable.
 // ============================================================================
-const INSERT_HISTORICAL_PROVIDER_EVIDENCE = `
-INSERT INTO historical_provider_evidence
-  (info_hash, file_index_key, provider, account_scope, evidence_type,
+
+// 1. Per-snapshot witness (idempotency boundary).
+//    ON CONFLICT DO NOTHING: replay of the same (source_id, source_version)
+//    is a no-op. first_seen_at / last_seen_at / observation_count are
+//    recorded ONLY on the first ingest of that exact snapshot.
+const INSERT_HISTORICAL_PROVIDER_SIGHTING = `
+INSERT OR IGNORE INTO historical_provider_evidence_sightings
+  (info_hash, file_index_key, provider, evidence_type,
    source_id, source_version, first_seen_at, last_seen_at, observation_count)
 VALUES
-  (@info_hash, @file_index_key, @provider, @account_scope, @evidence_type,
-   @source_id, @source_version, @first_seen_at, @last_seen_at, @observation_count)
-ON CONFLICT(info_hash, file_index_key, provider, evidence_type, source_id, source_version)
-DO UPDATE SET
-  first_seen_at = MIN(first_seen_at, excluded.first_seen_at),
-  last_seen_at = MAX(last_seen_at, excluded.last_seen_at),
-  observation_count = observation_count + excluded.observation_count,
-  account_scope = COALESCE(account_scope, excluded.account_scope);
+  (@info_hash, @file_index_key, @provider, @evidence_type,
+   @source_id, @source_version, @first_seen_at, @last_seen_at, @observation_count);
 `;
 
+// 2. Aggregate recompute. Source version is NOT in the key. The aggregate
+//    is recomputed from the sightings table so that:
+//      - replay produces the same aggregate (idempotent)
+//      - snapshot evolution is observable via distinct_snapshot_count
+//      - first_seen_at = MIN(first_seen_at) across all sightings
+//      - last_seen_at  = MAX(last_seen_at)  across all sightings
+//      - account_scope = the first non-null scope across sightings
+const UPSERT_HISTORICAL_PROVIDER_EVIDENCE = `
+INSERT INTO historical_provider_evidence
+  (info_hash, file_index_key, provider, account_scope, evidence_type,
+   source_id, first_seen_at, last_seen_at, distinct_snapshot_count)
+SELECT
+  s.info_hash, s.file_index_key, s.provider, @account_scope, s.evidence_type,
+  s.source_id, MIN(s.first_seen_at), MAX(s.last_seen_at), COUNT(*)
+FROM historical_provider_evidence_sightings s
+WHERE s.provider          = @provider
+  AND s.source_id         = @source_id
+  AND s.evidence_type     = @evidence_type
+  AND s.info_hash         = @info_hash
+  AND s.file_index_key    = @file_index_key
+GROUP BY s.info_hash, s.file_index_key, s.provider, s.evidence_type, s.source_id
+ON CONFLICT(info_hash, file_index_key, provider, evidence_type, source_id)
+DO UPDATE SET
+  first_seen_at           = MIN(historical_provider_evidence.first_seen_at, excluded.first_seen_at),
+  last_seen_at            = MAX(historical_provider_evidence.last_seen_at, excluded.last_seen_at),
+  distinct_snapshot_count = excluded.distinct_snapshot_count,
+  account_scope           = COALESCE(historical_provider_evidence.account_scope, excluded.account_scope);
+`;
+
+// 3. Read API (caller-aggregate view).
 const SELECT_HISTORICAL_PROVIDER_EVIDENCE_FOR_CANDIDATE = `
-SELECT provider, account_scope, evidence_type, source_id, source_version,
-       first_seen_at, last_seen_at, observation_count
+SELECT provider, account_scope, evidence_type, source_id,
+       first_seen_at, last_seen_at, distinct_snapshot_count
 FROM historical_provider_evidence
 WHERE info_hash = @info_hash
   AND file_index_key = @file_index_key
-ORDER BY provider, source_id, source_version;
+ORDER BY provider, source_id;
 `;
 
+// 4. Count helpers.
 const COUNT_HISTORICAL_PROVIDER_EVIDENCE = `
 SELECT COUNT(*) AS n FROM historical_provider_evidence;
 `;
 
+const COUNT_HISTORICAL_PROVIDER_SIGHTINGS = `
+SELECT COUNT(*) AS n FROM historical_provider_evidence_sightings;
+`;
+
 const COUNT_HISTORICAL_PROVIDER_EVIDENCE_FOR_CANDIDATE = `
 SELECT COUNT(*) AS n FROM historical_provider_evidence
+WHERE info_hash = @info_hash AND file_index_key = @file_index_key;
+`;
+
+const COUNT_HISTORICAL_PROVIDER_SIGHTINGS_FOR_CANDIDATE = `
+SELECT COUNT(*) AS n FROM historical_provider_evidence_sightings
 WHERE info_hash = @info_hash AND file_index_key = @file_index_key;
 `;
 
@@ -1311,11 +1400,14 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const selectPruneEligibleAttributesStmt = db.prepare(SELECT_PRUNE_ELIGIBLE_ATTRIBUTES);
   const selectObservationsForCandidateStmt = db.prepare(SELECT_OBSERVATIONS_FOR_CANDIDATE);
   const countObservationsStmt = db.prepare(COUNT_OBSERVATIONS);
-  // Historical provider evidence
-  const insertHistoricalProviderEvidenceStmt = db.prepare(INSERT_HISTORICAL_PROVIDER_EVIDENCE);
+  // Historical provider evidence (source-vs-snapshot model)
+  const insertHistoricalProviderSightingStmt = db.prepare(INSERT_HISTORICAL_PROVIDER_SIGHTING);
+  const upsertHistoricalProviderEvidenceStmt = db.prepare(UPSERT_HISTORICAL_PROVIDER_EVIDENCE);
   const selectHistoricalProviderEvidenceForCandidateStmt = db.prepare(SELECT_HISTORICAL_PROVIDER_EVIDENCE_FOR_CANDIDATE);
   const countHistoricalProviderEvidenceStmt = db.prepare(COUNT_HISTORICAL_PROVIDER_EVIDENCE);
+  const countHistoricalProviderSightingsStmt = db.prepare(COUNT_HISTORICAL_PROVIDER_SIGHTINGS);
   const countHistoricalProviderEvidenceForCandidateStmt = db.prepare(COUNT_HISTORICAL_PROVIDER_EVIDENCE_FOR_CANDIDATE);
+  const countHistoricalProviderSightingsForCandidateStmt = db.prepare(COUNT_HISTORICAL_PROVIDER_SIGHTINGS_FOR_CANDIDATE);
 
 
   function fileIndexKey(fileIndex) {
@@ -1729,69 +1821,94 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   // =========================================================================
 
   /**
-   * Validate that a string is a plausible hexadecimal info hash.
-   * Accepts 40-char (SHA-1) or 64-char (SHA-256) torrent infohashes.
+   * Validate that a string is a plausible hexadecimal BitTorrent v1
+   * info hash (SHA-1, 40 lowercase/uppercase hex chars).
+   *
+   * HashSucker's canonical candidate identity uses BitTorrent v1
+   * infohashes; there is no in-tree BitTorrent v2 / SHA-256 path.
+   * Accepting 64-char SHA-256 here would let historical evidence rows
+   * exist that cannot be joined to a `candidates` row. We therefore
+   * enforce the 40-char rule explicitly and reject everything else,
+   * matching the candidate ingestion convention used elsewhere in
+   * the project.
    *
    * @param {string} hash
    * @returns {boolean}
    */
   function isValidInfoHash(hash) {
     if (typeof hash !== 'string' || hash.length === 0) return false;
-    return /^[a-fA-F0-9]{40}$/.test(hash) || /^[a-fA-F0-9]{64}$/.test(hash);
+    return /^[a-fA-F0-9]{40}$/.test(hash);
   }
 
   /**
    * Ingest a bounded batch of historical provider evidence.
    *
-   * Design constraints (from spec):
-   *   - batch transaction (all-or-nothing within one call)
-   *   - idempotent UPSERT: re-importing the same evidence updates last_seen
-   *     and observation_count WITHOUT duplicating rows
-   *   - bounded memory: caller controls batch size; we do not hold all rows
-   *   - no URL persistence unless genuinely required (none required here)
-   *   - no provider API calls
-   *   - normalize infoHash (lowercase hex)
-   *   - reject malformed hashes
-   *   - fileIndex NULL handled canonically (→ file_index_key = -1)
-   *   - repeated rows within one batch do NOT amplify storage
+   * Source-vs-snapshot semantics:
    *
-   * The idempotency key is:
-   *   (infoHash, fileIndexKey, provider, evidenceType, sourceId, sourceVersion)
+   *   A historical evidence *aggregate* is identified by:
+   *     (provider, source_id, infoHash, fileIndexKey, evidenceType)
    *
-   * Semantics:
-   *   - INSERT OR IGNORE first: creates row if new composite identity
-   *   - UPDATE then: advances last_seen_at (as MAX) and bumps observation_count
-   *     This means the same row imported twice in one batch → observation_count += 2
-   *     but only ONE row in the DB. The same row from an identical second import
-   *     → MAX(last_seen_at, ts) + count += N (no duplication).
+   *   A *snapshot* is one concrete instance of that witness (a specific
+   *   source_version of a source_id, e.g. an export file dated 2025-01).
+   *
+   *   Replay contract:
+   *     Re-ingesting the same (source_id, source_version) snapshot is a
+   *     no-op. The sightings table's PRIMARY KEY is the snapshot-membership
+   *     identity, so INSERT OR IGNORE is the entire idempotency story.
+   *     The aggregate is recomputed from the sightings so replay produces
+   *     byte-identical logical state.
+   *
+   *     A genuinely NEW source_version creates a NEW sightings row and
+   *     bumps distinct_snapshot_count. A genuinely NEW source_id
+   *     creates a NEW sightings row AND a NEW aggregate row, which
+   *     is the unit of corroboration at query time.
+   *
+   *   source_version is REQUIRED (non-empty) for this contract. An empty
+   *   source_version would let two genuinely different snapshots of the
+   *   same source collapse into the same row, defeating replay.
    *
    * @param {Object} opts
    * @param {string} opts.provider         - provider name (e.g. 'realdebrid')
-   * @param {string} opts.sourceId           - identifier of the historical source
-   * @param {string} [opts.sourceVersion]    - version of the source dataset (default '')
+   * @param {string} opts.sourceId           - identifier of the INDEPENDENT
+   *                                            historical source (e.g. an
+   *                                            RD export lineage)
+   * @param {string} opts.sourceVersion      - version/snapshot of that source
+   *                                            (e.g. 'snapshot-2025-01').
+   *                                            Required for replay safety.
    * @param {Array}  opts.observations     - array of observation objects
    * @param {number} [opts.now]             - current timestamp (default Date.now())
    * @param {string} [opts.accountScope]    - account scope if applicable (default null)
    * @param {string} [opts.evidenceType]   - evidence type (default 'historical_hit')
-   * @returns {{ ingested: number, skipped: number, errors: Array }}
+   * @returns {{ ingested: number, skipped: number, errors: Array,
+   *            snapshots: number, aggregateRows: number }}
    */
   function ingestHistoricalProviderEvidence({
     provider,
     sourceId,
-    sourceVersion = '',
+    sourceVersion,
     observations = [],
     now = Date.now(),
     accountScope = null,
     evidenceType = 'historical_hit',
   } = {}) {
     if (!provider || typeof provider !== 'string') {
-      return { ingested: 0, skipped: 0, errors: [{ message: 'provider is required' }] };
+      return { ingested: 0, skipped: 0, errors: [{ message: 'provider is required' }], snapshots: 0, aggregateRows: 0 };
     }
     if (!sourceId || typeof sourceId !== 'string') {
-      return { ingested: 0, skipped: 0, errors: [{ message: 'sourceId is required' }] };
+      return { ingested: 0, skipped: 0, errors: [{ message: 'sourceId is required' }], snapshots: 0, aggregateRows: 0 };
+    }
+    // sourceVersion is REQUIRED (non-empty string). An empty sourceVersion
+    // would let two genuinely different snapshots of the same source
+    // collapse into one row, defeating replay idempotency.
+    if (typeof sourceVersion !== 'string' || sourceVersion.length === 0) {
+      return {
+        ingested: 0, skipped: 0,
+        errors: [{ message: 'sourceVersion is required (snapshot identity must be tracked)' }],
+        snapshots: 0, aggregateRows: 0,
+      };
     }
     if (!Array.isArray(observations) || observations.length === 0) {
-      return { ingested: 0, skipped: 0, errors: [] };
+      return { ingested: 0, skipped: 0, errors: [], snapshots: 0, aggregateRows: 0 };
     }
 
     const errors = [];
@@ -1803,23 +1920,30 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     // on long-running imports.
     db.exec('BEGIN IMMEDIATE');
     try {
+      // Track the set of (infoHash, fileIndexKey) pairs that got a NEW
+      // sighting row in this batch so we can recompute the aggregate
+      // for each of them. A replay that inserts zero rows is a no-op
+      // here (the sightings table is unchanged, the aggregate is unchanged).
+      const affectedCandidates = new Set();
+
       for (const obs of observations) {
         // Normalize infoHash: lowercase hex
         const infoHash = typeof obs.infoHash === 'string'
           ? obs.infoHash.toLowerCase()
           : null;
 
-        // Reject malformed hashes
+        // Reject malformed hashes. The historical evidence store mirrors
+        // the candidate identity rules: 40-char SHA-1 hex only.
         if (!infoHash || !isValidInfoHash(infoHash)) {
           errors.push({
             infoHash: obs.infoHash,
-            message: 'invalid infoHash: must be a 40 or 64 character hex string',
+            message: 'invalid infoHash: must be a 40 character SHA-1 hex string',
           });
           skipped++;
           continue;
         }
 
-        const fileIndexKey = obs.fileIndex == null ? -1 : obs.fileIndex;
+        const fik = obs.fileIndex == null ? -1 : obs.fileIndex;
         const firstSeenAt = typeof obs.firstSeenAt === 'number' && obs.firstSeenAt > 0
           ? obs.firstSeenAt
           : now;
@@ -1832,9 +1956,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
         const insertParams = {
           info_hash: infoHash,
-          file_index_key: fileIndexKey,
+          file_index_key: fik,
           provider,
-          account_scope: accountScope,
           evidence_type: evidenceType,
           source_id: sourceId,
           source_version: sourceVersion,
@@ -1844,38 +1967,76 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
         };
 
         try {
-          // Single upsert: INSERT on new row, UPDATE on conflict. Both
-          // paths are atomic and idempotent; the first_seen/last_seen/count
-          // math is applied in SQL via MIN/MAX/+.
-          insertHistoricalProviderEvidenceStmt.run(insertParams);
+          // INSERT OR IGNORE: the entire idempotency contract.
+          // - Replay of the same (source_id, source_version) is a no-op
+          //   (changes() == 0, no aggregate recompute needed for THIS row).
+          // - New sighting row → changes() == 1, we mark the candidate
+          //   for aggregate recompute below.
+          const r = insertHistoricalProviderSightingStmt.run(insertParams);
           ingested++;
+          if (r.changes > 0) {
+            affectedCandidates.add(`${infoHash}\x00${fik}`);
+          }
         } catch (err) {
           errors.push({ infoHash, message: err.message });
           skipped++;
         }
       }
+
+      // Recompute the aggregate for every candidate that got a new
+      // sighting row. Replay (zero affected candidates) is a no-op here.
+      // The UPSERT is itself idempotent: a recompute over an unchanged
+      // sightings set produces an identical aggregate.
+      //
+      // account_scope is the only column not derivable from the
+      // sightings (it is per-source, not per-sighting). We pass it as
+      // a parameter and use COALESCE in the UPSERT so the first
+      // non-null value wins and is never overwritten.
+      for (const key of affectedCandidates) {
+        const sep = key.indexOf('\x00');
+        const ih = key.slice(0, sep);
+        const fik = Number(key.slice(sep + 1));
+        try {
+          upsertHistoricalProviderEvidenceStmt.run({
+            provider,
+            source_id: sourceId,
+            evidence_type: evidenceType,
+            info_hash: ih,
+            file_index_key: fik,
+            account_scope: accountScope,
+          });
+        } catch (err) {
+          errors.push({ infoHash: ih, message: `aggregate upsert failed: ${err.message}` });
+        }
+      }
+
       db.exec('COMMIT');
     } catch (err) {
       try { db.exec('ROLLBACK'); } catch {}
       errors.push({ message: `transaction failed: ${err.message}` });
-      return { ingested: 0, skipped: observations.length, errors };
+      return { ingested: 0, skipped: observations.length, errors, snapshots: 0, aggregateRows: 0 };
     }
 
-    return { ingested, skipped, errors };
+    return {
+      ingested,
+      skipped,
+      errors,
+      snapshots: countHistoricalProviderSightingsStmt.get()?.n ?? 0,
+      aggregateRows: countHistoricalProviderEvidenceStmt.get()?.n ?? 0,
+    };
   }
 
   /**
-   * Retrieve all historical provider evidence for a candidate.
+   * Retrieve all historical provider evidence aggregates for a candidate.
    *
-   * This is a READ-ONLY query. It returns every row across all providers,
-   * sources, and evidence types for the given (infoHash, fileIndexKey).
-   * Callers that need corroboration or source-grouped views should
-   * derive those from the returned rows.
+   * This is a READ-ONLY query. It returns the aggregate table (one row per
+   * independent source_id), not the underlying sightings. Callers that need
+   * per-snapshot details should query the sightings table directly.
    *
    * @param {string} infoHash
    * @param {number|null} [fileIndex]
    * @returns {Array} rows with provider, account_scope, evidence_type, source_id,
-   *                  source_version, first_seen_at, last_seen_at, observation_count
+   *                  first_seen_at, last_seen_at, distinct_snapshot_count
    */
   function getHistoricalProviderEvidence(infoHash, fileIndex = null) {
     if (!infoHash) return [];
@@ -1913,6 +2074,41 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     if (!infoHash) return 0;
     try {
       return countHistoricalProviderEvidenceForCandidateStmt.get({
+        info_hash: infoHash.toLowerCase(),
+        file_index_key: fileIndexKey(fileIndex),
+      })?.n ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Count total historical provider sighting rows (per-snapshot witnesses).
+   * This is the raw count of every distinct (source_id, source_version)
+   * sighting across the table. The aggregate table's count will normally
+   * be smaller because one aggregate row covers many sighting rows.
+   *
+   * @returns {number}
+   */
+  function countHistoricalProviderSightings() {
+    try {
+      return countHistoricalProviderSightingsStmt.get()?.n ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Count historical provider sighting rows for a specific candidate.
+   *
+   * @param {string} infoHash
+   * @param {number|null} [fileIndex]
+   * @returns {number}
+   */
+  function countHistoricalProviderSightingsForCandidate(infoHash, fileIndex = null) {
+    if (!infoHash) return 0;
+    try {
+      return countHistoricalProviderSightingsForCandidateStmt.get({
         info_hash: infoHash.toLowerCase(),
         file_index_key: fileIndexKey(fileIndex),
       })?.n ?? 0;
@@ -4203,6 +4399,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getHistoricalProviderEvidence,
     countHistoricalProviderEvidence,
     countHistoricalProviderEvidenceForCandidate,
+    countHistoricalProviderSightings,
+    countHistoricalProviderSightingsForCandidate,
     isValidInfoHash,
     // Identity enrichment queue
     enqueueIdentityResolution,

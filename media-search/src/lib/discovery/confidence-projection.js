@@ -127,6 +127,11 @@
  *   - PROVIDER_HISTORICAL is a real provider hit — stronger than DMM
  *     alone (0.20, same as DMM), but not authoritative for current state
  *     (that's freshProvider).
+ *     Source-vs-snapshot: distinct source_ids are distinct corroboration
+ *     families. Distinct source_versions of the SAME source_id are NOT
+ *     distinct families — they are repeated sightings from the same
+ *     witness. The cache has already collapsed snapshots in the
+ *     aggregate; the projection sees one row per (provider, source_id).
  *   - ATTRIBUTE_HISTORICAL proves a parser understood the title — modest
  *     identity signal (0.20).
  *   - MEDIA_ASSOCIATION and SOURCE_LISTED are weaker but free
@@ -688,24 +693,30 @@ export function createConfidenceProjection(cache) {
     // 6. Historical provider evidence (durable prior store, NOT current).
     //
     // This is the integration point for cache.getHistoricalProviderEvidence.
-    // Each row in the store represents a durable corpus-membership signal
-    // such as "Real-Debrid has seen/served this release before". These are
-    // PRIORS — they do NOT imply current cache hit, current placement, or
-    // current availability. Fresh provider observations (section 3) still
-    // outrank these for current-period availability.
+    // Each aggregate row represents "this independent source has
+    // observed this release". These are PRIORS — they do NOT imply
+    // current cache hit, current placement, or current availability.
+    // Fresh provider observations (section 3) still outrank these for
+    // current-period availability.
     //
-    // We emit one PROVIDER_HISTORICAL item per row. The historicalSourceId
-    // is set to (provider, source_id) so that two independent historical
-    // sources become two distinct corroboration families (see classify()).
+    // historicalSourceId is built from (provider, source_id) ONLY —
+    // distinct versions of the same source_id are NOT distinct
+    // corroboration families (see source-vs-snapshot model). Two
+    // different source_ids ARE distinct families. The cache has
+    // already collapsed snapshots in the aggregate.
     if (typeof cache.getHistoricalProviderEvidence === 'function') {
       const hist = cache.getHistoricalProviderEvidence(infoHash, fileIndex);
       for (const h of hist) {
         out.push({
           kind: 'PROVIDER_HISTORICAL',
           source: h.provider,
-          historicalSourceId: `${h.provider}:${h.source_id}:${h.source_version ?? ''}`,
+          historicalSourceId: `${h.provider}:${h.source_id}`,
           observedAt: Number(h.last_seen_at ?? h.first_seen_at ?? 0),
-          observationCount: Number(h.observation_count ?? 1),
+          // distinct_snapshot_count replaces the old observation_count:
+          // it represents how many distinct snapshots of this source
+          // reported the sighting, not how many times the operator
+          // replayed a snapshot.
+          observationCount: Number(h.distinct_snapshot_count ?? 1),
         });
       }
     }

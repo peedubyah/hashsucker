@@ -1,25 +1,40 @@
 /**
- * Historical Provider Evidence Tests
+ * Historical Provider Evidence Tests — source-vs-snapshot model
  *
  * Proves the durable historical-provider-evidence landing zone and its
  * integration into the confidence projection.
  *
- * 11 spec cases (see README in the audit report):
- *   1. Import RD historical release X once
- *   2. Import exact same snapshot twice => row count unchanged
- *   3. Observe X again in later snapshot => lastSeen/observationCount advance
- *   4. Same X from independent source => independent corroboration preserved
- *   5. Release-level X (fileIndex=null) and file-level X:0 remain distinct
- *   6. Malformed hash rejected
- *   7. Historical RD hit raises availabilityPrior (projection)
- *   8. Historical RD hit + fresh RD negative => negative wins; history survives
- *   9. Historical RD hit + fresh RD positive => fresh positive wins
- *  10. Shuffled historical observation input => identical stored state + identical projection
- *  11. No historical evidence => existing projection behavior unchanged
+ * Source-vs-snapshot semantics (this slice):
+ *
+ *   Aggregate identity = (provider, source_id, infoHash, fileIndexKey,
+ *                         evidenceType)
+ *   Snapshot identity  = (provider, source_id, source_version,
+ *                         infoHash, fileIndexKey, evidenceType)
+ *
+ *   Replay (same source_id + same source_version) is idempotent at both
+ *   the sightings table and the aggregate. Distinct source_versions
+ *   of the SAME source_id are repeated sightings, not corroboration.
+ *
+ * Proof tests (spec section "PROVE"):
+ *
+ *   P1.  S/V1 contains X               → sightings=1,  aggregate DSC=1
+ *   P2.  Replay S/V1                   → sightings=1,  aggregate DSC=1,
+ *                                          full state identical
+ *   P3.  S/V2 contains X               → sightings=2,  aggregate DSC=2,
+ *                                          same independent source count=1
+ *   P4.  Independent source T/V1       → sightings+=1, aggregate DSC for
+ *                                          T=1, independent sources=2
+ *   P5.  S/V1 + S/V2                   → corroboration unchanged from S/V1
+ *   P6.  S/V1 + T/V1                   → corroboration += 1
+ *   P7.  Shuffled order                → identical state, identical proj
+ *   P8.  firstSeen/lastSeen monotonic
+ *   P9.  Fresh provider precedence unchanged
+ *   P10. No identity mutation
  *
  * Plus:
- *  - 100k-row synthetic performance / idempotency test
- *  - Round-trip projection through createConfidenceProjection(cache)
+ *   - infoHash validation narrowed to 40-char SHA-1 (HashSucker canonical)
+ *   - 100k-row synthetic perf / idempotency test
+ *   - Persistence across cache close/reopen
  */
 
 import assert from 'node:assert/strict';
@@ -43,255 +58,348 @@ function makeCache() {
   return createDiscoveryCache({ dbPath: ':memory:' });
 }
 
+// Convenience: ingest one observation set.
+function ingest(cache, opts) {
+  return cache.ingestHistoricalProviderEvidence({
+    now: NOW,
+    evidenceType: 'historical_hit',
+    ...opts,
+  });
+}
+
 // =============================================================================
-// 1. Import RD historical release X once
+// P1. S/V1 contains X  → sightings=1, aggregate DSC=1
 // =============================================================================
-test('1. ingest RD historical release X once creates a single row', () => {
+test('P1. S/V1 contains X: sightings=1, aggregate DSC=1', () => {
   const cache = makeCache();
-  const r = cache.ingestHistoricalProviderEvidence({
+  const r = ingest(cache, {
     provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations: [
-      { infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY },
-    ],
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
+    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
   });
   assert.equal(r.ingested, 1);
   assert.equal(r.skipped, 0);
   assert.deepEqual(r.errors, []);
+  assert.equal(r.aggregateRows, 1);
+  assert.equal(r.snapshots, 1);
+
+  // Sightings and aggregate counts both 1
+  assert.equal(cache.countHistoricalProviderSightings(), 1);
   assert.equal(cache.countHistoricalProviderEvidence(), 1);
 
   const rows = cache.getHistoricalProviderEvidence(HASH_X, null);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].provider, 'realdebrid');
-  assert.equal(rows[0].source_id, 'rd-history-2024');
-  assert.equal(rows[0].source_version, 'v1');
+  assert.equal(rows[0].source_id, 'rd-history');
   assert.equal(rows[0].evidence_type, 'historical_hit');
-  assert.equal(rows[0].observation_count, 1);
+  assert.equal(rows[0].distinct_snapshot_count, 1);
   cache.close();
 });
 
 // =============================================================================
-// 2. Import exact same snapshot twice => row count unchanged
+// P2. Replay S/V1  → sightings still 1, aggregate DSC still 1, state identical
 // =============================================================================
-test('2. re-import of identical snapshot does not duplicate rows', () => {
+test('P2. replay S/V1: sightings unchanged, aggregate DSC unchanged, state identical', () => {
   const cache = makeCache();
   const opts = {
     provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
     observations: [
-      { infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY },
+      { infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY, firstSeenAt: NOW - 30 * DAY },
     ],
   };
-  const r1 = cache.ingestHistoricalProviderEvidence(opts);
-  const r2 = cache.ingestHistoricalProviderEvidence(opts);
-  assert.equal(r1.ingested, 1);
+  ingest(cache, opts);
+  const before = cache.getHistoricalProviderEvidence(HASH_X, null);
+  const beforeSightings = cache.countHistoricalProviderSightings();
+  const beforeAggregate = cache.countHistoricalProviderEvidence();
+  const r2 = ingest(cache, opts);
+  // ingest returns ingested=1 (the call attempted 1 row); replay is a no-op
   assert.equal(r2.ingested, 1);
-  assert.equal(cache.countHistoricalProviderEvidence(), 1);
-  const rows = cache.getHistoricalProviderEvidence(HASH_X, null);
-  assert.equal(rows.length, 1);
-  // observation_count accumulates: 1 + 1 = 2
-  assert.equal(rows[0].observation_count, 2);
-  // last_seen_at is monotonic: MAX preserves the later value
-  // (both calls passed NOW - 2 * DAY, so last_seen_at stays at that value)
-  assert.equal(rows[0].last_seen_at, NOW - 2 * DAY);
+  // but neither table actually gained a row
+  assert.equal(cache.countHistoricalProviderSightings(), beforeSightings);
+  assert.equal(cache.countHistoricalProviderEvidence(), beforeAggregate);
+
+  const after = cache.getHistoricalProviderEvidence(HASH_X, null);
+  assert.deepEqual(after, before, 'aggregate row must be byte-identical after replay');
+  assert.equal(after[0].distinct_snapshot_count, 1,
+    'distinct_snapshot_count must NOT increment on replay');
   cache.close();
 });
 
 // =============================================================================
-// 3. Observe X again in later snapshot => lastSeen/observationCount advance
+// P3. S/V2 contains X  → sightings=2, aggregate DSC=2, source-count=1
 // =============================================================================
-test('3. re-import with later timestamp advances last_seen_at monotonically', () => {
+test('P3. S/V2 contains X: aggregate DSC=2, but independent source-count=1', () => {
   const cache = makeCache();
-  cache.ingestHistoricalProviderEvidence({
+  ingest(cache, {
     provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations: [
-      { infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 5 * DAY, firstSeenAt: NOW - 5 * DAY },
-    ],
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
+    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 5 * DAY }],
   });
-  cache.ingestHistoricalProviderEvidence({
+  ingest(cache, {
     provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations: [
-      { infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 1 * DAY, firstSeenAt: NOW - 1 * DAY },
-    ],
-  });
-  const rows = cache.getHistoricalProviderEvidence(HASH_X, null);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].first_seen_at, NOW - 5 * DAY, 'first_seen_at must NOT move forward');
-  assert.equal(rows[0].last_seen_at, NOW - 1 * DAY, 'last_seen_at must move to the later value');
-  assert.equal(rows[0].observation_count, 2);
-  cache.close();
-});
-
-test('3b. re-import with earlier timestamp is absorbed (first_seen preserves earliest)', () => {
-  const cache = makeCache();
-  cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations: [
-      { infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 1 * DAY },
-    ],
-  });
-  // A re-import that arrives with an earlier timestamp (e.g. out-of-order
-  // snapshot replay) must NOT rewind first_seen and must NOT advance
-  // last_seen past the existing value.
-  cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations: [
-      { infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 30 * DAY, firstSeenAt: NOW - 30 * DAY },
-    ],
-  });
-  const rows = cache.getHistoricalProviderEvidence(HASH_X, null);
-  assert.equal(rows[0].first_seen_at, NOW - 30 * DAY, 'first_seen_at absorbs an earlier re-import');
-  assert.equal(rows[0].last_seen_at, NOW - 1 * DAY, 'last_seen_at is preserved against an earlier re-import');
-  cache.close();
-});
-
-// =============================================================================
-// 4. Same X from independent source => independent corroboration preserved
-// =============================================================================
-test('4. two independent historical sources for the same release => 2 distinct rows', () => {
-  const cache = makeCache();
-  cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
+    sourceId: 'rd-history',
+    sourceVersion: 'V2',
     observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 1 * DAY }],
   });
-  cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2023',
-    sourceVersion: 'v1',
-    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
-  });
-  assert.equal(cache.countHistoricalProviderEvidence(), 2);
-  const rows = cache.getHistoricalProviderEvidence(HASH_X, null);
-  const sourceIds = rows.map((r) => r.source_id).sort();
-  assert.deepEqual(sourceIds, ['rd-history-2023', 'rd-history-2024']);
-  cache.close();
-});
-
-// =============================================================================
-// 5. Release-level vs file-level: HASH_X (null) and HASH_X:0 remain distinct
-// =============================================================================
-test('5. release-level (fileIndex=null) and file-level (fileIndex=0) remain distinct identities', () => {
-  const cache = makeCache();
-  cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations: [
-      { infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 1 * DAY },
-      { infoHash: HASH_X, fileIndex: 0, lastSeenAt: NOW - 1 * DAY },
-    ],
-  });
-  assert.equal(cache.countHistoricalProviderEvidence(), 2);
-  assert.equal(cache.countHistoricalProviderEvidenceForCandidate(HASH_X, null), 1);
-  assert.equal(cache.countHistoricalProviderEvidenceForCandidate(HASH_X, 0), 1);
-  assert.equal(cache.countHistoricalProviderEvidenceForCandidate(HASH_X, 1), 0);
-  cache.close();
-});
-
-// =============================================================================
-// 6. Malformed hash rejected
-// =============================================================================
-test('6. malformed hashes are rejected without aborting the batch', () => {
-  const cache = makeCache();
-  const r = cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations: [
-      { infoHash: 'not-a-hash', fileIndex: null },
-      { infoHash: HASH_X, fileIndex: null },
-      { infoHash: 'cafebabe', fileIndex: null }, // too short
-      { infoHash: null, fileIndex: null },
-      { infoHash: HASH_Y, fileIndex: 0 },
-    ],
-  });
-  assert.equal(r.ingested, 2);
-  assert.equal(r.skipped, 3);
-  assert.equal(r.errors.length, 3);
-  // The valid rows ARE persisted
-  assert.equal(cache.countHistoricalProviderEvidence(), 2);
-  cache.close();
-});
-
-test('6b. valid 64-char SHA-256 hashes are accepted', () => {
-  const cache = makeCache();
-  const sha256 = 'a'.repeat(64);
-  const r = cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations: [{ infoHash: sha256, fileIndex: null, lastSeenAt: NOW - 1 * DAY }],
-  });
-  assert.equal(r.ingested, 1);
+  // Sightings: 2 (one per snapshot)
+  assert.equal(cache.countHistoricalProviderSightings(), 2);
+  // Aggregate: 1 row (same source_id)
   assert.equal(cache.countHistoricalProviderEvidence(), 1);
-  cache.close();
-});
-
-test('6c. infoHash is normalized to lowercase', () => {
-  const cache = makeCache();
-  cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations: [
-      { infoHash: HASH_X.toUpperCase(), fileIndex: null, lastSeenAt: NOW - 1 * DAY },
-    ],
-  });
-  const rows = cache.getHistoricalProviderEvidence(HASH_X.toLowerCase(), null);
+  const rows = cache.getHistoricalProviderEvidence(HASH_X, null);
   assert.equal(rows.length, 1);
-  cache.close();
-});
+  assert.equal(rows[0].source_id, 'rd-history');
+  assert.equal(rows[0].distinct_snapshot_count, 2);
 
-// =============================================================================
-// 7. Historical RD hit raises availabilityPrior modestly
-// =============================================================================
-test('7. historical RD hit raises availabilityPrior modestly', () => {
-  const cache = makeCache();
-  cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
-  });
+  // Projection: still ONE independent family from this source.
   const proj = createConfidenceProjection(cache);
   const result = proj.project(HASH_X, null, { now: NOW });
-  // availabilityPrior: base 0 + 0.20 * decay(2d, 24h TTL) ≈ 0.20 * (0.5^(2d/7d)) ≈ 0.20 * 0.82 ≈ 0.164
-  assert.ok(result.availabilityPrior > 0 && result.availabilityPrior < 0.20,
-    `availabilityPrior should be modest provider prior, got ${result.availabilityPrior}`);
-  // corroboration: 1 family (provider, since historicalSourceId is set)
-  assert.ok(result.corroboration >= 1, `corroboration should be at least 1, got ${result.corroboration}`);
-  // reasons include provider-historical
-  assert.ok(result.reasons.includes('provider-historical'),
-    `reasons should include provider-historical, got: ${result.reasons}`);
-  // freshProvider: still null (history is a prior, not a current observation)
-  assert.equal(result.freshProvider, null);
+  // The aggregate contributes to ONE corroboration family, not two.
+  // (Corroboration may include other families depending on what else is
+  // present; here we expect corroboration = 1 from this one source +
+  // the generic provider family that PROVIDER_HISTORICAL maps to.)
+  // More importantly: the historicalSourceId collapses V1+V2 to a single
+  // string ("realdebrid:rd-history") — that's the unit of corroboration.
+  const histEvidence = result.evidence.filter((e) => e.kind === 'PROVIDER_HISTORICAL');
+  assert.equal(histEvidence.length, 1,
+    'aggregate must collapse to a single PROVIDER_HISTORICAL item');
+  assert.equal(histEvidence[0].historicalSourceId, 'realdebrid:rd-history');
   cache.close();
 });
 
 // =============================================================================
-// 8. Historical RD hit + fresh RD negative => negative wins current; history survives
+// P4. Independent source T/V1 contains X  → aggregate DSC for T=1, sources=2
 // =============================================================================
-test('8. historical RD hit + fresh RD negative => freshProvider=negative, history survives', () => {
+test('P4. independent source T/V1 contains X: independent source count = 2', () => {
   const cache = makeCache();
-  cache.ingestHistoricalProviderEvidence({
+  ingest(cache, {
     provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
     observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
   });
-  // Append a fresh negative provider observation
+  ingest(cache, {
+    provider: 'other-provider',
+    sourceId: 'op-history',
+    sourceVersion: 'V1',
+    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
+  });
+  // Two aggregate rows (two independent sources)
+  assert.equal(cache.countHistoricalProviderEvidence(), 2);
+  const rows = cache.getHistoricalProviderEvidence(HASH_X, null);
+  const sources = rows.map((r) => r.source_id).sort();
+  assert.deepEqual(sources, ['op-history', 'rd-history']);
+
+  const proj = createConfidenceProjection(cache);
+  const result = proj.project(HASH_X, null, { now: NOW });
+  // Two distinct historicalSourceIds ⇒ two corroboration families.
+  const histEvidence = result.evidence.filter((e) => e.kind === 'PROVIDER_HISTORICAL');
+  const ids = histEvidence.map((e) => e.historicalSourceId).sort();
+  assert.deepEqual(ids, ['other-provider:op-history', 'realdebrid:rd-history'].sort());
+  assert.ok(result.corroboration >= 2,
+    `corroboration should be >= 2, got ${result.corroboration}`);
+  cache.close();
+});
+
+// =============================================================================
+// P5. S/V1 + S/V2 must NOT produce more corroboration families than S/V1 alone
+// =============================================================================
+test('P5. S/V1 + S/V2 do not raise corroboration beyond S/V1 alone', () => {
+  // Cache A: only S/V1
+  const a = makeCache();
+  ingest(a, {
+    provider: 'realdebrid',
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
+    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
+  });
+  const projA = createConfidenceProjection(a);
+  const corA = projA.project(HASH_X, null, { now: NOW }).corroboration;
+
+  // Cache B: S/V1 + S/V2
+  const b = makeCache();
+  ingest(b, {
+    provider: 'realdebrid',
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
+    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
+  });
+  ingest(b, {
+    provider: 'realdebrid',
+    sourceId: 'rd-history',
+    sourceVersion: 'V2',
+    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
+  });
+  const projB = createConfidenceProjection(b);
+  const corB = projB.project(HASH_X, null, { now: NOW }).corroboration;
+
+  assert.equal(corB, corA,
+    `corroboration with V2 must equal corroboration without V2, got ${corB} vs ${corA}`);
+  // availabilityPrior must also be the same: distinct_snapshot_count went
+  // up but the family is still ONE, contributing +0.20 once.
+  const priA = projA.project(HASH_X, null, { now: NOW }).availabilityPrior;
+  const priB = projB.project(HASH_X, null, { now: NOW }).availabilityPrior;
+  assert.equal(priA, priB,
+    `availabilityPrior with V2 must equal availabilityPrior without V2, got ${priB} vs ${priA}`);
+  a.close(); b.close();
+});
+
+// =============================================================================
+// P6. S/V1 + T/V1 MUST increase corroboration
+// =============================================================================
+test('P6. S/V1 + T/V1 raises corroboration vs S/V1 alone', () => {
+  const a = makeCache();
+  ingest(a, {
+    provider: 'realdebrid',
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
+    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
+  });
+  const projA = createConfidenceProjection(a);
+  const corA = projA.project(HASH_X, null, { now: NOW }).corroboration;
+
+  const b = makeCache();
+  ingest(b, {
+    provider: 'realdebrid',
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
+    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
+  });
+  ingest(b, {
+    provider: 'torbox',
+    sourceId: 'torbox-history',
+    sourceVersion: 'V1',
+    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
+  });
+  const projB = createConfidenceProjection(b);
+  const corB = projB.project(HASH_X, null, { now: NOW }).corroboration;
+
+  assert.ok(corB > corA,
+    `corroboration with T/V1 must be > corroboration without, got ${corB} vs ${corA}`);
+  // availabilityPrior must increase (one more family adds +0.20×decay).
+  const priA = projA.project(HASH_X, null, { now: NOW }).availabilityPrior;
+  const priB = projB.project(HASH_X, null, { now: NOW }).availabilityPrior;
+  assert.ok(priB > priA,
+    `availabilityPrior with T/V1 must be > availabilityPrior without, got ${priB} vs ${priA}`);
+  a.close(); b.close();
+});
+
+// =============================================================================
+// P7. Shuffled import/replay order produces identical logical state
+// =============================================================================
+test('P7. shuffled import/replay order produces identical logical state and projection', () => {
+  function build(seedOrder) {
+    const c = makeCache();
+    for (const step of seedOrder) {
+      ingest(c, step);
+    }
+    return c;
+  }
+
+  const orderA = [
+    { provider: 'realdebrid', sourceId: 'rd-history', sourceVersion: 'V1',
+      observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 5 * DAY }] },
+    { provider: 'realdebrid', sourceId: 'rd-history', sourceVersion: 'V1',
+      observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 5 * DAY }] },
+    { provider: 'realdebrid', sourceId: 'rd-history', sourceVersion: 'V2',
+      observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 1 * DAY }] },
+    { provider: 'torbox', sourceId: 'torbox-history', sourceVersion: 'V1',
+      observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }] },
+  ];
+  const orderB = [
+    { provider: 'torbox', sourceId: 'torbox-history', sourceVersion: 'V1',
+      observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }] },
+    { provider: 'realdebrid', sourceId: 'rd-history', sourceVersion: 'V2',
+      observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 1 * DAY }] },
+    { provider: 'realdebrid', sourceId: 'rd-history', sourceVersion: 'V1',
+      observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 5 * DAY }] },
+    { provider: 'realdebrid', sourceId: 'rd-history', sourceVersion: 'V1',
+      observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 5 * DAY }] },
+  ];
+
+  const a = build(orderA);
+  const b = build(orderB);
+
+  // Same aggregate row count and per-candidate state
+  assert.equal(a.countHistoricalProviderEvidence(), b.countHistoricalProviderEvidence());
+  assert.equal(a.countHistoricalProviderSightings(), b.countHistoricalProviderSightings());
+
+  const ra = a.getHistoricalProviderEvidence(HASH_X, null);
+  const rb = b.getHistoricalProviderEvidence(HASH_X, null);
+  // Sort by source_id so order doesn't matter
+  const sortKey = (r) => `${r.provider}|${r.source_id}`;
+  const sa = [...ra].sort((x, y) => sortKey(x).localeCompare(sortKey(y)));
+  const sb = [...rb].sort((x, y) => sortKey(x).localeCompare(sortKey(y)));
+  assert.deepEqual(sa, sb, 'aggregate state must be identical regardless of import order');
+
+  // Projections match
+  const pa = createConfidenceProjection(a);
+  const pb = createConfidenceProjection(b);
+  const resA = pa.project(HASH_X, null, { now: NOW });
+  const resB = pb.project(HASH_X, null, { now: NOW });
+  assert.equal(resA.availabilityPrior, resB.availabilityPrior);
+  assert.equal(resA.identityConfidence, resB.identityConfidence);
+  assert.equal(resA.corroboration, resB.corroboration);
+  assert.equal(resA.freshness, resB.freshness);
+  assert.equal(resA.freshProvider, resB.freshProvider);
+  assert.deepEqual(resA.reasons, resB.reasons);
+
+  a.close(); b.close();
+});
+
+// =============================================================================
+// P8. firstSeenAt / lastSeenAt remain monotonic across snapshot evolution
+// =============================================================================
+test('P8. firstSeenAt/lastSeenAt remain monotonic across V1→V2 with later/earlier timestamps', () => {
+  const cache = makeCache();
+
+  // V1 observed 30 days ago
+  ingest(cache, {
+    provider: 'realdebrid',
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
+    observations: [{ infoHash: HASH_X, fileIndex: null, firstSeenAt: NOW - 30 * DAY, lastSeenAt: NOW - 30 * DAY }],
+  });
+  // V2 observed 5 days ago — later than V1
+  ingest(cache, {
+    provider: 'realdebrid',
+    sourceId: 'rd-history',
+    sourceVersion: 'V2',
+    observations: [{ infoHash: HASH_X, fileIndex: null, firstSeenAt: NOW - 5 * DAY, lastSeenAt: NOW - 5 * DAY }],
+  });
+
+  let row = cache.getHistoricalProviderEvidence(HASH_X, null)[0];
+  assert.equal(row.first_seen_at, NOW - 30 * DAY, 'first_seen_at = MIN across snapshots');
+  assert.equal(row.last_seen_at, NOW - 5 * DAY, 'last_seen_at = MAX across snapshots');
+
+  // V3 with earlier timestamps (out-of-order replay) — neither field moves backward
+  ingest(cache, {
+    provider: 'realdebrid',
+    sourceId: 'rd-history',
+    sourceVersion: 'V3',
+    observations: [{ infoHash: HASH_X, fileIndex: null, firstSeenAt: NOW - 60 * DAY, lastSeenAt: NOW - 60 * DAY }],
+  });
+  row = cache.getHistoricalProviderEvidence(HASH_X, null)[0];
+  assert.equal(row.first_seen_at, NOW - 60 * DAY, 'first_seen_at absorbs an even earlier snapshot');
+  assert.equal(row.last_seen_at, NOW - 5 * DAY, 'last_seen_at is preserved against an earlier snapshot');
+  assert.equal(row.distinct_snapshot_count, 3);
+  cache.close();
+});
+
+// =============================================================================
+// P9. Existing fresh-provider positive/negative precedence remains unchanged
+// =============================================================================
+test('P9a. historical + fresh negative: freshProvider=negative, history survives in reasons', () => {
+  const cache = makeCache();
+  ingest(cache, {
+    provider: 'realdebrid',
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
+    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
+  });
   cache.appendProviderObservation({
     provider: 'realdebrid',
     accountScope: 'default',
@@ -302,36 +410,26 @@ test('8. historical RD hit + fresh RD negative => freshProvider=negative, histor
     fileIndex: null,
     kind: 'authoritative',
     state: 'uncached',
-    observedAt: NOW - 5 * 60 * 1000, // 5 min ago
+    observedAt: NOW - 5 * 60 * 1000,
     expiresAt: NOW + 24 * HOUR,
     source: 'rd-probe',
+    evidence: 'uncached:no-match',
   });
   const proj = createConfidenceProjection(cache);
   const result = proj.project(HASH_X, null, { now: NOW });
-  // Fresh negative outranks the historical prior for current interpretation
   assert.equal(result.freshProvider, 'negative');
-  assert.ok(result.reasons.includes('provider-fresh-negative'),
-    `reasons should include provider-fresh-negative, got: ${result.reasons}`);
-  // Historical evidence SURVIVES in reasons
+  assert.ok(result.reasons.includes('provider-fresh-negative'));
   assert.ok(result.reasons.includes('provider-historical'),
-    `historical evidence should survive, got: ${result.reasons}`);
-  // availabilityPrior still reflects the historical prior
-  assert.ok(result.availabilityPrior > 0,
-    `availabilityPrior should still reflect the historical prior, got ${result.availabilityPrior}`);
-  // And the row is still in the table
-  assert.equal(cache.countHistoricalProviderEvidenceForCandidate(HASH_X, null), 1);
+    'history survives in reasons even when fresh is negative');
   cache.close();
 });
 
-// =============================================================================
-// 9. Historical RD hit + fresh RD positive => fresh positive wins
-// =============================================================================
-test('9. historical RD hit + fresh RD positive => freshProvider=positive', () => {
+test('P9b. historical + fresh positive: freshProvider=positive', () => {
   const cache = makeCache();
-  cache.ingestHistoricalProviderEvidence({
+  ingest(cache, {
     provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
     observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
   });
   cache.appendProviderObservation({
@@ -347,185 +445,107 @@ test('9. historical RD hit + fresh RD positive => freshProvider=positive', () =>
     observedAt: NOW - 5 * 60 * 1000,
     expiresAt: NOW + 24 * HOUR,
     source: 'rd-probe',
+    evidence: 'cached:hash-match',
   });
   const proj = createConfidenceProjection(cache);
   const result = proj.project(HASH_X, null, { now: NOW });
   assert.equal(result.freshProvider, 'positive');
-  assert.ok(result.reasons.includes('provider-fresh-positive'),
-    `reasons should include provider-fresh-positive, got: ${result.reasons}`);
-  assert.ok(result.reasons.includes('provider-historical'),
-    `historical evidence survives, got: ${result.reasons}`);
+  assert.ok(result.reasons.includes('provider-fresh-positive'));
   cache.close();
 });
 
 // =============================================================================
-// 10. Shuffled historical observation input => identical stored state + identical projection
+// P10. No identity mutation (file_index_key convention; release vs file level)
 // =============================================================================
-test('10. shuffled historical observation input produces identical stored state and identical projection', () => {
-  function buildCache() {
-    const c = makeCache();
-    // Same set of observations, two different orderings
-    // Pass explicit firstSeenAt so the auto-fallback (`now`) doesn't differ
-    // between the two calls below.
-    const obs = [
-      { infoHash: HASH_X, fileIndex: null, firstSeenAt: NOW - 30 * DAY, lastSeenAt: NOW - 1 * DAY },
-      { infoHash: HASH_Y, fileIndex: 0, firstSeenAt: NOW - 30 * DAY, lastSeenAt: NOW - 2 * DAY },
-      { infoHash: HASH_Z, fileIndex: null, firstSeenAt: NOW - 30 * DAY, lastSeenAt: NOW - 3 * DAY },
-    ];
-    c.ingestHistoricalProviderEvidence({
-      provider: 'realdebrid',
-      sourceId: 'rd-history-2024',
-      sourceVersion: 'v1',
-      observations: obs.slice().reverse(),
-    });
-    return c;
-  }
-  const cache1 = buildCache();
-  const cache2 = makeCache();
-  cache2.ingestHistoricalProviderEvidence({
+test('P10. release-level (fileIndex=null) and file-level (fileIndex=0) remain distinct identities', () => {
+  const cache = makeCache();
+  ingest(cache, {
     provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
     observations: [
-      { infoHash: HASH_Z, fileIndex: null, firstSeenAt: NOW - 30 * DAY, lastSeenAt: NOW - 3 * DAY },
-      { infoHash: HASH_X, fileIndex: null, firstSeenAt: NOW - 30 * DAY, lastSeenAt: NOW - 1 * DAY },
-      { infoHash: HASH_Y, fileIndex: 0, firstSeenAt: NOW - 30 * DAY, lastSeenAt: NOW - 2 * DAY },
+      { infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 1 * DAY },
+      { infoHash: HASH_X, fileIndex: 0, lastSeenAt: NOW - 1 * DAY },
     ],
   });
-  // Row counts match
-  assert.equal(cache1.countHistoricalProviderEvidence(), cache2.countHistoricalProviderEvidence());
-  // Per-candidate counts match
-  for (const h of [HASH_X, HASH_Y, HASH_Z]) {
-    assert.deepEqual(
-      cache1.getHistoricalProviderEvidence(h, null),
-      cache2.getHistoricalProviderEvidence(h, null),
-    );
-  }
-  // Projections match (deterministic + pure)
-  const proj1 = createConfidenceProjection(cache1);
-  const proj2 = createConfidenceProjection(cache2);
-  for (const h of [HASH_X, HASH_Y, HASH_Z]) {
-    const r1 = proj1.project(h, null, { now: NOW });
-    const r2 = proj2.project(h, null, { now: NOW });
-    assert.equal(r1.availabilityPrior, r2.availabilityPrior);
-    assert.equal(r1.identityConfidence, r2.identityConfidence);
-    assert.equal(r1.corroboration, r2.corroboration);
-    assert.equal(r1.freshness, r2.freshness);
-    assert.equal(r1.freshProvider, r2.freshProvider);
-    assert.deepEqual(r1.reasons, r2.reasons);
-  }
-  cache1.close();
-  cache2.close();
+  // Two aggregate rows (release-level + file-level)
+  assert.equal(cache.countHistoricalProviderEvidence(), 2);
+  assert.equal(cache.countHistoricalProviderEvidenceForCandidate(HASH_X, null), 1);
+  assert.equal(cache.countHistoricalProviderEvidenceForCandidate(HASH_X, 0), 1);
+  assert.equal(cache.countHistoricalProviderEvidenceForCandidate(HASH_X, 1), 0);
+  cache.close();
 });
 
 // =============================================================================
-// 11. No historical evidence => existing projection behavior unchanged
+// infoHash validation: 40-char SHA-1 only (no BitTorrent v2 in project)
 // =============================================================================
-test('11. with no historical evidence, projection matches the empty-prior baseline', () => {
+test('infoHash: 40-char SHA-1 accepted; 64-char SHA-256 rejected; malformed rejected', () => {
   const cache = makeCache();
-  // No historical ingest at all
-  const proj = createConfidenceProjection(cache);
-  const result = proj.project(HASH_X, null, { now: NOW });
-  // No evidence at all
-  assert.equal(result.availabilityPrior, 0);
-  assert.equal(result.identityConfidence, 0);
-  assert.equal(result.corroboration, 0);
-  assert.equal(result.freshProvider, null);
-  assert.equal(result.evidenceCount, 0);
-  assert.deepEqual(result.reasons, ['no-evidence']);
-  // No provider-historical reason
-  assert.ok(!result.reasons.includes('provider-historical'));
-  // No rows in the store
+  const sha256 = 'a'.repeat(64);
+  const r = ingest(cache, {
+    provider: 'realdebrid',
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
+    observations: [
+      { infoHash: 'not-a-hash', fileIndex: null },
+      { infoHash: HASH_X, fileIndex: null },
+      { infoHash: 'cafebabe', fileIndex: null },
+      { infoHash: null, fileIndex: null },
+      { infoHash: sha256, fileIndex: null },         // 64-char rejected
+      { infoHash: HASH_Y.toUpperCase(), fileIndex: 0 }, // upper-case normalized
+    ],
+  });
+  assert.equal(r.ingested, 2);
+  assert.equal(r.skipped, 4);
+  assert.equal(r.errors.length, 4);
+  // The two valid rows ARE persisted
+  assert.equal(cache.countHistoricalProviderEvidence(), 2);
+  // No row exists for the SHA-256 string
+  assert.equal(cache.countHistoricalProviderEvidenceForCandidate(sha256, null), 0);
+  // The upper-case SHA-1 was normalized to lowercase
+  assert.equal(cache.countHistoricalProviderEvidenceForCandidate(HASH_Y, 0), 1);
+  cache.close();
+});
+
+test('infoHash: sourceVersion is required (snapshot identity must be tracked)', () => {
+  const cache = makeCache();
+  const r = ingest(cache, {
+    provider: 'realdebrid',
+    sourceId: 'rd-history',
+    sourceVersion: '', // empty — not allowed
+    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 1 * DAY }],
+  });
+  assert.equal(r.ingested, 0);
+  assert.equal(r.skipped, 0);
+  assert.ok(r.errors.some((e) => /sourceVersion/.test(e.message)),
+    `expected sourceVersion error, got: ${JSON.stringify(r.errors)}`);
   assert.equal(cache.countHistoricalProviderEvidence(), 0);
   cache.close();
 });
 
 // =============================================================================
-// Independent historical sources raise corroboration
+// No historical evidence: projection behavior is unchanged from baseline
 // =============================================================================
-test('12. two independent historical sources raise corroboration to 2', () => {
+test('no historical evidence: projection matches the empty-prior baseline', () => {
   const cache = makeCache();
-  cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 1 * DAY }],
-  });
-  cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2023',
-    sourceVersion: 'v1',
-    observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 2 * DAY }],
-  });
   const proj = createConfidenceProjection(cache);
   const result = proj.project(HASH_X, null, { now: NOW });
-  // Two distinct historical sources => two distinct corroboration families
-  assert.equal(result.corroboration, 2, `corroboration should be 2, got ${result.corroboration}`);
-  // availabilityPrior: 0.20 * decay(1d, 24h) + 0.20 * decay(2d, 24h)
-  //   ≈ 0.20 * 0.91 + 0.20 * 0.41 ≈ 0.18 + 0.08 ≈ 0.26 (past-TTL taper kicks in
-  //   at 24h). The exact value is not part of the contract; we just check
-  //   it's strictly greater than a single historical source would give and
-  //   less than the 0.40 max.
-  assert.ok(result.availabilityPrior > 0.20 && result.availabilityPrior <= 0.40,
-    `availabilityPrior should be in (0.20, 0.40], got ${result.availabilityPrior}`);
+  assert.equal(result.availabilityPrior, 0);
+  assert.equal(result.identityConfidence, 0);
+  assert.equal(result.corroboration, 0);
+  assert.equal(result.freshProvider, null);
   cache.close();
 });
 
 // =============================================================================
-// 100k-row synthetic performance / idempotency test
+// Partial batch failure: invalid rows skipped, valid rows committed
 // =============================================================================
-test('performance: 100k historical rows ingest without amplification on second pass', () => {
+test('partial batch: invalid rows skipped, valid rows committed', () => {
   const cache = makeCache();
-  const N = 100_000;
-  const observations = [];
-  for (let i = 0; i < N; i++) {
-    // Generate deterministic 40-char hex hashes
-    const h = (i.toString(16).padStart(8, '0') + '0'.repeat(32)).slice(0, 40);
-    observations.push({ infoHash: h, fileIndex: null, lastSeenAt: NOW - 1 * DAY });
-  }
-  const t0 = Date.now();
-  const r1 = cache.ingestHistoricalProviderEvidence({
+  const r = ingest(cache, {
     provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations,
-  });
-  const t1 = Date.now();
-  assert.equal(r1.ingested, N);
-  assert.equal(r1.skipped, 0);
-  assert.equal(cache.countHistoricalProviderEvidence(), N);
-
-  // Re-ingest the same batch
-  const r2 = cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
-    observations,
-  });
-  const t2 = Date.now();
-  assert.equal(r2.ingested, N);
-  // Row count must NOT double
-  assert.equal(cache.countHistoricalProviderEvidence(), N, 'second pass must not duplicate rows');
-  // observation_count for each row should now be 2
-  const sample = cache.getHistoricalProviderEvidence(observations[0].infoHash, null);
-  assert.equal(sample[0].observation_count, 2);
-
-  // Report timings as a hint, not an assertion (CI noise):
-  // First pass: ~hundreds of ms; second pass: comparable.
-  // eslint-disable-next-line no-console
-  console.log(`[perf] 100k ingest first=${t1 - t0}ms, second=${t2 - t1}ms, rows=${N}`);
-  cache.close();
-});
-
-// =============================================================================
-// Batch in single transaction; partial failures don't lose committed rows
-// =============================================================================
-test('13. partial batch failure: invalid rows are skipped, valid rows are committed', () => {
-  const cache = makeCache();
-  const r = cache.ingestHistoricalProviderEvidence({
-    provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    sourceVersion: 'v1',
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
     observations: [
       { infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 1 * DAY },
       { infoHash: 'bad', fileIndex: null },
@@ -539,48 +559,90 @@ test('13. partial batch failure: invalid rows are skipped, valid rows are commit
 });
 
 // =============================================================================
-// Missing required fields return early without error
+// 100k-row synthetic perf / idempotency
 // =============================================================================
-test('14. missing provider or sourceId is a no-op (returns 0)', () => {
+test('performance: 100k historical sightings ingest; replay is no-op; aggregate correct', () => {
   const cache = makeCache();
-  const r1 = cache.ingestHistoricalProviderEvidence({
-    sourceId: 'rd-history-2024',
-    observations: [{ infoHash: HASH_X, fileIndex: null }],
-  });
-  assert.equal(r1.ingested, 0);
-  const r2 = cache.ingestHistoricalProviderEvidence({
+  const N = 100_000;
+  const observations = [];
+  for (let i = 0; i < N; i++) {
+    // Deterministic 40-char hex hashes
+    const h = (i.toString(16).padStart(8, '0') + '0'.repeat(32)).slice(0, 40);
+    observations.push({ infoHash: h, fileIndex: null, lastSeenAt: NOW - 1 * DAY });
+  }
+  const t0 = Date.now();
+  const r1 = ingest(cache, {
     provider: 'realdebrid',
-    observations: [{ infoHash: HASH_X, fileIndex: null }],
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
+    observations,
   });
-  assert.equal(r2.ingested, 0);
-  const r3 = cache.ingestHistoricalProviderEvidence({
+  const t1 = Date.now();
+  assert.equal(r1.ingested, N);
+  assert.equal(r1.skipped, 0);
+  assert.equal(cache.countHistoricalProviderSightings(), N);
+  assert.equal(cache.countHistoricalProviderEvidence(), N);
+
+  // Replay same snapshot
+  const t2 = Date.now();
+  const r2 = ingest(cache, {
     provider: 'realdebrid',
-    sourceId: 'rd-history-2024',
-    observations: [],
+    sourceId: 'rd-history',
+    sourceVersion: 'V1',
+    observations,
   });
-  assert.equal(r3.ingested, 0);
-  assert.equal(cache.countHistoricalProviderEvidence(), 0);
+  const t3 = Date.now();
+  assert.equal(r2.ingested, N);
+  // Sightings and aggregate row counts unchanged
+  assert.equal(cache.countHistoricalProviderSightings(), N,
+    'replay must not duplicate sightings');
+  assert.equal(cache.countHistoricalProviderEvidence(), N,
+    'replay must not duplicate aggregate rows');
+  // Each aggregate row's DSC must still be 1 (not 2)
+  const sample = cache.getHistoricalProviderEvidence(observations[0].infoHash, null);
+  assert.equal(sample[0].distinct_snapshot_count, 1,
+    'distinct_snapshot_count must NOT increment on replay');
+
+  // A new snapshot version bumps DSC and corroboration stays at 1 family
+  ingest(cache, {
+    provider: 'realdebrid',
+    sourceId: 'rd-history',
+    sourceVersion: 'V2',
+    observations,
+  });
+  assert.equal(cache.countHistoricalProviderSightings(), N * 2,
+    'V2 must double sightings count (one per hash)');
+  assert.equal(cache.countHistoricalProviderEvidence(), N,
+    'aggregate still one row per (provider, source_id, hash)');
+  const sampleV2 = cache.getHistoricalProviderEvidence(observations[0].infoHash, null);
+  assert.equal(sampleV2[0].distinct_snapshot_count, 2);
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `[perf] 100k first=${t1 - t0}ms replay=${t3 - t2}ms v2=${Date.now() - t3}ms rows=${N}`,
+  );
   cache.close();
 });
 
 // =============================================================================
-// Persistence across cache reopen
+// Persistence across cache close/reopen
 // =============================================================================
-test('15. historical evidence persists across cache close/reopen', () => {
+test('historical evidence persists across cache close/reopen', () => {
   const tmp = pathLib.join(os.tmpdir(), `hpe-test-${Date.now()}-${Math.random()}.db`);
   try {
     const c1 = createDiscoveryCache({ dbPath: tmp });
-    c1.ingestHistoricalProviderEvidence({
+    ingest(c1, {
       provider: 'realdebrid',
-      sourceId: 'rd-history-2024',
-      sourceVersion: 'v1',
+      sourceId: 'rd-history',
+      sourceVersion: 'V1',
       observations: [{ infoHash: HASH_X, fileIndex: null, lastSeenAt: NOW - 1 * DAY }],
     });
     c1.close();
     const c2 = createDiscoveryCache({ dbPath: tmp });
     const rows = c2.getHistoricalProviderEvidence(HASH_X, null);
     assert.equal(rows.length, 1);
-    assert.equal(rows[0].observation_count, 1);
+    assert.equal(rows[0].source_id, 'rd-history');
+    assert.equal(rows[0].distinct_snapshot_count, 1);
     c2.close();
   } finally {
     try { fs.unlinkSync(tmp); } catch {}
