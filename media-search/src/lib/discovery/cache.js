@@ -436,6 +436,51 @@ CREATE INDEX IF NOT EXISTS idx_dmm_obs_candidate
   ON dmm_source_observations(info_hash, file_index_key);
 CREATE INDEX IF NOT EXISTS idx_dmm_obs_fragment
   ON dmm_source_observations(generation_id, source, fragment_name);
+
+-- Historical provider evidence
+--
+-- Stores persistent corpus-membership signals such as:
+--   "Real-Debrid has seen/served this release before"
+-- These are PRIORS, not current observations. They do NOT imply
+--   current cache hit, current placement, current availability, or
+--   current delivery capability.
+--
+-- The (provider, source_id) axis is the identity of the *historical
+-- source* (e.g. an export file from RD, a different corpus). Multiple
+-- historical sources for the same release remain distinct rows so
+-- corroboration across independent sources is observable at query time.
+--
+-- Identity: PRIMARY KEY (info_hash, file_index_key, provider,
+--                   evidence_type, source_id, source_version)
+-- where file_index_key=-1 is the canonical release-level coordinate
+-- (matching the convention used throughout dmm_source_observations,
+-- candidates, etc.). Re-ingesting the same snapshot updates
+-- last_seen_at and bumps observation_count; it does not append
+-- duplicate rows.
+--
+-- source_version is part of the primary key only when the source
+-- itself evolves. If the caller does not track a version, pass ''.
+--
+-- metadata_json is intentionally absent. The spec allows it only if
+-- genuinely required. We do not persist URLs, filenames, or ordinals.
+CREATE TABLE IF NOT EXISTS historical_provider_evidence (
+  info_hash TEXT NOT NULL,
+  file_index_key INTEGER NOT NULL DEFAULT -1,
+  provider TEXT NOT NULL,
+  account_scope TEXT,
+  evidence_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  source_version TEXT NOT NULL DEFAULT '',
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  observation_count INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (info_hash, file_index_key, provider, evidence_type, source_id, source_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_historical_provider_evidence_candidate
+  ON historical_provider_evidence(info_hash, file_index_key);
+CREATE INDEX IF NOT EXISTS idx_historical_provider_evidence_source
+  ON historical_provider_evidence(provider, source_id, source_version);
 `;
 
 // ============================================================================
@@ -576,6 +621,62 @@ ORDER BY generation_id DESC, source, fragment_name;
 
 const COUNT_OBSERVATIONS = `
 SELECT COUNT(*) AS n FROM dmm_source_observations WHERE generation_id = ?;
+`;
+
+// ============================================================================
+// Historical provider evidence SQL
+//
+// Idempotency strategy: single INSERT ... ON CONFLICT DO UPDATE.
+//
+// The ON CONFLICT DO UPDATE path fires ONLY when a row with the same
+// (info_hash, file_index_key, provider, evidence_type, source_id,
+// source_version) already exists — which is the INSERT that just failed.
+// This means:
+//   - First ingest of a new composite identity → INSERT fires, count = delta
+//   - Re-ingest of the same identity             → UPDATE fires, count += delta
+//   - Re-ingest of a new source_id               → INSERT fires again, new row
+//
+// first_seen_at is protected by MIN() — a re-import with an earlier
+// last_seen_at never rewinds the first-sight timestamp.
+// last_seen_at uses MAX() — a re-import with an earlier timestamp is absorbed.
+// observation_count accumulates so repeated giant snapshots increase the
+// "strength" signal without duplicating rows.
+// account_scope uses COALESCE() — the first non-null scope wins.
+//
+// This is equivalent to the dmm_source_observations INSERT-OR-IGNORE + UPDATE
+// two-step pattern, but expressed as a single SQLite upsert statement.
+// ============================================================================
+const INSERT_HISTORICAL_PROVIDER_EVIDENCE = `
+INSERT INTO historical_provider_evidence
+  (info_hash, file_index_key, provider, account_scope, evidence_type,
+   source_id, source_version, first_seen_at, last_seen_at, observation_count)
+VALUES
+  (@info_hash, @file_index_key, @provider, @account_scope, @evidence_type,
+   @source_id, @source_version, @first_seen_at, @last_seen_at, @observation_count)
+ON CONFLICT(info_hash, file_index_key, provider, evidence_type, source_id, source_version)
+DO UPDATE SET
+  first_seen_at = MIN(first_seen_at, excluded.first_seen_at),
+  last_seen_at = MAX(last_seen_at, excluded.last_seen_at),
+  observation_count = observation_count + excluded.observation_count,
+  account_scope = COALESCE(account_scope, excluded.account_scope);
+`;
+
+const SELECT_HISTORICAL_PROVIDER_EVIDENCE_FOR_CANDIDATE = `
+SELECT provider, account_scope, evidence_type, source_id, source_version,
+       first_seen_at, last_seen_at, observation_count
+FROM historical_provider_evidence
+WHERE info_hash = @info_hash
+  AND file_index_key = @file_index_key
+ORDER BY provider, source_id, source_version;
+`;
+
+const COUNT_HISTORICAL_PROVIDER_EVIDENCE = `
+SELECT COUNT(*) AS n FROM historical_provider_evidence;
+`;
+
+const COUNT_HISTORICAL_PROVIDER_EVIDENCE_FOR_CANDIDATE = `
+SELECT COUNT(*) AS n FROM historical_provider_evidence
+WHERE info_hash = @info_hash AND file_index_key = @file_index_key;
 `;
 
 const INSERT_CANDIDATE = `
@@ -1210,6 +1311,11 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const selectPruneEligibleAttributesStmt = db.prepare(SELECT_PRUNE_ELIGIBLE_ATTRIBUTES);
   const selectObservationsForCandidateStmt = db.prepare(SELECT_OBSERVATIONS_FOR_CANDIDATE);
   const countObservationsStmt = db.prepare(COUNT_OBSERVATIONS);
+  // Historical provider evidence
+  const insertHistoricalProviderEvidenceStmt = db.prepare(INSERT_HISTORICAL_PROVIDER_EVIDENCE);
+  const selectHistoricalProviderEvidenceForCandidateStmt = db.prepare(SELECT_HISTORICAL_PROVIDER_EVIDENCE_FOR_CANDIDATE);
+  const countHistoricalProviderEvidenceStmt = db.prepare(COUNT_HISTORICAL_PROVIDER_EVIDENCE);
+  const countHistoricalProviderEvidenceForCandidateStmt = db.prepare(COUNT_HISTORICAL_PROVIDER_EVIDENCE_FOR_CANDIDATE);
 
 
   function fileIndexKey(fileIndex) {
@@ -1607,6 +1713,209 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     if (!generationId) return 0;
     try {
       return countObservationsStmt.get(generationId)?.n ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  // =========================================================================
+  // Historical provider evidence
+  //
+  // Bounded, idempotent batch ingest for persistent corpus-membership signals.
+  // This is intentionally DECOUPLED from current provider observations:
+  //   - Fresh RD probe results → provider_observation_events + _current
+  //   - Historical RD history  → historical_provider_evidence
+  // They have different lifecycles and feed different confidence axes.
+  // =========================================================================
+
+  /**
+   * Validate that a string is a plausible hexadecimal info hash.
+   * Accepts 40-char (SHA-1) or 64-char (SHA-256) torrent infohashes.
+   *
+   * @param {string} hash
+   * @returns {boolean}
+   */
+  function isValidInfoHash(hash) {
+    if (typeof hash !== 'string' || hash.length === 0) return false;
+    return /^[a-fA-F0-9]{40}$/.test(hash) || /^[a-fA-F0-9]{64}$/.test(hash);
+  }
+
+  /**
+   * Ingest a bounded batch of historical provider evidence.
+   *
+   * Design constraints (from spec):
+   *   - batch transaction (all-or-nothing within one call)
+   *   - idempotent UPSERT: re-importing the same evidence updates last_seen
+   *     and observation_count WITHOUT duplicating rows
+   *   - bounded memory: caller controls batch size; we do not hold all rows
+   *   - no URL persistence unless genuinely required (none required here)
+   *   - no provider API calls
+   *   - normalize infoHash (lowercase hex)
+   *   - reject malformed hashes
+   *   - fileIndex NULL handled canonically (→ file_index_key = -1)
+   *   - repeated rows within one batch do NOT amplify storage
+   *
+   * The idempotency key is:
+   *   (infoHash, fileIndexKey, provider, evidenceType, sourceId, sourceVersion)
+   *
+   * Semantics:
+   *   - INSERT OR IGNORE first: creates row if new composite identity
+   *   - UPDATE then: advances last_seen_at (as MAX) and bumps observation_count
+   *     This means the same row imported twice in one batch → observation_count += 2
+   *     but only ONE row in the DB. The same row from an identical second import
+   *     → MAX(last_seen_at, ts) + count += N (no duplication).
+   *
+   * @param {Object} opts
+   * @param {string} opts.provider         - provider name (e.g. 'realdebrid')
+   * @param {string} opts.sourceId           - identifier of the historical source
+   * @param {string} [opts.sourceVersion]    - version of the source dataset (default '')
+   * @param {Array}  opts.observations     - array of observation objects
+   * @param {number} [opts.now]             - current timestamp (default Date.now())
+   * @param {string} [opts.accountScope]    - account scope if applicable (default null)
+   * @param {string} [opts.evidenceType]   - evidence type (default 'historical_hit')
+   * @returns {{ ingested: number, skipped: number, errors: Array }}
+   */
+  function ingestHistoricalProviderEvidence({
+    provider,
+    sourceId,
+    sourceVersion = '',
+    observations = [],
+    now = Date.now(),
+    accountScope = null,
+    evidenceType = 'historical_hit',
+  } = {}) {
+    if (!provider || typeof provider !== 'string') {
+      return { ingested: 0, skipped: 0, errors: [{ message: 'provider is required' }] };
+    }
+    if (!sourceId || typeof sourceId !== 'string') {
+      return { ingested: 0, skipped: 0, errors: [{ message: 'sourceId is required' }] };
+    }
+    if (!Array.isArray(observations) || observations.length === 0) {
+      return { ingested: 0, skipped: 0, errors: [] };
+    }
+
+    const errors = [];
+    let ingested = 0;
+    let skipped = 0;
+
+    // Bounded transaction: process in one atomic unit.
+    // Uses IMMEDIATE to acquire a RESERVED lock early, reducing lock contention
+    // on long-running imports.
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const obs of observations) {
+        // Normalize infoHash: lowercase hex
+        const infoHash = typeof obs.infoHash === 'string'
+          ? obs.infoHash.toLowerCase()
+          : null;
+
+        // Reject malformed hashes
+        if (!infoHash || !isValidInfoHash(infoHash)) {
+          errors.push({
+            infoHash: obs.infoHash,
+            message: 'invalid infoHash: must be a 40 or 64 character hex string',
+          });
+          skipped++;
+          continue;
+        }
+
+        const fileIndexKey = obs.fileIndex == null ? -1 : obs.fileIndex;
+        const firstSeenAt = typeof obs.firstSeenAt === 'number' && obs.firstSeenAt > 0
+          ? obs.firstSeenAt
+          : now;
+        const lastSeenAt = typeof obs.lastSeenAt === 'number' && obs.lastSeenAt > 0
+          ? obs.lastSeenAt
+          : now;
+        const delta = typeof obs.observationCount === 'number' && obs.observationCount > 0
+          ? obs.observationCount
+          : 1;
+
+        const insertParams = {
+          info_hash: infoHash,
+          file_index_key: fileIndexKey,
+          provider,
+          account_scope: accountScope,
+          evidence_type: evidenceType,
+          source_id: sourceId,
+          source_version: sourceVersion,
+          first_seen_at: firstSeenAt,
+          last_seen_at: lastSeenAt,
+          observation_count: delta,
+        };
+
+        try {
+          // Single upsert: INSERT on new row, UPDATE on conflict. Both
+          // paths are atomic and idempotent; the first_seen/last_seen/count
+          // math is applied in SQL via MIN/MAX/+.
+          insertHistoricalProviderEvidenceStmt.run(insertParams);
+          ingested++;
+        } catch (err) {
+          errors.push({ infoHash, message: err.message });
+          skipped++;
+        }
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      try { db.exec('ROLLBACK'); } catch {}
+      errors.push({ message: `transaction failed: ${err.message}` });
+      return { ingested: 0, skipped: observations.length, errors };
+    }
+
+    return { ingested, skipped, errors };
+  }
+
+  /**
+   * Retrieve all historical provider evidence for a candidate.
+   *
+   * This is a READ-ONLY query. It returns every row across all providers,
+   * sources, and evidence types for the given (infoHash, fileIndexKey).
+   * Callers that need corroboration or source-grouped views should
+   * derive those from the returned rows.
+   *
+   * @param {string} infoHash
+   * @param {number|null} [fileIndex]
+   * @returns {Array} rows with provider, account_scope, evidence_type, source_id,
+   *                  source_version, first_seen_at, last_seen_at, observation_count
+   */
+  function getHistoricalProviderEvidence(infoHash, fileIndex = null) {
+    if (!infoHash) return [];
+    try {
+      return selectHistoricalProviderEvidenceForCandidateStmt.all({
+        info_hash: infoHash.toLowerCase(),
+        file_index_key: fileIndexKey(fileIndex),
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Count total historical provider evidence rows in the table.
+   *
+   * @returns {number}
+   */
+  function countHistoricalProviderEvidence() {
+    try {
+      return countHistoricalProviderEvidenceStmt.get()?.n ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Count historical provider evidence rows for a specific candidate.
+   *
+   * @param {string} infoHash
+   * @param {number|null} [fileIndex]
+   * @returns {number}
+   */
+  function countHistoricalProviderEvidenceForCandidate(infoHash, fileIndex = null) {
+    if (!infoHash) return 0;
+    try {
+      return countHistoricalProviderEvidenceForCandidateStmt.get({
+        info_hash: infoHash.toLowerCase(),
+        file_index_key: fileIndexKey(fileIndex),
+      })?.n ?? 0;
     } catch {
       return 0;
     }
@@ -3889,6 +4198,12 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     findPruneEligibleAttributes,
     getDmmObservationsForCandidate,
     countDmmObservations,
+    // Historical provider evidence (durable prior store, NOT current observations)
+    ingestHistoricalProviderEvidence,
+    getHistoricalProviderEvidence,
+    countHistoricalProviderEvidence,
+    countHistoricalProviderEvidenceForCandidate,
+    isValidInfoHash,
     // Identity enrichment queue
     enqueueIdentityResolution,
     getPendingEnrichments,

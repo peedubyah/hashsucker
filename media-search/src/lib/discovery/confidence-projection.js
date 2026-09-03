@@ -219,6 +219,15 @@ function classify(obs) {
     return { family: FAMILY_SOURCE_LIST, polarity: 'positive', ttlMs };
   }
   if (kind === 'PROVIDER_HISTORICAL') {
+    // A PROVIDER_HISTORICAL item MAY carry a historicalSourceId field.
+    // When it does, that source becomes its own corroboration family so
+    // that two independent historical sources (e.g. rd-history-2024 and
+    // rd-history-2023) raise corroboration without conflating them.
+    // When the field is absent, the item falls back to the generic
+    // PROVIDER family.
+    if (typeof obs.historicalSourceId === 'string' && obs.historicalSourceId.length > 0) {
+      return { family: `${FAMILY_PROVIDER}:${obs.historicalSourceId}`, polarity: 'positive', ttlMs };
+    }
     return { family: FAMILY_PROVIDER, polarity: 'positive', ttlMs };
   }
   if (kind === 'PROVIDER_FRESH_POSITIVE') {
@@ -389,6 +398,7 @@ export function projectCandidateEvidence(identity, observations, options = {}) {
   let availabilityPrior = 0;
   let dmmSeen = false;
   const dmmGenerations = new Set();
+  const providerHistoricalSources = new Set();
   for (const obs of stable) {
     const kind = obs.kind;
     if (kind === 'DMM_HISTORICAL' || kind === 'DMM_REPEATED') {
@@ -405,9 +415,19 @@ export function projectCandidateEvidence(identity, observations, options = {}) {
         dmmGenerations.add(obs.generationId);
       }
     } else if (kind === 'PROVIDER_HISTORICAL') {
-      const ageMs = Math.max(0, now - obs.observedAt);
-      const factor = decayFactor(ageMs, classify(obs).ttlMs);
-      availabilityPrior += 0.20 * factor;
+      // De-duplicate by historicalSourceId (or provider as a fallback for
+      // legacy items without a source id) so that multiple rows from the
+      // same historical source do not amplify the prior. Each unique
+      // historical source contributes +0.20 once.
+      const sourceUnit = typeof obs.historicalSourceId === 'string' && obs.historicalSourceId.length > 0
+        ? obs.historicalSourceId
+        : (obs.source ?? 'unknown');
+      if (!providerHistoricalSources.has(sourceUnit)) {
+        const ageMs = Math.max(0, now - obs.observedAt);
+        const factor = decayFactor(ageMs, classify(obs).ttlMs);
+        availabilityPrior += 0.20 * factor;
+        providerHistoricalSources.add(sourceUnit);
+      }
     }
   }
   availabilityPrior = Math.max(0, Math.min(1, availabilityPrior));
@@ -570,11 +590,27 @@ export function createConfidenceProjection(cache) {
     if (typeof cache.getProviderObservations === 'function') {
       const obs = cache.getProviderObservations(infoHash, fileIndex, {
         includeStale: true,
+        // Pass `now` so freshness is computed against the projection's
+        // pinned clock, not the real wall clock. This guarantees the
+        // projection is fully deterministic when `now` is provided.
+        now: options.now,
       });
       for (const o of obs) {
-        const state = (o.state ?? o.cached === true ? 'cached' :
-                      o.state ?? o.cached === false ? 'uncached' :
-                      o.state ?? 'unknown');
+        // Prefer the explicit state field when present. Fall back to
+        // the legacy `cached` boolean for older observation shapes.
+        // The ternary chain here intentionally avoids `??` chaining
+        // because the previous chained form had an operator-precedence
+        // bug that always returned 'cached' for any non-nullish state.
+        let state;
+        if (typeof o.state === 'string' && o.state.length > 0) {
+          state = o.state;
+        } else if (o.cached === true) {
+          state = 'cached';
+        } else if (o.cached === false) {
+          state = 'uncached';
+        } else {
+          state = 'unknown';
+        }
         const isStale = o.freshness === 'stale';
         const isFresh = o.freshness === 'fresh' || o.freshness === 'unbounded';
         if (state === 'cached' && isFresh) {
@@ -645,6 +681,31 @@ export function createConfidenceProjection(cache) {
           kind: 'MEDIA_ASSOCIATION',
           source: a.source,
           observedAt: Number(a.associated_at ?? 0),
+        });
+      }
+    }
+
+    // 6. Historical provider evidence (durable prior store, NOT current).
+    //
+    // This is the integration point for cache.getHistoricalProviderEvidence.
+    // Each row in the store represents a durable corpus-membership signal
+    // such as "Real-Debrid has seen/served this release before". These are
+    // PRIORS — they do NOT imply current cache hit, current placement, or
+    // current availability. Fresh provider observations (section 3) still
+    // outrank these for current-period availability.
+    //
+    // We emit one PROVIDER_HISTORICAL item per row. The historicalSourceId
+    // is set to (provider, source_id) so that two independent historical
+    // sources become two distinct corroboration families (see classify()).
+    if (typeof cache.getHistoricalProviderEvidence === 'function') {
+      const hist = cache.getHistoricalProviderEvidence(infoHash, fileIndex);
+      for (const h of hist) {
+        out.push({
+          kind: 'PROVIDER_HISTORICAL',
+          source: h.provider,
+          historicalSourceId: `${h.provider}:${h.source_id}:${h.source_version ?? ''}`,
+          observedAt: Number(h.last_seen_at ?? h.first_seen_at ?? 0),
+          observationCount: Number(h.observation_count ?? 1),
         });
       }
     }
