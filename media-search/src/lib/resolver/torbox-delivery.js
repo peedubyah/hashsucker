@@ -194,6 +194,27 @@ export async function ensureTorBoxDelivery({
 
   // Step 4: Find or establish the exact provider-file mapping.
   let mapping = controlPlaneStore.findFileMapping(releaseKey, placement.id);
+  // Defect E02 repair: findFileMapping keys on (releaseKey, placementId).
+  // For multi-file torrents the releaseKey is torrent-level, so an existing
+  // mapping may have been established for a different file in the same
+  // torrent (e.g. an earlier episode's handoff). The mapping's
+  // evidence.candidateFilename records the file the mapping was actually
+  // established against. If the current handoff's filename does not match,
+  // the existing mapping is for a sibling file in the same torrent, not for
+  // the exact backing the VFS byte path needs to address. Treat the stale
+  // mapping as absent so Step 4 re-establishes against the handoff's exact
+  // filename. This is the single seam that controls which
+  // (placement, providerFile) the rest of the delivery path — including the
+  // terminal-evidence write — binds to.
+  if (mapping && filename) {
+    const mappingFilename = mapping.evidence?.candidateFilename ?? null;
+    if (mappingFilename) {
+      const requestedName = path.posix.basename(String(filename).replaceAll('\\', '/'));
+      if (mappingFilename !== requestedName) {
+        mapping = null;
+      }
+    }
+  }
   if (!mapping) {
     if (!torBoxInventoryProvider) {
       throw new TorBoxDeliveryError(
