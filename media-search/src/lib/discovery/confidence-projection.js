@@ -738,7 +738,131 @@ export function createConfidenceProjection(cache) {
     return projectCandidateEvidence(identity, observations, options);
   }
 
-  return { project, collectObservations, projectCandidateEvidence };
+  return {
+    project,
+    collectObservations,
+    projectCandidateEvidence,
+    historicalAvailabilityPriorContribution: historicalAvailabilityPriorContributionStandalone,
+    computeHistoricalAvailabilityPrior: (cache, infoHash, fileIndex = null, options = {}) => {
+      if (!cache || typeof cache.getHistoricalProviderEvidence !== 'function') {
+        return 0;
+      }
+      try {
+        const projection = project(infoHash, fileIndex, { now: options.now });
+        return historicalAvailabilityPriorContributionStandalone(projection, options);
+      } catch {
+        // Never let historical evidence computation break ranking.
+        return 0;
+      }
+    },
+  };
+}
+
+/**
+ * Compute the bounded historical-availability-prior contribution to fold
+ * into a candidate's `providerAvailability` ranking component.
+ *
+ * This is the RANKING INTEGRATION SEAM. It translates the evidence
+ * projection into a single [0, 1] value that respects the core rule:
+ *
+ *   Fresh authoritative provider evidence outranks historical prior.
+ *
+ * Precedence (applied in order; first match wins):
+ *
+ *   1. freshProvider === 'positive'  → 0 (fresh positive dominates;
+ *                                          availability already ≥ 0.8)
+ *   2. freshProvider === 'negative'  → 0 (fresh negative suppresses
+ *                                          historical optimism)
+ *   3. freshProvider === 'stale'     → 0 (stale alone cannot claim
+ *                                          availability)
+ *   4. freshProvider === null        → bounded prior from projection
+ *                                          (no fresh evidence; history
+ *                                          may modestly influence)
+ *
+ * The bounded prior is computed as:
+ *
+ *   prior = min(availabilityPrior, MAX_HISTORICAL_PRIOR)
+ *
+ * where MAX_HISTORICAL_PRIOR is a fixed cap (default 0.4) so that no
+ * single historical signal can overpower quality/media-match/identity.
+ *
+ * Repeated snapshots from ONE source do not amplify — the projection's
+ * corroboration count (distinct families) is what raises the prior, and
+ * the cap bounds it.
+ *
+ * @param {Object} projection — result of projectCandidateEvidence()
+ * @param {Object} [options]
+ * @param {number} [options.maxPrior=0.4] — hard cap on historical prior
+ * @param {number} [options.corroborationBonus=0.05] — per additional
+ *   corroboration family beyond the first, capped at maxPrior
+ * @returns {number} bounded contribution in [0, 1]
+ */
+export function historicalAvailabilityPriorContribution(projection, options = {}) {
+  return historicalAvailabilityPriorContributionStandalone(projection, options);
+}
+
+// Internal implementation (shared between factory and standalone export)
+function historicalAvailabilityPriorContributionStandalone(projection, options = {}) {
+  if (!projection || typeof projection !== 'object') return 0;
+  const { maxPrior = 0.4, corroborationBonus = 0.05 } = options;
+  const freshProvider = projection.freshProvider;
+
+  // Fresh authoritative evidence outranks historical prior.
+  // freshProvider === 'positive' → fresh positive dominates.
+  // freshProvider === 'negative' → fresh negative suppresses historical optimism.
+  // freshProvider === 'stale' → stale alone cannot claim availability.
+  if (freshProvider === 'positive' || freshProvider === 'negative' || freshProvider === 'stale') {
+    return 0;
+  }
+
+  // freshProvider === null: no fresh evidence. Historical prior may
+  // modestly influence ranking, but is capped so it cannot overpower
+  // quality/media-match/identity.
+  const base = Math.max(0, Math.min(1, projection.availabilityPrior || 0));
+
+  // Corroboration bonus: each additional corroboration family beyond
+  // the first adds a small bounded amount. This rewards independent
+  // sources without allowing any single source to dominate.
+  const corroboration = projection.corroboration || 0;
+  const bonus = corroboration > 1
+    ? Math.min((corroboration - 1) * corroborationBonus, maxPrior)
+    : 0;
+
+  return Math.max(0, Math.min(maxPrior, base + bonus));
+}
+
+/**
+ * Compute the bounded historical-availability-prior contribution for a
+ * candidate identity directly from a cache instance.
+ *
+ * Convenience wrapper around project() + historicalAvailabilityPriorContribution().
+ * This is the function the ranking pipeline calls.
+ *
+ * @param {Object} cache — discovery cache instance (must expose getHistoricalProviderEvidence)
+ * @param {string} infoHash
+ * @param {number|null} [fileIndex]
+ * @param {Object} [options]
+ * @param {number} [options.now] — pinned clock
+ * @param {number} [options.maxPrior=0.4]
+ * @param {number} [options.corroborationBonus=0.05]
+ * @returns {number} bounded contribution in [0, 1]
+ */
+export function computeHistoricalAvailabilityPrior(cache, infoHash, fileIndex = null, options = {}) {
+  if (!cache || typeof cache.getHistoricalProviderEvidence !== 'function') {
+    return 0;
+  }
+  try {
+    // Build a minimal projection context. We need the factory's project()
+    // to collect observations, but we can call it via a temporary factory
+    // or directly. Since projectCandidateEvidence is standalone, we
+    // collect observations via the factory and project them.
+    const factory = createConfidenceProjection(cache);
+    const projection = factory.project(infoHash, fileIndex, { now: options.now });
+    return historicalAvailabilityPriorContributionStandalone(projection, options);
+  } catch {
+    // Never let historical evidence computation break ranking.
+    return 0;
+  }
 }
 
 export default projectCandidateEvidence;

@@ -614,5 +614,9 @@ export function toRankingInput(candidate) {
     sources: candidate.sources || [],
     selectedMediaId: candidate.selectedMediaId || null,
     provenance: candidate.provenance || null,
+    // Historical availability prior: bounded contribution from historical
+    // provider evidence. Folded into providerAvailability by rankHit()
+    // only when fresh evidence is absent. Defaults to 0 (no influence).
+    historicalPrior: candidate.historicalPrior || 0,
   };
 }

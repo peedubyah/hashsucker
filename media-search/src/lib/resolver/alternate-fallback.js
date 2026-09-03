@@ -413,6 +413,41 @@ export function createAlternateFallback(dependencies = {}) {
   }
 
   /**
+   * Determine provider attempt order for a candidate based on historical
+   * provider priors.
+   *
+   * This is the PROVIDER-ORDERING INTEGRATION SEAM. It uses historical
+   * evidence to decide which provider to try FIRST when both could
+   * plausibly fulfill the candidate. It does NOT:
+   *   - Skip a provider that should still be attempted
+   *   - Convert historical evidence into current availability
+   *   - Create provider state
+   *   - Mutate control-plane state
+   *
+   * Rules:
+   *   - No evidence for either → preserve default order (TorBox first)
+   *   - History for A only → A may be tried first
+   *   - History for both → stronger bounded projection chooses first
+   *   - History for A + fresh negative for A → A should NOT be preferred
+   *
+   * @param {Object} historicalProviderPrior — { torbox: number, realdebrid: number }
+   *   bounded priors in [0, 1]. Missing/unknown = 0.
+   * @returns {Array<'torbox'|'realdebrid'>} provider attempt order
+   */
+  function determineProviderAttemptOrder(historicalProviderPrior = {}) {
+    const torboxPrior = historicalProviderPrior?.torbox || 0;
+    const rdPrior = historicalProviderPrior?.realdebrid || 0;
+
+    // If RD has a strictly higher historical prior, try RD first.
+    // Otherwise, preserve default order (TorBox first).
+    // This is a TRY-ORDER change only — both providers are still attempted.
+    if (rdPrior > torboxPrior) {
+      return ['realdebrid', 'torbox'];
+    }
+    return ['torbox', 'realdebrid'];
+  }
+
+  /**
    * Find the first usable alternate candidate.
    *
    * Selection rule (milestone contract):
@@ -420,14 +455,27 @@ export function createAlternateFallback(dependencies = {}) {
    *   - TorBox UNCACHED/UNKNOWN + RD usable → return usable via RD
    *   - Both fail → continue to next candidate
    *
+   * Provider attempt order may be influenced by historical evidence via
+   * `historicalProviderPrior`. This only affects which provider is tried
+   * first — both are still attempted, and eligibility/fulfillment are
+   * unchanged.
+   *
    * @param {Object} params
    * @param {string} params.mediaId - Media identifier
    * @param {string} params.primaryReleaseKey - Release key of the primary candidate
    * @param {Object} params.expectedScope - Expected media scope
    * @param {Set<string>} [params.additionalAttemptedKeys] - Other attempted keys
+   * @param {Object} [params.historicalProviderPrior] - Historical provider priors
+   *   { torbox: number, realdebrid: number }. Affects TRY ORDER only.
    * @returns {Promise<Object|null>} First usable alternate or null
    */
-  async function findUsableAlternate({ mediaId, primaryReleaseKey, expectedScope, additionalAttemptedKeys = new Set() }) {
+  async function findUsableAlternate({
+    mediaId,
+    primaryReleaseKey,
+    expectedScope,
+    additionalAttemptedKeys = new Set(),
+    historicalProviderPrior = {},
+  }) {
     // Scope the persisted-results load to the same episode the caller is
     // resolving. expectedScope is the source of truth: when it carries
     // season/episode, only that episode's request is relevant.
@@ -443,36 +491,50 @@ export function createAlternateFallback(dependencies = {}) {
       attemptedReleaseKeys,
     });
 
+    // Determine provider attempt order based on historical evidence.
+    // Default is TorBox-first; historical priors may reorder.
+    const attemptOrder = determineProviderAttemptOrder(historicalProviderPrior);
+
     for (const candidate of candidates) {
-      // Revalidate TorBox availability first.
-      const revalidation = await revalidator.revalidateAvailability({
-        cache: searchCache,
-        infoHash: candidate.info_hash,
-        mediaId: candidate.media_id || '',
-        releaseKey: candidate.releaseKey,
-        provider: 'torbox',
-      });
+      // Try providers in the determined order. The first usable provider wins.
+      // Both providers are still attempted if the first fails.
+      for (const provider of attemptOrder) {
+        if (provider === 'torbox') {
+          // Revalidate TorBox availability.
+          const revalidation = await revalidator.revalidateAvailability({
+            cache: searchCache,
+            infoHash: candidate.info_hash,
+            mediaId: candidate.media_id || '',
+            releaseKey: candidate.releaseKey,
+            provider: 'torbox',
+          });
 
-      // TorBox confirms cached → use it without any RD calls.
-      if (revalidation.cacheState === REVALIDATION_OUTCOME.CACHED) {
-        return {
-          candidate,
-          revalidation,
-          rdResolution: null,
-        };
+          // TorBox confirms cached → use it without any RD calls.
+          if (revalidation.cacheState === REVALIDATION_OUTCOME.CACHED) {
+            return {
+              candidate,
+              revalidation,
+              rdResolution: null,
+              providerOrder: attemptOrder,
+            };
+          }
+          // TorBox unavailable → continue to next provider in order.
+        } else if (provider === 'realdebrid') {
+          // Attempt bounded RD resolution.
+          const rdResolution = await attemptRdResolutionFromAlternate(candidate);
+          if (rdResolution && rdResolution.usable) {
+            return {
+              candidate,
+              revalidation: null,
+              rdResolution,
+              providerOrder: attemptOrder,
+            };
+          }
+          // RD unavailable → continue to next provider in order.
+        }
       }
 
-      // TorBox unavailable — attempt bounded RD resolution only when needed.
-      const rdResolution = await attemptRdResolutionFromAlternate(candidate);
-      if (rdResolution && rdResolution.usable) {
-        return {
-          candidate,
-          revalidation,
-          rdResolution,
-        };
-      }
-
-      // Both TorBox and RD unavailable → continue to next candidate.
+      // Both providers unavailable → continue to next candidate.
     }
 
     return null;
@@ -618,6 +680,7 @@ export function createAlternateFallback(dependencies = {}) {
     buildReleaseKey,
     filterCandidates,
     checkCandidateAvailability,
+    determineProviderAttemptOrder,
     findUsableAlternate,
     buildFallbackTelemetry,
     attemptRdResolutionFromAlternate,

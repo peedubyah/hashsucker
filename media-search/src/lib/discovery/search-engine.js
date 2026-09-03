@@ -41,6 +41,7 @@ import { createReleaseIdentity, createReleaseKey } from '../../api/release-contr
 import { emit, EVENTS } from '../../lib/trace/events.js';
 import { inc, recordScore, recordTopNCacheState } from '../../lib/metrics.js';
 import { rankHits, countIdentityEligibility, aggregateIdentityTiers, shadowRankComparison, rankHitsTiered, diagnoseTopCandidates, evaluateIdentityEligibility } from './ranking.js';
+import { computeHistoricalAvailabilityPrior } from './confidence-projection.js';
 import { isEpisodeCovered } from './episode-coverage.js';
 import { evaluateEligibility } from './rejection.js';
 import { RejectionReason, RejectionTracker, createRejection, describeRejection } from './rejection-tracker.js';
@@ -876,8 +877,18 @@ export async function combinedSearch(cache, options = {}) {
     // Source origin does NOT determine desirability — evidence does.
     // Apply identity tier as primary precedence signal.
     timing.start('candidate.ranking');
-    const rankingInputs = eligibleCandidates.map(toRankingInput);
-    const { ranked, tierMeta } = rankHitsTiered(rankingInputs, queryIntent, mediaId);
+    // Compute historical availability priors for each candidate and attach
+    // them to the ranking input. The prior is a bounded contribution that
+    // is folded into providerAvailability ONLY when fresh evidence is absent.
+    const rankingInputsWithPrior = eligibleCandidates.map(candidate => {
+      const prior = computeHistoricalAvailabilityPrior(
+        cache,
+        candidate.hash,
+        candidate.fileIndex ?? null,
+      );
+      return toRankingInput({ ...candidate, historicalPrior: prior });
+    });
+    const { ranked, tierMeta } = rankHitsTiered(rankingInputsWithPrior, queryIntent, mediaId);
     pipelineDebug.rankedCandidates = ranked.length;
     pipelineDebug.afterRanking = ranked.length;
     pipelineDebug.tieredRanking = tierMeta;
@@ -1185,7 +1196,14 @@ export async function searchTrace(cache, options = {}) {
 
     // Rank
     timing.start('candidate.ranking');
-    const rankingInputs = eligibleCandidates.map(toRankingInput);
+    const rankingInputs = eligibleCandidates.map(candidate => {
+      const prior = computeHistoricalAvailabilityPrior(
+        cache,
+        candidate.hash,
+        candidate.fileIndex ?? null,
+      );
+      return toRankingInput({ ...candidate, historicalPrior: prior });
+    });
     const ranked = rankHits(rankingInputs, queryIntent, mediaId);
     const topRanked = ranked.slice(0, limit);
     const rankingComposition = {

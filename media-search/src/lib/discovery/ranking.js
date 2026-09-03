@@ -1366,6 +1366,7 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     selectedMediaId = null,
     hasLiveDiscovery = false,
     liveProviderHints = null,
+    historicalPrior = 0,
   } = hit;
 
   // Compute component scores using semantic confidence functions.
@@ -1386,11 +1387,30 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
 
   // Provider availability: observations for corpus, live discovery for live
   // A live provider returning a candidate IS availability evidence
-  const providerAvailability = providerAvailabilityFromLive(
+  const freshProviderAvailability = providerAvailabilityFromLive(
     providerObservations,
     hasLiveDiscovery,
     liveProviderHints
   );
+
+  // Historical availability prior: a bounded contribution from historical
+  // provider evidence that is folded into the `providerAvailability`
+  // component ONLY when fresh evidence is absent. This keeps the existing
+  // weight structure intact (no new weight added) while allowing history
+  // to modestly influence ranking of otherwise-close candidates.
+  //
+  // Precedence:
+  //   - fresh positive → historical prior = 0 (fresh dominates)
+  //   - fresh negative → historical prior = 0 (fresh suppresses optimism)
+  //   - no fresh evidence → historical prior ∈ [0, maxPrior] (bounded)
+  //
+  // The historical prior is added to fresh availability, then clamped to
+  // [0, 1]. Since fresh availability is already ≥ 0.8 for fresh cached,
+  // adding a bounded prior cannot push it over 1.0 in practice — the
+  // clamp is a safety net.
+  const effectiveProviderAvailability = Math.max(0, Math.min(1,
+    freshProviderAvailability + (historicalPrior || 0)
+  ));
 
   const episodeMatch = episodeMatchScore(releaseAttributes, queryIntent);
 
@@ -1402,7 +1422,7 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     quality: quality * WEIGHTS.quality,
     releaseConfidence: releaseConfidence * WEIGHTS.releaseConfidence,
     identityConfidence: identityConfidence * WEIGHTS.identityConfidence,
-    providerAvailability: providerAvailability * WEIGHTS.providerAvailability,
+    providerAvailability: effectiveProviderAvailability * WEIGHTS.providerAvailability,
     episodeMatch: episodeMatch * WEIGHTS.episodeMatch,
   };
 
@@ -1420,17 +1440,21 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
   // Ranking justification — flight recorder for explainability.
   // Does NOT change the score. Exposes the breakdown so operators can
   // understand why a candidate won or lost.
+  // Exposes the historical prior in the justification so operators can
+  // answer "Candidate received +X because RD had historical evidence".
   const justification = Object.freeze({
     candidate: { hash, fileIndex, releaseKey: hit.releaseKey || `${hash}:${fileIndex ?? 'torrent'}`, filename },
     finalScore: roundedScore,
     scoreBreakdown: Object.freeze({
-      cacheScore: Math.round(providerAvailability * 1000) / 1000,
+      cacheScore: Math.round(effectiveProviderAvailability * 1000) / 1000,
       qualityScore: Math.round(quality * 1000) / 1000,
       sourceScore: Math.round(releaseConfidence * 1000) / 1000,
       metadataScore: Math.round(identityConfidence * 1000) / 1000,
       popularityScore: Math.round(effectiveRelevance * 1000) / 1000,
     }),
     weights: Object.freeze({ ...WEIGHTS }),
+    historicalPrior: Math.round((historicalPrior || 0) * 1000) / 1000,
+    freshProviderAvailability: Math.round(freshProviderAvailability * 1000) / 1000,
   });
 
   return {
@@ -1444,7 +1468,7 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
       quality: Math.round(quality * 1000) / 1000,
       releaseConfidence: Math.round(releaseConfidence * 1000) / 1000,
       identityConfidence: Math.round(identityConfidence * 1000) / 1000,
-      providerAvailability: Math.round(providerAvailability * 1000) / 1000,
+      providerAvailability: Math.round(effectiveProviderAvailability * 1000) / 1000,
       episodeMatch: Math.round(episodeMatch * 1000) / 1000,
     },
     contributions,
