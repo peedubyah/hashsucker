@@ -24,7 +24,7 @@ const DEFAULT_SOURCE = 'unknown';
  * @param {Array<Object>[options.providerObservations] - Optional provider observations
  * @returns {{ inserted: number, updated: number, associated: number }} Counts
  */
-export function ingestCandidates(cache, { source = DEFAULT_SOURCE, entries = [], providerObservations = [] } = {}) {
+export function ingestCandidates(cache, { source = DEFAULT_SOURCE, entries = [], providerObservations = [], generationId = null, fragmentName = null } = {}) {
   let inserted = 0;
   let updated = 0;
   let associated = 0;
@@ -44,6 +44,20 @@ export function ingestCandidates(cache, { source = DEFAULT_SOURCE, entries = [],
       ...observation,
       kind: observation.kind ?? 'authoritative',
       source: observation.source ?? source,
+    });
+  }
+
+  // DMM source provenance: record (candidate, source, fragment, generation)
+  // observations. Idempotent — re-processing the same fragment in the same
+  // generation does not amplify rows. Safe to call without generationId or
+  // fragmentName (no-op) so existing callers that don't supply provenance
+  // remain unchanged.
+  if (generationId && fragmentName && cache.recordDmmSourceObservations) {
+    cache.recordDmmSourceObservations({
+      source,
+      fragmentName,
+      generationId,
+      entries,
     });
   }
 

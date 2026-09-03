@@ -249,7 +249,19 @@ async function main() {
     pinnedTreeSha = resolvedTreeSha;
     console.log(`Pinned tree SHA for run ${runId}: ${resolvedTreeSha}`);
   }
-
+  // DMM source provenance: start (or resume) the generation record. The
+  // generation_id IS the tree_sha. The generation is closed at the end of
+  // main() with status='complete' (zero failed fragments) or
+  // 'incomplete' (any failures). Only 'complete' generations are consulted
+  // for stale detection, so a rebuild that retries or partially completes
+  // cannot mark earlier generations stale.
+  if (cache.startDmmGeneration) {
+    cache.startDmmGeneration({
+      generationId: resolvedTreeSha,
+      source: 'dmm-hashlist',
+      treeSha: resolvedTreeSha,
+    });
+  }
   // Validate pinned SHA matches expected
   if (pinnedTreeSha !== 'fda7edc62d85d1021492d2767cd5af9080fc922f') {
     console.error(`WARNING: Pinned tree SHA ${pinnedTreeSha} does not match expected fda7edc62d85d1021492d2767cd5af9080fc922f`);
@@ -316,10 +328,17 @@ async function main() {
    * 2. In-memory deduplication by infoHash (avoids redundant DB writes)
    * 3. Skip-existing: checks DB for equivalent candidate before writing
    *
+   * Also records dmm_source_observations for every entry that survives the
+   * dedup + skip-existing filters. Observations are co-atomic with the
+   * candidate upsert because both happen in the same transaction.
+   *
    * @param {Array<Object>} entries - Candidate entries to ingest
+   * @param {Object} [opts] - provenance threading
+   * @param {string} [opts.fragmentName]
+   * @param {string} [opts.generationId]
    * @returns {{ inserted: number, updated: number, skipped: number }}
    */
-  function bulkUpsertCandidates(entries) {
+  function bulkUpsertCandidates(entries, { fragmentName, generationId } = {}) {
     const now = Date.now();
     let inserted = 0;
     let updated = 0;
@@ -327,6 +346,7 @@ async function main() {
 
     cache.db.exec('BEGIN');
     try {
+      const observedEntries = [];
       for (const entry of entries) {
         // In-memory dedup: skip if we've already seen this infoHash in this batch
         if (seenInfoHashes.has(entry.infoHash)) {
@@ -345,10 +365,14 @@ async function main() {
           // Skip-existing: check if the existing candidate has equivalent key data
           const sameTitle = (existing.title || null) === (entry.title || null);
           const sameFilename = (existing.filename || null) === (entry.filename || null);
-          const sameSize = (existing.size || null) === (entry.size || null);
+          const sameSize = (existing.size || null) === (entry.size ?? null);
 
           if (sameTitle && sameFilename && sameSize) {
             skipped++;
+            // Still record the observation: the candidate may exist from a
+            // prior run, but this fragment + generation is a fresh witness.
+            // idempotent via INSERT OR IGNORE on the composite key.
+            if (generationId && fragmentName) observedEntries.push(entry);
             continue;
           }
         }
@@ -372,12 +396,26 @@ async function main() {
           last_seen: entry.lastSeen ?? now,
         });
 
+        if (generationId && fragmentName) observedEntries.push(entry);
+
         if (existing) {
           updated++;
         } else {
           inserted++;
         }
       }
+
+      // Record observations in the same transaction.
+      if (generationId && fragmentName && cache.recordDmmSourceObservations && observedEntries.length > 0) {
+        cache.recordDmmSourceObservations({
+          source: 'dmm-hashlist',
+          fragmentName,
+          generationId,
+          entries: observedEntries,
+          now,
+        });
+      }
+
       cache.db.exec('COMMIT');
     } catch (error) {
       cache.db.exec('ROLLBACK');
@@ -427,7 +465,10 @@ async function main() {
       // Ingest entries using optimized bulk path
       let result = { inserted: 0, updated: 0, skipped: 0 };
       if (entries.length > 0) {
-        result = bulkUpsertCandidates(entries);
+        result = bulkUpsertCandidates(entries, {
+          fragmentName: frag.fragment_name,
+          generationId: resolvedTreeSha,
+        });
         invocationAccepted += result.inserted + result.updated;
       }
 
@@ -515,6 +556,24 @@ async function main() {
     status,
     runId
   );
+
+  // DMM source provenance: close the generation. Run-completion status
+  // (status) is the source of truth here — it already accounts for failed
+  // fragments. The generation record mirrors the run status so the two
+  // stay in agreement. An interrupted rebuild leaves the generation as
+  // 'incomplete' (the script's main() catch path below also handles
+  // hard failures).
+  if (cache.completeDmmGeneration) {
+    cache.completeDmmGeneration(
+      resolvedTreeSha,
+      status, // 'complete' | 'incomplete' | 'running' (mirrors run status)
+      {
+        fragmentsTotal: counts.total,
+        fragmentsComplete: counts.complete,
+        fragmentsFailed: counts.failed,
+      }
+    );
+  }
 
   // Report cumulative progress
   console.log('\n=== REBUILD PROGRESS ===');

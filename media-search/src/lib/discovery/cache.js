@@ -381,6 +381,201 @@ CREATE TRIGGER IF NOT EXISTS release_attributes_au AFTER UPDATE ON release_attri
   INSERT INTO release_search(rowid, title, filename, resolution, source_type, codec, audio, release_group, language, media_type)
   VALUES (new.rowid, new.title, new.filename, new.resolution, new.source_type, new.codec, new.audio, new.release_group, new.language, new.media_type);
 END;
+
+-- ============================================================================
+-- DMM source provenance (lifecycle, refresh generations, stale detection)
+-- ============================================================================
+-- Authoritative refresh-generation record for a DMM tree. A row is INSERTed
+-- at the start of every in-tree ingest (and by the rebuild script) and only
+-- moves to status='complete' when the source has been fully observed. A
+-- generation that is interrupted, still running, or has unresolved failures
+-- stays in 'running' or 'incomplete' and is NEVER consulted for stale
+-- detection, so a crashed refresh cannot make the previous generation look
+-- stale.
+--
+-- Identity here is additive metadata only. It does not change candidate,
+-- release, or attribute identity. file_index_key = -1 remains the
+-- torrent-level identity for DMM data; per-file records would carry 0,1,...
+CREATE TABLE IF NOT EXISTS dmm_ingestion_generations (
+  generation_id TEXT PRIMARY KEY,
+  source TEXT NOT NULL DEFAULT 'dmm-hashlist',
+  tree_sha TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  completed_at INTEGER,
+  fragments_total INTEGER NOT NULL DEFAULT 0,
+  fragments_complete INTEGER NOT NULL DEFAULT 0,
+  fragments_failed INTEGER NOT NULL DEFAULT 0,
+  records_seen INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL CHECK (status IN ('running','complete','incomplete','failed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dmm_generations_status
+  ON dmm_ingestion_generations(status, started_at DESC);
+
+-- Many-to-many membership: which source observation justifies which candidate
+-- identity, in which generation. One row per (candidate identity, source,
+-- fragment, generation). Re-ingesting the same fragment/generation is a no-op
+-- via INSERT OR IGNORE on the deterministic primary key. Multiple fragments
+-- and multiple generations may each contribute observations for the same
+-- candidate without mutating the candidate row.
+CREATE TABLE IF NOT EXISTS dmm_source_observations (
+  info_hash TEXT NOT NULL,
+  file_index_key INTEGER NOT NULL DEFAULT -1,
+  source TEXT NOT NULL,
+  fragment_name TEXT NOT NULL,
+  generation_id TEXT NOT NULL,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  records_seen INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (info_hash, file_index_key, source, fragment_name, generation_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dmm_obs_generation
+  ON dmm_source_observations(generation_id, source);
+CREATE INDEX IF NOT EXISTS idx_dmm_obs_candidate
+  ON dmm_source_observations(info_hash, file_index_key);
+CREATE INDEX IF NOT EXISTS idx_dmm_obs_fragment
+  ON dmm_source_observations(generation_id, source, fragment_name);
+`;
+
+// ============================================================================
+// DMM source provenance SQL
+// ============================================================================
+
+const INSERT_GENERATION = `
+INSERT INTO dmm_ingestion_generations
+  (generation_id, source, tree_sha, started_at, status)
+VALUES (@generation_id, @source, @tree_sha, @started_at, 'running')
+ON CONFLICT(generation_id) DO UPDATE SET
+  started_at = MIN(dmm_ingestion_generations.started_at, excluded.started_at);
+`;
+
+const UPDATE_GENERATION_PROGRESS = `
+UPDATE dmm_ingestion_generations SET
+  fragments_total = @fragments_total,
+  fragments_complete = @fragments_complete,
+  fragments_failed = @fragments_failed,
+  records_seen = records_seen + @records_seen_delta
+WHERE generation_id = @generation_id;
+`;
+
+const COMPLETE_GENERATION = `
+UPDATE dmm_ingestion_generations SET
+  completed_at = @completed_at,
+  fragments_total = @fragments_total,
+  fragments_complete = @fragments_complete,
+  fragments_failed = @fragments_failed,
+  status = @status
+WHERE generation_id = @generation_id;
+`;
+
+const GET_GENERATION = `
+SELECT * FROM dmm_ingestion_generations WHERE generation_id = ?;
+`;
+
+const GET_CURRENT_COMPLETE_GENERATION = `
+SELECT * FROM dmm_ingestion_generations
+WHERE source = ? AND status = 'complete'
+ORDER BY completed_at DESC, rowid DESC
+LIMIT 1;
+`;
+
+const INSERT_SOURCE_OBSERVATION = `
+INSERT OR IGNORE INTO dmm_source_observations
+  (info_hash, file_index_key, source, fragment_name, generation_id,
+   first_seen_at, last_seen_at, records_seen)
+VALUES
+  (@info_hash, @file_index_key, @source, @fragment_name, @generation_id,
+   @first_seen_at, @last_seen_at, @records_seen);
+`;
+
+// Touch the last_seen_at of an existing observation row so repeated
+// observation of the same fragment/generation is monotonically timestamped
+// without amplifying rows. Does not touch first_seen_at.
+const TOUCH_SOURCE_OBSERVATION = `
+UPDATE dmm_source_observations SET
+  last_seen_at = MAX(last_seen_at, @last_seen_at),
+  records_seen = records_seen + @records_seen_delta
+WHERE info_hash = @info_hash
+  AND file_index_key = @file_index_key
+  AND source = @source
+  AND fragment_name = @fragment_name
+  AND generation_id = @generation_id;
+`;
+
+// Stale detection: observations present in the previous generation but
+// missing from the given generation. Drives the "fragment disappeared" and
+// "fragment no longer contains this candidate" analyses.
+const SELECT_STALE_OBSERVATIONS = `
+SELECT info_hash, file_index_key, source, fragment_name, generation_id
+FROM dmm_source_observations
+WHERE generation_id = @prev_generation
+  AND (info_hash, file_index_key, source, fragment_name) NOT IN (
+    SELECT info_hash, file_index_key, source, fragment_name
+    FROM dmm_source_observations
+    WHERE generation_id = @current_generation
+  )
+ORDER BY info_hash, file_index_key, source, fragment_name;
+`;
+
+// Stale fragments: fragment names that appeared in the previous generation
+// but are entirely absent from the current generation (whether or not
+// individual candidates carried them).
+const SELECT_STALE_FRAGMENTS = `
+SELECT DISTINCT source, fragment_name
+FROM dmm_source_observations
+WHERE generation_id = @prev_generation
+  AND (source, fragment_name) NOT IN (
+    SELECT DISTINCT source, fragment_name
+    FROM dmm_source_observations
+    WHERE generation_id = @current_generation
+  )
+ORDER BY source, fragment_name;
+`;
+
+// Candidate identities that have ZERO active source observations in the
+// given generation. These are prune-eligible ONLY when the generation is
+// 'complete' (otherwise interrupted refreshes would silently mark live
+// candidates as stale).
+const SELECT_PRUNE_ELIGIBLE_CANDIDATES = `
+SELECT c.info_hash, c.file_index_key
+FROM candidates c
+WHERE NOT EXISTS (
+  SELECT 1 FROM dmm_source_observations o
+  WHERE o.info_hash = c.info_hash
+    AND o.file_index_key = c.file_index_key
+    AND o.generation_id = @current_generation
+);
+`;
+
+// Same shape for release_attributes: attributes without any source
+// observation justifying them in the current generation.
+const SELECT_PRUNE_ELIGIBLE_ATTRIBUTES = `
+SELECT ra.info_hash, ra.file_index_key, ra.source
+FROM release_attributes ra
+WHERE NOT EXISTS (
+  SELECT 1 FROM dmm_source_observations o
+  WHERE o.info_hash = ra.info_hash
+    AND o.file_index_key = ra.file_index_key
+    AND o.generation_id = @current_generation
+);
+`;
+
+// Source-observation membership for a specific candidate. Used by
+// justification-aware pruning: a candidate is globally stale only when it
+// has zero observations in the current generation; the many-to-many design
+// means a candidate can be justified by multiple fragments/generations.
+const SELECT_OBSERVATIONS_FOR_CANDIDATE = `
+SELECT source, fragment_name, generation_id,
+       first_seen_at, last_seen_at, records_seen
+FROM dmm_source_observations
+WHERE info_hash = @info_hash
+  AND file_index_key = @file_index_key
+ORDER BY generation_id DESC, source, fragment_name;
+`;
+
+const COUNT_OBSERVATIONS = `
+SELECT COUNT(*) AS n FROM dmm_source_observations WHERE generation_id = ?;
 `;
 
 const INSERT_CANDIDATE = `
@@ -1002,6 +1197,19 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const getReleaseAttributesStmt = db.prepare(GET_RELEASE_ATTRIBUTES);
   const getReleaseAttributesBySourceStmt = db.prepare(GET_RELEASE_ATTRIBUTES_BY_SOURCE);
   const getCandidatesWithoutAttributesStmt = db.prepare(GET_CANDIDATES_WITHOUT_ATTRIBUTES);
+  const insertGenerationStmt = db.prepare(INSERT_GENERATION);
+  const updateGenerationProgressStmt = db.prepare(UPDATE_GENERATION_PROGRESS);
+  const completeGenerationStmt = db.prepare(COMPLETE_GENERATION);
+  const getGenerationStmt = db.prepare(GET_GENERATION);
+  const getCurrentCompleteGenerationStmt = db.prepare(GET_CURRENT_COMPLETE_GENERATION);
+  const insertSourceObservationStmt = db.prepare(INSERT_SOURCE_OBSERVATION);
+  const touchSourceObservationStmt = db.prepare(TOUCH_SOURCE_OBSERVATION);
+  const selectStaleObservationsStmt = db.prepare(SELECT_STALE_OBSERVATIONS);
+  const selectStaleFragmentsStmt = db.prepare(SELECT_STALE_FRAGMENTS);
+  const selectPruneEligibleCandidatesStmt = db.prepare(SELECT_PRUNE_ELIGIBLE_CANDIDATES);
+  const selectPruneEligibleAttributesStmt = db.prepare(SELECT_PRUNE_ELIGIBLE_ATTRIBUTES);
+  const selectObservationsForCandidateStmt = db.prepare(SELECT_OBSERVATIONS_FOR_CANDIDATE);
+  const countObservationsStmt = db.prepare(COUNT_OBSERVATIONS);
 
 
   function fileIndexKey(fileIndex) {
@@ -1116,6 +1324,292 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     const params = normalizeCandidate(merged);
     insertCandidateStmt.run(params);
     return getCandidate(candidate.infoHash, candidate.fileIndex);
+  }
+
+  // ==========================================================================
+  // DMM source provenance — generation lifecycle
+  // ==========================================================================
+
+  /**
+   * Begin a new DMM ingestion generation, or resume an existing one.
+   * Idempotent: INSERT OR IGNORE semantics preserve existing started_at.
+   * Must be called BEFORE processing any fragments of a new generation.
+   *
+   * @param {Object} opts
+   * @param {string} opts.generationId  - stable generation identifier (tree_sha)
+   * @param {string} opts.source        - ingestion source name
+   * @param {string} [opts.treeSha]      - DMM tree SHA (set to generationId if omitted)
+   * @returns {Object|null} generation row or null on error
+   */
+  function startDmmGeneration({ generationId, source = 'dmm-hashlist', treeSha = null } = {}) {
+    if (!generationId) return null;
+    try {
+      insertGenerationStmt.run({
+        generation_id: generationId,
+        source,
+        tree_sha: treeSha || generationId,
+        started_at: Date.now(),
+      });
+      return getGenerationStmt.get(generationId) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Record per-fragment processing progress on a running generation.
+   * Called from flushBatch and from per-fragment complete/incomplete paths.
+   * Does NOT change generation status; call completeDmmGeneration for that.
+   *
+   * @param {string} generationId
+   * @param {Object} delta - records_seen_delta, fragments_total, fragments_complete, fragments_failed
+   */
+  function updateDmmGenerationProgress(generationId, delta = {}) {
+    if (!generationId) return;
+    try {
+      updateGenerationProgressStmt.run({
+        generation_id: generationId,
+        records_seen_delta: delta.recordsSeenDelta ?? 0,
+        fragments_total: delta.fragmentsTotal ?? 0,
+        fragments_complete: delta.fragmentsComplete ?? 0,
+        fragments_failed: delta.fragmentsFailed ?? 0,
+      });
+    } catch { /* swallow */ }
+  }
+
+  /**
+   * Mark a generation as complete, incomplete, or failed.
+   * Only 'complete' generations are consulted for stale detection.
+   *
+   * @param {string} generationId
+   * @param {string} status - 'complete' | 'incomplete' | 'failed'
+   * @param {Object} [counts] - fragments_total, fragments_complete, fragments_failed
+   */
+  function completeDmmGeneration(generationId, status = 'complete', counts = {}) {
+    if (!generationId) return;
+    try {
+      completeGenerationStmt.run({
+        generation_id: generationId,
+        completed_at: status === 'complete' ? Date.now() : null,
+        fragments_total: counts.fragmentsTotal ?? 0,
+        fragments_complete: counts.fragmentsComplete ?? 0,
+        fragments_failed: counts.fragmentsFailed ?? 0,
+        status,
+      });
+    } catch { /* swallow */ }
+  }
+
+  /**
+   * Get a generation by ID.
+   * @param {string} generationId
+   * @returns {Object|null}
+   */
+  function getDmmGeneration(generationId) {
+    if (!generationId) return null;
+    try {
+      return getGenerationStmt.get(generationId) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Get the most recently COMPLETED generation for a source.
+   * This is the generation used for stale detection queries.
+   * Only 'complete' status is consulted — interrupted generations are invisible.
+   *
+   * @param {string} [source] - defaults to 'dmm-hashlist'
+   * @returns {Object|null}
+   */
+  function getCurrentDmmGeneration(source = 'dmm-hashlist') {
+    try {
+      return getCurrentCompleteGenerationStmt.get(source) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ==========================================================================
+  // DMM source provenance — per-fragment observation recording
+  // ==========================================================================
+
+  /**
+   * Record source observations for ingested candidate entries.
+   * Called INSIDE the same flushBatch transaction so that observations and
+   * candidate upserts are co-atomic.
+   *
+   * Idempotent: INSERT OR IGNORE on (info_hash, file_index_key, source,
+   * fragment_name, generation_id) means re-processing the same fragment in the
+   * same or a subsequent generation is a no-op for already-observed records.
+   * The TOUCH step updates last_seen_at for already-present rows so repeated
+   * observation is monotonically timestamped without amplifying rows.
+   *
+   * @param {Object} opts
+   * @param {string} opts.source        - ingestion source ('dmm-hashlist')
+   * @param {string} opts.fragmentName - fragment identifier (e.g. '2024-01-fragment.html')
+   * @param {string} opts.generationId - tree_sha of the DMM tree being ingested
+   * @param {Array}  opts.entries      - candidate entries from ingestCandidates
+   * @param {number} [opts.now]        - timestamp (defaults to Date.now())
+   */
+  function recordDmmSourceObservations({
+    source = 'dmm-hashlist',
+    fragmentName,
+    generationId,
+    entries = [],
+    now = Date.now(),
+  } = {}) {
+    if (!generationId || !fragmentName || entries.length === 0) return;
+    for (const entry of entries) {
+      const fik = fileIndexKey(entry.fileIndex);
+      // INSERT OR IGNORE: first observation of this (candidate, source, fragment, gen)
+      // creates the row. Subsequent calls for the same composite key are no-ops
+      // at this step.
+      insertSourceObservationStmt.run({
+        info_hash: entry.infoHash,
+        file_index_key: fik,
+        source,
+        fragment_name: fragmentName,
+        generation_id: generationId,
+        first_seen_at: now,
+        last_seen_at: now,
+        records_seen: 1,
+      });
+      // TOUCH: update last_seen_at and records_seen for already-existing rows.
+      // This handles the case where the same fragment is re-processed (e.g. retry)
+      // or where multiple entries for the same candidate arrive in the same batch.
+      touchSourceObservationStmt.run({
+        info_hash: entry.infoHash,
+        file_index_key: fik,
+        source,
+        fragment_name: fragmentName,
+        generation_id: generationId,
+        last_seen_at: now,
+        records_seen_delta: 1,
+      });
+    }
+  }
+
+  // ==========================================================================
+  // DMM source provenance — stale detection queries
+  // ==========================================================================
+
+  /**
+   * Find observations present in prevGeneration but absent in currentGeneration.
+   * Used to surface candidates and fragments that disappeared between generations.
+   * Safe to call even when currentGeneration is still running (results may be
+   * partial until the generation is marked complete).
+   *
+   * @param {string} prevGeneration - generation ID of the older generation
+   * @param {string} currentGeneration - generation ID of the newer generation
+   * @returns {Array} rows with info_hash, file_index_key, source, fragment_name, generation_id
+   */
+  function findStaleObservations(prevGeneration, currentGeneration) {
+    if (!prevGeneration || !currentGeneration) return [];
+    try {
+      return selectStaleObservationsStmt.all({
+        prev_generation: prevGeneration,
+        current_generation: currentGeneration,
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Find fragment names that appeared in prevGeneration but are absent from
+   * currentGeneration. Indicates which source fragments have been removed from
+   * the DMM tree entirely.
+   *
+   * @param {string} prevGeneration
+   * @param {string} currentGeneration
+   * @returns {Array} rows with source, fragment_name
+   */
+  function findStaleFragments(prevGeneration, currentGeneration) {
+    if (!prevGeneration || !currentGeneration) return [];
+    try {
+      return selectStaleFragmentsStmt.all({
+        prev_generation: prevGeneration,
+        current_generation: currentGeneration,
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Find candidate identities with ZERO active source observations in the
+   * given generation. These are candidates that cannot be justified by any
+   * source observation in currentGeneration.
+   *
+   * IMPORTANT: only call this when currentGeneration is status='complete'.
+   * Calling it on a running or incomplete generation will over-report stale
+   * candidates because the generation has not yet been fully observed.
+   *
+   * @param {string} currentGeneration
+   * @returns {Array} rows with info_hash, file_index_key
+   */
+  function findPruneEligibleCandidates(currentGeneration) {
+    if (!currentGeneration) return [];
+    try {
+      return selectPruneEligibleCandidatesStmt.all({ current_generation: currentGeneration });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Find release_attributes rows with ZERO active source observations in the
+   * given generation. These are attributes that cannot be justified by any
+   * source observation in currentGeneration.
+   *
+   * @param {string} currentGeneration
+   * @returns {Array} rows with info_hash, file_index_key, source
+   */
+  function findPruneEligibleAttributes(currentGeneration) {
+    if (!currentGeneration) return [];
+    try {
+      return selectPruneEligibleAttributesStmt.all({ current_generation: currentGeneration });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get all source observations for a specific candidate identity.
+   * Returns observations across all generations, newest generation first.
+   * Used to determine whether a prune-eligible candidate is still justified
+   * by another source/generation before any pruning action is taken.
+   *
+   * @param {string} infoHash
+   * @param {number} [fileIndex]
+   * @returns {Array} rows with source, fragment_name, generation_id, timestamps
+   */
+  function getDmmObservationsForCandidate(infoHash, fileIndex = null) {
+    if (!infoHash) return [];
+    try {
+      return selectObservationsForCandidateStmt.all({
+        info_hash: infoHash,
+        file_index_key: fileIndexKey(fileIndex),
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Count total observations in a generation. Useful for estimating backfill
+   * scope and verifying generation population.
+   *
+   * @param {string} generationId
+   * @returns {number}
+   */
+  function countDmmObservations(generationId) {
+    if (!generationId) return 0;
+    try {
+      return countObservationsStmt.get(generationId)?.n ?? 0;
+    } catch {
+      return 0;
+    }
   }
 
   function getCandidate(infoHash, fileIndex) {
@@ -3382,6 +3876,19 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     _insertReleaseAttributes,
     getReleaseAttributes,
     getCandidatesWithoutReleaseAttributes,
+    // DMM source provenance (lifecycle + stale detection)
+    startDmmGeneration,
+    updateDmmGenerationProgress,
+    completeDmmGeneration,
+    getDmmGeneration,
+    getCurrentDmmGeneration,
+    recordDmmSourceObservations,
+    findStaleObservations,
+    findStaleFragments,
+    findPruneEligibleCandidates,
+    findPruneEligibleAttributes,
+    getDmmObservationsForCandidate,
+    countDmmObservations,
     // Identity enrichment queue
     enqueueIdentityResolution,
     getPendingEnrichments,

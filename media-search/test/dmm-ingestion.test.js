@@ -721,3 +721,484 @@ test('flushBatch is atomic on SIGKILL-equivalent: re-running the same batch yiel
 
   cache.close();
 });
+
+// ============================================================================
+// DMM Source Provenance & Refresh-Generation Lifecycle
+// ============================================================================
+// These tests prove the minimum provenance + refresh-generation lifecycle:
+// 1. G1 ingest is idempotent (re-running the same generation does not amplify rows)
+// 2. Reingesting fragment A/G1 does not duplicate provenance
+// 3. Interrupted G2 does not mark G1 observations stale
+// 4. Completing G2 makes missing observations queryable as stale
+// 5. Candidate still justified by another source is NOT considered globally stale
+// 6. Candidate with zero active source observations IS detectable as prune-eligible
+// 7. file_index NULL remains distinct from any future file-specific candidate
+// 8. Ranking over unchanged evidence snapshot is unchanged
+
+// Helper: build a minimal cache + runner for the fixture scenarios.
+function makeFixtureCache() {
+  return createDiscoveryCache({ dbPath: ':memory:' });
+}
+
+const GEN_G1 = 'g1_' + 'a'.repeat(36); // 38 chars
+const GEN_G2 = 'g2_' + 'b'.repeat(36);
+const FRAG_A = 'fragment-A.html';
+const FRAG_B = 'fragment-B.html';
+
+function makeEntry(hash, filename) {
+  return {
+    infoHash: hash,
+    fileIndex: null,
+    title: filename,
+    filename,
+    size: 1024,
+    sources: [{ id: 'dmm.hashlist', kind: 'ingestion' }],
+    mediaAssociations: [],
+  };
+}
+
+test('provenance: dmm_ingestion_generations and dmm_source_observations are created', async () => {
+  const cache = makeFixtureCache();
+  const result = cache.startDmmGeneration({ generationId: GEN_G1, treeSha: GEN_G1 });
+  assert.ok(result, 'startDmmGeneration must return a row');
+  assert.equal(result.generation_id, GEN_G1);
+  assert.equal(result.status, 'running');
+
+  // Insert a source observation directly.
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist',
+    fragmentName: FRAG_A,
+    generationId: GEN_G1,
+    entries: [makeEntry('aa'.repeat(20), 'X.mkv')],
+  });
+
+  const gen = cache.getDmmGeneration(GEN_G1);
+  assert.ok(gen, 'generation must be retrievable');
+  assert.equal(gen.status, 'running');
+
+  const count = cache.countDmmObservations(GEN_G1);
+  assert.equal(count, 1, 'one observation must be recorded');
+
+  // The current COMPLETE generation is null (G1 is still 'running').
+  assert.equal(cache.getCurrentDmmGeneration(), null);
+
+  // Close as complete.
+  cache.completeDmmGeneration(GEN_G1, 'complete', {
+    fragmentsTotal: 1, fragmentsComplete: 1, fragmentsFailed: 0,
+  });
+  const current = cache.getCurrentDmmGeneration();
+  assert.ok(current, 'after completion, current complete generation is set');
+  assert.equal(current.status, 'complete');
+
+  cache.close();
+});
+
+test('provenance: G1 ingest is idempotent (re-running same generation does not amplify rows)', async () => {
+  const cache = makeFixtureCache();
+  cache.startDmmGeneration({ generationId: GEN_G1, treeSha: GEN_G1 });
+
+  const entries = [
+    makeEntry('a1'.repeat(20), 'X.mkv'),
+    makeEntry('a2'.repeat(20), 'Y.mkv'),
+  ];
+
+  // First ingest of fragment A.
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G1, entries,
+  });
+  assert.equal(cache.countDmmObservations(GEN_G1), 2);
+
+  // Re-ingest the SAME fragment/generation.
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G1, entries,
+  });
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G1, entries,
+  });
+
+  // Still 2 rows — the composite primary key (info_hash, file_index_key, source,
+  // fragment_name, generation_id) is deterministic and INSERT OR IGNORE means
+  // duplicate writes are no-ops.
+  assert.equal(
+    cache.countDmmObservations(GEN_G1), 2,
+    're-ingesting same fragment/generation must not amplify observation rows',
+  );
+
+  cache.close();
+});
+
+test('provenance: many-to-many ownership — a candidate may be justified by multiple fragments', async () => {
+  const cache = makeFixtureCache();
+  cache.startDmmGeneration({ generationId: GEN_G1, treeSha: GEN_G1 });
+
+  // Candidate Y appears in both Fragment A and Fragment B.
+  const yHash = 'cc'.repeat(20);
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G1,
+    entries: [makeEntry(yHash, 'Y.mkv')],
+  });
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_B, generationId: GEN_G1,
+    entries: [makeEntry(yHash, 'Y.mkv')],
+  });
+
+  // Two rows for Y (one per fragment) — the candidate is justified by both.
+  const yObs = cache.getDmmObservationsForCandidate(yHash, null);
+  assert.equal(yObs.length, 2, 'candidate Y must have one observation per fragment');
+  const fragments = yObs.map(o => o.fragment_name).sort();
+  assert.deepEqual(fragments, [FRAG_A, FRAG_B]);
+
+  cache.close();
+});
+
+test('provenance: interrupted G2 does not mark G1 observations stale', async () => {
+  const cache = makeFixtureCache();
+
+  // G1 completes fully.
+  cache.startDmmGeneration({ generationId: GEN_G1, treeSha: GEN_G1 });
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G1,
+    entries: [makeEntry('d1'.repeat(20), 'X.mkv')],
+  });
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_B, generationId: GEN_G1,
+    entries: [makeEntry('d2'.repeat(20), 'Y.mkv')],
+  });
+  cache.completeDmmGeneration(GEN_G1, 'complete', {
+    fragmentsTotal: 2, fragmentsComplete: 2, fragmentsFailed: 0,
+  });
+
+  // G2 starts but is INTERRUPTED: it processes Fragment A only, fails on B,
+  // and is closed as 'incomplete' (or never closed).
+  cache.startDmmGeneration({ generationId: GEN_G2, treeSha: GEN_G2 });
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G2,
+    entries: [makeEntry('d1'.repeat(20), 'X.mkv')], // only X observed in G2
+  });
+  // Do NOT mark G2 complete. Leave it 'running'.
+
+  // Stale-detection must only consider COMPLETE generations. G2 is not complete,
+  // so it is invisible. getCurrentDmmGeneration must still return G1.
+  const current = cache.getCurrentDmmGeneration();
+  assert.ok(current, 'current complete generation must exist');
+  assert.equal(current.generation_id, GEN_G1,
+    'G2 is incomplete — G1 must remain the current complete generation');
+
+  // findPruneEligibleCandidates against G1 (the current complete gen) must
+  // NOT mark Y as stale: Y has an observation in G1/Fragment-B.
+  // Add the candidates first so findPruneEligibleCandidates has rows to look at.
+  cache.upsertCandidate(makeEntry('d1'.repeat(20), 'X.mkv'));
+  cache.upsertCandidate(makeEntry('d2'.repeat(20), 'Y.mkv'));
+  const prune = cache.findPruneEligibleCandidates(GEN_G1);
+  assert.equal(prune.length, 0, 'no candidate should be prune-eligible against G1');
+
+  cache.close();
+});
+
+test('provenance: completing G2 makes missing observations queryable as stale', async () => {
+  const cache = makeFixtureCache();
+
+  // G1: both fragments observed.
+  cache.startDmmGeneration({ generationId: GEN_G1, treeSha: GEN_G1 });
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G1,
+    entries: [
+      makeEntry('e1'.repeat(20), 'X.mkv'),
+      makeEntry('e2'.repeat(20), 'Y.mkv'),
+    ],
+  });
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_B, generationId: GEN_G1,
+    entries: [
+      makeEntry('e2'.repeat(20), 'Y.mkv'),
+      makeEntry('e3'.repeat(20), 'Z.mkv'),
+    ],
+  });
+  cache.completeDmmGeneration(GEN_G1, 'complete', {
+    fragmentsTotal: 2, fragmentsComplete: 2, fragmentsFailed: 0,
+  });
+
+  // G2: Y disappears from Fragment A, but Z and X are still present.
+  // Also need a candidate population for prune-eligible queries.
+  cache.upsertCandidate(makeEntry('e1'.repeat(20), 'X.mkv'));
+  cache.upsertCandidate(makeEntry('e2'.repeat(20), 'Y.mkv'));
+  cache.upsertCandidate(makeEntry('e3'.repeat(20), 'Z.mkv'));
+
+  cache.startDmmGeneration({ generationId: GEN_G2, treeSha: GEN_G2 });
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G2,
+    entries: [makeEntry('e1'.repeat(20), 'X.mkv')], // Y removed from A
+  });
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_B, generationId: GEN_G2,
+    entries: [makeEntry('e3'.repeat(20), 'Z.mkv')], // Y removed from B too
+  });
+  cache.completeDmmGeneration(GEN_G2, 'complete', {
+    fragmentsTotal: 2, fragmentsComplete: 2, fragmentsFailed: 0,
+  });
+
+  // Now G2 is the current complete generation.
+  assert.equal(cache.getCurrentDmmGeneration().generation_id, GEN_G2);
+
+  // Stale observations: any (info_hash, source, fragment) seen in G1 but not in G2.
+  const stale = cache.findStaleObservations(GEN_G1, GEN_G2);
+  // Expect 2 stale: Y/A and Y/B.
+  assert.equal(stale.length, 2, 'Y should be stale in both fragments');
+  const staleKeys = stale.map(s => `${s.info_hash.slice(0, 4)}/${s.fragment_name}`).sort();
+  assert.deepEqual(staleKeys, [
+    `${'e2'.repeat(20).slice(0, 4)}/${FRAG_A}`,
+    `${'e2'.repeat(20).slice(0, 4)}/${FRAG_B}`,
+  ]);
+
+  // Prune-eligible candidates against G2: candidates with zero observations in G2.
+  const prune = cache.findPruneEligibleCandidates(GEN_G2);
+  // X has G2/A, Z has G2/B, Y has neither → only Y is prune-eligible.
+  assert.equal(prune.length, 1, 'only Y is prune-eligible against G2');
+  assert.equal(prune[0].info_hash, 'e2'.repeat(20));
+
+  cache.close();
+});
+
+test('provenance: cross-generation justification — prior observation does not prevent stale detection but proves the identity existed', async () => {
+  const cache = makeFixtureCache();
+
+  // G1: candidate Y observed by DMM Fragment A.
+  cache.startDmmGeneration({ generationId: GEN_G1, treeSha: GEN_G1 });
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G1,
+    entries: [makeEntry('f1'.repeat(20), 'Y.mkv')],
+  });
+  cache.completeDmmGeneration(GEN_G1, 'complete', {
+    fragmentsTotal: 1, fragmentsComplete: 1, fragmentsFailed: 0,
+  });
+
+  cache.upsertCandidate(makeEntry('f1'.repeat(20), 'Y.mkv'));
+
+  // G2 (DMM): Y disappears from DMM entirely. G2 is complete but has zero
+  // DMM observations of Y. (If there were a cross-source observer like scraper-A,
+  // its observation would also carry generation_id=GEN_G2 and would show up in
+  // getDmmObservationsForCandidate — proving the candidate was still seen
+  // by another source in the same generation.)
+  cache.startDmmGeneration({ generationId: GEN_G2, treeSha: GEN_G2 });
+  // No DMM observations for Y in G2 — it disappeared.
+  cache.completeDmmGeneration(GEN_G2, 'complete', {
+    fragmentsTotal: 1, fragmentsComplete: 1, fragmentsFailed: 0,
+  });
+
+  // G2 is the current complete DMM generation.
+  const currentDmmGen = cache.getCurrentDmmGeneration('dmm-hashlist');
+  assert.equal(currentDmmGen.generation_id, GEN_G2,
+    'G2 must be the current complete DMM generation');
+
+  // DMM-only prune query against G2 says Y is DMM-prune-eligible: there are
+  // no DMM observations of Y in G2.
+  const dmmPrune = cache.findPruneEligibleCandidates(GEN_G2);
+  assert.equal(dmmPrune.length, 1, 'Y is DMM-prune-eligible (no DMM observation in G2)');
+
+  // Cross-generation justification: Y still has a G1 observation.
+  // getDmmObservationsForCandidate surfaces all observations regardless of
+  // generation. This proves the candidate identity existed and was valid.
+  const yObs = cache.getDmmObservationsForCandidate('f1'.repeat(20), null);
+  assert.equal(yObs.length, 1,
+    'candidate Y has one historical observation (G1 DMM)');
+  assert.equal(yObs[0].generation_id, GEN_G1,
+    'the historical observation is from G1');
+  assert.equal(yObs[0].source, 'dmm-hashlist',
+    'the historical observation is from the DMM source');
+
+  // If scraper-A had observed Y in G2, there would be 2 observations:
+  // (G1, dmm-hashlist) and (G2, scraper-A). The scraper justifies Y in G2
+  // even though DMM did not. This is the cross-source justification case —
+  // it is reflected in getDmmObservationsForCandidate.
+
+  cache.close();
+});
+
+test('provenance: fileIndex NULL (-1) remains distinct from any future file-specific candidate', async () => {
+  const cache = makeFixtureCache();
+  cache.startDmmGeneration({ generationId: GEN_G1, treeSha: GEN_G1 });
+
+  // Two candidates with the SAME info_hash but different file_index_key:
+  //   - torrent-level (fileIndex NULL → file_index_key = -1)
+  //   - file-specific (fileIndex 0 → file_index_key = 0)
+  // Both are valid identities; the provenance table must keep them separate.
+  const torrentLevel = {
+    infoHash: 'abc'.repeat(13) + 'abcd', // 40 hex chars
+    fileIndex: null,
+    title: 'multi-file.mkv',
+    filename: 'multi-file.mkv',
+    size: 1024,
+    sources: [{ id: 'dmm.hashlist', kind: 'ingestion' }],
+    mediaAssociations: [],
+  };
+  const fileSpecific = {
+    ...torrentLevel,
+    fileIndex: 0,
+    title: 'multi-file/file0.mkv',
+    filename: 'multi-file/file0.mkv',
+  };
+
+  cache.upsertCandidate(torrentLevel);
+  cache.upsertCandidate(fileSpecific);
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G1,
+    entries: [torrentLevel, fileSpecific],
+  });
+
+  // Two candidates in the corpus with the same info_hash.
+  const sameHash = 'abc'.repeat(13) + 'abcd';
+  const torrentRow = cache.getCandidate(sameHash, null);
+  const fileRow = cache.getCandidate(sameHash, 0);
+  assert.ok(torrentRow, 'torrent-level candidate must exist');
+  assert.ok(fileRow, 'file-specific candidate must exist');
+  // rowToCandidate exposes fileIndex (the original nullable column) but not
+  // file_index_key. Query the raw row for the durable key to verify the
+  // identity separation that the schema enforces.
+  const rawRows = cache.db.prepare(
+    'SELECT file_index, file_index_key FROM candidates WHERE info_hash = ?'
+  ).all(sameHash);
+  assert.equal(rawRows.length, 2, 'two distinct candidates for the same info_hash');
+  const torrentRaw = rawRows.find(r => r.file_index === null);
+  const fileRaw = rawRows.find(r => r.file_index === 0);
+  assert.ok(torrentRaw, 'torrent-level row must exist (file_index IS NULL)');
+  assert.ok(fileRaw, 'file-specific row must exist (file_index = 0)');
+  assert.equal(torrentRaw.file_index_key, -1, 'torrent-level uses file_index_key = -1');
+  assert.equal(fileRaw.file_index_key, 0, 'file-specific uses file_index_key = 0');
+
+  // Two distinct observation rows — the provenance primary key includes
+  // file_index_key, so NULL and 0 do not collide.
+  const count = cache.countDmmObservations(GEN_G1);
+  assert.equal(count, 2, 'torrent-level and file-specific must produce 2 distinct observations');
+
+  // Observing only the torrent-level candidate does NOT stale-out the file-specific.
+  cache.startDmmGeneration({ generationId: GEN_G2, treeSha: GEN_G2 });
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G2,
+    entries: [torrentLevel], // only torrent-level observed
+  });
+  cache.completeDmmGeneration(GEN_G2, 'complete', {
+    fragmentsTotal: 1, fragmentsComplete: 1, fragmentsFailed: 0,
+  });
+  // G1 was also completed so the prune test is meaningful.
+  cache.completeDmmGeneration(GEN_G1, 'complete', {
+    fragmentsTotal: 1, fragmentsComplete: 1, fragmentsFailed: 0,
+  });
+
+  // Against G2, only the file-specific candidate is prune-eligible. The
+  // torrent-level is observed in G2.
+  const prune = cache.findPruneEligibleCandidates(GEN_G2);
+  assert.equal(prune.length, 1, 'only the file-specific candidate is prune-eligible');
+  assert.equal(prune[0].info_hash, sameHash);
+  assert.equal(prune[0].file_index_key, 0,
+    'the prune-eligible candidate is the file-specific one, not the torrent-level one');
+
+  cache.close();
+});
+
+test('provenance: ranking over unchanged evidence snapshot is unchanged', async () => {
+  // This test proves that adding provenance observations does not mutate
+  // candidate identity, release_attributes, or the FTS5 search index. The
+  // search-engine ranking output before and after observation recording
+  // must be byte-identical.
+  const cache = makeFixtureCache();
+  cache.startDmmGeneration({ generationId: GEN_G1, treeSha: GEN_G1 });
+
+  const entries = [
+    { ...makeEntry('a1'.repeat(20), 'Movie.2024.1080p.BluRay.x264-GRP1.mkv'),
+      title: 'Movie.2024.1080p.BluRay.x264-GRP1.mkv' },
+  ];
+
+  // Ingest and parse attributes.
+  const { ingestCandidates } = await import('../src/lib/discovery/ingest.js');
+  ingestCandidates(cache, {
+    source: 'dmm-hashlist', entries, generationId: GEN_G1, fragmentName: FRAG_A,
+  });
+
+  // Run attribute worker so release_attributes + FTS are populated.
+  const { runAttributeWorker } = await import('../src/lib/discovery/attribute-worker.js');
+  await runAttributeWorker(cache, { limit: undefined });
+
+  // Ranking snapshot BEFORE recording extra provenance.
+  const before = searchReleases(cache, { query: 'Movie 2024' });
+  const beforeResults = before.results.map(r => ({
+    info_hash: r.infoHash, filename: r.filename, score: r.score,
+  }));
+
+  // Record the same provenance multiple times. This is the idempotency test:
+  // ranking MUST be unchanged.
+  for (let i = 0; i < 3; i++) {
+    cache.recordDmmSourceObservations({
+      source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G1, entries,
+    });
+  }
+
+  const after = searchReleases(cache, { query: 'Movie 2024' });
+  const afterResults = after.results.map(r => ({
+    info_hash: r.infoHash, filename: r.filename, score: r.score,
+  }));
+
+  assert.deepEqual(afterResults, beforeResults,
+    'ranking over the same evidence must be byte-identical after observation recording');
+  assert.ok(afterResults.length > 0, 'sanity: there must be at least one ranked result');
+
+  // FTS row count must equal release_attributes count (no FTS drift from provenance).
+  const raCount = cache.db.prepare('SELECT COUNT(*) AS n FROM release_attributes').get().n;
+  const ftsCount = cache.db.prepare('SELECT COUNT(*) AS n FROM release_search').get().n;
+  assert.equal(ftsCount, raCount, 'FTS5 index must remain in sync with release_attributes');
+
+  // Observation count: at most 1 row per (candidate, source, fragment, generation)
+  // — the 3 extra writes are INSERT OR IGNORE no-ops.
+  const obsCount = cache.countDmmObservations(GEN_G1);
+  assert.equal(obsCount, 1, 'idempotent re-recording must not amplify observation rows');
+
+  cache.close();
+});
+
+test('provenance: cross-source justification — candidate observed by another source in the current generation is NOT DMM-stale', async () => {
+  const cache = makeFixtureCache();
+
+  // G1: candidate Y observed by DMM.
+  cache.startDmmGeneration({ generationId: GEN_G1, treeSha: GEN_G1 });
+  cache.recordDmmSourceObservations({
+    source: 'dmm-hashlist', fragmentName: FRAG_A, generationId: GEN_G1,
+    entries: [makeEntry('fa'.repeat(20), 'Y.mkv')],
+  });
+  cache.completeDmmGeneration(GEN_G1, 'complete', {
+    fragmentsTotal: 1, fragmentsComplete: 1, fragmentsFailed: 0,
+  });
+
+  cache.upsertCandidate(makeEntry('fa'.repeat(20), 'Y.mkv'));
+
+  // G2: Y disappears from DMM, but a SEPARATE non-DMM source (scraper-A)
+  // still observes Y in the same generation. The provenance table captures
+  // both observations.
+  cache.startDmmGeneration({ generationId: GEN_G2, treeSha: GEN_G2 });
+  cache.recordDmmSourceObservations({
+    source: 'scraper-A', // different source, same generation
+    fragmentName: 'scraper-A-list.json',
+    generationId: GEN_G2,
+    entries: [makeEntry('fa'.repeat(20), 'Y.mkv')],
+  });
+  cache.completeDmmGeneration(GEN_G2, 'complete', {
+    fragmentsTotal: 1, fragmentsComplete: 1, fragmentsFailed: 0,
+  });
+
+  // Y is NOT prune-eligible: scraper-A observed it in G2, so Y is justified
+  // in the current generation. This is the safe default — the prune query
+  // is source-agnostic, so a candidate is never deleted while ANY source
+  // still sees it in the current generation.
+  const prune = cache.findPruneEligibleCandidates(GEN_G2);
+  assert.equal(prune.length, 0,
+    'Y is NOT prune-eligible because scraper-A observed it in G2');
+
+  // getDmmObservationsForCandidate surfaces both observations across both
+  // sources, so a justification-aware prune layer sees the full picture.
+  const yObs = cache.getDmmObservationsForCandidate('fa'.repeat(20), null);
+  assert.equal(yObs.length, 2,
+    'candidate Y has 2 observations: G1/DMM and G2/scraper-A');
+  const yJustified = yObs.some(o => o.source === 'scraper-A' && o.generation_id === GEN_G2);
+  assert.ok(yJustified,
+    'candidate Y is still justified by scraper-A in G2 — must NOT be globally pruned');
+
+  cache.close();
+});

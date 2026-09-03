@@ -397,6 +397,8 @@ export class DMMIngestionRunner {
     onProgress = null,
     enableAttributeParsing = true,
     enableMediaEnrichment = false,  // Disabled by default (requires external API calls)
+    generationId = null,
+    treeSha = null,
   } = {}) {
     this.source = source || new DMMHashListSource();
     this.cache = cache;
@@ -405,6 +407,13 @@ export class DMMIngestionRunner {
     this.onProgress = onProgress || null;
     this.enableAttributeParsing = enableAttributeParsing;
     this.enableMediaEnrichment = enableMediaEnrichment;
+    // DMM source provenance: generationId is the stable identity for a
+    // refresh (default: DMM tree_sha). When the runner is created without an
+    // explicit generationId, it is captured from listFragments() at run() so
+    // the runner never has to guess. fragmentName is the per-fragment
+    // identifier, threaded from processFragment down into flushBatch.
+    this.pinnedGenerationId = generationId || null;
+    this.pinnedTreeSha = treeSha || null;
     this.metrics = new IngestionMetrics();
   }
 
@@ -418,16 +427,50 @@ export class DMMIngestionRunner {
 
     this.metrics.start();
 
+    // Capture generationId from listFragments() if not pinned. The source
+    // wrapper returns {fragments, treeSha, branch} — we use treeSha as the
+    // stable generation identifier. This is the only durable version signal
+    // the DMM tree provides; using tree_sha here means a generation cannot
+    // be confused with another by a different list order or fragment count.
+    let treeSha = this.pinnedTreeSha;
+    let generationId = this.pinnedGenerationId;
+
     try {
       // 1. List available fragments
-      const fragments = await this.source.listFragments();
+      const listing = await this.source.listFragments();
+      const fragments = Array.isArray(listing) ? listing : (listing?.fragments || []);
+      if (!treeSha && listing && typeof listing === 'object' && listing.treeSha) {
+        treeSha = listing.treeSha;
+      }
+      if (!generationId) {
+        generationId = treeSha || `unknown-${Date.now()}`;
+      }
+      this.pinnedTreeSha = treeSha;
+      this.pinnedGenerationId = generationId;
+
+      // Open the generation row so that fragment processing can record
+      // observations against it. startDmmGeneration is idempotent — calling
+      // it for an already-running generation preserves its existing
+      // started_at.
+      if (this.cache.startDmmGeneration) {
+        this.cache.startDmmGeneration({
+          generationId,
+          source: 'dmm-hashlist',
+          treeSha,
+        });
+      }
+
       const toProcess = this.maxFragments
         ? fragments.slice(0, this.maxFragments)
         : fragments;
 
       // 2. Process each fragment
+      let fragmentsComplete = 0;
+      let fragmentsFailed = 0;
       for (const fragment of toProcess) {
-        await this.processFragment(fragment);
+        const result = await this.processFragment(fragment, { generationId });
+        if (result === 'complete') fragmentsComplete++;
+        else if (result === 'failed') fragmentsFailed++;
       }
 
       // 3. Attribute parsing pass (post-ingestion enrichment)
@@ -450,6 +493,36 @@ export class DMMIngestionRunner {
         });
         this.metrics.enrichmentStats = enrichStats;
       }
+
+      // Close the generation. A clean finish (zero failures) is 'complete';
+      // any failure makes the generation 'incomplete' so stale-detection
+      // queries will refuse to use it. An exception during processing
+      // is captured by the outer finally: in that case the generation is
+      // closed in the catch path below.
+      if (this.cache.completeDmmGeneration) {
+        const totalForGen = fragmentsComplete + fragmentsFailed;
+        this.cache.completeDmmGeneration(
+          generationId,
+          fragmentsFailed === 0 ? 'complete' : 'incomplete',
+          {
+            fragmentsTotal: totalForGen,
+            fragmentsComplete,
+            fragmentsFailed,
+          }
+        );
+      }
+    } catch (error) {
+      // Generation crashed mid-refresh. Mark it incomplete so it is NEVER
+      // used for stale detection. The previous generation's observations
+      // remain intact and continue to justify their candidates.
+      if (this.cache.completeDmmGeneration && generationId) {
+        this.cache.completeDmmGeneration(generationId, 'incomplete', {
+          fragmentsTotal: 0,
+          fragmentsComplete: 0,
+          fragmentsFailed: 0,
+        });
+      }
+      throw error;
     } finally {
       this.metrics.stop();
     }
@@ -459,8 +532,15 @@ export class DMMIngestionRunner {
 
   /**
    * Process a single fragment.
+   *
+   * Returns 'complete' | 'failed' to let run() track fragment outcomes for
+   * generation completion. fragmentName + generationId are threaded into
+   * the ingest pipeline so per-fragment provenance is recorded inside the
+   * same transaction as the candidate upserts.
    */
-  async processFragment(fragment) {
+  async processFragment(fragment, { generationId } = {}) {
+    const fragmentName = fragment.name || null;
+    const effectiveGenerationId = generationId || this.pinnedGenerationId;
     try {
       // Fetch HTML
       const html = await this.source.fetchFragment(fragment.url);
@@ -470,33 +550,38 @@ export class DMMIngestionRunner {
       const compressed = extractPayload(html);
       if (!compressed) {
         this.metrics.addError(new Error(`No payload found in ${fragment.name}`));
-        return;
+        return 'failed';
       }
 
       // Decompress
       const json = decompressFromEncodedURIComponent(compressed);
       if (!json) {
         this.metrics.addError(new Error(`Failed to decompress ${fragment.name}`));
-        return;
+        return 'failed';
       }
 
       // Stream parse and ingest in batches
-      await this.ingestFromStream(streamParseDMM(json));
+      await this.ingestFromStream(streamParseDMM(json), {
+        fragmentName,
+        generationId: effectiveGenerationId,
+      });
 
       this.metrics.fragmentProcessed();
+      return 'complete';
     } catch (error) {
       this.metrics.addError(error);
-    }
-
-    if (this.onProgress) {
-      this.onProgress(this.metrics);
+      return 'failed';
+    } finally {
+      if (this.onProgress) {
+        this.onProgress(this.metrics);
+      }
     }
   }
 
   /**
    * Ingest records from a streaming parser.
    */
-  async ingestFromStream(recordStream) {
+  async ingestFromStream(recordStream, { fragmentName, generationId } = {}) {
     let batch = [];
 
     for (const record of recordStream) {
@@ -511,14 +596,14 @@ export class DMMIngestionRunner {
       batch.push(entry);
 
       if (batch.length >= this.batchSize) {
-        await this.flushBatch(batch);
+        await this.flushBatch(batch, { fragmentName, generationId });
         batch = [];
       }
     }
 
     // Flush remaining
     if (batch.length > 0) {
-      await this.flushBatch(batch);
+      await this.flushBatch(batch, { fragmentName, generationId });
     }
   }
 
@@ -530,8 +615,13 @@ export class DMMIngestionRunner {
    * in either the pre-batch or the post-batch state — never a partial
    * batch. ingestCandidates itself loops per-record and does not own a
    * transaction; this wrapper is what gives the batch its atomicity.
+   *
+   * Provenance (fragmentName + generationId) flows through ingestCandidates
+   * to recordDmmSourceObservations, which is also called inside this
+   * transaction — so observations are co-atomic with the candidate upserts
+   * they justify.
    */
-  async flushBatch(batch) {
+  async flushBatch(batch, { fragmentName, generationId } = {}) {
     const db = this.cache.db;
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -539,6 +629,8 @@ export class DMMIngestionRunner {
       const result = ingestCandidates(this.cache, {
         source: 'dmm-hashlist',
         entries: batch,
+        generationId,
+        fragmentName,
       });
 
       this.metrics.recordsInserted += result.inserted || 0;
