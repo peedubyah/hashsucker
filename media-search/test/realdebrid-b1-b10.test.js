@@ -40,8 +40,8 @@ import { createDiscoveryCache } from '../src/lib/discovery/cache.js';
 
 const E02_INFOHASH = 'a07b84404989fccee1d55c247cb03e22c8847ecc';
 const E02_SIZE = 8_775_633_660;
-const E02_FILENAME = 'When They See Us S01 HDR WEB-DL 2160p/When They See Us S01E02 WEB-DL 2160p.mkv';
-const E02_BASENAME = 'When They See Us S01E02 WEB-DL 2160p.mkv';
+const E02_FILENAME = 'When They See Us S01 HDR AMZN 2160p/When They See Us S01E02 AMZN 2160p.mkv';
+const E02_BASENAME = 'When They See Us S01E02 AMZN 2160p.mkv';
 const E02_RD_FILE_ID = 'rd-file-e02';
 const E02_TORRENT_ID = 'torrent-e02';
 

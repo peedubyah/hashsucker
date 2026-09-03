@@ -54,7 +54,7 @@ import { createDiscoveryCache } from '../src/lib/discovery/cache.js';
 const E02_INFOHASH = '8862ba8185d52ad54a9fda496546d828ed244a91'; // rank5 hash for tt7137906 S01E02
 const E02_SIZE = 2_834_055_554;
 const E02_FILENAME =
-  'When.They.See.Us.S01.1080p.NF.WEBRip.x265.10bit.HDR.DDP5.1.Atmos-ExREN[rartv]/When.They.See.Us.S01E02.1080p.NF.WEB-DL.Atmos.DDP5.1.HDR.H.265-ExREN.mkv';
+  'When.They.See.Us.S01.1080p.NF.AMZN.10bit.HDR.DDP5.1.Atmos-ExREN[rartv]/When.They.See.Us.S01E02.1080p.NF.AMZN.Atmos.DDP5.1.HDR.H.265-ExREN.mkv';
 const E02_RD_FILE_ID = 'rd-file-rank5';
 const E02_TORRENT_ID = 'torrent-rank5';
 

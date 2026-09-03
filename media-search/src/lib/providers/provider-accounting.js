@@ -103,6 +103,12 @@ const CATEGORIES = Object.freeze([
   'realdebrid_file_match',
   'realdebrid_file_ambiguous',
   'realdebrid_file_absent',
+  // Local RD filename-filter predictor (DMM-mapped error_code 35 rules).
+  // Fires when attemptRdResolution short-circuits an addMagnet call based
+  // on a local filename match — no RD API call is issued. This is a LOCAL
+  // prediction, not an RD observation; it must never be persisted as
+  // provider evidence.
+  'realdebrid_filename_filter_short_circuit',
   // Worker A — delivery/CDN byte-read 429 state machine. The
   // requestdl-layer 429 categories above account for the provider
   // API; the Delivery_* categories below account for the byte-read
@@ -365,6 +371,7 @@ export function formatProviderAccounting(snapshot, { title, provider = 'torbox' 
       'realdebrid_file_match',
       'realdebrid_file_ambiguous',
       'realdebrid_file_absent',
+      'realdebrid_filename_filter_short_circuit',
     ];
     if (value === 0 && !alwaysRender.includes(cat)) continue;
     const label = cat.replaceAll('_', ' ');

@@ -35,6 +35,73 @@ const PLAYABLE_VIDEO_EXTENSIONS = new Set([
 ]);
 
 /**
+ * DMM-mapped RD error_code 35 / infringing_file filename filter rules.
+ *
+ * Local prediction only — NOT an RD observation. Each rule has an explicit
+ * ID so matches are debuggable without dumping regex internals.
+ *
+ * Two rule families:
+ *   - substring:   case-insensitive true-substring match anywhere in the name
+ *   - dot-adjacency: Source.Codec literal dot-bounded match (\b on both sides
+ *                  so WEB.x264 matches but WEB.x2645 / XWEB.x264 do not;
+ *                  Blu-Ray.x264 does NOT match BluRay.x264 because the
+ *                  hyphen breaks the literal character sequence)
+ *
+ * Punctuation is NOT normalized — the dot-adjacency rules depend on the
+ * literal dot separators in the release name.
+ */
+export const RD_FILENAME_FILTER_RULES = Object.freeze([
+  // True substring rules (case-insensitive)
+  { id: 'rd_rule_substring_web_dl', type: 'substring', pattern: 'web-dl' },
+  { id: 'rd_rule_substring_webrip', type: 'substring', pattern: 'webrip' },
+  { id: 'rd_rule_substring_bdrip', type: 'substring', pattern: 'bdrip' },
+  { id: 'rd_rule_substring_hdrip', type: 'substring', pattern: 'hdrip' },
+  { id: 'rd_rule_substring_dvdrip', type: 'substring', pattern: 'dvdrip' },
+  // Dot-adjacency rules (literal Source.Codec, case-insensitive)
+  { id: 'rd_rule_dot_bluray_x264', type: 'dot-adjacency', pattern: 'BluRay.x264' },
+  { id: 'rd_rule_dot_hdtv_x264', type: 'dot-adjacency', pattern: 'HDTV.x264' },
+  { id: 'rd_rule_dot_hdtv_xvid', type: 'dot-adjacency', pattern: 'HDTV.XviD' },
+  { id: 'rd_rule_dot_web_x264', type: 'dot-adjacency', pattern: 'WEB.x264' },
+  { id: 'rd_rule_dot_web_h264', type: 'dot-adjacency', pattern: 'WEB.h264' },
+]);
+
+function escapeRegExp(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Pre-compile rules: substring rules get a plain case-insensitive regex,
+// dot-adjacency rules get \b-bounded regexes (word boundary at each end).
+const COMPILED_RULES = RD_FILENAME_FILTER_RULES.map(rule => {
+  if (rule.type === 'substring') {
+    return { id: rule.id, type: rule.type, pattern: rule.pattern, regex: new RegExp(escapeRegExp(rule.pattern), 'i') };
+  }
+  return {
+    id: rule.id,
+    type: rule.type,
+    pattern: rule.pattern,
+    regex: new RegExp(`\\b${escapeRegExp(rule.pattern)}\\b`, 'i'),
+  };
+});
+
+/**
+ * Classify a filename against the local RD filename-filter predictor.
+ *
+ * Pure local prediction — no RD call, no observation persisted.
+ *
+ * @param {string|null|undefined} filename - Hashsucker canonical filename.
+ * @returns {null | { ruleId: string, pattern: string }} Match detail or null.
+ */
+export function classifyRdFilenameFilter(filename) {
+  if (!filename || typeof filename !== 'string') return null;
+  for (const rule of COMPILED_RULES) {
+    if (rule.regex.test(filename)) {
+      return { ruleId: rule.id, pattern: rule.pattern };
+    }
+  }
+  return null;
+}
+
+/**
  * Error thrown when RD resolution fails but TorBox fallback is available.
  * The resolver catches this and falls through to TorBox.
  */
@@ -242,6 +309,27 @@ export async function attemptRdResolution(client, searchCache, candidate, option
   if (observationState === 'uncached') {
     providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
     return { status: 'skipped', reason: 'uncached' };
+  }
+
+  // Local filename-filter predictor — only when there is NO fresh RD
+  // observation. A positive local match means the candidate's filename
+  // matches a known RD error_code 35 pattern, so the addMagnet call is
+  // almost certainly doomed. Skip it without issuing any RD API call.
+  //
+  // This is a LOCAL prediction only — NOT an RD observation, and it MUST
+  // NOT persist any provider evidence. Fresh RD observations above
+  // (cached/infringing/uncached) are more authoritative and always win.
+  if (observationState === 'missing') {
+    const filterMatch = classifyRdFilenameFilter(filename);
+    if (filterMatch) {
+      providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
+      providerAccounting.increment('realdebrid', 'realdebrid_filename_filter_short_circuit');
+      return {
+        status: 'skipped',
+        reason: 'rd_filename_filter_match',
+        filter: { ruleId: filterMatch.ruleId, pattern: filterMatch.pattern },
+      };
+    }
   }
 
   // For cached or missing/stale: attempt RD resolution (resolver-safe)
