@@ -10,6 +10,7 @@ import {
   validateRangeResponseHeaders,
   classifyReadFailure,
 } from './range-response-validator.js';
+import { streamFromDataPlane } from './data-plane-forward.js';
 
 const DAV_ROOT = '/vfs';
 const MOVIES_PATH = `${DAV_ROOT}/Movies`;
@@ -261,6 +262,7 @@ export function createMovieWebDav({
   terminalEvidenceStore = null,
   now = () => Date.now(),
   fetchFn = fetch,
+  dataPlaneBaseUrl = 'http://hy4-data-plane:3001',
 }) {
   const states = new Map();
 
@@ -861,6 +863,40 @@ export function createMovieWebDav({
       sendError(response, error, { size: metadata.size });
       return;
     }
+
+    // ---- P4 VFS range-forwarding cutover ---------------------------------
+    // VFS decided WHICH durable TorrentFile is exposed (state.entry.torrentFileId).
+    // When a durable TorrentFile exists, byte delivery is forwarded to the Rust
+    // data plane, which owns provider execution + Range serving + byte
+    // exactness. The legacy Node provider/byte-delivery path below stays
+    // reachable ONLY as rollback evidence — for entries without a durable
+    // TorrentFile (torrentFileId === null) and as a last-resort fallback when
+    // the data plane is unreachable (P4 §6). Headers are not yet written here,
+    // so a DATA_PLANE_UNREACHABLE simply falls through to legacy.
+    if (state.entry.torrentFileId) {
+      try {
+        await streamFromDataPlane({
+          fetchFn,
+          baseUrl: dataPlaneBaseUrl,
+          tfId: state.entry.torrentFileId,
+          request,
+          response,
+          contentType: CONTENT_TYPE,
+        });
+        return;
+      } catch (error) {
+        if (error?.code === 'DATA_PLANE_UNREACHABLE') {
+          console.warn(
+            `[vfs] data-plane unreachable for tfId=${state.entry.torrentFileId} `
+            + `release=${state.entry.releaseKey}; falling back to legacy provider path`,
+          );
+        } else {
+          sendError(response, error, { size: metadata.size });
+          return;
+        }
+      }
+    }
+
     const opened = await (async () => {
       try {
         return await openValidatedProviderRead(

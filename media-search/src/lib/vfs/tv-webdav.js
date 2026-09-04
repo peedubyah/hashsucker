@@ -23,6 +23,7 @@ import {
   validateRangeResponseHeaders,
   classifyReadFailure,
 } from './range-response-validator.js';
+import { streamFromDataPlane } from './data-plane-forward.js';
 
 const DAV_ROOT = '/vfs';
 const CONTENT_TYPE = 'video/x-matroska';
@@ -269,6 +270,7 @@ export function createTvWebDav({
   terminalEvidenceStore = null,
   now = () => Date.now(),
   fetchFn = fetch,
+  dataPlaneBaseUrl = 'http://hy4-data-plane:3001',
 }) {
   const states = new Map();
 
@@ -919,6 +921,37 @@ export function createTvWebDav({
       sendError(response, error, { size: metadata.size });
       return;
     }
+
+    // ---- P4 VFS range-forwarding cutover (mirror of movie-webdav). --------
+    // VFS decided WHICH durable TorrentFile is exposed; forward byte delivery to
+    // the Rust data plane when a durable TorrentFile exists. The legacy Node
+    // provider path below remains as rollback evidence for torrentFileId === null
+    // and as a last-resort fallback when the data plane is unreachable (P4 §6).
+    if (state.entry.torrentFileId) {
+      try {
+        await streamFromDataPlane({
+          fetchFn,
+          baseUrl: dataPlaneBaseUrl,
+          tfId: state.entry.torrentFileId,
+          request,
+          response,
+          contentType: CONTENT_TYPE,
+        });
+        return;
+      } catch (error) {
+        if (error?.code === 'DATA_PLANE_UNREACHABLE') {
+          console.warn(
+            '[vfs-tv] data-plane unreachable for tfId=' + state.entry.torrentFileId
+            + ' release=' + state.entry.releaseKey
+            + '; falling back to legacy provider path',
+          );
+        } else {
+          sendError(response, error, { size: metadata.size });
+          return;
+        }
+      }
+    }
+
     let opened;
     try {
       opened = await openValidatedProviderRead(

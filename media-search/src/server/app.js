@@ -1560,6 +1560,10 @@ export function createRequestHandler(dependencies = {}) {
     torBoxDownloadUrlCache,
     terminalEvidenceStore,
     now: clock,
+    // P4: forward VFS byte reads to the Rust data plane. Default is the
+    // compose-network service name; override via DATA_PLANE_URL. No hardcoded
+    // host IPs (P4 §9).
+    dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://hy4-data-plane:3001',
   });
   const handleTvWebDav = createTvWebDav({
     searchCache,
@@ -1570,6 +1574,7 @@ export function createRequestHandler(dependencies = {}) {
     torBoxDownloadUrlCache,
     terminalEvidenceStore,
     now: clock,
+    dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://hy4-data-plane:3001',
   });
 
   // Eager VFS metadata hydrators used by the request completion path so
