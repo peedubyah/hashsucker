@@ -237,6 +237,14 @@ export function toCanonicalLive(raw, options = {}) {
     // - relevance: identity-derived relevance when scoped to queried media
     // - identityConfidence: live scope match provides moderate confidence
     selectedMediaId,
+    // Slice 7: exact per-file byte size from behaviorHints.videoSize.
+    // Null when the source stream had no numeric videoSize. This is the
+    // authoritative per-file size — NOT torrent-total, NOT parseSizeFromText.
+    // Threaded through ranking so it survives into persisted results.
+    selectedFileSize:
+      Number.isSafeInteger(raw.exactFileSize) && raw.exactFileSize > 0
+        ? raw.exactFileSize
+        : null,
     // Flags for semantic confidence calculation:
     hasLiveDiscovery: true, // This candidate came from live discovery
     liveProviderHints: raw.providers || null, // Provider hints for availability
@@ -368,6 +376,14 @@ export function mergeExactDuplicates(existing, incoming) {
     providerEvidence: mergedProviderEvidence,
     sources: mergedSources,
     selectedMediaId: mergedSelectedMediaId,
+    // Slice 7: preserve exact per-file size from whichever source has it.
+    // Same releaseKey = same physical file, so sizes should agree.
+    selectedFileSize:
+      Number.isSafeInteger(existing.selectedFileSize) && existing.selectedFileSize > 0
+        ? existing.selectedFileSize
+        : (Number.isSafeInteger(incoming.selectedFileSize) && incoming.selectedFileSize > 0
+          ? incoming.selectedFileSize
+          : null),
     // Preserve live discovery evidence from either source
     hasLiveDiscovery: existing.hasLiveDiscovery || incoming.hasLiveDiscovery,
     liveProviderHints: existing.liveProviderHints || incoming.liveProviderHints,
@@ -618,5 +634,11 @@ export function toRankingInput(candidate) {
     // provider evidence. Folded into providerAvailability by rankHit()
     // only when fresh evidence is absent. Defaults to 0 (no influence).
     historicalPrior: candidate.historicalPrior || 0,
+    // Slice 7: exact per-file byte size. Threaded through ranking so it
+    // survives into persisted results. Null when unknown.
+    selectedFileSize:
+      Number.isSafeInteger(candidate.selectedFileSize) && candidate.selectedFileSize > 0
+        ? candidate.selectedFileSize
+        : null,
   };
 }

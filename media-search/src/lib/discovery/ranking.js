@@ -1323,6 +1323,12 @@ function toRankingInputShadow(candidate) {
     hasLiveDiscovery: candidate.hasLiveDiscovery ?? false,
     liveProviderHints: candidate.liveProviderHints ?? null,
     releaseKey: candidate.releaseKey,
+    // Slice 7: exact per-file byte size. Shadow ranking is diagnostic only
+    // (no persistence), but threading it keeps the shape consistent.
+    selectedFileSize:
+      Number.isSafeInteger(candidate.selectedFileSize) && candidate.selectedFileSize > 0
+        ? candidate.selectedFileSize
+        : null,
   };
 }
 
@@ -1367,6 +1373,7 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     hasLiveDiscovery = false,
     liveProviderHints = null,
     historicalPrior = 0,
+    selectedFileSize = null,
   } = hit;
 
   // Compute component scores using semantic confidence functions.
@@ -1478,6 +1485,12 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     providerEvidence,
     sources,
     selectedMediaId,
+    // Slice 7: exact per-file byte size survives ranking so it can be
+    // persisted into media_request_results. Does NOT influence score.
+    selectedFileSize:
+      Number.isSafeInteger(selectedFileSize) && selectedFileSize > 0
+        ? selectedFileSize
+        : null,
     provenance: hit.provenance || null,
     justification,
   };
