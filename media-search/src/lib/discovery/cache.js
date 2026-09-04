@@ -23,6 +23,8 @@ import {
   toLegacyCachedState,
 } from '../providers/observations.js';
 
+import { extractQualityFeatures } from './quality-features.js';
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS candidates (
   info_hash TEXT NOT NULL,
@@ -246,6 +248,8 @@ CREATE TABLE IF NOT EXISTS media_request_results (
   expected_media_scope TEXT,
   parsed_candidate_scope TEXT,
   selected_file_size INTEGER,
+  quality_features TEXT,
+  quality_features_version INTEGER,
   FOREIGN KEY (request_id) REFERENCES media_requests(id),
   FOREIGN KEY (intent_id) REFERENCES media_intents(id)
 );
@@ -1321,6 +1325,14 @@ const FOREIGN_KEYS_ENFORCED = 'foreign-keys-enforced-v1';
 export const EVIDENCE_SNAPSHOT_VERSION = 1;
 const MEDIA_REQUEST_RESULTS_EVIDENCE_SNAPSHOT = 'media-request-results-evidence-snapshot-v1';
 
+// Slice 6: quality features JSON snapshot on ranked request results.
+// One versioned JSON column keeps schema sane. Legacy rows remain NULL —
+// they are valid and report quality_features unavailable on read.
+// No destructive backfill: historical quality features cannot be
+// reconstructed for rows persisted before this migration.
+export const QUALITY_FEATURES_VERSION = 1;
+const MEDIA_REQUEST_RESULTS_QUALITY_FEATURES = 'media-request-results-quality-features-v1';
+
 // Forbidden fields that must NEVER reach the snapshot. Listed as a
 // module-level constant so the snapshot builder is a deterministic
 // pure function — no closure state, no implicit dependencies.
@@ -1604,6 +1616,28 @@ function migrateMediaRequestResultsEvidenceSnapshot(db) {
   db.prepare(
     'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
   ).run(MEDIA_REQUEST_RESULTS_EVIDENCE_SNAPSHOT, Date.now());
+}
+
+// Slice 6: add quality_features / quality_features_version columns to
+// media_request_results. Existing rows keep NULL — they are valid legacy
+// rows and report quality_features unavailable on read. No destructive
+// backfill: historical quality features cannot be reconstructed for rows
+// persisted before this migration.
+function migrateMediaRequestResultsQualityFeatures(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(MEDIA_REQUEST_RESULTS_QUALITY_FEATURES);
+  if (applied) return;
+  const info = db.prepare('PRAGMA table_info(media_request_results)').all();
+  if (!info.some((col) => col.name === 'quality_features')) {
+    db.exec('ALTER TABLE media_request_results ADD COLUMN quality_features TEXT');
+  }
+  if (!info.some((col) => col.name === 'quality_features_version')) {
+    db.exec('ALTER TABLE media_request_results ADD COLUMN quality_features_version INTEGER');
+  }
+  db.prepare(
+    'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+  ).run(MEDIA_REQUEST_RESULTS_QUALITY_FEATURES, Date.now());
 }
 
 function migrateLegacyProviderObservations(db) {
@@ -2116,6 +2150,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   migratePlaybackHandoffsIdentityUnique(db);
   migrateMediaRequestResultsIdentityUnique(db);
   migrateMediaRequestResultsEvidenceSnapshot(db);
+  migrateMediaRequestResultsQualityFeatures(db);
   // Slice 1.75: the torrent_file_id index can only be created once the
   // column is present. For legacy prod databases, the column is added by
   // migratePlaybackHandoffsTorrentFileId above. For fresh installs the
@@ -4742,7 +4777,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       'score_breakdown', 'identity_tier', 'identity_confidence', 'identity_evidence',
       'resolution_state', 'release_metadata', 'ranking_breakdown',
       'eligible', 'ineligible_reason', 'ineligible_code', 'expected_media_scope', 'parsed_candidate_scope',
-      'selected_file_size', 'evidence_snapshot', 'evidence_snapshot_version'
+      'selected_file_size', 'evidence_snapshot', 'evidence_snapshot_version',
+      'quality_features', 'quality_features_version'
     ];
     if (intentId) { cols.push('intent_id'); }
     const placeholders = cols.map(() => '?').join(', ');
@@ -4835,6 +4871,11 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
         // evidence fields are present so the persisted row is
         // explainable after restart.
         const { snapshot, version } = buildEvidenceSnapshot(r);
+        // Slice 6: build quality features from the SAME ranked object
+        // whose score we are about to persist. Pure extraction — no
+        // re-querying, no re-ranking. Provider/auth data never enters
+        // the snapshot. Unknown values stay null/unknown.
+        const qualityFeatures = extractQualityFeatures(r);
         resultStmt.run(
           requestId,
           r.rank,
@@ -4859,6 +4900,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
             : null,
           snapshot,
           version,
+          JSON.stringify(qualityFeatures),
+          QUALITY_FEATURES_VERSION,
           ...(intentId ? [intentId] : []),
         );
       }
@@ -4917,6 +4960,127 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       version: row.evidence_snapshot_version,
       available: true,
     };
+  }
+
+  // Slice 6: read API for quality features. Returns the parsed feature
+  // object (or null when the row has no quality_features) and the
+  // persisted version marker. A row with quality_features_version IS NOT
+  // NULL and quality_features IS NULL is treated as unavailable and
+  // surfaced explicitly to callers — never silently coerced to an empty
+  // object.
+  function getMediaRequestResultQualityFeatures(requestId, rank) {
+    const row = db.prepare(`
+      SELECT quality_features, quality_features_version
+      FROM media_request_results
+      WHERE request_id = @request_id AND rank = @rank
+    `).get({ request_id: requestId, rank });
+    if (!row) return null;
+    if (row.quality_features == null) {
+      return {
+        features: null,
+        version: row.quality_features_version ?? null,
+        available: false,
+      };
+    }
+    let parsed = null;
+    try { parsed = JSON.parse(row.quality_features); } catch { parsed = null; }
+    return {
+      features: parsed,
+      version: row.quality_features_version,
+      available: true,
+    };
+  }
+
+  // Slice 6: aggregate quality feature distributions across all ranked
+  // results. Read-only analytics helper for later quality-weight
+  // experiments. Groups/counts by resolution, source type, codec,
+  // container, and release group. Also reports size statistics per
+  // resolution tier.
+  //
+  // Returns null when no rows have quality_features yet (e.g. fresh
+  // install or all-legacy corpus).
+  function getQualityFeatureDistribution() {
+    const rows = db.prepare(`
+      SELECT quality_features
+      FROM media_request_results
+      WHERE quality_features IS NOT NULL
+    `).all();
+    if (rows.length === 0) return null;
+
+    const distribution = {
+      total: rows.length,
+      resolution: {},
+      source: {},
+      codec: {},
+      container: {},
+      releaseGroup: {},
+      sizeByResolution: {},
+      withExactSize: 0,
+      withRuntime: 0,
+      withBytesPerMinute: 0,
+      withNormalizedGroup: 0,
+    };
+
+    for (const row of rows) {
+      let parsed = null;
+      try { parsed = JSON.parse(row.quality_features); } catch { continue; }
+      if (!parsed) continue;
+
+      // Resolution distribution
+      const res = parsed.resolution?.label || 'unknown';
+      distribution.resolution[res] = (distribution.resolution[res] || 0) + 1;
+
+      // Source distribution
+      const src = parsed.source?.type || 'unknown';
+      distribution.source[src] = (distribution.source[src] || 0) + 1;
+
+      // Codec distribution
+      const codec = parsed.codec?.video || 'unknown';
+      distribution.codec[codec] = (distribution.codec[codec] || 0) + 1;
+
+      // Container distribution
+      const container = parsed.container?.type || 'unknown';
+      distribution.container[container] = (distribution.container[container] || 0) + 1;
+
+      // Release group distribution
+      const group = parsed.releaseGroup?.normalized || null;
+      if (group) {
+        distribution.releaseGroup[group] = (distribution.releaseGroup[group] || 0) + 1;
+        distribution.withNormalizedGroup++;
+      }
+
+      // Size statistics by resolution tier
+      if (parsed.size?.bytes != null) {
+        distribution.withExactSize++;
+        if (!distribution.sizeByResolution[res]) {
+          distribution.sizeByResolution[res] = [];
+        }
+        distribution.sizeByResolution[res].push(parsed.size.bytes);
+      }
+
+      // Runtime / bytesPerMinute
+      if (parsed.derived?.runtimeMinutes != null) distribution.withRuntime++;
+      if (parsed.size?.bytesPerMinute != null) distribution.withBytesPerMinute++;
+    }
+
+    // Compute size statistics per resolution tier
+    const sizeStats = {};
+    for (const [res, sizes] of Object.entries(distribution.sizeByResolution)) {
+      sizes.sort((a, b) => a - b);
+      const n = sizes.length;
+      sizeStats[res] = {
+        count: n,
+        min: sizes[0],
+        p25: sizes[Math.floor(n * 0.25)],
+        median: sizes[Math.floor(n * 0.5)],
+        p75: sizes[Math.floor(n * 0.75)],
+        max: sizes[n - 1],
+      };
+    }
+    distribution.sizeStats = sizeStats;
+    delete distribution.sizeByResolution; // raw arrays not needed in output
+
+    return distribution;
   }
 
   // ---------------------------------------------------------------------------
@@ -5708,6 +5872,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getMediaRequestsByMediaId,
     getMediaRequestResults,
     getMediaRequestResultEvidenceSnapshot,
+    getMediaRequestResultQualityFeatures,
+    getQualityFeatureDistribution,
     buildEvidenceSnapshot,
     // Playback handoff persistence
     persistPlaybackHandoff,
