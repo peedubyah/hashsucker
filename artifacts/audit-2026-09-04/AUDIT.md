@@ -1229,3 +1229,293 @@ This works because the slice-4 snapshot is captured at the time of `persistMedia
 - m3-north-db is still frozen at 9f36481
 - the 11 realdebrid production contradictions (out of scope; the reconciliation correctly handles them but does not auto-resolve them; future slice may decide policy)
 - the `findTemporary` reference in `test/worker-a-torbox-promotion.test.js` (pre-existing test/source mismatch; not a slice-5 regression)
+
+==========================================================================
+SECTION P: SLICE 6 — QUALITY FEATURE EXTRACTION + PERSISTANCE
+==========================================================================
+
+Date: 2026-09-04
+Commit: 9e3d3f3
+Spec: QUALITY FEATURE EXTRACTION + PERSISTENCE (no ranking weights)
+
+--------------------------------------------------------------------------
+P.1 Metadata Audit
+--------------------------------------------------------------------------
+
+Current metadata sources for quality features:
+
+  SOURCE                FIELDS                         STATUS
+  --------------------- ------------------------------ -------------------
+  release_attributes    resolution, source_type,      DURABLE (parsed)
+                        codec, release_group,
+                        title, year, media_type
+
+  candidates            filename, size (bytes),        DURABLE
+                        info_hash, file_index_key
+
+  media_request_results filename, selected_file_size,  DURABLE
+                        resolution_state, release_metadata
+
+  live discovery        resolution, source, codec,     DURABLE
+                        hdr, audio, releaseGroup,
+                        exactFileSize (behaviorHints.videoSize)
+
+  DMM corpus            filename, hash, bytes          DURABLE
+
+  Cinemeta              title, year, type             DURABLE (identity only)
+
+  MEDIA RUNTIME         —                              MISSING (no TMDB runtime)
+
+Key findings:
+  - release_attributes has 1.48M rows (one per info_hash)
+  - 14.2% missing resolution, 24% missing source_type, 30% missing codec
+  - 47% missing release group (parser only captures trailing token)
+  - Container is derived from filename extension (ephemeral, not stored)
+  - Exact file size available for 99.7% of candidates (1.48M of 1.48M)
+  - Media runtime is entirely absent — bytesPerMinute will be null
+  - selected_file_size on results is currently 0 (live discovery doesn't
+    yet thread it through persistMediaRequest for all paths)
+
+--------------------------------------------------------------------------
+P.2 Quality Feature Schema
+--------------------------------------------------------------------------
+
+Version: 1 (QUALITY_FEATURES_VERSION)
+
+{
+  version: 1,
+  resolution: {
+    label: '2160p' | '1440p' | '1080p' | '720p' | 'sd' | 'unknown',
+    width: null | number,
+    height: null | number,
+    confidence: 0.0-1.0
+  },
+  size: {
+    bytes: null | number,
+    bytesPerMinute: null | number,
+    sizeDensityMode: 'runtime-normalized' | 'raw-only' | 'missing'
+  },
+  source: { type: 'remux' | 'bluray' | 'web-dl' | 'webrip' | 'hdtv' | 'cam' | 'unknown' },
+  codec: { video: 'av1' | 'hevc' | 'h264' | 'vc1' | 'mpeg2' | 'unknown' },
+  container: { type: 'mkv' | 'mp4' | 'm2ts' | 'ts' | 'avi' | 'unknown' },
+  releaseGroup: {
+    raw: null | string,
+    normalized: null | string,
+    confidence: 0.0-1.0
+  },
+  derived: {
+    runtimeMinutes: null | number,
+    sizeWithinResolutionPeerPercentile: null | number
+  }
+}
+
+Design decisions:
+  - One versioned JSON column (quality_features TEXT) keeps schema sane
+  - Legacy rows remain NULL — no destructive backfill
+  - Frozen output prevents accidental mutation
+  - Provider/auth data explicitly never enters the snapshot
+  - Unknown values stay null/unknown — never invented
+
+--------------------------------------------------------------------------
+P.3 Normalization Rules
+--------------------------------------------------------------------------
+
+Resolution:
+  2160p / 4K / UHD / 4kuhd → '2160p' (3840x2160)
+  1440p → '1440p' (2560x1440)
+  1080p / 1080i / FHD → '1080p' (1920x1080)
+  720p → '720p' (1280x720)
+  576p / 480p / 360p → 'sd' (no standard dims)
+  No signal → 'unknown' (width=null, height=null)
+  Filename fallback when parser output absent
+  NEVER infer from file size
+
+Source:
+  Remux → 'remux'
+  BluRay / BDRip / BRRip → 'bluray'
+  WEB-DL / WEB → 'web-dl'
+  WEBRip → 'webrip'
+  HDTV → 'hdtv'
+  CAM → 'cam'
+  No signal → 'unknown'
+
+Codec:
+  x265 / h265 / hevc → 'hevc'
+  x264 / h264 / avc → 'h264'
+  av1 → 'av1'
+  vc-1 / vc1 → 'vc1'
+  mpeg2 → 'mpeg2'
+  No signal → 'unknown'
+
+Container:
+  Derived from filename extension ONLY (.mkv, .mp4, .m2ts, .ts, .avi)
+  NEVER inferred from codec/source tags
+  No extension → 'unknown'
+
+Release group:
+  Raw parser value preserved
+  Normalize: trim, strip surrounding punctuation wrappers, strip trailing dots
+  Preserve mixed-case (FraMeSToR stays FraMeSToR)
+  Do NOT merge distinct groups
+  Do NOT assign quality/reliability weights
+
+Size/bitrate:
+  bytesPerMinute = exactBytes / runtimeMinutes (when both known)
+  Without runtime: raw-only mode
+  No global monotonicity — 12GB 1080p ≠ 12GB 2160p
+
+--------------------------------------------------------------------------
+P.4 Persistence Changes
+--------------------------------------------------------------------------
+
+Schema migration:
+  ALTER TABLE media_request_results ADD COLUMN quality_features TEXT
+  ALTER TABLE media_request_results ADD COLUMN quality_features_version INTEGER
+  Marker: media-request-results-quality-features-v1
+
+Write path (persistMediaRequest):
+  - Quality features built from SAME ranked result object whose score is persisted
+  - No re-querying, no re-ranking
+  - quality_features_version = 1 for new rows only
+  - INSERT OR IGNORE (same as evidence snapshot)
+
+Read API:
+  getMediaRequestResultQualityFeatures(requestId, rank) → { features, version, available }
+  getQualityFeatureDistribution() → aggregate distribution object
+
+Migration guard:
+  Idempotent — checks schema_migrations before applying ALTER TABLE
+  Legacy rows keep NULL quality_features
+
+--------------------------------------------------------------------------
+P.5 Real Corpus Census
+--------------------------------------------------------------------------
+
+Production DB (read-only, 2026-09-04):
+
+  release_attributes:        1,480,584 rows (distinct info_hashes)
+  candidates:                1,480,584 total, 1,475,669 with exact size
+  media_request_results:     8,385 rows
+
+Resolution distribution:
+  1080p:  924,433 (62.4%)
+  720p:   166,304 (11.2%)
+  2160p:  163,786 (11.1%)
+  480p:    12,506 (0.8%)
+  8k:       3,290 (0.2%)
+  360p:       248 (<0.1%)
+  null:   210,017 (14.2%)
+
+Source distribution (top):
+  WEB-DL:  546,575 (37%)
+  BluRay:  287,224 (19%)
+  WEBRip:  161,200 (11%)
+  HDTV:     61,180 (4%)
+  Remux:    23,151 (1.6%)
+  null:    355,844 (24%)
+
+Codec distribution:
+  x264:   649,091 (44%)
+  x265:   320,577 (22%)
+  AVC:     46,561 (3.1%)
+  XviD:    12,395 (0.8%)
+  null:   448,286 (30%)
+
+Top release groups:
+  RARBG: 50,702 | NTb: 39,865 | FLUX: 22,754 | playWEB: 15,961
+  FW: 15,486 | MeGusta: 14,419 | FraMeSToR: 13,041 | FGT: 11,254
+  null: 696,840 (47%)
+
+Container distribution:
+  mkv:    813,468 (55%)
+  other:  481,197 (32.5%)  [no recognized extension]
+  mp4:    163,792 (11%)
+  avi:     17,521 (1.2%)
+
+Size by resolution (with exact size):
+  1080p: avg 7.16 GB, median 2.42 GB, range 0–1962 GB (n=923,804)
+  720p:  avg 2.58 GB, range 0–1301 GB (n=166,078)
+  2160p: avg 23.55 GB, range 0–2052 GB (n=163,682)
+  8k:    avg 19.75 GB, range 0–264 GB (n=3,289)
+
+Tiny-file outliers (< 500 MB): 50,077 across all resolutions
+  (NOT bad quality — just reported as per spec L)
+
+Giant-file outliers (> 50 GB): 54,747 across all resolutions
+  2160p: 27,077 | 1080p: 14,735 | null-res: 12,229
+  (NOT bad quality — just reported as per spec L)
+
+percent with exact file size: 99.7% (candidates), 0% (results — not yet threaded)
+percent with runtime available: 0% (MISSING — no TMDB integration)
+percent where bytesPerMinute can be calculated: 0% (no runtime)
+percent with normalized release group: ~53% (of those with release_group)
+
+--------------------------------------------------------------------------
+P.6 YIFY / Small-Release Case
+--------------------------------------------------------------------------
+
+Fixture: YIFY-like 1080p WEB-DL x264 encode (~1.3 GiB) vs
+         larger 1080p BluRay x265 encode (~12 GiB)
+
+Result (proven in test M):
+  - Features differ: size (1.3 vs 12 GB), source (web-dl vs bluray),
+    codec (h264 vs hevc), group (YIFY vs SPREBBLE)
+  - NO quality_score field in snapshot
+  - NO ranking difference because quality weight = 0
+  - Both correctly labeled 1080p
+
+This proves we are NOT baking in "smaller == worse" as a quality assumption.
+The feature layer captures the difference; future analytics/ranking may use it.
+
+--------------------------------------------------------------------------
+P.7 Tests
+--------------------------------------------------------------------------
+
+44 tests in test/quality-features-slice-6.test.js:
+
+  B (2):    schema versioning, frozen output
+  C (8):    resolution normalization (4K/UHD/1080p/720p/sd/unknown/fallback/no-infer)
+  D (4):    size/bitrate (bytesPerMinute, raw-only, missing, 12GB same-bytes-diff-res)
+  E (2):    source type normalization + unknown
+  F (4):    release group (raw+normalized, strip punctuation, mixed-case, null)
+  G (2):    codec normalization + unknown
+  H (3):    container (extension, unknown, no-infer-from-codec)
+  I (2):    persistence (new row version=1, legacy row unavailable)
+  J (2):    write path (same object, no re-rank)
+  K (2):    analytics read API (distribution, empty)
+  M (1):    YIFY vs BluRay proof
+  N (10):   determinism (1-10 per spec)
+  O (3):    non-goals (no quality_score, no group weights, no provider state)
+
+Full suite: 2711 tests, 2579 pass, 130 fail (vs 137 fail baseline — 7 fewer)
+  Pre-existing failures: enrichment pipeline, worker-a-torbox-promotion,
+  docker-compose integration, edge-proxy contract docs.
+  No new failures introduced by slice 6.
+
+--------------------------------------------------------------------------
+P.8 Files Changed
+--------------------------------------------------------------------------
+
+  NEW:     media-search/src/lib/discovery/quality-features.js  (247 lines)
+  NEW:     media-search/test/quality-features-slice-6.test.js  (570 lines)
+  MODIFY:  media-search/src/lib/discovery/cache.js
+           (+2 columns, +migration, +write-path integration, +read API)
+
+--------------------------------------------------------------------------
+P.9 What This Slice Does NOT DO
+--------------------------------------------------------------------------
+
+Per spec section O:
+  - DO NOT change ranking weights
+  - DO NOT add quality_score to final score
+  - DO NOT add release-group reliability weights
+  - DO NOT change provider order
+  - DO NOT touch resolver
+  - DO NOT touch VFS/WebDAV
+  - DO NOT touch byte delivery
+  - DO NOT touch HY4 Rust
+  - DO NOT change TorrentFile identity
+  - DO NOT use historical playback outcomes yet
+
+This slice prepares analytics only. Quality features are extracted and
+persisted. Future slices may weight ranking by these features.

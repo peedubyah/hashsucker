@@ -1,0 +1,135 @@
+section           metric            value
+-------  ------------------------  -------
+A.1      total_release_attributes  1480584
+A.1      distinct_info_hashes      1480584
+A.1      null_resolution            210017
+A.1      null_source_type           355844
+A.1      null_codec                 448286
+A.1      null_release_group         696840
+A.1      null_filename                   0
+section  resolution    n
+-------  ----------  ------
+B.1      1080p       924433
+B.1      720p        166304
+B.1      2160p       163786
+B.1      480p         12506
+B.1      8k            3290
+B.1      360p           248
+section  source_type    n
+-------  -----------  ------
+C.1      WEB-DL       546575
+C.1      BluRay       287224
+C.1      WEBRip       161200
+C.1      HDTV          61180
+C.1      Remux         23151
+C.1      Proper        22927
+C.1      DVD           12588
+C.1      Internal       7369
+C.1      TVRip           827
+C.1      PDTV            610
+C.1      VHS             234
+C.1      RERIP           188
+C.1      DSRip           166
+C.1      RERiP           143
+C.1      pdtv            114
+C.1      rerip            69
+C.1      TVrip            63
+C.1      TVRIP            23
+C.1      tvrip            21
+C.1      vhs              18
+C.1      TvRip            17
+C.1      Vhs              13
+C.1      RERip             7
+C.1      TVRiP             6
+C.1      ReRip             5
+C.1      Rerip             2
+section  codec     n
+-------  ------  ------
+D.1      x264    649091
+D.1      x265    320577
+D.1      AVC      46561
+D.1      XviD     12395
+D.1      VC-1      2122
+D.1      MPEG-2    1025
+D.1      DivX       266
+D.1      avc        218
+D.1      Avc         43
+section  release_group     n
+-------  --------------  -----
+E.1      RARBG           50702
+E.1      NTb             39865
+E.1      FLUX            22754
+E.1      playWEB         15961
+E.1      FW              15486
+E.1      MeGusta         14419
+E.1      FraMeSToR       13041
+E.1      FGT             11254
+E.1      Kitsune         10560
+E.1      EDITH           10536
+E.1      VARYG            9232
+E.1      PSA              8316
+E.1      ToonsHub         6123
+E.1      ETHEL            6037
+E.1      Lat              5384
+E.1      ELiTE            5080
+E.1      successfulcrab   4597
+E.1      TORRENTGALAXY    4453
+E.1      BAE              4393
+E.1      OFT              4297
+section  container    n
+-------  ---------  ------
+F.1      mkv        813468
+F.1      other      481197
+F.1      mp4        163792
+F.1      avi         17521
+F.1      iso          1746
+F.1      m2ts         1348
+F.1      ts           1231
+F.1      wmv           172
+F.1      mov            59
+F.1      flv            37
+F.1      webm           13
+section              metric                value
+-------  -------------------------------  -------
+G.1      candidates_with_size             1475669
+G.1      candidates_total                 1480584
+G.1      results_with_selected_file_size        0
+G.1      results_total                       8385
+section  resolution    n     min_gb  avg_gb  max_gb
+-------  ----------  ------  ------  ------  -------
+H.1      1080p       923804     0.0    7.16  1962.36
+H.1      720p        166078     0.0    2.58  1300.83
+H.1      2160p       163682     0.0   23.55  2052.08
+H.1      480p         12445     0.0    2.49  1119.28
+H.1      8k            3289     0.0   19.75   264.49
+H.1      360p           246    0.01    2.55     21.6
+section          metric            value
+-------  -----------------------  -------
+I.1      1080p_size_distribution   923804
+I.1      1080p_size_distribution      0.0
+I.1      1080p_size_distribution     1.42
+I.1      1080p_size_distribution     2.42
+I.1      1080p_size_distribution     6.22
+I.1      1080p_size_distribution  1962.36
+section  resolution    n    min_mb
+-------  ----------  -----  ------
+J.1                  50077     0.0
+J.1      1080p       46637     0.0
+J.1      720p        31367     0.0
+J.1      480p         9667     0.0
+J.1      2160p         474     0.0
+J.1      8k             48     0.0
+J.1      360p           39     5.5
+section  resolution    n    max_gb
+-------  ----------  -----  ------
+K.1      2160p       27077  2052.1
+K.1      1080p       14735  1962.4
+K.1                  12229  5014.5
+K.1      720p          653  1300.8
+K.1      480p          113  1119.3
+K.1      8k             46   264.5
+section              metric               value
+-------  -------------------------------  -----
+L.1      results_total                     8385
+L.1      results_with_selected_file_size      0
+L.1      results_with_resolution_state     8385
