@@ -123,6 +123,25 @@ Neither is a host, container, or VFS path. If a Plex-visible path, VFS
 logical path, or Windows/container path ever needs to agree with either one,
 that is a diagnosed seam — not a normalization to apply here.
 
+### What the field-name collision does and does not mean
+
+The two namespaces are **independent**, not opposites. Their string values
+may legitimately be equal. A test that asserts `assert.notEqual(torrentFile,
+providers[0])` is wrong as a general invariant — it would pass any time the
+data is, by accident, unequal, and fail any time the data is, by chance,
+equal. The real invariants are:
+
+- `torrentFile.canonicalInternalPath` is a one-way projection of
+  `torrent_files.internal_path`.
+- `providers[].canonicalInternalPath` is a one-way projection of
+  `provider_files.path`.
+- Neither field is derived from the other.
+- Neither field is normalized into a host, container, VFS, or Plex path.
+- Equal strings must not be assumed to mean identity.
+- Unequal strings must not be assumed to mean distinct.
+
+`docs/hy4/tests/s1-path-provenance.mjs` enforces these.
+
 ## Deliberately out of scope in P2
 
 - **Provider ordering / ranking.** `ORDER BY` in the query is for
