@@ -1,22 +1,29 @@
-# HY4 south data plane -- P3 containerized build.
+# HY4 south data plane -- P3 containerized build (P3 correction: pinned).
 #
 # Multi-stage:
-#   1. builder  - rust:1-alpine, builds a release binary against musl
-#   2. runtime  - alpine, no rust toolchain, just the binary as a non-root user
+#   1. builder  - rust:1.96.1-alpine3.22 (PINNED), builds a release binary against musl
+#   2. runtime  - alpine:3.22, no rust toolchain, just the binary as a non-root user
 #
 # Reproducible: the build context is ./hy4-data-plane. The Dockerfile expects:
 #   - Cargo.toml, Cargo.lock, src/ at the build context root
 #   - src/ containing lib.rs (re-exports) + serve.rs (serving core) + main.rs (binary)
 #
-# The build pins to rust:1-alpine (not :latest) so the build is reproducible
-# on a moving release train; the Cargo.lock pins the resolved graph so the
-# output is bit-stable.
+# The build pins the compiler to an exact known-good tag (Rust 1.96.1,
+# Alpine 3.22) instead of the floating rust:1-alpine, so a rebuild on a
+# later date picks up the same compiler. Cargo.lock pins the resolved
+# graph so the output is bit-stable.
+#
+# Pin provenance: P2 build c8c02a9 (2026-09-04) resolved cleanly under
+# rustc 1.96.1 with Alpine gcc 15.2.0. P3 step 4 verified the same toolchain.
+# Verified by `docker build` against this Dockerfile (2026-09-04, P3
+# correction). Re-pull only if you are willing to re-validate the build.
 #
 # The runtime image has no build tooling. The binary is statically linked
 # except for musl libc and libgcc_s, both of which alpine carries.
 
 # ---- Stage 1: builder ----
-FROM rust:1-alpine AS builder
+# PINNED: rust:1.96.1-alpine3.22 -- exact known-good tag.
+FROM rust:1.96.1-alpine3.22 AS builder
 
 WORKDIR /build
 
@@ -41,7 +48,10 @@ COPY src ./src
 RUN cargo build --release --bin hy4-data-plane
 
 # ---- Stage 2: runtime ----
-FROM alpine:3.20
+# Alpine 3.22 (matches builder); 3.20 in the P3 base Dockerfile; either
+# is fine as long as it is a musl-libc image. Pinned to 3.22 for
+# parity with the builder and with the already-cached image.
+FROM alpine:3.22
 
 # tini for clean signal handling (Ctrl-C, SIGTERM). The Rust binary uses
 # tokio's signal handling, but a wrapper is still the convention for

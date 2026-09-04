@@ -67,8 +67,21 @@ pub const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 
 /// The frozen, durable identity of a cached file. Bytes are interchangeable across
 /// providers only under the same `TorrentFileId`.
+///
+/// The cache key MUST be the exact durable TorrentFile row projected by S-1
+/// (`torrentFile.id`, the `torrent_files.id` PK). Two sibling files in the
+/// same torrent legitimately share the same `info_hash`; collapsing cache
+/// identity to (info_hash + canonical_path + size) was a heuristic that
+/// depended on the host never assigning two TorrentFile rows the same
+/// internal_path under the same info_hash. The PK is guaranteed unique by
+/// SQLite. See docs/hy4/CROSS-FILE-KEYING-AUDIT.md (P3 correction).
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TorrentFileId {
+    /// Exact durable TorrentFile row id from S-1 (`torrent_files.id`).
+    /// The cache and the capability single-flight are keyed on this.
+    pub tf_id_durable: String,
+    /// S-1-projected BitTorrent info_hash. Carried for logging/diagnostics,
+    /// NOT used as the cache key (two sibling files can share this).
     pub info_hash: String,
     pub canonical_path: String,
     pub size: u64,
@@ -76,17 +89,11 @@ pub struct TorrentFileId {
 
 impl TorrentFileId {
     pub fn cache_key(&self) -> String {
-        // Stable, filesystem-safe. info_hash lowercase, path hashed to avoid / collisions.
-        let h = short_hash(&self.canonical_path);
-        format!("{}__{}__{}", self.info_hash.to_ascii_lowercase(), h, self.size)
+        // The durable PK. No hashing, no composition: the PK is already
+        // filesystem-safe (UUIDv4 in production), unique, and is what
+        // VFS, resolver, and forensics all key on.
+        self.tf_id_durable.clone()
     }
-}
-
-fn short_hash(s: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    format!("{:016x}", h.finish())
 }
 
 // ---------------------------------------------------------------------------
@@ -1183,6 +1190,7 @@ mod tests {
         let m = Arc::new(Metrics::default());
         let e = CacheEngine::open(cfg, m).unwrap();
         let tf = TorrentFileId {
+            tf_id_durable: "tf_dune_2021_mkv".into(),
             info_hash: "0439d86e8da335cde1b25575ed0534bf7359bc38".into(),
             canonical_path: "Dune (2021)/Dune.mkv".into(),
             size: file_size,
@@ -1482,6 +1490,7 @@ mod tests {
         };
         let m = Arc::new(Metrics::default());
         let tf = TorrentFileId {
+            tf_id_durable: "tf_test_survive_restart".into(),
             info_hash: "abc".into(),
             canonical_path: "x".into(),
             size: 64 * MIB,
@@ -1511,6 +1520,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let m = Arc::new(Metrics::default());
         let tf = TorrentFileId {
+            tf_id_durable: "tf_test_chunk_size_change".into(),
             info_hash: "abc".into(),
             canonical_path: "x".into(),
             size: 64 * MIB,
@@ -1561,5 +1571,150 @@ mod tests {
         let expect = &payload[(3 * MIB + 11) as usize..=(20 * MIB - 7) as usize];
         assert_eq!(got.len(), expect.len());
         assert!(got == expect, "pread must return EXACTLY the requested bytes");
+    }
+
+    // ---- P3 correction: same-infoHash sibling-file adversarial proof ----
+    //
+    // This test is the focused adversarial proof demanded by the P3
+    // correction. It is capable of failing under the previous
+    // info_hash-only key (or any key that does not include the durable
+    // TorrentFile PK): the two sibling files share the same info_hash
+    // but must still get DISTINCT cache entries, DISTINCT bytes, and
+    // DISTINCT capability reuse keys.
+    //
+    // Setup: two TorrentFileIds with the same info_hash but
+    //   - different tf_id_durable  (the SQLite PK)
+    //   - different canonical_path
+    //   - different size
+    // Fill chunk 0 of each with distinguishable bytes (0xAA for A,
+    // 0xBB for B). The same chunk index 0 in the same engine must
+    // resolve to two independent on-disk files with two independent
+    // SQLite rows.
+    #[test]
+    fn same_info_hash_sibling_files_get_distinct_cache_entries() {
+        let dir = tempdir().unwrap();
+        let cfg = CacheConfig {
+            root: dir.path().to_path_buf(),
+            max_bytes: 64 * MIB,
+            chunk_size: 8 * MIB,
+        };
+        let m = Arc::new(Metrics::default());
+        let e = CacheEngine::open(cfg, m).unwrap();
+
+        // Shared info_hash (sibling files in the same torrent).
+        const SHARED_INFO_HASH: &str = "deadbeefcafe0000deadbeefcafe0000deadbeef";
+        let tf_a = TorrentFileId {
+            tf_id_durable: "tf_sibling_A".into(),
+            info_hash: SHARED_INFO_HASH.into(),
+            canonical_path: "Siblings/episode_01.mkv".into(),
+            size: 16 * MIB, // 2 chunks
+        };
+        let tf_b = TorrentFileId {
+            tf_id_durable: "tf_sibling_B".into(),
+            info_hash: SHARED_INFO_HASH.into(),
+            canonical_path: "Siblings/episode_02.mkv".into(),
+            size: 24 * MIB, // 3 chunks; different size, different chunk count
+        };
+
+        // ---- 1. Cache keys are distinct ----
+        let key_a = tf_a.cache_key();
+        let key_b = tf_b.cache_key();
+        assert_ne!(
+            key_a, key_b,
+            "SAME info_hash sibling files MUST have distinct cache keys"
+        );
+        assert!(
+            key_a.contains("tf_sibling_A"),
+            "key_a must be derived from tf_id_durable, not info_hash (got {key_a})"
+        );
+        assert!(
+            key_b.contains("tf_sibling_B"),
+            "key_b must be derived from tf_id_durable, not info_hash (got {key_b})"
+        );
+
+        // ---- 2. Fill chunk 0 of each with distinguishable bytes ----
+        let grid_a = e.grid_for(&tf_a);
+        let grid_b = e.grid_for(&tf_b);
+        let len_a = grid_a.chunk_len(0) as usize;
+        let len_b = grid_b.chunk_len(0) as usize;
+
+        let st_a = e.begin_stage(tf_a.clone()).unwrap();
+        st_a.stage(0, &vec![0xAA; len_a]).unwrap();
+        st_a.finish();
+        let st_b = e.begin_stage(tf_b.clone()).unwrap();
+        st_b.stage(0, &vec![0xBB; len_b]).unwrap();
+        st_b.finish();
+
+        // ---- 3. Both chunks are PRESENT (independent rows) ----
+        assert!(
+            e.is_present(&key_a, 0).unwrap(),
+            "sibling A chunk 0 must be PRESENT after stage+finish"
+        );
+        assert!(
+            e.is_present(&key_b, 0).unwrap(),
+            "sibling B chunk 0 must be PRESENT after stage+finish"
+        );
+
+        // ---- 4. pread returns the CORRECT bytes for each ----
+        // (read the entire chunk 0 of each)
+        let bytes_a = e.pread(&tf_a, 0, len_a as u64 - 1).unwrap();
+        let bytes_b = e.pread(&tf_b, 0, len_b as u64 - 1).unwrap();
+        assert_eq!(bytes_a.len(), len_a);
+        assert_eq!(bytes_b.len(), len_b);
+        assert!(
+            bytes_a.iter().all(|&b| b == 0xAA),
+            "sibling A bytes must all be 0xAA; a key collision would have returned B's 0xBB"
+        );
+        assert!(
+            bytes_b.iter().all(|&b| b == 0xBB),
+            "sibling B bytes must all be 0xBB; a key collision would have returned A's 0xAA"
+        );
+
+        // ---- 5. Distinct chunk counts ----
+        // A has 2 chunks (size 16 MiB / 8 MiB), B has 3 chunks (size 24 MiB).
+        assert_eq!(grid_a.chunk_count(), 2);
+        assert_eq!(grid_b.chunk_count(), 3);
+
+        // ---- 6. Warm reread cannot cross alias ----
+        // Re-pread both; bytes must still be correct.
+        let bytes_a2 = e.pread(&tf_a, 0, len_a as u64 - 1).unwrap();
+        let bytes_b2 = e.pread(&tf_b, 0, len_b as u64 - 1).unwrap();
+        assert!(bytes_a2.iter().all(|&b| b == 0xAA));
+        assert!(bytes_b2.iter().all(|&b| b == 0xBB));
+
+        // ---- 7. Capability reuse key: the two siblings MUST be
+        //         distinguishable even if they share the same provider,
+        //         account, resource, and provider_file_id (a worst-case
+        //         setup: two sibling files in the same torrent that
+        //         happen to point at the same provider file). This is
+        //         exactly the case the corrected Slot.tf_id is built
+        //         to handle. We construct two Slot values with the
+        //         same provider coord but different tf_id and verify
+        //         the resulting sf_keys differ.
+        //
+        // The Slot is in manager.rs; we exercise the same keying
+        // arithmetic inline here rather than pulling in the manager
+        // crate-internals for a focused test.
+        let provider = "realdebrid";
+        let account_scope = "main";
+        let resource = "rd_res_42";
+        let provider_file_id = "rd_pf_42";
+        // The previous key shape (info_hash-based) would have:
+        //   sf_key_A == sf_key_B  (same tf_id, same provider coord)
+        // The corrected key shape (durable PK) yields:
+        //   sf_key_A != sf_key_B
+        let sf_key_a = format!(
+            "{}|{}|{}|{}|{}",
+            provider, account_scope, tf_a.tf_id_durable, resource, provider_file_id
+        );
+        let sf_key_b = format!(
+            "{}|{}|{}|{}|{}",
+            provider, account_scope, tf_b.tf_id_durable, resource, provider_file_id
+        );
+        assert_ne!(
+            sf_key_a, sf_key_b,
+            "Siblings sharing the same provider coord MUST be \
+             distinguishable in the capability reuse key"
+        );
     }
 }

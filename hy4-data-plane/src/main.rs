@@ -210,11 +210,12 @@ async fn handle_files(
     // S-1-projected identity for THIS tfId.
     let state = Arc::new(AppState {
         authoritative_size: resp.torrent_file.size,
+        // Host tf_id is the URL path segment. Carried for logging.
         tf_id: resp.torrent_file.id.clone(),
-        // S-1-projected BitTorrent info_hash. The cache is keyed on this
-        // (not on the host tf_id), so the keying survives host re-imports
-        // and does not alias two different physical files. See
-        // docs/hy4/CROSS-FILE-KEYING-AUDIT.md.
+        // Exact durable PK from S-1 (torrent_files.id). The cache and
+        // the capability single-flight are keyed on this. See
+        // docs/hy4/CROSS-FILE-KEYING-AUDIT.md (P3 correction).
+        tf_id_durable: resp.torrent_file.id.clone(),
         info_hash: resp.torrent_file.info_hash.clone(),
         canonical_path: resp
             .torrent_file
@@ -255,6 +256,7 @@ async fn handle_metrics(AxumState(svc): AxumState<Arc<ServiceState>>) -> Respons
     let state = Arc::new(AppState {
         authoritative_size: 0,
         tf_id: String::new(),
+        tf_id_durable: String::new(),
         info_hash: String::new(),
         canonical_path: String::new(),
         client: svc.client.clone(),

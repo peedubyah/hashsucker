@@ -48,7 +48,7 @@ pub struct DeliveryCapability {
     pub(crate) runtime_url: String,
     pub provider: String,
     pub account_scope: String,
-    pub torrent_file_id: String, // infoHash
+    pub torrent_file_id: String, // durable PK from S-1 (torrentFile.id); see Slot in manager.rs
     pub provider_resource_id: String,
     pub provider_file_id: String,
     pub acquired_at: Instant,

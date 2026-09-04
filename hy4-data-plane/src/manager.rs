@@ -145,7 +145,14 @@ impl CapabilityManager {
             if let Some(t) = target {
                 slots.push(Slot {
                     coord: t.clone(),
-                    tf_id: tf.info_hash.clone(),
+                    // Slot-level identity is the durable PK from S-1
+                    // (torrentFile.id). info_hash is NOT used here
+                    // because two sibling files in the same torrent
+                    // legitimately share the same info_hash. The
+                    // single-flight key (sf_key) and the negative cache
+                    // therefore cannot alias sibling files. See
+                    // docs/hy4/CROSS-FILE-KEYING-AUDIT.md (P3 correction).
+                    tf_id: tf.id.clone(),
                     target_file_id: t.provider_file_id.clone(),
                     breaker: Breaker::new(3, Duration::from_secs(30)),
                     caps: Mutex::new(Vec::new()),

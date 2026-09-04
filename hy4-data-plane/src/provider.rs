@@ -160,7 +160,11 @@ async fn acquire_torbox(
         final_url,
         "torbox".into(),
         coord.account_scope.clone(),
-        tf.info_hash.clone(),
+        // Carried identity: the durable PK from S-1
+        // (torrentFile.id == torrent_files.id). Capability
+        // REUSE is keyed by the Slot (provider + account +
+        // resource + tf_id_durable + file), not by this field.
+        tf.id.clone(),
         coord.provider_resource_id.clone(),
         coord.provider_file_id.clone(),
         Some(Duration::from_secs(ttl)),
@@ -258,7 +262,10 @@ async fn acquire_rd_mode_a(
                     dl.to_string(),
                     "realdebrid".into(),
                     coord.account_scope.clone(),
-                    tf.info_hash.clone(),
+                    // Carried identity: the durable PK from S-1
+                    // (torrentFile.id == torrent_files.id). See Slot
+                    // comment in manager.rs.
+                    tf.id.clone(),
                     coord.provider_resource_id.clone(),
                     coord.provider_file_id.clone(),
                     Some(Duration::from_secs(ttl)),
@@ -403,7 +410,10 @@ async fn acquire_rd_mode_b(
         dl.to_string(),
         "realdebrid".into(),
         coord.account_scope.clone(),
-        tf.info_hash.clone(),
+        // Carried identity: the durable PK from S-1
+        // (torrentFile.id == torrent_files.id). See Slot comment
+        // in manager.rs.
+        tf.id.clone(),
         coord.provider_resource_id.clone(),
         coord.provider_file_id.clone(),
         Some(Duration::from_secs(
