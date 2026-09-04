@@ -70,28 +70,32 @@ export const QUALITY_CONTRIBUTION_VERSION = 1;
  *
  * Desired shape (spec section B):
  *   resolution   ~45-55%  (DOMINANT)
- *   sizeRelative ~25-35%  (SECONDARY, BOUNDED)
- *   source       ~10-20%  (SMALLER)
- *   codec        ~3-6%    (TINY)
- *   container    ~0-2%    (NEARLY NEGLIGIBLE)
+ *   resolution   ~50%  (DOMINANT)
+ *   sizeRelative ~30%  (SECONDARY, BOUNDED)
+ *   source       ~14%  (SMALLER)
+ *   codec        ~5%   (TINY)
+ *   container    ~1%   (NEARLY NEGLIGIBLE)
  */
 const QUALITY_COMPONENT_WEIGHTS = Object.freeze({
   resolution: 0.50,
   sizeRelative: 0.30,
-  source: 0.12,
+  source: 0.14,
   codec: 0.05,
-  container: 0.03,
+  container: 0.01,
 });
 
 // Resolution component scores (spec section C).
-// 'unknown' gets 0.0 — low-confidence estimate, not a quality signal.
+// 'unknown' is NEUTRAL (0.50) — not a quality signal.
+// Unknown resolution lowers confidence, not score. SD is still scored
+// lower than neutral because SD is an OBSERVED low resolution, not a
+// missing-data signal.
 const RESOLUTION_COMPONENT_SCORES = Object.freeze({
   '2160p': 1.00,
   '1440p': 0.88,
   '1080p': 0.72,
   '720p': 0.45,
   'sd': 0.20,
-  'unknown': 0.00,
+  'unknown': 0.50,
 });
 
 // Source type component scores (spec section E).
@@ -131,8 +135,8 @@ const NEUTRAL_COMPONENT = 0.50;
  * @returns {number} 0.0-1.0
  */
 function resolutionComponentScore(resolutionLabel) {
-  if (!resolutionLabel || resolutionLabel === 'unknown') return 0.0;
-  return RESOLUTION_COMPONENT_SCORES[resolutionLabel] ?? 0.0;
+  if (!resolutionLabel || resolutionLabel === 'unknown') return NEUTRAL_COMPONENT;
+  return RESOLUTION_COMPONENT_SCORES[resolutionLabel] ?? NEUTRAL_COMPONENT;
 }
 
 /**

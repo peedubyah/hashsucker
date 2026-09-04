@@ -5146,21 +5146,34 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     };
   }
 
-  // Slice 8: aggregate quality contribution shadow distributions across all
+  // Slice 8A: aggregate quality contribution shadow distributions across all
   // ranked results. Read-only analytics helper for hypothetical weight
   // experiments. Reports total score distribution, component averages,
-  // confidence distribution, and hypothetical reorder analysis at 0.02/0.05/0.10.
+  // confidence distribution, and PER-REQUEST hypothetical reorder analysis
+  // at 0.02/0.05/0.10.
+  //
+  // CRITICAL: Hypothetical ranking is computed PER REQUEST_ID, not globally.
+  // Candidates from different media requests are not peers — comparing
+  // their rank positions would be meaningless. Each request's candidates
+  // are reranked independently using the persisted base score + hypothetical
+  // quality weight × shadow total.
   //
   // Returns null when no rows have quality_features yet.
   function getQualityContributionShadowDistribution() {
     const rows = db.prepare(`
-      SELECT quality_features, score
+      SELECT request_id, rank, quality_features, score
       FROM media_request_results
       WHERE quality_features IS NOT NULL
     `).all();
     if (rows.length === 0) return null;
 
-    const shadows = [];
+    // Group rows by request_id (preserving insertion order)
+    const byRequest = new Map();
+    for (const row of rows) {
+      if (!byRequest.has(row.request_id)) byRequest.set(row.request_id, []);
+      byRequest.get(row.request_id).push(row);
+    }
+
     const totals = [];
     const confidences = [];
     const componentSums = { resolution: 0, sizeRelative: 0, source: 0, codec: 0, container: 0 };
@@ -5179,7 +5192,6 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       componentSums.source += shadow.components.source;
       componentSums.codec += shadow.components.codec;
       componentSums.container += shadow.components.container;
-      shadows.push({ score: row.score || 0, shadow });
     }
 
     if (withShadow === 0) return null;
@@ -5188,48 +5200,108 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     confidences.sort((a, b) => a - b);
     const n = totals.length;
 
-    // Hypothetical reorder analysis at 0.02, 0.05, 0.10
+    // Hypothetical reorder analysis at 0.02, 0.05, 0.10 — PER REQUEST
     const hypotheticalWeights = [0.02, 0.05, 0.10];
     const hypotheticalAnalysis = {};
     for (const w of hypotheticalWeights) {
-      // Sort by hypothetical score = score + weight * shadowTotal
-      const enriched = shadows.map((s, i) => ({
-        _originalIndex: i,
-        _baseScore: s.score,
-        _shadowTotal: s.shadow.total,
-        _hypotheticalScore: s.score + w * s.shadow.total,
-      }));
-      const sorted = [...enriched].sort((a, b) => {
-        if (b._hypotheticalScore !== a._hypotheticalScore) {
-          return b._hypotheticalScore - a._hypotheticalScore;
-        }
-        return a._originalIndex - b._originalIndex;
-      });
-      let reorderCount = 0;
-      let totalMovement = 0;
+      let requestsWithReorder = 0;
+      let requestsWithTop1Change = 0;
+      let candidatesConsidered = 0;
+      let candidatesMoved = 0;
+      const allMovements = [];
       let maxMovement = 0;
-      for (let newRank = 0; newRank < sorted.length; newRank++) {
-        const movement = Math.abs(newRank - sorted[newRank]._originalIndex);
-        if (movement > 0) reorderCount++;
-        totalMovement += movement;
-        if (movement > maxMovement) maxMovement = movement;
+
+      for (const [, reqRows] of byRequest) {
+        // Parse all rows in this request
+        const enriched = [];
+        for (const r of reqRows) {
+          let parsed = null;
+          try { parsed = JSON.parse(r.quality_features); } catch { continue; }
+          if (!parsed || !parsed.qualityContributionShadow) continue;
+          enriched.push({
+            _originalRank: r.rank,
+            _baseScore: r.score || 0,
+            _shadowTotal: parsed.qualityContributionShadow.total,
+            _hypotheticalScore: (r.score || 0) + w * parsed.qualityContributionShadow.total,
+          });
+        }
+        if (enriched.length === 0) continue;
+
+        // Sort by hypothetical score DESC, tie-break by original rank ASC
+        const sorted = [...enriched].sort((a, b) => {
+          if (b._hypotheticalScore !== a._hypotheticalScore) {
+            return b._hypotheticalScore - a._hypotheticalScore;
+          }
+          return a._originalRank - b._originalRank;
+        });
+
+        candidatesConsidered += enriched.length;
+
+        // Map original-rank → new position
+        const rankToNewPos = new Map();
+        for (let newPos = 0; newPos < sorted.length; newPos++) {
+          rankToNewPos.set(sorted[newPos]._originalRank, newPos);
+        }
+
+        let requestMoved = 0;
+        let top1Changed = false;
+        for (const e of enriched) {
+          const newPos = rankToNewPos.get(e._originalRank);
+          // Convert rank (1-indexed) to position (0-indexed) for movement
+          const origPos = e._originalRank - 1;
+          const movement = Math.abs(newPos - origPos);
+          if (movement > 0) {
+            requestMoved++;
+            candidatesMoved++;
+            allMovements.push(movement);
+            if (movement > maxMovement) maxMovement = movement;
+          }
+        }
+
+        // Check top-1 change: does the original rank-1 still land at position 0?
+        const originalTop1 = enriched.find((e) => e._originalRank === 1);
+        if (originalTop1) {
+          if (rankToNewPos.get(1) !== 0) {
+            top1Changed = true;
+          }
+        }
+
+        if (requestMoved > 0) requestsWithReorder++;
+        if (top1Changed) requestsWithTop1Change++;
       }
+
+      allMovements.sort((a, b) => a - b);
+      const medianMovement = allMovements.length > 0
+        ? allMovements[Math.floor(allMovements.length / 2)]
+        : 0;
+      const avgMovement = allMovements.length > 0
+        ? Math.round((allMovements.reduce((a, b) => a + b, 0) / allMovements.length) * 1000) / 1000
+        : 0;
+      const requestCount = byRequest.size;
+
       hypotheticalAnalysis[`weight_${w.toFixed(2)}`] = {
         weight: w,
-        reorderCount,
-        reorderPercent: Math.round((reorderCount / n) * 1000) / 10,
-        medianRankMovement: sorted.length > 0 ? (() => {
-          const m = sorted.map((_, i) => Math.abs(i - sorted[i]._originalIndex)).sort((a, b) => a - b);
-          return m[Math.floor(m.length / 2)];
-        })() : 0,
-        maxRankMovement: maxMovement,
-        averageRankMovement: Math.round((totalMovement / n) * 1000) / 1000,
+        requestCount,
+        requestsWithReorder,
+        requestsWithTop1Change,
+        top1ChangePercent: requestCount > 0
+          ? Math.round((requestsWithTop1Change / requestCount) * 1000) / 10
+          : 0,
+        candidatesConsidered,
+        candidatesMoved,
+        candidateMovePercent: candidatesConsidered > 0
+          ? Math.round((candidatesMoved / candidatesConsidered) * 1000) / 10
+          : 0,
+        medianAbsoluteRankMovement: medianMovement,
+        averageAbsoluteRankMovement: avgMovement,
+        maxAbsoluteRankMovement: maxMovement,
       };
     }
 
     return {
       total: rows.length,
       withShadow,
+      requestCount: byRequest.size,
       totalScore: {
         min: totals[0],
         p25: totals[Math.floor(n * 0.25)],

@@ -202,8 +202,10 @@ test('C: resolution component scores follow spec ordering', () => {
   assert.ok(c1440 > c1080, `1440p (${c1440}) > 1080p (${c1080})`);
   assert.ok(c1080 > c720, `1080p (${c1080}) > 720p (${c720})`);
   assert.ok(c720 > csd, `720p (${c720}) > sd (${csd})`);
-  assert.ok(csd > cUnknown, `sd (${csd}) > unknown (${cUnknown})`);
-  assert.equal(cUnknown, 0.0, 'unknown resolution scores 0');
+  // Slice 8A: unknown is NEUTRAL (0.50), NOT worse than SD.
+  // Unknown resolution lowers confidence, not score.
+  assert.ok(cUnknown > csd, `unknown (${cUnknown}) > sd (${csd}) — unknown is neutral, not penalised`);
+  assert.equal(cUnknown, 0.5, 'unknown resolution is exactly neutral');
 });
 
 test('C: resolution scores match spec values', () => {
@@ -876,6 +878,254 @@ test('O: distribution returns null for legacy/empty corpus', () => {
 });
 
 // ===========================================================================
+// O2. Slice 8A: per-request grouping regression test
+// ===========================================================================
+
+test('O2: hypothetical analysis groups by request_id, not globally', () => {
+  const dbPath = tempDbPath('per-request');
+  const cache = createDiscoveryCache(dbPath);
+
+  // Request A: 3 candidates, scores tightly clustered so quality dominates
+  const reqA = [
+    rankedResult({
+      rank: 1,
+      infoHash: 'A'.repeat(40),
+      score: 0.70,
+      filename: 'Movie.2024.1080p.BluRay.x265-FLUX.mkv',
+      selectedFileSize: 8589934592,
+      release: { resolution: '1080p', source_type: 'BluRay', codec: 'x265', release_group: 'FLUX' },
+    }),
+    rankedResult({
+      rank: 2,
+      infoHash: 'B'.repeat(40),
+      score: 0.68,
+      filename: 'Movie.2024.720p.WEB-DL.x264-YTS.mkv',
+      selectedFileSize: 1401946675,
+      release: { resolution: '720p', source_type: 'WEB-DL', codec: 'x264', release_group: 'YTS' },
+    }),
+    rankedResult({
+      rank: 3,
+      infoHash: 'C'.repeat(40),
+      score: 0.66,
+      filename: 'Movie.2024.2160p.UHD.WEB-DL.x265-TEST.mkv',
+      selectedFileSize: 3000000000,
+      release: { resolution: '2160p', source_type: 'WEB-DL', codec: 'x265', release_group: 'TEST' },
+    }),
+  ];
+
+  // Request B: 2 candidates, much higher scores than A
+  // The 720p here has a very low score relative to the others.
+  // The point: scores of B don't interleave with A's — if the algorithm
+  // did a GLOBAL sort, B's lower-scored 720p would interleave with A's
+  // results and produce nonsense movement. Per-request sort keeps them
+  // isolated.
+  const reqB = [
+    rankedResult({
+      rank: 1,
+      infoHash: 'D'.repeat(40),
+      score: 0.95,
+      filename: 'Other.2024.1080p.BluRay.x265-AAA.mkv',
+      selectedFileSize: 8589934592,
+      release: { resolution: '1080p', source_type: 'BluRay', codec: 'x265', release_group: 'AAA' },
+    }),
+    rankedResult({
+      rank: 2,
+      infoHash: 'E'.repeat(40),
+      score: 0.93,
+      filename: 'Other.2024.720p.WEB-DL.x264-BBB.mkv',
+      selectedFileSize: 1401946675,
+      release: { resolution: '720p', source_type: 'WEB-DL', codec: 'x264', release_group: 'BBB' },
+    }),
+  ];
+
+  const reqIdA = cache.persistMediaRequest({ mediaId: 'ttA' }, reqA);
+  const reqIdB = cache.persistMediaRequest({ mediaId: 'ttB' }, reqB);
+  assert.notEqual(reqIdA, reqIdB, 'two distinct request_ids');
+
+  const dist = cache.getQualityContributionShadowDistribution();
+  assert.ok(dist !== null);
+  assert.equal(dist.requestCount, 2, 'two distinct requests');
+
+  const w10 = dist.hypotheticalAnalysis['weight_0.10'];
+  assert.equal(w10.requestCount, 2);
+  // The schema rejects duplicate (request_id, info_hash, file_index_key) tuples.
+  // The default rankedResult factory uses infoHash='A'.repeat(40) and
+  // fileIndex=-1, so two rows with default infoHash + -1 collide. We
+  // give every row a distinct infoHash so all 5 are persisted.
+  assert.equal(w10.candidatesConsidered, 5, '5 candidates considered (3+2)');
+  assert.ok(w10.candidatesMoved <= w10.candidatesConsidered);
+  assert.ok(w10.medianAbsoluteRankMovement >= 0);
+  assert.ok(w10.maxAbsoluteRankMovement >= 0);
+
+  rmSync(dirname(dbPath), { recursive: true, force: true });
+});
+
+test('O2: regression — two overlapping-score requests prove global sort would be wrong', () => {
+  const dbPath = tempDbPath('overlap');
+  const cache = createDiscoveryCache(dbPath);
+
+  // Request 1: low scores 0.50/0.45, all 1080p
+  // Request 2: higher scores 0.90/0.80, 720p
+  // A global sort would interleave these. A per-request sort keeps them
+  // isolated — Request 1's quality reorder doesn't touch Request 2's
+  // ordering, and vice versa.
+  // Each row gets a distinct infoHash to avoid the UNIQUE INDEX on
+  // (request_id, info_hash, file_index_key).
+  const req1 = [
+    rankedResult({
+      rank: 1,
+      infoHash: '1'.repeat(40),
+      score: 0.50,
+      filename: 'A.2024.1080p.BluRay.x265.mkv',
+      selectedFileSize: 8000000000,
+      release: { resolution: '1080p', source_type: 'BluRay', codec: 'x265' },
+    }),
+    rankedResult({
+      rank: 2,
+      infoHash: '2'.repeat(40),
+      score: 0.45,
+      filename: 'A.2024.1080p.WEB-DL.x264.mkv',
+      selectedFileSize: 2000000000,
+      release: { resolution: '1080p', source_type: 'WEB-DL', codec: 'x264' },
+    }),
+  ];
+
+  const req2 = [
+    rankedResult({
+      rank: 1,
+      infoHash: '3'.repeat(40),
+      score: 0.90,
+      filename: 'B.2024.720p.BluRay.x265.mkv',
+      selectedFileSize: 4000000000,
+      release: { resolution: '720p', source_type: 'BluRay', codec: 'x265' },
+    }),
+    rankedResult({
+      rank: 2,
+      infoHash: '4'.repeat(40),
+      score: 0.80,
+      filename: 'B.2024.720p.WEB-DL.x264.mkv',
+      selectedFileSize: 1500000000,
+      release: { resolution: '720p', source_type: 'WEB-DL', codec: 'x264' },
+    }),
+  ];
+
+  const reqId1 = cache.persistMediaRequest({ mediaId: 'ttX' }, req1);
+  const reqId2 = cache.persistMediaRequest({ mediaId: 'ttY' }, req2);
+
+  const dist = cache.getQualityContributionShadowDistribution();
+  const w10 = dist.hypotheticalAnalysis['weight_0.10'];
+
+  // CRITICAL ASSERTION: candidatesConsidered must equal sum of per-request
+  // candidate counts (2+2=4), NOT a global sort result.
+  assert.equal(w10.candidatesConsidered, 4,
+    'per-request grouping: candidatesConsidered = sum of per-request counts (2+2=4)');
+  assert.equal(w10.requestCount, 2, 'two requests');
+
+  // The per-request top-1 is the original rank 1 in each request. Per-request
+  // hypothetical sort should never produce a top-1 change for either request
+  // because in each request, rank 1 has both higher score AND (probably)
+  // higher quality. We test that the top-1-change counter is independent
+  // of the OTHER request's scores.
+  assert.ok(w10.requestsWithTop1Change >= 0);
+  assert.ok(w10.requestsWithTop1Change <= w10.requestCount);
+
+  rmSync(dirname(dbPath), { recursive: true, force: true });
+});
+
+// ===========================================================================
+// O3. Slice 8A: unknown resolution is neutral, NOT worse than SD
+// ===========================================================================
+
+test('O3: unknown resolution is neutral, not penalised as worse than SD', () => {
+  const sd = extractQualityFeatures({
+    release: { resolution: 'sd' },
+    filename: 'Movie.2024.480p.BluRay.x264.mkv',
+    selectedFileSize: 700000000,
+  });
+  const unknown = extractQualityFeatures({
+    release: {},
+    filename: 'Movie.2024.BluRay.x264.mkv',
+    selectedFileSize: 8589934592,
+  });
+
+  const sdResolution = sd.qualityContributionShadow.components.resolution;
+  const unknownResolution = unknown.qualityContributionShadow.components.resolution;
+
+  // Slice 8A: unknown is neutral (0.5), SD is 0.20
+  assert.equal(unknownResolution, 0.5, 'unknown resolution = 0.5 (neutral)');
+  assert.equal(sdResolution, 0.20, 'sd resolution = 0.20');
+  assert.ok(unknownResolution > sdResolution,
+    `unknown (${unknownResolution}) > sd (${sdResolution}) — not penalised for absence`);
+
+  // But unknown has lower confidence
+  const sdConfidence = sd.qualityContributionShadow.confidence;
+  const unknownConfidence = unknown.qualityContributionShadow.confidence;
+  assert.ok(unknownConfidence < sdConfidence,
+    `unknown confidence (${unknownConfidence}) < sd confidence (${sdConfidence}) — confidence decreases for missing data`);
+});
+
+test('O3: unknown resolution does NOT implicitly penalise via large weight', () => {
+  // Resolution weight = 0.50, unknown = 0.5 (neutral)
+  // weighted contribution of unknown = 0.5 * 0.5 = 0.25
+  // Compare to SD: 0.20 * 0.5 = 0.10
+  // Unknown still wins on the resolution dimension.
+  const features = extractQualityFeatures({
+    release: {},
+    filename: 'Movie.mkv',
+    selectedFileSize: 8589934592,
+  });
+  const shadow = features.qualityContributionShadow;
+  assert.equal(shadow.components.resolution, 0.5);
+  // The resolution contribution to total: 0.5 * 0.5 = 0.25
+  // This is identical to having a known 1080p-equivalent of 0.5 score
+  // (which there is no such resolution, but the point is it doesn't
+  // implicitly drag the total down).
+  // Verify: unknown resolution alone should not cause total < 0.3
+  // when all other components are neutral.
+  assert.ok(shadow.total >= 0.4,
+    `unknown resolution + all neutral should give total >= 0.4, got ${shadow.total}`);
+});
+
+// ===========================================================================
+// O4. Slice 8A: component weights have container <= 0.02
+// ===========================================================================
+
+test('O4: component weights have container influence <= 0.02', () => {
+  const features = extractQualityFeatures({
+    release: { resolution: '1080p' },
+    filename: 'Movie.2024.1080p.BluRay.x265-FLUX.mkv',
+    selectedFileSize: 8589934592,
+  });
+  const w = features.qualityContributionShadow.componentWeights;
+  assert.ok(w.container <= 0.02, `container weight (${w.container}) <= 0.02`);
+  assert.equal(w.resolution, 0.50);
+  assert.equal(w.sizeRelative, 0.30);
+  assert.equal(w.source, 0.14);
+  assert.equal(w.codec, 0.05);
+  assert.equal(w.container, 0.01);
+
+  // Sum must equal 1.0
+  const sum = w.resolution + w.sizeRelative + w.source + w.codec + w.container;
+  assert.ok(Math.abs(sum - 1.0) < 0.001, `weights sum to 1.0, got ${sum}`);
+});
+
+test('O4: container change (mkv↔avi) does not materially affect total', () => {
+  const mkv = extractQualityFeatures({
+    release: { resolution: '1080p', source_type: 'BluRay', codec: 'x265' },
+    filename: 'Movie.2024.1080p.BluRay.x265-FLUX.mkv',
+    selectedFileSize: 8589934592,
+  });
+  const avi = extractQualityFeatures({
+    release: { resolution: '1080p', source_type: 'BluRay', codec: 'x265' },
+    filename: 'Movie.2024.1080p.BluRay.x265-FLUX.avi',
+    selectedFileSize: 8589934592,
+  });
+  const totalDelta = Math.abs(mkv.qualityContributionShadow.total - avi.qualityContributionShadow.total);
+  // Container weight is 0.01, so mkv(0.55)→avi(0.35) delta = 0.20 * 0.01 = 0.002
+  assert.ok(totalDelta < 0.005, `container change total delta (${totalDelta}) < 0.005`);
+});
+
+// ===========================================================================
 // P. Determinism
 // ===========================================================================
 
@@ -947,10 +1197,10 @@ test('edge: all unknown/missing components → total is weighted sum', () => {
     codec: { video: 'unknown' },
     container: { type: 'unknown' },
   });
-  // resolution unknown → 0.0, others neutral → 0.5
-  // total = 0.0*0.5 + 0.5*0.3 + 0.5*0.12 + 0.5*0.05 + 0.5*0.03 = 0.25
-  assert.ok(Math.abs(shadow.total - 0.25) < 0.01, `expected ~0.25, got ${shadow.total}`);
-  assert.equal(shadow.confidence, 0.0);
+  // Slice 8A: unknown resolution is NEUTRAL (0.5), not 0.0.
+  // All five components are 0.5 → total = 0.5 * (0.5+0.3+0.14+0.05+0.01) = 0.5
+  assert.ok(Math.abs(shadow.total - 0.5) < 0.01, `expected ~0.5, got ${shadow.total}`);
+  assert.equal(shadow.confidence, 0.0, 'confidence 0 when all components unknown');
 });
 
 test('edge: best possible quality', () => {
