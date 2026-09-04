@@ -544,6 +544,107 @@ CREATE INDEX IF NOT EXISTS idx_historical_provider_evidence_source
 `;
 
 // ============================================================================
+// RD /downloads raw observation + correlation tables
+//
+// Architectural role:
+//   /downloads is RD's per-download-event log. It has NO infoHash and
+//   NO deterministic bridge to /torrents. We persist it as raw
+//   observation only — never as historical_provider_evidence, which
+//   requires an infoHash PK.
+//
+//   rd_download_observations:
+//     one row per RD download event (one RD download id = one row).
+//     The (provider, source_id, rd_id) tuple is the stable primary
+//     identity. Re-importing the same RD download id is a no-op.
+//     Distinct RD download ids with identical (filename, filesize)
+//     remain distinct rows (the 52 Oppenheimer rows are NOT collapsed).
+//     source_version is the snapshot provenance, identical to
+//     historical_provider_evidence's source_version semantics.
+//
+//   rd_download_correlations:
+//     DERIVED HYPOTHESIS CACHE. May be empty (we build it only if
+//     correlation quality is materially useful; see
+//     scripts/correlate-rd-downloads.js). The correlation layer is
+//     a pure function of (observations, candidates) and is safe to
+//     rebuild from scratch. It is never authoritative identity.
+//     A row here says "for observation rd_id, candidate info_hash
+//     + file_index is the closest match given the available evidence;
+//     see reasons_json for which features fired." It is NOT a
+//     historical_provider_evidence row, NOT a release-identity
+//     statement, and NOT safe to feed into ranking without the
+//     separate gate in lib/discovery/ranking.js (which currently
+//     does not consult this table — ranking is unchanged by this
+//     schema addition).
+// ============================================================================
+
+const CREATE_RD_DOWNLOAD_OBSERVATIONS = `
+CREATE TABLE IF NOT EXISTS rd_download_observations (
+  provider TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  source_version TEXT NOT NULL,
+  source_event_id TEXT NOT NULL,
+  rd_id TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  normalized_filename TEXT NOT NULL,
+  exact_bytes INTEGER NOT NULL,
+  mime_type TEXT,
+  streamable INTEGER NOT NULL DEFAULT 0,
+  generated_at INTEGER NOT NULL,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  parsed_title TEXT,
+  parsed_year INTEGER,
+  season INTEGER,
+  episode INTEGER,
+  resolution TEXT,
+  source_type TEXT,
+  codec TEXT,
+  release_group TEXT,
+  parser_confidence REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (provider, source_id, source_event_id)
+);
+`;
+
+const CREATE_RD_DOWNLOAD_OBSERVATIONS_INDEXES = `
+CREATE INDEX IF NOT EXISTS idx_rd_download_obs_filename_bytes
+  ON rd_download_observations(provider, source_id, normalized_filename, exact_bytes);
+CREATE INDEX IF NOT EXISTS idx_rd_download_obs_version
+  ON rd_download_observations(provider, source_id, source_version);
+CREATE INDEX IF NOT EXISTS idx_rd_download_obs_generated
+  ON rd_download_observations(generated_at);
+`;
+
+const CREATE_RD_DOWNLOAD_CORRELATIONS = `
+CREATE TABLE IF NOT EXISTS rd_download_correlations (
+  provider TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  source_version TEXT NOT NULL,
+  source_event_id TEXT NOT NULL,
+  rd_id TEXT NOT NULL,
+  candidate_info_hash TEXT NOT NULL,
+  candidate_file_index_key INTEGER NOT NULL,
+  correlation_class TEXT NOT NULL,
+  correlation_score REAL NOT NULL,
+  reasons_json TEXT NOT NULL,
+  ambiguity_count INTEGER NOT NULL,
+  parsed_filename TEXT,
+  exact_bytes INTEGER,
+  generated_at INTEGER,
+  correlated_at INTEGER NOT NULL,
+  PRIMARY KEY (provider, source_id, source_event_id, candidate_info_hash, candidate_file_index_key)
+);
+`;
+
+const CREATE_RD_DOWNLOAD_CORRELATIONS_INDEXES = `
+CREATE INDEX IF NOT EXISTS idx_rd_download_corr_candidate
+  ON rd_download_correlations(candidate_info_hash, candidate_file_index_key);
+CREATE INDEX IF NOT EXISTS idx_rd_download_corr_class
+  ON rd_download_correlations(provider, source_id, correlation_class);
+CREATE INDEX IF NOT EXISTS idx_rd_download_corr_event
+  ON rd_download_correlations(provider, source_id, source_event_id);
+`;
+
+// ============================================================================
 // DMM source provenance SQL
 // ============================================================================
 
@@ -800,6 +901,119 @@ SELECT COUNT(*) AS n FROM historical_provider_evidence_sightings
 WHERE info_hash = @info_hash AND file_index_key = @file_index_key;
 `;
 
+// ============================================================================
+// RD /downloads raw observations SQL
+// ============================================================================
+
+// Idempotent insert keyed on (provider, source_id, source_event_id).
+// Re-importing the same RD download id is a no-op (r.changes === 0).
+// A genuinely new RD download id (a new /downloads row) creates a
+// new observation row.
+//
+// We use INSERT OR IGNORE (not DO UPDATE) because the raw observation
+// log is immutable per (provider, source_id, source_event_id): each
+// RD download event is its own source of truth. If the same RD
+// download id appears in two acquisitions (e.g. a re-run of the
+// snapshot), the row's first/last_seen_at and source_version are
+// NOT updated — only the existence of the row is recorded. This
+// matches the historical_provider_evidence_sightings model: replay
+// is a no-op, not a refresh.
+//
+// The correlatable downstream state (rd_download_correlations) is
+// the place where snapshot-version changes take effect; it is
+// rebuilt from scratch on every correlation run.
+const INSERT_RD_DOWNLOAD_OBSERVATION = `
+INSERT OR IGNORE INTO rd_download_observations (
+  provider, source_id, source_version, source_event_id, rd_id,
+  filename, normalized_filename, exact_bytes,
+  mime_type, streamable, generated_at,
+  first_seen_at, last_seen_at,
+  parsed_title, parsed_year, season, episode,
+  resolution, source_type, codec, release_group,
+  parser_confidence
+) VALUES (
+  @provider, @source_id, @source_version, @source_event_id, @rd_id,
+  @filename, @normalized_filename, @exact_bytes,
+  @mime_type, @streamable, @generated_at,
+  @first_seen_at, @last_seen_at,
+  @parsed_title, @parsed_year, @season, @episode,
+  @resolution, @source_type, @codec, @release_group,
+  @parser_confidence
+);
+`;
+
+const SELECT_ALL_RD_DOWNLOAD_OBSERVATIONS = `
+SELECT * FROM rd_download_observations
+ORDER BY generated_at ASC, source_event_id ASC;
+`;
+
+const SELECT_RD_DOWNLOAD_OBS_BY_FILENAME_BYTES = `
+SELECT * FROM rd_download_observations
+WHERE provider = @provider AND source_id = @source_id
+  AND normalized_filename = @normalized_filename
+  AND exact_bytes = @exact_bytes
+ORDER BY generated_at ASC, source_event_id ASC;
+`;
+
+const COUNT_RD_DOWNLOAD_OBSERVATIONS = `
+SELECT COUNT(*) AS n FROM rd_download_observations
+WHERE provider = @provider AND source_id = @source_id;
+`;
+
+// ============================================================================
+// RD /downloads correlation SQL
+// ============================================================================
+
+const INSERT_RD_DOWNLOAD_CORRELATION = `
+INSERT INTO rd_download_correlations (
+  provider, source_id, source_version, source_event_id, rd_id,
+  candidate_info_hash, candidate_file_index_key,
+  correlation_class, correlation_score, reasons_json, ambiguity_count,
+  parsed_filename, exact_bytes, generated_at, correlated_at
+) VALUES (
+  @provider, @source_id, @source_version, @source_event_id, @rd_id,
+  @candidate_info_hash, @candidate_file_index_key,
+  @correlation_class, @correlation_score, @reasons_json, @ambiguity_count,
+  @parsed_filename, @exact_bytes, @generated_at, @correlated_at
+)
+ON CONFLICT(provider, source_id, source_event_id, candidate_info_hash, candidate_file_index_key) DO UPDATE SET
+  source_version = excluded.source_version,
+  correlation_class = excluded.correlation_class,
+  correlation_score = excluded.correlation_score,
+  reasons_json = excluded.reasons_json,
+  ambiguity_count = excluded.ambiguity_count,
+  parsed_filename = excluded.parsed_filename,
+  exact_bytes = excluded.exact_bytes,
+  generated_at = excluded.generated_at,
+  correlated_at = excluded.correlated_at;
+`;
+
+// Clear the (provider, source_id) partition of correlations. Used at
+// the start of a correlation rerun so the table is a pure function
+// of the current (observations, candidates) state. The observations
+// table is NEVER cleared.
+const CLEAR_RD_DOWNLOAD_CORRELATIONS = `
+DELETE FROM rd_download_correlations
+WHERE provider = @provider AND source_id = @source_id;
+`;
+
+const SELECT_ALL_RD_DOWNLOAD_CORRELATIONS = `
+SELECT * FROM rd_download_correlations
+ORDER BY source_event_id, correlation_score DESC;
+`;
+
+const COUNT_RD_DOWNLOAD_CORRELATIONS = `
+SELECT COUNT(*) AS n FROM rd_download_correlations
+WHERE provider = @provider AND source_id = @source_id;
+`;
+
+const COUNT_RD_DOWNLOAD_CORRELATIONS_BY_CLASS = `
+SELECT correlation_class, COUNT(*) AS n
+FROM rd_download_correlations
+WHERE provider = @provider AND source_id = @source_id
+GROUP BY correlation_class;
+`;
+
 const INSERT_CANDIDATE = `
 INSERT INTO candidates (
   info_hash, file_index, file_index_key, search_key, title, filename, size, seeders, leechers,
@@ -851,6 +1065,40 @@ SELECT * FROM candidates ORDER BY last_seen DESC;
 
 const SELECT_CANDIDATES_BY_KEY = `
 SELECT * FROM candidates WHERE search_key = @search_key ORDER BY last_seen DESC;
+`;
+
+// Streaming raw candidates: used by analysis tools that need to walk
+// the whole corpus without loading it into memory in one shot. The
+// cursor is on (info_hash, file_index_key) so paging is stable and
+// uses the primary key index.
+const SELECT_RAW_CANDIDATES_PAGE = `
+SELECT * FROM candidates
+WHERE info_hash > @cursor_info_hash
+   OR (info_hash = @cursor_info_hash AND file_index_key > @cursor_file_index_key)
+ORDER BY info_hash ASC, file_index_key ASC
+LIMIT @limit;
+`;
+
+// Batch variant: when you have many search_keys, an IN-clause
+// avoids a per-key roundtrip. Caller passes a JSON-serialized array.
+const SELECT_CANDIDATES_BY_KEYS = `
+SELECT * FROM candidates WHERE search_key IN (
+  SELECT value FROM json_each(@search_keys)
+) ORDER BY last_seen DESC;
+`;
+
+// Token-OR prefilter: returns candidate rows whose filename or title
+// contains ANY of the supplied tokens as a word boundary. Used by the
+// north-side correlate layer as a coarse prefilter before scoring.
+//
+// The clause is built with parameterized LIKEs so it stays safe from
+// injection. Tokens are passed in as a JSON array; empty/short tokens
+// are dropped by the caller before we ever build the SQL.
+const SELECT_CANDIDATES_BY_TOKENS_TEMPLATE = `
+SELECT * FROM candidates
+WHERE {CLAUSE}
+ORDER BY last_seen DESC
+LIMIT @limit;
 `;
 
 const INSERT_OBSERVATION_EVENT = `
@@ -1396,6 +1644,36 @@ function migrateCacheProbeQueue(db) {
 // and PK, so this migration is a no-op for them.
 // =============================================================================
 const HISTORICAL_PROVIDER_EVENT_ID_MIGRATION = 'historical-provider-event-id-v1';
+const RD_DOWNLOADS_SCHEMA_MIGRATION = 'rd-downloads-raw-observations-v1';
+
+function migrateRdDownloadsSchema(db) {
+  // Idempotent: the SCHEMA above already runs CREATE TABLE IF NOT
+  // EXISTS for the new tables. This migration only exists to mark
+  // the application of these tables in schema_migrations so future
+  // schema-evolution work can rely on a recorded "this database
+  // has been opened by a version that knows about /downloads
+  // observations" marker. The marker carries no data and is
+  // recorded on every fresh open (idempotent INSERT OR IGNORE
+  // semantics are not needed because schema_migrations PK is the
+  // name itself).
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(RD_DOWNLOADS_SCHEMA_MIGRATION);
+  if (applied) return;
+
+  // Defensive: SCHEMA above creates these tables, but if a caller
+  // wired a pre-existing database (e.g. a restored backup from a
+  // version of HashSucker that never had the SCHEMA block) we
+  // still want them present.
+  db.exec(CREATE_RD_DOWNLOAD_OBSERVATIONS);
+  db.exec(CREATE_RD_DOWNLOAD_OBSERVATIONS_INDEXES);
+  db.exec(CREATE_RD_DOWNLOAD_CORRELATIONS);
+  db.exec(CREATE_RD_DOWNLOAD_CORRELATIONS_INDEXES);
+
+  db.prepare(
+    'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+  ).run(RD_DOWNLOADS_SCHEMA_MIGRATION, Date.now());
+}
 
 function migrateHistoricalProviderEvidenceEventId(db) {
   const applied = db.prepare(
@@ -1562,6 +1840,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   );
   migrateCacheProbeQueue(db);
   migrateHistoricalProviderEvidenceEventId(db);
+  migrateRdDownloadsSchema(db);
 
   const insertCandidateStmt = db.prepare(INSERT_CANDIDATE);
   const getCandidateStmt = db.prepare(GET_CANDIDATE);
@@ -1571,6 +1850,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const getObservationHistoryStmt = db.prepare(GET_OBSERVATION_HISTORY);
   const selectAllCandidatesStmt = db.prepare(SELECT_ALL_CANDIDATES);
   const selectCandidatesByKeyStmt = db.prepare(SELECT_CANDIDATES_BY_KEY);
+  const selectCandidatesByKeysStmt = db.prepare(SELECT_CANDIDATES_BY_KEYS);
+  const selectRawCandidatesPageStmt = db.prepare(SELECT_RAW_CANDIDATES_PAGE);
   const insertMediaAssocStmt = db.prepare(INSERT_MEDIA_ASSOCIATION);
   const upsertMediaAssocStmt = db.prepare(UPSERT_MEDIA_ASSOCIATION);
   const getMediaAssocStmt = db.prepare(GET_MEDIA_ASSOCIATIONS);
@@ -1600,6 +1881,16 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   const countHistoricalProviderSightingsStmt = db.prepare(COUNT_HISTORICAL_PROVIDER_SIGHTINGS);
   const countHistoricalProviderEvidenceForCandidateStmt = db.prepare(COUNT_HISTORICAL_PROVIDER_EVIDENCE_FOR_CANDIDATE);
   const countHistoricalProviderSightingsForCandidateStmt = db.prepare(COUNT_HISTORICAL_PROVIDER_SIGHTINGS_FOR_CANDIDATE);
+  // RD /downloads raw observations + correlations
+  const insertRdDownloadObservationStmt = db.prepare(INSERT_RD_DOWNLOAD_OBSERVATION);
+  const selectAllRdDownloadObservationsStmt = db.prepare(SELECT_ALL_RD_DOWNLOAD_OBSERVATIONS);
+  const selectRdDownloadObservationsByFileBytesStmt = db.prepare(SELECT_RD_DOWNLOAD_OBS_BY_FILENAME_BYTES);
+  const countRdDownloadObservationsStmt = db.prepare(COUNT_RD_DOWNLOAD_OBSERVATIONS);
+  const insertRdDownloadCorrelationStmt = db.prepare(INSERT_RD_DOWNLOAD_CORRELATION);
+  const clearRdDownloadCorrelationsStmt = db.prepare(CLEAR_RD_DOWNLOAD_CORRELATIONS);
+  const selectAllRdDownloadCorrelationsStmt = db.prepare(SELECT_ALL_RD_DOWNLOAD_CORRELATIONS);
+  const countRdDownloadCorrelationsStmt = db.prepare(COUNT_RD_DOWNLOAD_CORRELATIONS);
+  const countRdDownloadCorrelationsByClassStmt = db.prepare(COUNT_RD_DOWNLOAD_CORRELATIONS_BY_CLASS);
 
 
   function fileIndexKey(fileIndex) {
@@ -2329,6 +2620,242 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     }
   }
 
+  // ========================================================================
+  // RD /downloads raw observation API
+  // ========================================================================
+
+  /**
+   * Ingest a batch of normalized /downloads raw observations.
+   *
+   * Idempotent: re-importing the same RD download id is a no-op
+   * (changes() === 0). Distinct RD download ids with the same
+   * (filename, filesize) remain distinct rows.
+   *
+   * @param {object} opts
+   * @param {string} opts.sourceVersion   Snapshot provenance (from acquirer's
+   *                                      manifest.sourceVersion — identical
+   *                                      semantics to historical_provider_evidence)
+   * @param {Array} opts.observations    Array of normalized /downloads rows
+   *                                      (from rd-downloads.js normalizeDownloadEntry)
+   * @param {number} [opts.now]          Wallclock for first_seen_at
+   * @returns {{ ingested, inserted, skipped, errors, observationRows }}
+   */
+  function ingestRdDownloadObservations({ sourceVersion, observations = [], now = Date.now() } = {}) {
+    if (!sourceVersion || typeof sourceVersion !== 'string' || sourceVersion.length === 0) {
+      return { ingested: 0, inserted: 0, skipped: 0, errors: [{ message: 'sourceVersion is required' }], observationRows: 0 };
+    }
+    if (!Array.isArray(observations)) {
+      return { ingested: 0, inserted: 0, skipped: 0, errors: [{ message: 'observations must be an array' }], observationRows: 0 };
+    }
+
+    const errors = [];
+    let ingested = 0;
+    let inserted = 0;
+    let skipped = 0;
+
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const obs of observations) {
+        const params = {
+          provider: 'realdebrid',
+          source_id: 'downloads',
+          source_version: sourceVersion,
+          source_event_id: String(obs.source_event_id || ''),
+          rd_id: String(obs.rd_id || ''),
+          filename: String(obs.filename || ''),
+          normalized_filename: String(obs.normalized_filename || ''),
+          exact_bytes: Number.isSafeInteger(obs.exact_bytes) ? obs.exact_bytes : 0,
+          mime_type: obs.mime_type || null,
+          streamable: obs.streamable ? 1 : 0,
+          generated_at: Number.isSafeInteger(obs.generated_at) ? obs.generated_at : now,
+          first_seen_at: Number.isSafeInteger(obs.first_seen_at) ? obs.first_seen_at : now,
+          last_seen_at: Number.isSafeInteger(obs.last_seen_at) ? obs.last_seen_at : now,
+          parsed_title: obs.parsed_title || null,
+          parsed_year: Number.isSafeInteger(obs.parsed_year) ? obs.parsed_year : null,
+          season: Number.isSafeInteger(obs.season) ? obs.season : null,
+          episode: Number.isSafeInteger(obs.episode) ? obs.episode : null,
+          resolution: obs.resolution || null,
+          source_type: obs.source_type || null,
+          codec: obs.codec || null,
+          release_group: obs.release_group || null,
+          parser_confidence: typeof obs.parser_confidence === 'number' ? obs.parser_confidence : 0,
+        };
+
+        if (!params.source_event_id) {
+          errors.push({ message: 'source_event_id is required', filename: params.filename });
+          skipped += 1;
+          continue;
+        }
+
+        try {
+          const r = insertRdDownloadObservationStmt.run(params);
+          ingested += 1;
+          if (r.changes > 0) inserted += 1;
+        } catch (err) {
+          errors.push({ source_event_id: params.source_event_id, message: err.message });
+          skipped += 1;
+        }
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      try { db.exec('ROLLBACK'); } catch {}
+      return { ingested: 0, inserted: 0, skipped: observations.length, errors: [{ message: `transaction failed: ${err.message}` }], observationRows: 0 };
+    }
+
+    return {
+      ingested,
+      inserted,
+      skipped,
+      errors,
+      observationRows: countRdDownloadObservationsStmt.get({ provider: 'realdebrid', source_id: 'downloads' })?.n ?? 0,
+    };
+  }
+
+  /**
+   * Retrieve all raw RD /downloads observations.
+   * @returns {Array}
+   */
+  function getAllRdDownloadObservations() {
+    try {
+      return selectAllRdDownloadObservationsStmt.all();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Count total raw RD /downloads observations.
+   * @returns {number}
+   */
+  function countRdDownloadObservations() {
+    try {
+      return countRdDownloadObservationsStmt.get({ provider: 'realdebrid', source_id: 'downloads' })?.n ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Retrieve RD /downloads observations matching a specific (filename, bytes) pair.
+   * Used by the correlation layer to find exact-file candidates.
+   *
+   * @param {string} normalizedFilename
+   * @param {number} exactBytes
+   * @returns {Array}
+   */
+  function getRdDownloadObservationsByFileBytes(normalizedFilename, exactBytes) {
+    try {
+      return selectRdDownloadObservationsByFileBytesStmt.all({
+        provider: 'realdebrid',
+        source_id: 'downloads',
+        normalized_filename: normalizedFilename,
+        exact_bytes: exactBytes,
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Write correlation results for the RD /downloads observation set.
+   *
+   * Clears the (realdebrid, downloads) partition first, then inserts
+   * the new results. The table is always a pure function of the current
+   * (observations, candidates) state — safe to rebuild from scratch.
+   *
+   * @param {object} opts
+   * @param {string} opts.sourceVersion    Snapshot version of the observation set
+   * @param {Array} opts.correlations     Array of correlation result rows
+   * @param {number} [opts.now]
+   * @returns {{ written, errors }}
+   */
+  function writeRdDownloadCorrelations({ sourceVersion, correlations = [], now = Date.now() } = {}) {
+    if (!sourceVersion || typeof sourceVersion !== 'string' || sourceVersion.length === 0) {
+      return { written: 0, errors: [{ message: 'sourceVersion is required' }] };
+    }
+    if (!Array.isArray(correlations)) {
+      return { written: 0, errors: [{ message: 'correlations must be an array' }] };
+    }
+
+    const errors = [];
+    let written = 0;
+
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      // Clear old correlations for this source — fresh rebuild each run
+      clearRdDownloadCorrelationsStmt.run({ provider: 'realdebrid', source_id: 'downloads' });
+
+      for (const c of correlations) {
+        const params = {
+          provider: 'realdebrid',
+          source_id: 'downloads',
+          source_version: sourceVersion,
+          source_event_id: String(c.source_event_id || ''),
+          rd_id: String(c.rd_id || ''),
+          candidate_info_hash: String(c.candidate_info_hash || ''),
+          candidate_file_index_key: fileIndexKey(c.candidate_file_index_key ?? null),
+          correlation_class: String(c.correlation_class || 'UNMATCHED'),
+          correlation_score: typeof c.correlation_score === 'number' ? c.correlation_score : 0,
+          reasons_json: JSON.stringify(c.reasons_json || []),
+          ambiguity_count: Number.isSafeInteger(c.ambiguity_count) ? c.ambiguity_count : 0,
+          parsed_filename: c.parsed_filename || null,
+          exact_bytes: Number.isSafeInteger(c.exact_bytes) ? c.exact_bytes : null,
+          generated_at: Number.isSafeInteger(c.generated_at) ? c.generated_at : null,
+          correlated_at: now,
+        };
+
+        try {
+          insertRdDownloadCorrelationStmt.run(params);
+          written += 1;
+        } catch (err) {
+          errors.push({ source_event_id: params.source_event_id, message: err.message });
+        }
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      try { db.exec('ROLLBACK'); } catch {}
+      return { written: 0, errors: [{ message: `transaction failed: ${err.message}` }] };
+    }
+
+    return { written, errors };
+  }
+
+  /**
+   * Retrieve all RD /downloads correlations.
+   * @returns {Array}
+   */
+  function getAllRdDownloadCorrelations() {
+    try {
+      return selectAllRdDownloadCorrelationsStmt.all();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Count total RD /downloads correlations.
+   * @returns {number}
+   */
+  function countRdDownloadCorrelations() {
+    try {
+      return countRdDownloadCorrelationsStmt.get({ provider: 'realdebrid', source_id: 'downloads' })?.n ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Count RD /downloads correlations by class.
+   * @returns {Array<{correlation_class, n}>}
+   */
+  function countRdDownloadCorrelationsByClass() {
+    try {
+      return countRdDownloadCorrelationsByClassStmt.all({ provider: 'realdebrid', source_id: 'downloads' });
+    } catch {
+      return [];
+    }
+  }
+
   function getCandidate(infoHash, fileIndex) {
     const row = getCandidateStmt.get({
       info_hash: infoHash,
@@ -2459,6 +2986,116 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     }
 
     return candidates;
+  }
+
+  /**
+   * Batch-fetch candidates matching any of the given search_keys.
+   * Returns raw candidate rows (NOT the public Candidate shape) so
+   * the caller can hand them to correlation without paying the
+   * public-shape conversion cost.
+   *
+   * Duplicates across keys (the same info_hash can be returned for
+   * multiple keys) are de-duplicated by (info_hash, file_index).
+   *
+   * @param {object} options
+   * @param {string[]} options.searchKeys
+   * @returns {Array<object>}
+   */
+  function queryRawCandidatesBySearchKeys({ searchKeys } = {}) {
+    if (!Array.isArray(searchKeys) || searchKeys.length === 0) return [];
+    const params = { search_keys: JSON.stringify(searchKeys) };
+    const rows = selectCandidatesByKeysStmt.all(params);
+    const seen = new Set();
+    const out = [];
+    for (const r of rows) {
+      const k = `${r.info_hash}\x00${r.file_index == null ? -1 : r.file_index}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(r);
+    }
+    return out;
+  }
+
+  /**
+   * Per-observation coarse prefilter: returns candidate rows whose
+   * filename or title contains any of the supplied tokens as a word
+   * boundary. De-duplicates by (info_hash, file_index_key).
+   *
+   * This is the bottleneck fix for north-side correlation: scoring
+   * 1M+ candidates against 100+ observations is intractable, but
+   * per-obs SQL LIKE prefilter on a handful of distinctive tokens
+   * narrows the candidate set to a few hundred per observation.
+   *
+   * Tokens shorter than 3 chars or containing only digits are
+   * dropped to avoid token-storm matches.
+   *
+   * @param {object} options
+   * @param {string[]} options.tokens  Distinctive title tokens
+   * @param {number} [options.limit=2000]  Max rows to return
+   * @returns {Array<object>}  Raw candidate rows (caller maps to shape)
+   */
+  function queryRawCandidatesByTokens({ tokens, limit = 2000 }) {
+    if (!Array.isArray(tokens) || tokens.length === 0) return [];
+    const safe = tokens
+      .filter((t) => typeof t === 'string' && t.length >= 3 && /[a-z]/i.test(t))
+      .map((t) => t.replace(/[%_]/g, ''))
+      .filter((t) => t.length >= 3)
+      .slice(0, 16); // hard cap on tokens per obs
+    if (safe.length === 0) return [];
+    const clauses = [];
+    const params = { limit };
+    for (let i = 0; i < safe.length; i += 1) {
+      const k = `t${i}`;
+      params[k] = `%${safe[i]}%`;
+      clauses.push(`(filename LIKE @${k} OR title LIKE @${k})`);
+    }
+    const sql = SELECT_CANDIDATES_BY_TOKENS_TEMPLATE.replace(
+      '{CLAUSE}',
+      clauses.join(' OR '),
+    );
+    const stmt = db.prepare(sql);
+    try {
+      const rows = stmt.all(params);
+      // De-dupe by (info_hash, file_index_key) in JS
+      const seen = new Set();
+      const out = [];
+      for (const r of rows) {
+        const fik = r.file_index == null ? -1 : r.file_index;
+        const k = `${r.info_hash}::${fik}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push(r);
+        if (out.length >= limit) break;
+      }
+      return out;
+    } finally {
+      try { stmt.finalize(); } catch { /* ignore */ }
+    }
+  }
+
+  /**
+   * Stream the candidate corpus in pages, ordered by id ASC. This is
+   * the only way to walk a multi-million-row corpus without OOM.
+   *
+   * @param {object} options
+   * @param {number} [options.pageSize=50000]  rows per page
+   * @returns {Generator<{rows: Array<object>, lastId: number}>}
+   */
+  function* iterateRawCandidates({ pageSize = 50000 } = {}) {
+    let cursorInfoHash = '';
+    let cursorFileIndexKey = -1;
+    while (true) {
+      const rows = selectRawCandidatesPageStmt.all({
+        cursor_info_hash: cursorInfoHash,
+        cursor_file_index_key: cursorFileIndexKey,
+        limit: pageSize,
+      });
+      if (rows.length === 0) return;
+      cursorInfoHash = rows[rows.length - 1].info_hash;
+      cursorFileIndexKey = rows[rows.length - 1].file_index == null ? -1 : rows[rows.length - 1].file_index;
+      yield { rows, lastInfoHash: cursorInfoHash, lastFileIndexKey: cursorFileIndexKey };
+      if (rows.length < pageSize) return;
+    }
   }
 
   /**
@@ -4543,6 +5180,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     try { getObservationHistoryStmt.finalize(); } catch {}
     try { selectAllCandidatesStmt.finalize(); } catch {}
     try { selectCandidatesByKeyStmt.finalize(); } catch {}
+    try { selectCandidatesByKeysStmt.finalize(); } catch {}
+    try { selectRawCandidatesPageStmt.finalize(); } catch {}
     try { insertMediaAssocStmt.finalize(); } catch {}
     try { upsertMediaAssocStmt.finalize(); } catch {}
     try { getMediaAssocStmt.finalize(); } catch {}
@@ -4594,6 +5233,9 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getProviderObservations,
     getProviderObservationHistory,
     queryCachedCandidates,
+    queryRawCandidatesBySearchKeys,
+    queryRawCandidatesByTokens,
+    iterateRawCandidates,
     associateMedia,
     getMediaAssociations,
     queryCandidatesByMedia,
@@ -4625,6 +5267,16 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     countHistoricalProviderEvidenceForCandidate,
     countHistoricalProviderSightings,
     countHistoricalProviderSightingsForCandidate,
+    // RD /downloads raw observations (NOT historical_provider_evidence —
+    // /downloads has no infoHash, no deterministic bridge to /torrents)
+    ingestRdDownloadObservations,
+    getAllRdDownloadObservations,
+    getRdDownloadObservationsByFileBytes,
+    countRdDownloadObservations,
+    writeRdDownloadCorrelations,
+    getAllRdDownloadCorrelations,
+    countRdDownloadCorrelations,
+    countRdDownloadCorrelationsByClass,
     isValidInfoHash,
     // Escape hatch for opt-in tables (importer checkpoint state etc.)
     getRawDb,

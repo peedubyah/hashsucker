@@ -1,0 +1,202 @@
+{
+  "rawEvents": 108,
+  "uniqueFileBytesGroups": 16,
+  "classDistribution": {
+    "UNIQUE_STRONG": 0,
+    "MULTIPLE_PLAUSIBLE": 0,
+    "WEAK": 108,
+    "UNMATCHED": 0
+  },
+  "bytesByClass": {
+    "UNIQUE_STRONG": 0,
+    "MULTIPLE_PLAUSIBLE": 0,
+    "WEAK": 2315636986536,
+    "UNMATCHED": 0
+  },
+  "bytesByClassHuman": {
+    "UNIQUE_STRONG": "0 B",
+    "MULTIPLE_PLAUSIBLE": "0 B",
+    "WEAK": "2.11 TB",
+    "UNMATCHED": "0 B"
+  },
+  "eventPercentByClass": {
+    "UNIQUE_STRONG": "0.00%",
+    "MULTIPLE_PLAUSIBLE": "0.00%",
+    "WEAK": "100.00%",
+    "UNMATCHED": "0.00%"
+  },
+  "bytesPercentByClass": {
+    "UNIQUE_STRONG": "0.00%",
+    "MULTIPLE_PLAUSIBLE": "0.00%",
+    "WEAK": "100.00%",
+    "UNMATCHED": "0.00%"
+  },
+  "totalBytesHuman": "2.11 TB",
+  "totalEvents": 108,
+  "candidateHashCardinality": 13,
+  "groupSummary": {
+    "totalGroups": 16,
+    "groupsByClass": {
+      "UNIQUE_STRONG": 0,
+      "MULTIPLE_PLAUSIBLE": 0,
+      "WEAK": 16,
+      "UNMATCHED": 0
+    },
+    "topGroups": [
+      {
+        "filename": "the.lord.of.the.rings.2003.extended.proper.2160p.bluray.remux.hevc.dts-hd.ma.truehd.7.1.atmos-fgt.mkv",
+        "bytes": 169114151864,
+        "bytesHuman": "157.50 GB",
+        "events": 4,
+        "totalBytes": 676456607456,
+        "totalBytesHuman": "630.00 GB",
+        "classes": {
+          "UNIQUE_STRONG": 0,
+          "MULTIPLE_PLAUSIBLE": 0,
+          "WEAK": 4,
+          "UNMATCHED": 0
+        },
+        "candidateHashCount": 1
+      },
+      {
+        "filename": "sinners.2025.multi.vf2.2160p.uhd.bluray.remux.hybrid.dv.hdr10plus.truehd.atmos.7.1.hevc-rebirth.mkv",
+        "bytes": 74981043537,
+        "bytesHuman": "69.83 GB",
+        "events": 7,
+        "totalBytes": 524867304759,
+        "totalBytesHuman": "488.82 GB",
+        "classes": {
+          "UNIQUE_STRONG": 0,
+          "MULTIPLE_PLAUSIBLE": 0,
+          "WEAK": 7,
+          "UNMATCHED": 0
+        },
+        "candidateHashCount": 1
+      },
+      {
+        "filename": "knives.out.2019.2160p.d.mvo.avo.bdremux.hevc.hdr.truehd.atmos.7.1-selezen.mkv",
+        "bytes": 63566065953,
+        "bytesHuman": "59.20 GB",
+        "events": 7,
+        "totalBytes": 444962461671,
+        "totalBytesHuman": "414.40 GB",
+        "classes": {
+          "UNIQUE_STRONG": 0,
+          "MULTIPLE_PLAUSIBLE": 0,
+          "WEAK": 7,
+          "UNMATCHED": 0
+        },
+        "candidateHashCount": 1
+      },
+      {
+        "filename": "oppenheimer.2023.2160p.10bit.hdr.bluray.6ch.x265.hevc-psa.mkv",
+        "bytes": 4099958870,
+        "bytesHuman": "3.82 GB",
+        "events": 52,
+        "totalBytes": 213197861240,
+        "totalBytesHuman": "198.56 GB",
+        "classes": {
+          "UNIQUE_STRONG": 0,
+          "MULTIPLE_PLAUSIBLE": 0,
+          "WEAK": 52,
+          "UNMATCHED": 0
+        },
+        "candidateHashCount": 1
+      },
+      {
+        "filename": "black.panther.2018.2160p.dv.hdr10plus.ai-enhanced.hevc.truehd.atmos.7.1.multi-rife.4.18-60fps-dirtyhippie.mkv",
+        "bytes": 34319716114,
+        "bytesHuman": "31.96 GB",
+        "events": 4,
+        "totalBytes": 137278864456,
+        "totalBytesHuman": "127.85 GB",
+        "classes": {
+          "UNIQUE_STRONG": 0,
+          "MULTIPLE_PLAUSIBLE": 0,
+          "WEAK": 4,
+          "UNMATCHED": 0
+        },
+        "candidateHashCount": 1
+      },
+      {
+        "filename": "the.matrix.1999.rerip.2160p.uhd.bluray.x265-iamable.mkv",
+        "bytes": 37675795874,
+        "bytesHuman": "35.09 GB",
+        "events": 2,
+        "totalBytes": 75351591748,
+        "totalBytesHuman": "70.18 GB",
+        "classes": {
+          "UNIQUE_STRONG": 0,
+          "MULTIPLE_PLAUSIBLE": 0,
+          "WEAK": 2,
+          "UNMATCHED": 0
+        },
+        "candidateHashCount": 1
+      },
+      {
+        "filename": "dune - parte due - part two (2024) webdl rip 2160p h265 10 bit dv hdr10+ ita eng ac3 5.1 sub ita eng licdom.mkv",
+        "bytes": 4038279055,
+        "bytesHuman": "3.76 GB",
+        "events": 14,
+        "totalBytes": 56535906770,
+        "totalBytesHuman": "52.65 GB",
+        "classes": {
+          "UNIQUE_STRONG": 0,
+          "MULTIPLE_PLAUSIBLE": 0,
+          "WEAK": 14,
+          "UNMATCHED": 0
+        },
+        "candidateHashCount": 1
+      },
+      {
+        "filename": "ted.lasso.s01.2160p.web.h.265-mixed[rartv].rar",
+        "bytes": 51463766669,
+        "bytesHuman": "47.93 GB",
+        "events": 1,
+        "totalBytes": 51463766669,
+        "totalBytesHuman": "47.93 GB",
+        "classes": {
+          "UNIQUE_STRONG": 0,
+          "MULTIPLE_PLAUSIBLE": 0,
+          "WEAK": 1,
+          "UNMATCHED": 0
+        },
+        "candidateHashCount": 1
+      },
+      {
+        "filename": "spider-man.brand.new.day.2026.v3.2160p.telesync.x265-dks.@damediapirate.on.x.mp4",
+        "bytes": 17097828145,
+        "bytesHuman": "15.92 GB",
+        "events": 3,
+        "totalBytes": 51293484435,
+        "totalBytesHuman": "47.77 GB",
+        "classes": {
+          "UNIQUE_STRONG": 0,
+          "MULTIPLE_PLAUSIBLE": 0,
+          "WEAK": 3,
+          "UNMATCHED": 0
+        },
+        "candidateHashCount": 1
+      },
+      {
+        "filename": "the.avengers.2012.2160p.uhd.hdr.bluray.x265.10bit.dd5.1.[wman-lord].mkv",
+        "bytes": 6195676342,
+        "bytesHuman": "5.77 GB",
+        "events": 4,
+        "totalBytes": 24782705368,
+        "totalBytesHuman": "23.08 GB",
+        "classes": {
+          "UNIQUE_STRONG": 0,
+          "MULTIPLE_PLAUSIBLE": 0,
+          "WEAK": 4,
+          "UNMATCHED": 0
+        },
+        "candidateHashCount": 1
+      }
+    ]
+  },
+  "config": {
+    "strongFloor": 0.7,
+    "wrote": false
+  }
+}

@@ -2541,3 +2541,58 @@ test('getReleaseAttributesForCandidate sorts by confidence descending', () => {
 
   cache.close();
 });
+
+test('queryRawCandidatesByTokens matches by filename or title token', () => {
+  const cache = createDiscoveryCache();
+  cache.upsertCandidate({
+    infoHash: HASH,
+    fileIndex: 1,
+    title: 'Oppenheimer 2023 1080p BluRay x264',
+    filename: 'Oppenheimer.2023.1080p.BluRay.x264.mkv',
+    sources: [{ id: 'dmm', kind: 'live' }],
+    firstSeen: Date.now(),
+    lastSeen: Date.now(),
+  });
+  cache.upsertCandidate({
+    infoHash: OTHER_HASH,
+    fileIndex: 1,
+    title: 'Dune Part Two 2024 2160p',
+    filename: 'Dune.Part.Two.2024.2160p.mkv',
+    sources: [{ id: 'dmm', kind: 'live' }],
+    firstSeen: Date.now(),
+    lastSeen: Date.now(),
+  });
+  cache.upsertCandidate({
+    infoHash: THIRD_HASH,
+    fileIndex: 1,
+    title: 'Oppenheimer 2023 720p',
+    filename: 'Oppenheimer.2023.720p.mkv',
+    sources: [{ id: 'dmm', kind: 'live' }],
+    firstSeen: Date.now(),
+    lastSeen: Date.now(),
+  });
+
+  // Should match the two Oppenheimer rows
+  const matches = cache.queryRawCandidatesByTokens({
+    tokens: ['Oppenheimer'],
+  });
+  assert.equal(matches.length, 2);
+  const hashes = new Set(matches.map((r) => r.info_hash));
+  assert.ok(hashes.has(HASH));
+  assert.ok(hashes.has(THIRD_HASH));
+  assert.ok(!hashes.has(OTHER_HASH));
+
+  // Empty / short / numeric tokens are dropped
+  const empty = cache.queryRawCandidatesByTokens({ tokens: [] });
+  assert.equal(empty.length, 0);
+  const short = cache.queryRawCandidatesByTokens({ tokens: ['ab', 'x', '12'] });
+  assert.equal(short.length, 0);
+
+  // Title-side match
+  const titleMatch = cache.queryRawCandidatesByTokens({
+    tokens: ['Oppenheimer'],
+  });
+  assert.equal(titleMatch.length, 2);
+
+  cache.close();
+});

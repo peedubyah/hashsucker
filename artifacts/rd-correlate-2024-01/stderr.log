@@ -1,0 +1,9 @@
+[correlate-rd-downloads] observations: 108
+[correlate-rd-downloads]   prefilter 20/108 obs → 1749 unique candidates so far
+[correlate-rd-downloads]   prefilter 40/108 obs → 1749 unique candidates so far
+[correlate-rd-downloads]   prefilter 60/108 obs → 3204 unique candidates so far
+[correlate-rd-downloads]   prefilter 80/108 obs → 4020 unique candidates so far
+[correlate-rd-downloads]   prefilter 100/108 obs → 4115 unique candidates so far
+[correlate-rd-downloads] loaded 4420 unique candidates via per-obs token prefilter (108 obs)
+[correlate-rd-downloads] candidates (total): 4420
+[correlate-rd-downloads] --no-write: correlations table NOT updated
