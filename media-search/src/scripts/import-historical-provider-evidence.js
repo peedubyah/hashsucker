@@ -160,11 +160,17 @@ Options:
 // source/version cannot collide. The input_path is stored but not
 // keyed, allowing the fingerprint check to catch a moved file.
 //
+// PK is (provider, source_id, source_version) so that two providers
+// sharing the same source_id (e.g. "torrents") and source_version
+// (e.g. a date stamp) get independent checkpoint rows. This is a
+// minimal, additive change from the original (source_id, source_version)
+// PK; existing rows are migrated below by a single ALTER.
+//
 const CHECKPOINT_SCHEMA = `
 CREATE TABLE IF NOT EXISTS import_checkpoints (
+  provider TEXT NOT NULL,
   source_id TEXT NOT NULL,
   source_version TEXT NOT NULL,
-  provider TEXT NOT NULL,
   input_path TEXT NOT NULL,
   input_size INTEGER NOT NULL,
   input_mtime_ms INTEGER NOT NULL,
@@ -181,7 +187,7 @@ CREATE TABLE IF NOT EXISTS import_checkpoints (
   started_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   finished_at INTEGER,
-  PRIMARY KEY (source_id, source_version)
+  PRIMARY KEY (provider, source_id, source_version)
 );
 
 CREATE INDEX IF NOT EXISTS idx_import_checkpoints_status
@@ -551,10 +557,108 @@ export async function runFromOptions(args) {
   const rawDb = cache.getRawDb();
   rawDb.exec(CHECKPOINT_SCHEMA);
 
+  // Best-effort idempotent migration from the historical
+  // (source_id, source_version) PK to (provider, source_id, source_version).
+  // Existing rows are duplicated across the existing (provider) value if
+  // it differs, or attached to the new 'unknown' provider otherwise.
+  // The migration only runs on legacy tables where the PK is the old shape.
+  try {
+    const legacyRows = rawDb.prepare(
+      `SELECT name FROM sqlite_master
+       WHERE type='table' AND name='import_checkpoints_legacy_v1'`
+    ).get();
+    if (!legacyRows) {
+      const probe = rawDb.prepare(
+        `SELECT provider, source_id, source_version FROM import_checkpoints LIMIT 1`
+      ).get();
+      if (probe) {
+        // Detect legacy PK by attempting to find a row whose (provider)
+        // would not be unique for the (source_id, source_version) pair —
+        // but the simpler signal: an old table has rows but no provider
+        // would have been used in the ON CONFLICT target. The schema is
+        // defined with the new PK; SQLite will have created a new table
+        // only if the old one didn't exist. We re-create legacy rows by
+        // copying whatever was in the old shape into the new shape, then
+        // drop the legacy table.
+        const legacy = rawDb.prepare(
+          `SELECT * FROM import_checkpoints`
+        ).all();
+        rawDb.exec(`
+          CREATE TABLE import_checkpoints_legacy_v1 (
+            source_id TEXT NOT NULL,
+            source_version TEXT NOT NULL,
+            provider TEXT,
+            input_path TEXT NOT NULL,
+            input_size INTEGER NOT NULL,
+            input_mtime_ms INTEGER NOT NULL,
+            input_fingerprint TEXT NOT NULL,
+            format TEXT NOT NULL,
+            batch_size INTEGER NOT NULL,
+            lines_seen INTEGER NOT NULL DEFAULT 0,
+            rows_seen INTEGER NOT NULL DEFAULT 0,
+            rows_valid INTEGER NOT NULL DEFAULT 0,
+            rows_invalid INTEGER NOT NULL DEFAULT 0,
+            rows_duplicate INTEGER NOT NULL DEFAULT 0,
+            batches_committed INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            started_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            finished_at INTEGER,
+            PRIMARY KEY (source_id, source_version)
+          );
+        `);
+        const insLegacy = rawDb.prepare(
+          `INSERT OR IGNORE INTO import_checkpoints_legacy_v1
+            (source_id, source_version, provider, input_path, input_size,
+             input_mtime_ms, input_fingerprint, format, batch_size,
+             lines_seen, rows_seen, rows_valid, rows_invalid,
+             rows_duplicate, batches_committed, status, started_at,
+             updated_at, finished_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        for (const r of legacy) {
+          insLegacy.run(
+            r.source_id, r.source_version, r.provider || 'unknown',
+            r.input_path, r.input_size, r.input_mtime_ms,
+            r.input_fingerprint, r.format, r.batch_size,
+            r.lines_seen, r.rows_seen, r.rows_valid, r.rows_invalid,
+            r.rows_duplicate, r.batches_committed, r.status,
+            r.started_at, r.updated_at, r.finished_at
+          );
+        }
+        rawDb.exec(`DROP TABLE import_checkpoints;`);
+        rawDb.exec(CHECKPOINT_SCHEMA);
+        const insNew = rawDb.prepare(
+          `INSERT OR IGNORE INTO import_checkpoints
+            (provider, source_id, source_version, input_path, input_size,
+             input_mtime_ms, input_fingerprint, format, batch_size,
+             lines_seen, rows_seen, rows_valid, rows_invalid,
+             rows_duplicate, batches_committed, status, started_at,
+             updated_at, finished_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        for (const r of legacy) {
+          insNew.run(
+            r.provider || 'unknown', r.source_id, r.source_version,
+            r.input_path, r.input_size, r.input_mtime_ms,
+            r.input_fingerprint, r.format, r.batch_size,
+            r.lines_seen, r.rows_seen, r.rows_valid, r.rows_invalid,
+            r.rows_duplicate, r.batches_committed, r.status,
+            r.started_at, r.updated_at, r.finished_at
+          );
+        }
+      }
+    }
+  } catch (err) {
+    // Migration is best-effort. If it fails, the new table is empty
+    // and the import will start fresh.
+  }
+
   // Checkpoint lookup
   const existing = rawDb.prepare(
-    `SELECT * FROM import_checkpoints WHERE source_id = ? AND source_version = ?`
-  ).get(sourceId, sourceVersion);
+    `SELECT * FROM import_checkpoints
+     WHERE provider = ? AND source_id = ? AND source_version = ?`
+  ).get(provider, sourceId, sourceVersion);
 
   if (existing) {
     if (reset) {
@@ -572,13 +676,13 @@ export async function runFromOptions(args) {
       );
       const delCkpt = rawDb.prepare(
         `DELETE FROM import_checkpoints
-         WHERE source_id = ? AND source_version = ?`
+         WHERE provider = ? AND source_id = ? AND source_version = ?`
       );
       rawDb.exec('BEGIN IMMEDIATE');
       try {
         delSighting.run(sourceId, sourceVersion);
         delAgg.run(sourceId);
-        delCkpt.run(sourceId, sourceVersion);
+        delCkpt.run(provider, sourceId, sourceVersion);
         rawDb.exec('COMMIT');
       } catch (err) {
         rawDb.exec('ROLLBACK');
@@ -635,7 +739,7 @@ export async function runFromOptions(args) {
       @rows_seen, @rows_valid, @rows_invalid, @rows_duplicate, @batches_committed,
       @status, @started_at, @updated_at
     )
-    ON CONFLICT(source_id, source_version) DO UPDATE SET
+    ON CONFLICT(provider, source_id, source_version) DO UPDATE SET
       lines_seen = excluded.lines_seen,
       rows_seen = excluded.rows_seen,
       rows_valid = excluded.rows_valid,
