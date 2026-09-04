@@ -1,16 +1,23 @@
 /**
- * Quality Feature Extraction — Slice 6.
+ * Quality Feature Extraction — Slice 6 + Slice 7 + Slice 7B + Slice 8.
  *
  * Pure, deterministic feature extractor for ranked candidates.
  * Captures durable quality features for later analytics without
  * changing ranking behavior.
  *
+ * Slice 8 adds a SHADOW quality contribution model:
+ *   - computeQualityContribution(features) — pure, bounded, component-scored
+ *   - rankWithHypotheticalQualityWeight(results, weight) — counterfactual only
+ *   - Shadow is embedded in extractQualityFeatures output as
+ *     qualityContributionShadow — persisted but ZERO ranking influence.
+ *
  * This module does NOT:
  * - Change ranking behavior or weights
- * - Compute quality scores
+ * - Compute quality scores used by production ranking
  * - Access provider state (no I/O, no DB, no network)
  * - Infer resolution from file size
  * - Make raw size globally monotonic
+ * - Use release group in quality contribution (group is analytics-only)
  *
  * It ONLY extracts features from the candidate/result object that
  * produced the ranked row. The SAME object whose score was persisted
@@ -33,9 +40,341 @@
  *   M  YIFY/small-release: features differ, NO ranking difference
  *   N  determinism (byte-identical JSON for same candidate)
  *   O  non-goals: no quality_score, no group reliability weights
+ *
+ * Slice 8 spec traceability:
+ *   A  quality model: versioned, component-scored, reasons, confidence
+ *   B  component priority: resolution > sizeRelative > source > codec > container
+ *   C  resolution component: 2160p→1.0, 1440p→0.88, 1080p→0.72, 720p→0.45, sd→0.20
+ *   D  relative size: log-sigmoid on peerRatio, saturating, no raw bytes
+ *   E  source type: remux>bluray>web-dl>webrip>hdtv>cam, smaller than resolution
+ *   F  codec: tiny modifier (av1>hevc>h264>vc1>mpeg2)
+ *   G  container: nearly negligible (mkv>mp4>m2ts>avi)
+ *   H  release group: NO SCORE CONTRIBUTION (analytics-only)
+ *   I  confidence: fraction of components with known values; missing ≠ negative
+ *   J  shadow integration: zero ranking influence, persists alongside explanation
+ *   K  counterfactual: rankWithHypotheticalQualityWeight for what-if analysis
  */
 
 export const QUALITY_FEATURES_VERSION = 1;
+
+// ---------------------------------------------------------------------------
+// Slice 8: Quality Contribution Model (SHADOW ONLY — zero ranking influence)
+// ---------------------------------------------------------------------------
+
+export const QUALITY_CONTRIBUTION_VERSION = 1;
+
+/**
+ * Internal component weights for the quality contribution model.
+ * These represent RELATIVE importance within the quality model only.
+ * They are NOT global ranking weights and do NOT affect production scores.
+ *
+ * Desired shape (spec section B):
+ *   resolution   ~45-55%  (DOMINANT)
+ *   sizeRelative ~25-35%  (SECONDARY, BOUNDED)
+ *   source       ~10-20%  (SMALLER)
+ *   codec        ~3-6%    (TINY)
+ *   container    ~0-2%    (NEARLY NEGLIGIBLE)
+ */
+const QUALITY_COMPONENT_WEIGHTS = Object.freeze({
+  resolution: 0.50,
+  sizeRelative: 0.30,
+  source: 0.12,
+  codec: 0.05,
+  container: 0.03,
+});
+
+// Resolution component scores (spec section C).
+// 'unknown' gets 0.0 — low-confidence estimate, not a quality signal.
+const RESOLUTION_COMPONENT_SCORES = Object.freeze({
+  '2160p': 1.00,
+  '1440p': 0.88,
+  '1080p': 0.72,
+  '720p': 0.45,
+  'sd': 0.20,
+  'unknown': 0.00,
+});
+
+// Source type component scores (spec section E).
+const SOURCE_COMPONENT_SCORES = Object.freeze({
+  'remux': 1.00,
+  'bluray': 0.85,
+  'web-dl': 0.70,
+  'webrip': 0.55,
+  'hdtv': 0.35,
+  'cam': 0.10,
+});
+
+// Codec component scores (spec section F) — efficiency/context signal only.
+const CODEC_COMPONENT_SCORES = Object.freeze({
+  'av1': 0.70,
+  'hevc': 0.65,
+  'h264': 0.50,
+  'vc1': 0.35,
+  'mpeg2': 0.30,
+});
+
+// Container component scores (spec section G) — nearly negligible.
+const CONTAINER_COMPONENT_SCORES = Object.freeze({
+  'mkv': 0.55,
+  'mp4': 0.50,
+  'm2ts': 0.45,
+  'ts': 0.45,
+  'avi': 0.35,
+});
+
+// Neutral value for unknown/missing component data (spec section I).
+const NEUTRAL_COMPONENT = 0.50;
+
+/**
+ * Compute the resolution component score (spec section C).
+ * @param {string} resolutionLabel — canonical resolution label
+ * @returns {number} 0.0-1.0
+ */
+function resolutionComponentScore(resolutionLabel) {
+  if (!resolutionLabel || resolutionLabel === 'unknown') return 0.0;
+  return RESOLUTION_COMPONENT_SCORES[resolutionLabel] ?? 0.0;
+}
+
+/**
+ * Compute the relative-size component score (spec section D).
+ *
+ * Uses a log-sigmoid on peerRatio so that:
+ *   - very small sizes → modest low signal (not annihilated)
+ *   - around median (ratio≈1.0) → neutral/good (~0.65)
+ *   - moderately above median → positive (~0.86 at ratio=2)
+ *   - absurdly huge → saturating (~0.95 at ratio=4, ~0.99 at ratio=10)
+ *
+ * When peerRatio is null (no cohort), returns neutral (0.50).
+ *
+ * @param {number|null} peerRatio — sizeRatioToMedian from derived features
+ * @returns {number} 0.0-1.0
+ */
+function sizeRelativeComponentScore(peerRatio) {
+  if (peerRatio == null || !Number.isFinite(peerRatio)) return NEUTRAL_COMPONENT;
+  // Clamp ratio to avoid log(0); log2(0.01) ≈ -6.64 gives score ≈ 0.02
+  const logRatio = Math.log2(Math.max(peerRatio, 0.01));
+  // Sigmoid: centered at logRatio=-0.5, steepness 1.2
+  // At ratio=1.0 (log2=0): score ≈ 0.645 (neutral/good)
+  // At ratio=0.25 (log2=-2): score ≈ 0.142 (low but not annihilated)
+  // At ratio=4.0 (log2=2): score ≈ 0.953 (saturating)
+  const score = 1 / (1 + Math.exp(-1.2 * (logRatio + 0.5)));
+  return Math.max(0, Math.min(1, score));
+}
+
+/**
+ * Compute the source type component score (spec section E).
+ * @param {string} sourceType — canonical source type
+ * @returns {number} 0.0-1.0
+ */
+function sourceComponentScore(sourceType) {
+  if (!sourceType || sourceType === 'unknown') return NEUTRAL_COMPONENT;
+  return SOURCE_COMPONENT_SCORES[sourceType] ?? NEUTRAL_COMPONENT;
+}
+
+/**
+ * Compute the codec component score (spec section F).
+ * @param {string} codec — canonical codec label
+ * @returns {number} 0.0-1.0
+ */
+function codecComponentScore(codec) {
+  if (!codec || codec === 'unknown') return NEUTRAL_COMPONENT;
+  return CODEC_COMPONENT_SCORES[codec] ?? NEUTRAL_COMPONENT;
+}
+
+/**
+ * Compute the container component score (spec section G).
+ * @param {string} container — canonical container type
+ * @returns {number} 0.0-1.0
+ */
+function containerComponentScore(container) {
+  if (!container || container === 'unknown') return NEUTRAL_COMPONENT;
+  return CONTAINER_COMPONENT_SCORES[container] ?? NEUTRAL_COMPONENT;
+}
+
+/**
+ * Compute confidence as fraction of components with known values (spec section I).
+ * Unknown values do NOT count as known; absence is not penalized.
+ *
+ * @param {Object} features — the quality feature snapshot
+ * @returns {number} 0.0-1.0 (fraction of components with known values)
+ */
+function computeConfidence(features) {
+  let known = 0;
+  const total = 5;
+  if (features.resolution?.label && features.resolution.label !== 'unknown') known++;
+  if (features.derived?.peerRatio != null) known++;
+  if (features.source?.type && features.source.type !== 'unknown') known++;
+  if (features.codec?.video && features.codec.video !== 'unknown') known++;
+  if (features.container?.type && features.container.type !== 'unknown') known++;
+  return known / total;
+}
+
+/**
+ * Pure, deterministic quality contribution model (spec section A).
+ *
+ * Takes the quality feature snapshot (output of extractQualityFeatures) and
+ * computes a bounded quality contribution. This function is PURE — no I/O,
+ * no DB, no network, no provider data access.
+ *
+ * Output shape:
+ *   {
+ *     version: 1,
+ *     total: <bounded 0-1>,
+ *     components: { resolution, sizeRelative, source, codec, container },
+ *     componentWeights: { resolution, sizeRelative, source, codec, container },
+ *     reasons: [...],
+ *     confidence: <0-1 fraction of known components>
+ *   }
+ *
+ * IMPORTANT:
+ *   - This is SHADOW DATA. It does NOT affect production ranking.
+ *   - Release group contributes exactly 0 (spec section H).
+ *   - Missing data is neutral, not negative (spec section I).
+ *
+ * @param {Object} features — output of extractQualityFeatures
+ * @returns {Object} Frozen quality contribution snapshot
+ */
+export function computeQualityContribution(features = {}) {
+  const resolution = resolutionComponentScore(features.resolution?.label);
+  const sizeRelative = sizeRelativeComponentScore(features.derived?.peerRatio);
+  const source = sourceComponentScore(features.source?.type);
+  const codec = codecComponentScore(features.codec?.video);
+  const container = containerComponentScore(features.container?.type);
+
+  const weights = QUALITY_COMPONENT_WEIGHTS;
+  const total = Math.max(0, Math.min(1,
+    resolution * weights.resolution +
+    sizeRelative * weights.sizeRelative +
+    source * weights.source +
+    codec * weights.codec +
+    container * weights.container
+  ));
+
+  const confidence = computeConfidence(features);
+
+  // Build human-readable reasons for inspectability
+  const reasons = [];
+  reasons.push(`resolution=${features.resolution?.label || 'unknown'} (component=${resolution.toFixed(3)})`);
+  if (features.derived?.peerRatio != null) {
+    reasons.push(`peerRatio=${features.derived.peerRatio.toFixed(3)} (component=${sizeRelative.toFixed(3)})`);
+  } else {
+    reasons.push('sizeRelative=neutral (no peer cohort)');
+  }
+  reasons.push(`source=${features.source?.type || 'unknown'} (component=${source.toFixed(3)})`);
+  reasons.push(`codec=${features.codec?.video || 'unknown'} (component=${codec.toFixed(3)})`);
+  reasons.push(`container=${features.container?.type || 'unknown'} (component=${container.toFixed(3)})`);
+  reasons.push('releaseGroup=0 (analytics-only, no score contribution)');
+
+  return Object.freeze({
+    version: QUALITY_CONTRIBUTION_VERSION,
+    total: Math.round(total * 1000) / 1000,
+    components: Object.freeze({
+      resolution: Math.round(resolution * 1000) / 1000,
+      sizeRelative: Math.round(sizeRelative * 1000) / 1000,
+      source: Math.round(source * 1000) / 1000,
+      codec: Math.round(codec * 1000) / 1000,
+      container: Math.round(container * 1000) / 1000,
+    }),
+    componentWeights: Object.freeze({ ...QUALITY_COMPONENT_WEIGHTS }),
+    reasons,
+    confidence: Math.round(confidence * 1000) / 1000,
+  });
+}
+
+/**
+ * Counterfactual ranking helper (spec section K).
+ *
+ * Pure analysis tool — computes what WOULD happen if quality contributed
+ * to ranking at the given hypothetical weight. Does NOT mutate input.
+ *
+ * Use this to answer: "If quality had weight X, what would move?"
+ *
+ * @param {Array<Object>} results — ranked results, each with optional
+ *   .qualityContributionShadow (the shadow object) and .score
+ * @param {number} [weight=0.05] — hypothetical quality weight (0-1)
+ * @returns {Object} Reordering analysis:
+ *   - weight: the hypothetical weight used
+ *   - totalCandidates: count of input results
+ *   - reorderCount: number of candidates that changed rank
+ *   - medianRankMovement: median absolute rank change
+ *   - maxRankMovement: maximum absolute rank change
+ *   - averageRankMovement: mean absolute rank change
+ *   - originalOrder: array of { score, shadowTotal }
+ *   - hypotheticalOrder: array of { score, hypotheticalScore, shadowTotal }
+ */
+export function rankWithHypotheticalQualityWeight(results, weight = 0.05) {
+  if (!Array.isArray(results) || results.length === 0) {
+    return Object.freeze({
+      weight,
+      totalCandidates: 0,
+      reorderCount: 0,
+      medianRankMovement: 0,
+      maxRankMovement: 0,
+      averageRankMovement: 0,
+      originalOrder: [],
+      hypotheticalOrder: [],
+    });
+  }
+
+  const enriched = results.map((r, i) => {
+    const shadowTotal = r.qualityContributionShadow?.total ?? 0.5;
+    const baseScore = Number.isFinite(r.score) ? r.score : 0;
+    const hypotheticalScore = baseScore + weight * shadowTotal;
+    return {
+      _originalIndex: i,
+      _baseScore: baseScore,
+      _shadowTotal: shadowTotal,
+      _hypotheticalScore: hypotheticalScore,
+      _rank: r.rank ?? i,
+    };
+  });
+
+  // Sort descending by hypothetical score; tie-break by original index (stable)
+  const sorted = [...enriched].sort((a, b) => {
+    if (b._hypotheticalScore !== a._hypotheticalScore) {
+      return b._hypotheticalScore - a._hypotheticalScore;
+    }
+    return a._originalIndex - b._originalIndex;
+  });
+
+  // Compute rank movements
+  const movements = [];
+  let reorderCount = 0;
+  let totalMovement = 0;
+  let maxMovement = 0;
+
+  for (let newRank = 0; newRank < sorted.length; newRank++) {
+    const origRank = sorted[newRank]._originalIndex;
+    const movement = Math.abs(newRank - origRank);
+    movements.push(movement);
+    if (movement > 0) reorderCount++;
+    totalMovement += movement;
+    if (movement > maxMovement) maxMovement = movement;
+  }
+
+  movements.sort((a, b) => a - b);
+  const medianMovement = movements.length > 0
+    ? movements[Math.floor(movements.length / 2)]
+    : 0;
+
+  return Object.freeze({
+    weight,
+    totalCandidates: results.length,
+    reorderCount,
+    medianRankMovement: medianMovement,
+    maxRankMovement: maxMovement,
+    averageRankMovement: Math.round((totalMovement / results.length) * 1000) / 1000,
+    originalOrder: enriched.map((e) => ({
+      score: e._baseScore,
+      shadowTotal: e._shadowTotal,
+    })),
+    hypotheticalOrder: sorted.map((e) => ({
+      score: e._baseScore,
+      hypotheticalScore: Math.round(e._hypotheticalScore * 1000) / 1000,
+      shadowTotal: e._shadowTotal,
+    })),
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Normalization maps
@@ -49,6 +388,7 @@ const RESOLUTION_MAP = {
   '1080p': '1080p', '1080i': '1080p', 'fhd': '1080p',
   '720p': '720p',
   '576p': 'sd', '480p': 'sd', '360p': 'sd',
+  'sd': 'sd',
 };
 
 // Standard display dimensions for known resolutions.
@@ -325,9 +665,9 @@ export function extractQualityFeatures(candidate, context = {}) {
   const normalizedGroup = normalizeReleaseGroup(rawGroup);
 
   // -----------------------------------------------------------------------
-  // Assemble frozen snapshot
+  // Assemble snapshot (unfrozen for shadow attachment)
   // -----------------------------------------------------------------------
-  return Object.freeze({
+  const snapshot = {
     version: QUALITY_FEATURES_VERSION,
     resolution: Object.freeze({
       label: resolutionLabel || 'unknown',
@@ -361,7 +701,29 @@ export function extractQualityFeatures(candidate, context = {}) {
       peerCount: peerFeatures.peerCount,
       peerMedianBytes: peerFeatures.peerMedianBytes,
     }),
-  });
+  };
+
+  // -----------------------------------------------------------------------
+  // Slice 8: attach quality contribution shadow.
+  // ZERO ranking influence — this is analytics/inspection only.
+  // The shadow is computed from the fully-assembled feature snapshot,
+  // but the snapshot's score is NOT modified by the shadow.
+  // -----------------------------------------------------------------------
+  snapshot.qualityContributionShadow = computeQualityContribution(snapshot);
+
+  return Object.freeze(snapshot);
+}
+
+/**
+ * Build the quality contribution shadow from a fully-assembled feature object.
+ * Extracted so the shadow can be attached after all feature components are
+ * known, but before the snapshot is frozen.
+ *
+ * @param {Object} features — the unfrozen feature object (without shadow yet)
+ * @returns {Object} Frozen quality contribution shadow
+ */
+function attachQualityContributionShadow(features) {
+  return computeQualityContribution(features);
 }
 
 /**

@@ -5112,6 +5112,149 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   // Stored knowledge lookup for resolver debug
   // ---------------------------------------------------------------------------
 
+  // Slice 8: read API for quality contribution shadow. Returns the parsed
+  // shadow object (or null when the row has no quality_features) and the
+  // persisted version marker. The shadow is embedded in the quality_features
+  // JSON column — no schema change needed.
+  function getMediaRequestResultQualityContributionShadow(requestId, rank) {
+    const row = db.prepare(`
+      SELECT quality_features, quality_features_version
+      FROM media_request_results
+      WHERE request_id = @request_id AND rank = @rank
+    `).get({ request_id: requestId, rank });
+    if (!row) return null;
+    if (row.quality_features == null) {
+      return {
+        shadow: null,
+        version: row.quality_features_version ?? null,
+        available: false,
+      };
+    }
+    let parsed = null;
+    try { parsed = JSON.parse(row.quality_features); } catch { parsed = null; }
+    if (!parsed || !parsed.qualityContributionShadow) {
+      return {
+        shadow: null,
+        version: row.quality_features_version ?? null,
+        available: false,
+      };
+    }
+    return {
+      shadow: parsed.qualityContributionShadow,
+      version: row.quality_features_version,
+      available: true,
+    };
+  }
+
+  // Slice 8: aggregate quality contribution shadow distributions across all
+  // ranked results. Read-only analytics helper for hypothetical weight
+  // experiments. Reports total score distribution, component averages,
+  // confidence distribution, and hypothetical reorder analysis at 0.02/0.05/0.10.
+  //
+  // Returns null when no rows have quality_features yet.
+  function getQualityContributionShadowDistribution() {
+    const rows = db.prepare(`
+      SELECT quality_features, score
+      FROM media_request_results
+      WHERE quality_features IS NOT NULL
+    `).all();
+    if (rows.length === 0) return null;
+
+    const shadows = [];
+    const totals = [];
+    const confidences = [];
+    const componentSums = { resolution: 0, sizeRelative: 0, source: 0, codec: 0, container: 0 };
+    let withShadow = 0;
+
+    for (const row of rows) {
+      let parsed = null;
+      try { parsed = JSON.parse(row.quality_features); } catch { continue; }
+      if (!parsed || !parsed.qualityContributionShadow) continue;
+      const shadow = parsed.qualityContributionShadow;
+      withShadow++;
+      totals.push(shadow.total);
+      confidences.push(shadow.confidence);
+      componentSums.resolution += shadow.components.resolution;
+      componentSums.sizeRelative += shadow.components.sizeRelative;
+      componentSums.source += shadow.components.source;
+      componentSums.codec += shadow.components.codec;
+      componentSums.container += shadow.components.container;
+      shadows.push({ score: row.score || 0, shadow });
+    }
+
+    if (withShadow === 0) return null;
+
+    totals.sort((a, b) => a - b);
+    confidences.sort((a, b) => a - b);
+    const n = totals.length;
+
+    // Hypothetical reorder analysis at 0.02, 0.05, 0.10
+    const hypotheticalWeights = [0.02, 0.05, 0.10];
+    const hypotheticalAnalysis = {};
+    for (const w of hypotheticalWeights) {
+      // Sort by hypothetical score = score + weight * shadowTotal
+      const enriched = shadows.map((s, i) => ({
+        _originalIndex: i,
+        _baseScore: s.score,
+        _shadowTotal: s.shadow.total,
+        _hypotheticalScore: s.score + w * s.shadow.total,
+      }));
+      const sorted = [...enriched].sort((a, b) => {
+        if (b._hypotheticalScore !== a._hypotheticalScore) {
+          return b._hypotheticalScore - a._hypotheticalScore;
+        }
+        return a._originalIndex - b._originalIndex;
+      });
+      let reorderCount = 0;
+      let totalMovement = 0;
+      let maxMovement = 0;
+      for (let newRank = 0; newRank < sorted.length; newRank++) {
+        const movement = Math.abs(newRank - sorted[newRank]._originalIndex);
+        if (movement > 0) reorderCount++;
+        totalMovement += movement;
+        if (movement > maxMovement) maxMovement = movement;
+      }
+      hypotheticalAnalysis[`weight_${w.toFixed(2)}`] = {
+        weight: w,
+        reorderCount,
+        reorderPercent: Math.round((reorderCount / n) * 1000) / 10,
+        medianRankMovement: sorted.length > 0 ? (() => {
+          const m = sorted.map((_, i) => Math.abs(i - sorted[i]._originalIndex)).sort((a, b) => a - b);
+          return m[Math.floor(m.length / 2)];
+        })() : 0,
+        maxRankMovement: maxMovement,
+        averageRankMovement: Math.round((totalMovement / n) * 1000) / 1000,
+      };
+    }
+
+    return {
+      total: rows.length,
+      withShadow,
+      totalScore: {
+        min: totals[0],
+        p25: totals[Math.floor(n * 0.25)],
+        median: totals[Math.floor(n * 0.5)],
+        p75: totals[Math.floor(n * 0.75)],
+        max: totals[n - 1],
+        mean: Math.round((totals.reduce((a, b) => a + b, 0) / n) * 1000) / 1000,
+      },
+      confidence: {
+        min: confidences[0],
+        median: confidences[Math.floor(n * 0.5)],
+        max: confidences[n - 1],
+        mean: Math.round((confidences.reduce((a, b) => a + b, 0) / n) * 1000) / 1000,
+      },
+      componentAverages: {
+        resolution: Math.round((componentSums.resolution / withShadow) * 1000) / 1000,
+        sizeRelative: Math.round((componentSums.sizeRelative / withShadow) * 1000) / 1000,
+        source: Math.round((componentSums.source / withShadow) * 1000) / 1000,
+        codec: Math.round((componentSums.codec / withShadow) * 1000) / 1000,
+        container: Math.round((componentSums.container / withShadow) * 1000) / 1000,
+      },
+      hypotheticalAnalysis,
+    };
+  }
+
   const GET_MEDIA_REQUESTS_BY_MEDIA_ID = `
     SELECT * FROM media_requests
     WHERE media_id = @media_id
@@ -5898,7 +6041,9 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getMediaRequestResults,
     getMediaRequestResultEvidenceSnapshot,
     getMediaRequestResultQualityFeatures,
+    getMediaRequestResultQualityContributionShadow,
     getQualityFeatureDistribution,
+    getQualityContributionShadowDistribution,
     buildEvidenceSnapshot,
     // Playback handoff persistence
     persistPlaybackHandoff,
