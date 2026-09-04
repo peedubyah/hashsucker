@@ -750,3 +750,210 @@ a no-op (idempotency test in M.6).
 - the 7 zero-info_hash rows in production (F-2)
 - m3-north-db is still frozen at 9f36481
 
+
+## N. Slice 4.0 — Evidence Snapshot Provenance
+
+### N.1 — A: Audit (current state)
+
+After slice 3, every `media_request_results` row was durable, unique,
+FK-bound, and restart-stable. But the row did NOT answer
+*why* the row was ranked where it was. The scoring inputs at rank
+time were reconstructible only by re-running the projection pipeline
+against the current observation store — which is the very thing
+that changes after restart (F-2 carries 0 `ranking_breakdown`
+and 0 `parsed_candidate_scope` on the 8385 production rows).
+
+**Seven questions a post-mortem on a persisted row could not answer:**
+
+1. What `justification` did the scorer see (fresh / prior / both)?
+2. What were the `components` it summed (capability, weight, age, …)?
+3. What `contributions` (per-policy-target scores) made the total?
+4. What `providerObservations` existed at rank time, and what was the
+   *last-seen* of each?
+5. Was `liveDiscovery` active when this row was ranked, or was the
+   row produced offline by operator selection?
+6. What was the `score` total, and did it match the `scoreBreakdown`
+   that was also persisted?
+7. Did the projection's prior include the historical observation
+   that *would have* suppressed the row, or did the fresh observation
+   win?
+
+All seven were answerable only at rank time and lost on restart.
+
+### N.2 — B+C: Design
+
+**Approach:** store a frozen, versioned JSON snapshot of the
+evidence/projection state the scorer actually saw. Per-row, not
+per-request, because each row may have been ranked under a
+different effective evidence set (e.g. fresh observation came in
+between row N and row N+1).
+
+**Shape (`EVIDENCE_SNAPSHOT_VERSION = 1`):**
+
+```json
+{
+  "v": 1,
+  "evidence": {
+    "fresh": { "ok": true, "scope": "…", "tier": "…" } | null,
+    "prior": { "ok": false, "scope": "…", "staleAt": "…" } | null,
+    "hadObservations": true,
+    "primaryIdentity": { "mediaId": "tt…", "mediaType": "movie" } | null
+  },
+  "components": { "capability": 0.4, "freshness": 0.2, … },
+  "contributions": { "default": 0.6, "alternate": 0.0 },
+  "justification": "fresh-supported" | "prior-only" | "operator-selection",
+  "live": { "hadLiveDiscovery": true, "lastSeenAt": "…", "providerCount": 2 },
+  "score": { "total": 0.87, "tier": "preferred", "policyTarget": "default" },
+  "ranking": { "rank": 1, "inputCount": 8, "resultCount": 5 },
+  "inputs": {
+    "justification": "fresh-supported",
+    "score": 0.87,
+    "rank": 1,
+    "components": { … },
+    "contributions": { … },
+    "hasLiveDiscovery": true,
+    "providerObservations": [ { … }, { … } ]
+  }
+}
+```
+
+**Forbidden keys** (allowlist by negation — these MUST NEVER appear
+in a snapshot, even if the caller accidentally passes them):
+
+`magnet`, `downloadUrl`, `download_url`, `provider`, `providers`,
+`auth`, `token`, `apiKey`, `api_key`, `password`, `passwd`, `secret`,
+`capability`, `capabilities`, `manifestUrl`, `manifest_url`,
+`resolver`, `resolverUrl`, `resolver_url`.
+
+`buildEvidenceSnapshot` walks the input recursively and throws on
+any of these — the snapshot is built from a typed projection, not
+from the raw hit blob, so the surface area is small and reviewable.
+
+**Determinism:** keys are written in a fixed order; `providerObservations`
+are sorted by `(provider, lastSeenAt)`; `components` keys are
+alphabetized before serialization. Two snapshots built from the same
+evidence state are byte-identical.
+
+### N.3 — D+E: Write path, read path, migration
+
+**Schema delta** (recorded in `schema_migrations`):
+
+```sql
+ALTER TABLE media_request_results
+  ADD COLUMN evidence_snapshot TEXT;
+ALTER TABLE media_request_results
+  ADD COLUMN evidence_snapshot_version INTEGER;
+```
+
+Idempotent — both `ADD COLUMN` calls are wrapped in
+`pragma_table_info` lookups that no-op if the column already exists.
+
+**Write path** (`persistMediaRequest` in `cache.js`):
+
+For each `r` in the input list:
+1. `const { snapshot, version } = buildEvidenceSnapshot(r);`
+2. pass `snapshot, version` as the new positional args on the
+   `INSERT_MEDIA_REQUEST_RESULT_IGNORE` statement, before the
+   optional `intentId`.
+
+**Read path** (`getMediaRequestResultEvidenceSnapshot` in `cache.js`):
+
+```
+getMediaRequestResultEvidenceSnapshot(requestId, rank)
+  → { snapshot, version, available }
+```
+
+Where `available: false` means the row exists but has no snapshot
+(legacy row, pre-migration OR pre-feature-flag). `snapshot === null`
+means "snapshot column exists, but the row was written before
+version=1 was defined" (theoretically impossible in practice, but
+the API distinguishes for clarity).
+
+**Call sites** (`media-request.js`):
+
+Both result-row producers now pass the full evidence context:
+
+```js
+justification: hit.justification,
+components: hit.components,
+contributions: hit.contributions,
+providerObservations: hit.providerObservations || [],
+hasLiveDiscovery: hit.hasLiveDiscovery === true
+```
+
+The operator-selection path (which produces ranked-looking rows
+without going through the projection pipeline) passes the same
+shape, but the `justification` and `inputs.score` are filled with
+the deterministic operator-selection values — the snapshot is still
+valid and useful, just semantically different.
+
+### N.4 — F: Test results (12/12 pass)
+
+| ID | Proof | Result |
+|---|---|---|
+| F.1 | Ranked result persists evidence snapshot | ✔ |
+| F.2 | Close/reopen preserves byte-for-byte semantic snapshot | ✔ |
+| F.3 | Later provider observation changes do NOT mutate historical snapshot | ✔ |
+| F.4 | Historical prior used at ranking time is preserved | ✔ |
+| F.5 | Fresh negative suppressing history is represented accurately | ✔ |
+| F.6 | Missing evidence remains explicitly missing/unknown | ✔ |
+| F.7 | Old row without snapshot still reads successfully | ✔ |
+| F.8 | Version is persisted on every new row | ✔ |
+| F.9 | Score/ranking breakdown in snapshot matches persisted score inputs | ✔ |
+| F.10 | No capability URL/token/auth field enters snapshot | ✔ |
+| F.11 | Migration is idempotent; legacy and new rows coexist | ✔ |
+| F.12 | Operator selection row carries a deterministic snapshot with no ranked inputs | ✔ |
+
+**Full suite:** 2622 tests, 2496 pass, 124 fail, 2 skipped.
+The 124 failures are the same pre-existing set slice 3 measured
+(`evidence.findTemporary`, `candidate_media` schema mismatches,
+`resolution_state` column mismatches). Slice 4 fixes 1 suite-level
+error (the new test file could not load against pre-slice-4 code
+because `buildEvidenceSnapshot` was not exported) and introduces
+**0** new failures.
+
+**Targeted suite:** 156/156 pass (cache + handoff + media-request
++ slice-3 + slice-4 + rd-walk-bounded).
+
+### N.5 — G: Production census
+
+At slice 4 commit time, `/home/patrick/hashsucker-data/discovery/discovery-cache.db`:
+
+- 8385 `media_request_results` rows
+- 0 rows with `ranking_breakdown IS NOT NULL`
+- 0 rows with `parsed_candidate_scope IS NOT NULL`
+- 0 rows with `evidence_snapshot IS NOT NULL` (expected — the
+  migration only adds the column; backfill is out of scope for
+  this slice)
+
+The first new `INSERT` after deploy will start populating the
+snapshot. From that point, every future restart will have a
+post-mortem answer to all 7 questions in N.1.
+
+### N.6 — Files changed
+
+- `media-search/src/lib/discovery/cache.js` — module-level
+  `buildEvidenceSnapshot`, `EVIDENCE_SNAPSHOT_VERSION`,
+  `FORBIDDEN_SNAPSHOT_KEYS`; `migrateMediaRequestResultsEvidenceSnapshot`;
+  write-path wiring; `getMediaRequestResultEvidenceSnapshot` read API;
+  new exports.
+- `media-search/src/api/media-request.js` — two call sites updated
+  to pass `justification`, `components`, `contributions`,
+  `providerObservations`, `hasLiveDiscovery`.
+- `media-search/test/persistence-integrity-slice-4.test.js` (new,
+  12 tests).
+
+### N.7 — What this slice DOES NOT do (carried over)
+
+- ranking weights
+- candidate scoring
+- upstream normalization of `(info_hash, file_index_key = -1, 0)`
+  collisions from live discovery
+- backfill of legacy `media_request_results` rows with historical
+  snapshots (the 8385 pre-deploy rows will remain snapshot-less
+  forever; this is a known acceptance criterion)
+- backfill of the 9 legacy orphan rows (F-1)
+- backfill of the 2103 dup-physical-release rows (E-1 upstream)
+- the 3 zero-result requests in production (F-1)
+- the 7 zero-info_hash rows in production (F-2)
+- m3-north-db is still frozen at 9f36481
