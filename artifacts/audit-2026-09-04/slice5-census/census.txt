@@ -1,0 +1,58 @@
+section             metric              value
+-------  -----------------------------  -----
+A.1      current_total                    772
+A.1      cached                           372
+A.1      uncached                         400
+A.1      error                              0
+A.1      unknown                            0
+A.1      distinct_provider_scope_pairs      2
+A.1      distinct_info_hashes             718
+A.1      null_account_scope                 0
+A.1      null_observed_at                   0
+A.1      null_expires_at                    0
+A.1      with_error_category               36
+A.1      durable_negatives_infringing      36
+A.1      durable_negatives_unsupported      0
+A.1      transient_negatives              364
+section              metric              value
+-------  ------------------------------  -----
+A.2      events_total                     2410
+A.2      cached_events                    1196
+A.2      uncached_events                  1210
+A.2      error_events                        2
+A.2      unknown_events                      2
+A.2      distinct_provider_scope_pairs       2
+A.2      distinct_info_hashes             1107
+A.2      null_account_scope                  0
+A.2      null_observed_at                    0
+A.2      null_expires_at                     0
+A.2      null_recorded_at                    0
+A.2      events_with_error_category        241
+A.2      infringing_events                 237
+A.2      unsupported_events                  0
+A.2      temporarily_unavailable_events      2
+A.2      unknown_error_events                2
+section                    metric                     value
+-------  -------------------------------------------  -----
+A.3      candidates_with_history_contradictions          11
+A.3      candidates_with_current_contradiction_pairs      8
+section   provider   account_scope   state     n
+-------  ----------  -------------  --------  ---
+A.5      realdebrid  default        cached     11
+A.5      realdebrid  default        uncached   43
+A.5      torbox      default        cached    361
+A.5      torbox      default        uncached  357
+section         metric         value
+-------  --------------------  -----
+A.6      repeats_per_hash      2.177
+A.6      max_repeats_one_hash    131
+section      'historical_provider_evidence'      COUNT(*)
+-------  --------------------------------------  --------
+A.7      historical_provider_evidence                   0
+A.7      historical_provider_evidence_sightings         0
+A.7      rd_download_observations                     108
+A.7      rd_download_correlations                     108
+A.7      rd_download_correlation_classes                1
+section  ttl_bucket   n
+-------  ----------  ---
+A.8      lt-10min    772

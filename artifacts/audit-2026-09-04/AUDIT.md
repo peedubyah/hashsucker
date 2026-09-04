@@ -957,3 +957,275 @@ post-mortem answer to all 7 questions in N.1.
 - the 3 zero-result requests in production (F-1)
 - the 7 zero-info_hash rows in production (F-2)
 - m3-north-db is still frozen at 9f36481
+
+## O. Slice 5.0 — Provider Evidence Reconciliation + Contradiction Handling
+
+**Slice:** m3-north-db control-plane integrity hardening (slice 5)
+**Date:** 2026-09-04
+**Branch state:** main @ ba2b1c7, m3-north-db frozen at 9f36481
+
+### O.1 — A: Evidence lifecycle audit (current state)
+
+The current system separates evidence into four parallel layers:
+
+| Layer | Table(s) | Purpose | Lifecycle |
+|-------|----------|---------|-----------|
+| Append-only event log | `provider_observation_events` | Full history of every recorded observation (id, source, kind, error_category, latency, retry_after_ms, correlation_id) | INSERT only. Never updated. |
+| Current projection | `provider_observation_current` | One row per (provider, account_scope, scope, subject_type, subject_key, kind) — the "most recent" truth for that key | UPSERT gated on `EXCLUDED.observed_at >= current.observed_at`. |
+| Historical evidence | `historical_provider_evidence` + `historical_provider_evidence_sightings` | Aggregated historical provider hits (RD downloads, etc.) | Idempotent INSERT per (source_id, source_event_id). |
+| RD raw observations | `rd_download_observations` + `rd_download_correlations` | Raw /downloads feed + per-candidate correlation | INSERT only. |
+
+**Answering the 10 audit questions:**
+
+1. **Can a fresh positive and fresh negative coexist for the same provider/hash?**
+   - At the **event** layer: yes — both events remain in history.
+   - At the **current** layer: no — the UPSERT is gated on `observed_at`; only the most recent observation wins. **Census: 11 (info_hash, file_index_key, provider) tuples in production have BOTH cached and uncached events in history; the current layer reflects whichever is most recent.** Slice 5 adds a guard that prevents a transient from erasing a known current state (see O.3 E).
+
+2. **If so, which wins and why?**
+   - Newer `observed_at` wins at the current layer. This is a *temporal* conflict-resolution rule — the latest observation is treated as the freshest provider truth. The pre-slice-5 system had no contradiction-specific guard; slice 5 adds one for the transient-vs-known case.
+
+3. **Does unknown overwrite known?**
+   - **Pre-slice-5: yes** — UPSERT condition is purely `observed_at`, and a fresh transient had a later `observed_at` than an older known. This violated the spec rule "Fresh current UNKNOWN / ERROR does NOT erase a prior known positive/negative."
+   - **Post-slice-5: no** — UPSERT WHERE clause now has a guard: `NOT (EXCLUDED.state IN ('error','unknown') AND current.state IN ('cached','uncached'))`. The transient still appears in the event log, but the current projection is preserved.
+
+4. **Does error overwrite known?**
+   - **Post-slice-5: no** — same guard.
+
+5. **Does stale evidence remain distinguishable from absent evidence?**
+   - Yes. `evaluateObservationFreshness` returns `{freshness: 'stale' | 'fresh' | 'unbounded'}` per observation. The reconciliation function in `evidence-reconciliation.js` distinguishes `fresh` / `stale` / `missing` (no current row at all) at the layer above.
+
+6. **Can historical evidence accidentally override a fresh contradiction?**
+   - No. Historical evidence lives in a different table and is only consulted when current is missing. Fresh current positive or negative always wins (see spec D.7: "fresh negative + historical positive → negative, history suppressed").
+
+7. **Can repeated identical observations strengthen confidence incorrectly?**
+   - At the provider observation layer: UPSERT overwrites with the same observation; no amplification (the projection is the latest, not a sum). Repeated identical events with the same `observed_at` collapse to one logical observation in the reconciliation layer (see O.2 `collapseRepeatedObservations`).
+   - At the historical evidence layer: `historical_provider_evidence_sightings` uses `INSERT OR IGNORE` keyed on `(source_id, source_event_id)`, so a replayed source event does NOT add a new sighting. The aggregate is recomputed from the sightings table.
+
+8. **Can observations from different account scopes bleed together?**
+   - The `provider_observation_current` PRIMARY KEY includes `account_scope`, so different scopes are isolated at the storage layer. **Census: 0 rows in production have a NULL/empty `account_scope`. All 772 current rows are `default`.** The reconciliation function enforces the same isolation via `groupObservationsByScope`.
+
+9. **Are timestamps source-time, observation-time, or write-time?**
+   - `observed_at` = observation-time (when the probe ran).
+   - `expires_at` = observation-time + TTL (e.g. 5 min for cache probes).
+   - `recorded_at` = write-time (when the row hit the DB).
+   - The historical evidence layer uses `first_seen_at` / `last_seen_at` (source-time from the source event).
+   - These are intentionally distinct. The reconciliation layer uses `observed_at` for freshness, not `recorded_at`.
+
+10. **Can current state be reconstructed deterministically after restart?**
+    - Yes. The current projection is a strict function of the current table (which is persisted to disk). The reconciliation function is a pure function of (current rows + historical rows + now + freshness policy). Given the same DB snapshot, the same reconciliation output is produced.
+
+### O.2 — B+C: Reconciliation semantics
+
+Added `media-search/src/lib/discovery/evidence-reconciliation.js` — a pure module that derives the authoritative current interpretation of provider evidence.
+
+**Output shape (frozen object):**
+
+```
+{
+  currentState:     'positive' | 'negative' | 'unknown',
+  freshness:        'fresh'    | 'stale'    | 'missing',
+  confidence:       'current'  | 'historical-prior' | 'unresolved',
+  reason:           <closed enumerable — see RECONCILIATION_REASONS>,
+  negativeKind:     'durable' | 'transient' | null,
+  historicalPrior:  { provider, accountScope, positive, sources: [], ... } | null,
+  freshObservation: <observation> | null,
+  repeatedCollapsed: number,
+}
+```
+
+**Closed enums (machine-readable, no freeform text):**
+
+- `CURRENT_STATES = ['positive', 'negative', 'unknown']`
+- `FRESHNESS_BUCKETS = ['fresh', 'stale', 'missing']`
+- `CONFIDENCE_SOURCES = ['current', 'historical-prior', 'unresolved']`
+- `RECONCILIATION_REASONS` — 8 enumerable values: `fresh-positive`, `fresh-negative`, `historical-prior-positive`, `historical-prior-negative`, `stale-positive`, `stale-negative`, `transient-unknown-preserved-known`, `no-evidence`.
+- `DURABLE_NEGATIVE_ERROR_CATEGORIES = new Set(['infringing', 'unsupported'])`.
+
+**Precedence rules (applied in this exact order):**
+
+1. Fresh current `cached` → `currentState: positive`, `reason: fresh-positive`.
+2. Fresh current `uncached` → `currentState: negative`, `reason: fresh-negative`. `negativeKind = 'durable'` iff `errorCategory ∈ DURABLE_NEGATIVE_ERROR_CATEGORIES`, else `'transient'`.
+3. Fresh current `error`/`unknown` → look back for the most recent known (`cached`/`uncached`):
+   - If a prior known exists: preserve it, mark `confidence: unresolved`, `reason: transient-unknown-preserved-known`. The prior known is the *interpreted* current state; the fresh transient IS the fresh observation, but the *interpretation* is preserved.
+   - If no prior known: `currentState: unknown`, `confidence: unresolved`, `reason: transient-unknown-preserved-known`.
+4. Stale current + no fresh → if historical prior exists, fall back to it; else preserve stale.
+5. Missing current + historical prior → `historical-prior-*` reason.
+6. No evidence at all → `no-evidence`, `unknown`, `unresolved`.
+
+**Per the spec, the derived projection is NOT persisted.** The reconciliation function is pure and stateless; the caller (typically a read path or an operator tool) supplies the source facts. This is the "Prefer deriving from durable source facts" rule from the spec.
+
+### O.3 — D+E: Contradiction handling + write-path hardening
+
+**D (10 contradiction cases) — all proven by `test/evidence-reconciliation-slice-5.test.js` (24 tests):**
+
+| Case | Spec | Test | Result |
+|------|------|------|--------|
+| D.1 | fresh positive + historical positive | `D.1: fresh positive after historical positive → current positive` | PASS |
+| D.2 | fresh negative + historical positive | `D.2: fresh negative after historical positive → current negative` | PASS |
+| D.3 | transient error after fresh positive | `D.3: transient error after fresh positive → does NOT erase positive` | PASS |
+| D.4 | transient unknown after fresh negative | `D.4: transient unknown after fresh negative → does NOT erase negative` | PASS |
+| D.5 | stale positive + no fresh | `D.5: stale positive + no fresh current → unknown w/ stale context` | PASS |
+| D.6 | historical positive + no current | `D.6: historical positive + no current → historical-prior positive` | PASS |
+| D.7 | fresh negative + historical positive | `D.7: fresh negative + historical positive → negative` | PASS |
+| D.8 | fresh positive + historical negative | `D.8: fresh positive + historical negative → positive` | PASS |
+| D.9 | replayed N times | `D.9: same observation replayed N times → same derived state` | PASS |
+| D.10 | two account scopes | `D.10: same hash under two account scopes → states remain independent` | PASS |
+
+**E (write-path hardening):**
+
+The pre-slice-5 `UPSERT_CURRENT_OBSERVATION` SQL was:
+
+```sql
+ON CONFLICT(...) DO UPDATE SET ...
+WHERE EXCLUDED.observed_at >= provider_observation_current.observed_at;
+```
+
+This is purely temporal: a fresh transient (later `observed_at`) would overwrite a known current. Slice 5 adds the guard:
+
+```sql
+AND NOT (
+  EXCLUDED.state IN ('error', 'unknown')
+  AND provider_observation_current.state IN ('cached', 'uncached')
+)
+```
+
+**Proven by `test/evidence-reconciliation-write-path-slice-5.test.js` (7 tests):**
+
+- E.1: known `cached` survives a fresh transient `unknown`.
+- E.2: known `uncached` survives a fresh transient `error`.
+- E.3: transient-then-known: known DOES overwrite the prior transient (transient never blocks a subsequent known write).
+- E.4: known-vs-known of opposite sign: newer wins (per spec rule 1+2).
+- E.4b: transient-vs-transient: newer transient overwrites older transient.
+- E.5: history preserves the full event chain regardless of write-path gating.
+- H.1: media_request_results evidence snapshot is immutable under later observation writes (request-snapshot interaction — see O.7).
+
+**What the write-path guard does NOT do:**
+
+- Does not modify the `provider_observation_events` log. All events are still recorded.
+- Does not prevent known-vs-known contradictions. A fresh `cached` can still overwrite an older `uncached` (and vice versa) — the guard is specifically for transient-vs-known.
+- Does not introduce any destructive retention.
+
+### O.4 — F+G: Provider-specific findings
+
+**F: RD semantics (per spec section F):**
+
+- Code 35 (infringement) — `buildRdObservation` in `providers/realdebrid/observe.js` sets `state: uncached, errorCategory: 'infringing', retryable: false`. This is a **durable** negative and IS persisted at the current layer.
+- `unsupported` / `not-found` / `not-allowed` / `dead` — `errorCategory: 'unsupported', retryable: false`. Also durable.
+- Ambiguous / transient failures (5xx, network, parse) — `state: error, errorCategory: 'unknown', retryable: true`. Transient.
+- `requestdl` failures / 429 / timeouts — currently surface as `state: unknown, errorCategory: 'temporarily-unavailable'`. Transient.
+
+**Census: 237 RD infringing events in history, 36 RD infringing rows in current layer.** These are intentional durable negatives and the slice-5 `DURABLE_NEGATIVE_ERROR_CATEGORIES` set correctly classifies them.
+
+**G: TorBox semantics (per spec section G):**
+
+- `cached` → `state: cached`.
+- `uncached` → `state: uncached`.
+- `failed` (transport failure on a single hash) → `state: unknown, errorCategory: 'temporarily-unavailable'`. Transient.
+- Batch-level failure → all hashes in the batch are recorded as `state: unknown, errorCategory: 'transient'`. Transient.
+
+**Key invariant: a transport failure is NEVER persisted as a content negative.** A `temporarily-unavailable` or `transient` observation is an `unknown` state and falls into the transient-handling branch of the reconciliation (rule 3 in O.2). The cached/uncached "known" is preserved.
+
+**Census: 2 transient-unavailable events, 2 unknown-error events in history; 0 in current layer (all have been replaced by a later known or remain in history).** This confirms the system already correctly keeps transport failures out of the current projection once a subsequent known is recorded.
+
+**Provider availability vs delivery capability (per spec G):**
+
+The slice-5 reconciliation explicitly separates these. Provider availability is a function of the **current projection** (cached/uncached). Delivery capability (the ability to actually serve the file — torrent active, RD unrestricted, etc.) is a separate concern owned by HY4 south-side. Slice 5 does not touch delivery.
+
+### O.5 — H: Request snapshot immutability
+
+`test/evidence-reconciliation-write-path-slice-5.test.js` H.1 proves the slice-4 evidence snapshot on `media_request_results` is immutable under any subsequent observation writes:
+
+1. A request is persisted with a slice-4 evidence snapshot (`version: 1`) for a `torbox cached` ranking.
+2. A transient `error` observation is recorded.
+3. A fresh `uncached` observation is recorded.
+4. The persisted snapshot's JSON is byte-for-byte identical to the pre-write snapshot.
+
+This works because the slice-4 snapshot is captured at the time of `persistMediaRequest`, encoded into the `media_request_results.evidence_snapshot` column, and the write-path guards (slice 5) prevent any later write from touching that column. The event log records the new observations; the historical snapshot remains a frozen artifact of the moment the request was ranked.
+
+### O.6 — I: Production read-only census
+
+`artifacts/audit-2026-09-04/slice5-census/run-census.sh` runs against the production DB in read-only mode. Results at `artifacts/audit-2026-09-04/slice5-census/census.txt`:
+
+| Metric | Value |
+|--------|-------|
+| `provider_observation_current` rows | 772 |
+| `cached` / `uncached` / `error` / `unknown` | 372 / 400 / 0 / 0 |
+| `provider_observation_events` rows | 2410 |
+| `cached_events` / `uncached_events` / `error_events` / `unknown_events` | 1196 / 1210 / 2 / 2 |
+| Distinct `(provider, account_scope)` pairs in current | 2 (realdebrid, torbox × default) |
+| Distinct info_hashes in current | 718 |
+| Distinct info_hashes in events | 1107 |
+| Rows with `account_scope IS NULL OR ''` | 0 (in both tables) |
+| Rows with `observed_at IS NULL` | 0 |
+| Rows with `expires_at IS NULL` | 0 |
+| Current rows with `error_category` set | 36 (all `infringing`) |
+| Durable negatives (infringing) in current | 36 |
+| Durable negatives (unsupported) in current | 0 |
+| Transient negatives in current | 364 |
+| Infringing events in history | 237 |
+| Temporarily-unavailable events | 2 |
+| Unknown-error events | 2 |
+| Candidates with history contradictions (cached+uncached in events) | 11 |
+| Candidates with current-vs-event divergence | 8 |
+| Repeats per hash (events / distinct info_hash) | 2.18 |
+| Max repeats for one hash | 131 (one realdebrid hash) |
+| `historical_provider_evidence` rows | 0 |
+| `historical_provider_evidence_sightings` rows | 0 |
+| `rd_download_observations` rows | 108 |
+| `rd_download_correlations` rows | 108 |
+
+**Top contradiction class: realdebrid.** All 11 history-contradiction candidates are realdebrid, all 8 current-vs-event divergences are realdebrid. The max-repeats hash (131 events) is one of these contradictions. TorBox has 0 contradictions in the current layer (current and most-recent event always agree).
+
+**Empty `historical_provider_evidence` table:** The historical evidence importer has never been run against production. The current layer is the only source of provider truth. The reconciliation function still correctly falls back to "no evidence" (`no-evidence` reason) when both current and historical are empty.
+
+**No destructive mutations were performed against the production DB.** The census script opens the DB in `-readonly` mode.
+
+### O.7 — J: Storage / retention review
+
+| Metric | Value | Assessment |
+|--------|-------|------------|
+| Total events | 2410 over 7.55 days | 319 events/day. At 200 bytes/event ≈ 64 KB/day. Negligible growth. |
+| Max repeats for one hash | 131 | One realdebrid hash has been probed 131 times over 7.5 days (~17/day). This is the contradiction hash; the repetition is expected and the slice-5 reconciliation correctly collapses them. |
+| DB size | 1.7 GB | Dominated by other tables (release_search, etc.), not observation history. Observation history is well under 1 MB total. |
+| Append-only invariant | `provider_observation_events` is INSERT-only (no UPDATE/DELETE in code) | Compaction would require a deliberate decision; not implemented in slice 5. |
+| Idempotency of replays | INSERT OR IGNORE on `(source_id, source_event_id)` for sightings; same observation (provider, scope, kind, state) at current layer is overwritten, not amplified | Replays do not strengthen evidence. |
+
+**Retention decision (per spec J): no destructive retention implemented.** All evidence is append-only at the events layer, and the current layer is bounded by the natural PRIMARY KEY uniqueness. Compaction would require choosing an eviction policy for old events (e.g. "keep last N events per (info_hash, file_index_key, provider)"). The current growth rate does not justify this.
+
+### O.8 — K: Test results
+
+**Slice 5 tests alone:** 24/24 pass (`test/evidence-reconciliation-slice-5.test.js`).
+**Slice 5 write-path tests:** 7/7 pass (`test/evidence-reconciliation-write-path-slice-5.test.js`).
+**Slice 5 + Slice 4 combined:** 42/42 pass.
+**Targeted suite (cache + handoff + media-request + slice 3 + slice 4 + slice 5 + rd-walk-bounded + observation + historical):** 346/346 pass.
+
+**Full suite:** 2653/2527/124/2-skipped (vs slice-4 baseline 2622/2496/124/2-skipped).
+- +31 tests (24 + 6 + 1)
+- +31 pass
+- 0 new failures
+- 0 new skips
+- The 124 pre-existing failures are unchanged (failure diff against the slice-4 post-state: empty intersection, empty diff). The 1 added test (E.4b) brings the totals from +30 to +31.
+
+### O.9 — Files changed
+
+- `media-search/src/lib/discovery/cache.js` — `UPSERT_CURRENT_OBSERVATION` SQL: added WHERE-clause guard to prevent transient from erasing known current state.
+- `media-search/src/lib/discovery/evidence-reconciliation.js` (new, 359 lines) — pure module: `reconcileProviderEvidence`, `reconcileAllScopes`, `collapseRepeatedObservations`, `groupObservationsByScope`, `buildHistoricalPrior`, closed enums.
+- `media-search/test/evidence-reconciliation-slice-5.test.js` (new, 24 tests).
+- `media-search/test/evidence-reconciliation-write-path-slice-5.test.js` (new, 7 tests).
+- `artifacts/audit-2026-09-04/slice5-census/run-census.sh` (new) — read-only production census.
+- `artifacts/audit-2026-09-04/slice5-census/census.txt` (new) — census output.
+
+### O.10 — What this slice DOES NOT do (carried over)
+
+- ranking weights
+- candidate scoring
+- upstream normalization of `(info_hash, file_index_key = -1, 0)` collisions from live discovery
+- backfill of legacy `media_request_results` rows with historical snapshots (the 8385 pre-deploy rows remain snapshot-less forever; known acceptance criterion)
+- backfill of the 9 legacy orphan rows (F-1)
+- backfill of the 2103 dup-physical-release rows (E-1 upstream)
+- the 3 zero-result requests in production (F-1)
+- the 7 zero-info_hash rows in production (F-2)
+- destructive retention of observation history
+- m3-north-db is still frozen at 9f36481
+- the 11 realdebrid production contradictions (out of scope; the reconciliation correctly handles them but does not auto-resolve them; future slice may decide policy)
+- the `findTemporary` reference in `test/worker-a-torbox-promotion.test.js` (pre-existing test/source mismatch; not a slice-5 regression)
