@@ -45,7 +45,9 @@ use hy4_data_plane::{
     control::{fetch_control, ControlTorrentFile},
     manager::CapabilityManager,
     metrics::Metrics,
-    serve::{get_file, metrics_handler, AppState, SUPPORTED_SCHEMA_VERSION},
+    serve::{
+        data_plane_error, get_file, metrics_handler, AppState, SUPPORTED_SCHEMA_VERSION,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -184,11 +186,16 @@ async fn handle_files(
     {
         Ok(r) => r,
         Err(msg) => {
-            return (
+            // P5 class B: S-1 could not resolve this tfId (unknown / not-found /
+            // control unreachable). NOT fallback-eligible: emit a classified
+            // `S1_FETCH_FAILED` so the Node VFS does not blindly try unrelated
+            // candidates. See docs/hy4/S1-CONTROL-CONTRACT.md (byte error contract).
+            return data_plane_error(
                 StatusCode::BAD_GATEWAY,
-                format!("S-1 fetch failed: {msg}"),
-            )
-                .into_response();
+                "S1_FETCH_FAILED",
+                &tf_id,
+                None,
+            );
         }
     };
 

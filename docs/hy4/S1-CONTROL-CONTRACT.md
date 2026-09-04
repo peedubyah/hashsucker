@@ -153,3 +153,44 @@ equal. The real invariants are:
   policy into the identity contract.
 - **Multi-TorrentFile router, VFS wiring, provider-path deletion.** Later
   tranches. Not started.
+
+---
+
+## Byte error contract (P5)
+
+P5 makes Rust the **only** byte-serving authority for any durable VFS entry
+(`state.entry.torrentFileId != null`). The contract below is the narrow,
+structured surface the Node VFS uses to **classify** a Rust failure instead of
+guessing from a plain-text body or a truncated `206`. All error bodies are JSON
+of the shape `{ "error": { "code": <CODE>, "torrent_file_id": <tfId> } }`.
+
+A Rust failure maps to exactly one P5 class. The class dictates what Node may do:
+
+| Code | HTTP | Class | Fallback-eligible? | Node behavior |
+|------|------|-------|--------------------|---------------|
+| `PROVIDER_EXHAUSTED` | 502 | **D** | ✅ YES | Switch to next persisted alternate `TorrentFile` and re-forward to Rust. |
+| `S1_FETCH_FAILED` | 502 | **B** | ❌ NO | Identity / not-found / control unreachable. No blind fallback. |
+| `INTERNAL_ERROR` | 500/502 | **C** | ❌ NO | Transient infra / explicit 5xx. **No legacy escape.** |
+| *(any 416)* | 416 | **A** | ❌ NO | Client Range unsatisfiable. No fallback. |
+| `DATA_PLANE_UNREACHABLE` | 502 | **C** | ❌ NO | Rust itself is down. Explicit failure; no legacy escape (re-forwarding would only hit the same dead plane). |
+
+**The critical invariant:** `PROVIDER_EXHAUSTED` is produced **before any `206`
+is committed**. Previously `get_file` wrote the `206` headers, then on provider
+exhaustion simply ended the byte channel — the client saw a truncated/empty
+`206`, indistinguishable from success. Now `acquire_for_read` runs *before* the
+`206`, and exhaustion returns a clean typed `502` (see `serve.rs::data_plane_error`).
+
+**Rust owns same-TorrentFile recovery.** `PROVIDER_EXHAUSTED` means "this
+TorrentFile cannot be delivered by ANY Node-supplied provider, and no recovery is
+in flight." Node's only fallback is to a *different* TorrentFile via the existing
+persisted-candidate lifecycle (`findUsableAlternate` → `promoteAlternate` →
+`materializeVfsEntry` → re-forward). It must **never** fall through to the legacy
+Node provider byte path for a `tfId`-present entry.
+
+**TEST-ONLY fault gate:** setting `HY4_FORCE_EXHAUST_TFID=tf_xxx,yyy` on the data
+plane container forces `PROVIDER_EXHAUSTED` for the listed tfIds — a bounded,
+reversible way to exercise class D. Never set in production.
+
+Classifiers live in `media-search/src/lib/vfs/data-plane-forward.js`
+(`classifyDataPlaneError`).
+

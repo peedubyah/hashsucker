@@ -51,12 +51,38 @@ const PROXIED_HEADERS = [
  * `sendError` helper can route it without a class dependency.
  */
 export class DataPlaneError extends Error {
-  constructor(message, status = 502, code = 'DATA_PLANE_ERROR') {
+  /**
+   * @param {string} message
+   * @param {number} status  HTTP status to surface to the caller (default 502).
+   * @param {string} code    Machine-readable error code (e.g. PROVIDER_EXHAUSTED).
+   * @param {'A'|'B'|'C'|'D'} errorClass  P5 failure class:
+   *   A — client Range / no fallback (416)
+   *   B — identity / not-found / no blind fallback (S1_FETCH_FAILED)
+   *   C — transient infra / explicit 5xx / data-plane unreachable. MUST NOT
+   *       silently fall through to the legacy Node provider byte path.
+   *   D — provider exhaustion. The ONLY fallback-eligible class: the caller may
+   *       switch to a persisted alternate TorrentFile and re-forward to Rust.
+   */
+  constructor(message, status = 502, code = 'DATA_PLANE_ERROR', errorClass = 'C') {
     super(message);
     this.name = 'DataPlaneError';
     this.status = status;
     this.code = code;
+    this.class = errorClass;
   }
+}
+
+/**
+ * P5 failure-class classifier. Maps a Rust error code (or status) to a class
+ * that the caller uses to decide fallback vs explicit failure. See the P5 brief.
+ */
+export function classifyDataPlaneError(code, status) {
+  if (code === 'PROVIDER_EXHAUSTED') return 'D';
+  if (code === 'S1_FETCH_FAILED') return 'B';
+  if (code === 'INTERNAL_ERROR') return 'C';
+  if (status === 416) return 'A';
+  // default: explicit 5xx / 429 / unknown — class C (no legacy escape)
+  return 'C';
 }
 
 /**
@@ -92,48 +118,89 @@ export async function streamFromDataPlane({
   try {
     upstream = await fetchFn(upstreamUrl, { method, headers: upstreamHeaders });
   } catch (error) {
-    // No response bytes have been written yet — safe for the caller to fall
-    // back to the legacy Node byte path.
+    // The data plane itself is unreachable. P5 proof D: this is an explicit
+    // failure — there is no durable TorrentFile Rust can serve, so re-forwarding
+    // a persisted alternate would only hit the same dead data plane. Class C:
+    // terminal, NO silent fall-through to the legacy Node provider byte path.
     throw new DataPlaneError(
       `data-plane unreachable for tfId=${tfId}: ${error?.message || error}`,
       502,
       'DATA_PLANE_UNREACHABLE',
+      'C',
     );
   }
 
-  const outHeaders = {};
-  for (const name of PROXIED_HEADERS) {
-    const value = upstream.headers.get(name);
-    if (value != null) outHeaders[name] = value;
-  }
-  if (contentType && outHeaders['content-type'] == null) {
-    outHeaders['content-type'] = contentType;
-  }
-  outHeaders['cache-control'] = 'no-store';
+  // P5: classify the data-plane response before proxying. A 200/206 is a
+  // successful byte stream and is proxied verbatim (unchanged P4 behavior). Any
+  // non-success status is classified into a P5 failure class and THROWN (rather
+  // than proxied) so the caller can decide: class D (provider exhaustion) →
+  // reuse the persisted-candidate fallback and re-forward to Rust with a
+  // different TorrentFile; every other class → explicit terminal failure with NO
+  // silent fall-through to the legacy Node provider byte path.
+  const status = upstream.status;
+  if (status === 200 || status === 206) {
+    const outHeaders = {};
+    for (const name of PROXIED_HEADERS) {
+      const value = upstream.headers.get(name);
+      if (value != null) outHeaders[name] = value;
+    }
+    if (contentType && outHeaders['content-type'] == null) {
+      outHeaders['content-type'] = contentType;
+    }
+    outHeaders['cache-control'] = 'no-store';
 
-  // Proxy status + headers verbatim. This automatically preserves 206/416,
-  // streaming, Content-Range, Accept-Ranges, and the data plane's Retry-After
-  // (carried outside PROXIED_HEADERS only if needed — see note in P4 §2).
-  response.writeHead(upstream.status, outHeaders);
+    // Proxy status + headers verbatim. This automatically preserves 206/416,
+    // streaming, Content-Range, Accept-Ranges, and the data plane's Retry-After
+    // (carried outside PROXIED_HEADERS only if needed — see note in P4 §2).
+    response.writeHead(status, outHeaders);
 
-  if (!upstream.body) {
-    response.end();
+    if (!upstream.body) {
+      response.end();
+      return;
+    }
+
+    const stream = Readable.fromWeb(upstream.body);
+    const abort = () => stream.destroy();
+    request.once('aborted', abort);
+    response.once('close', abort);
+    try {
+      stream.pipe(response);
+      await finished(stream);
+    } catch (error) {
+      if (!response.headersSent) throw error;
+      // Headers already on the wire — cannot 502 now; tear down cleanly.
+      response.destroy(error);
+    } finally {
+      request.removeListener('aborted', abort);
+      response.removeListener('close', abort);
+    }
     return;
   }
 
-  const stream = Readable.fromWeb(upstream.body);
-  const abort = () => stream.destroy();
-  request.once('aborted', abort);
-  response.once('close', abort);
+  // Non-success: read the body (Rust emits structured JSON on 5xx) and classify.
+  // Even when the body is not JSON, the status alone determines the class.
+  let code = `DATA_PLANE_HTTP_${status}`;
+  if (status === 416) code = 'RUST_RANGE_NOT_SATISFIABLE';
+  else if (status === 429) code = 'RUST_RATE_LIMITED';
+  let bodyText = '';
   try {
-    stream.pipe(response);
-    await finished(stream);
-  } catch (error) {
-    if (!response.headersSent) throw error;
-    // Headers already on the wire — cannot 502 now; tear down cleanly.
-    response.destroy(error);
-  } finally {
-    request.removeListener('aborted', abort);
-    response.removeListener('close', abort);
+    bodyText = await upstream.text();
+  } catch {
+    // ignore body read errors; fall back to status-derived code
   }
+  if (bodyText) {
+    try {
+      const parsed = JSON.parse(bodyText);
+      if (parsed?.error?.code) code = parsed.error.code;
+    } catch {
+      // non-JSON body; keep the status-derived code
+    }
+  }
+  const errorClass = classifyDataPlaneError(code, status);
+  throw new DataPlaneError(
+    `data-plane returned ${status} for tfId=${tfId}: ${code}`,
+    status,
+    code,
+    errorClass,
+  );
 }

@@ -1558,6 +1558,9 @@ export function createRequestHandler(dependencies = {}) {
     rdResolutionCache,
     resolveTorBoxDeliverySeam,
     torBoxDownloadUrlCache,
+    // P5: reuse the EXISTING persisted-candidate fallback seam in the VFS
+    // (tfId-present class-D exhaustion → alternate TorrentFile → re-forward to Rust).
+    alternateFallback,
     terminalEvidenceStore,
     now: clock,
     // P4: forward VFS byte reads to the Rust data plane. Default is the
@@ -1572,6 +1575,9 @@ export function createRequestHandler(dependencies = {}) {
     rdResolutionCache,
     resolveTorBoxDeliverySeam,
     torBoxDownloadUrlCache,
+    // P5: reuse the EXISTING persisted-candidate fallback seam in the VFS
+    // (tfId-present class-D exhaustion → alternate TorrentFile → re-forward to Rust).
+    alternateFallback,
     terminalEvidenceStore,
     now: clock,
     dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://hy4-data-plane:3001',

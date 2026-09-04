@@ -150,6 +150,42 @@ pub fn rate_limited_response(ra: Option<Duration>) -> Response<Body> {
     .unwrap()
 }
 
+/// P5 southbound error contract.
+///
+/// Emits a structured JSON error so the Node VFS can CLASSIFY the failure
+/// instead of guessing from a plain-text body:
+///   - `PROVIDER_EXHAUSTED`  (502) — every Node-supplied provider for this
+///     TorrentFile is exhausted AND no same-TorrentFile recovery is in flight.
+///     This is the ONLY fallback-eligible class: Node may switch to the next
+///     persisted alternate candidate (different TorrentFile) and re-forward
+///     to Rust.
+///   - `S1_FETCH_FAILED`      (502) — Rust could not resolve this tfId via the
+///     S-1 control plane (unknown / not-found / control unreachable). NOT
+///     fallback-eligible: do not blindly try unrelated candidates.
+///   - `INTERNAL_ERROR`      (500/502) — transient Rust/infra failure. NOT
+///     fallback-eligible and MUST NOT silently fall through to the legacy
+///     Node provider byte path.
+///
+/// The `PROVIDER_EXHAUSTED` code is produced BEFORE any 206 is committed, so
+/// the client receives a clean 5xx rather than a truncated 206. See
+/// docs/hy4/S1-CONTROL-CONTRACT.md (byte error contract). TEST-ONLY fault
+/// gates never set this in production.
+pub fn data_plane_error(
+    status: StatusCode,
+    code: &str,
+    tf_id: &str,
+    retry_after: Option<Duration>,
+) -> Response<Body> {
+    let mut b = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(d) = retry_after {
+        b = b.header(header::RETRY_AFTER, d.as_secs().to_string());
+    }
+    let body = serde_json::json!({ "error": { "code": code, "torrent_file_id": tf_id } }).to_string();
+    b.body(Body::from(body)).unwrap()
+}
+
 pub fn delivery_error(e: manager::DeliveryError, m: &Metrics) -> Response<Body> {
     match e {
         manager::DeliveryError::AllSameTfFailed { last, retry_after } => {
@@ -173,6 +209,22 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     // parsing, so T0 is not quietly redefined to mean "after we did some work".
     let t0 = Instant::now();
     let size = state.authoritative_size;
+    // P5 TEST-ONLY fault gate: force provider-exhaustion for specific tfIds so
+    // the persisted-candidate fallback path can be exercised in a bounded,
+    // reversible way (set HY4_FORCE_EXHAUST_TFID=tf_xxx on the container, unset
+    // to disable). Never set in production. Returns the classified 502 BEFORE
+    // any 206 is committed, exactly as a real AllSameTfFailed would.
+    if let Ok(list) = std::env::var("HY4_FORCE_EXHAUST_TFID") {
+        let forced: Vec<&str> = list.split(',').map(|s| s.trim()).collect();
+        if forced.iter().any(|t| *t == state.tf_id) {
+            return data_plane_error(
+                StatusCode::BAD_GATEWAY,
+                "PROVIDER_EXHAUSTED",
+                &state.tf_id,
+                None,
+            );
+        }
+    }
     let range_hdr = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
 
     let (start, end) = match parse_range(range_hdr, size) {
@@ -272,6 +324,38 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             .unwrap_or(false),
     };
 
+    // ---- P5: classify provider-exhaustion BEFORE committing the 206 --------
+    // The byte stream is opened lazily inside the spawned task below. If every
+    // Node-supplied provider for this TorrentFile is exhausted, `acquire_for_read`
+    // returns `AllSameTfFailed` BEFORE any byte is produced. By acquiring here
+    // (and short-circuiting to a typed 502) we turn "this TorrentFile cannot be
+    // delivered" into a clean, classified 5xx instead of a truncated 206.
+    //
+    // The acquired capability is handed to the first provider-requiring span so
+    // the actual byte stream reuses it (no double acquire / limiter loss). Pure
+    // cache hits (no Fetch run) skip acquire entirely and stream locally.
+    let needs_provider = is_single
+        || plan.is_none()
+        || plan
+            .as_ref()
+            .map_or(true, |p| p.runs().iter().any(|r| matches!(r.kind, RunKind::Fetch)));
+    let first_reserved: Option<manager::ReservedCapability> = if needs_provider {
+        match state.manager.acquire_for_read(priority).await {
+            Ok(r) => Some(r),
+            Err(manager::DeliveryError::AllSameTfFailed { retry_after, .. }) => {
+                return data_plane_error(
+                    StatusCode::BAD_GATEWAY,
+                    "PROVIDER_EXHAUSTED",
+                    &state.tf_id,
+                    retry_after,
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let mut first_reserved = first_reserved;
+
     let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
     let metrics = state.metrics.clone();
     let cache_clone = state.cache.clone();
@@ -305,6 +389,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                 size,
                 true,
                 faults,
+                first_reserved.take(),
                 None,
                 Some(stage.clone()),
             )
@@ -339,15 +424,16 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     priority,
                     start,
                     upstream_end,
-                    size,
-                    false,
-                    faults,
-                    None,
-                    Some(stage.clone()),
-                )
-                .await;
-                if !ok {
-                    return;
+                size,
+                false,
+                faults,
+                first_reserved.take(),
+                None,
+                Some(stage.clone()),
+            )
+            .await;
+            if !ok {
+                return;
                 }
                 metrics.record_stage_report(StageReport {
                     instants: stage.snapshot(),
@@ -391,6 +477,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         };
 
         let mut first_byte = true;
+        let mut first_consumed = false;
         for run in &runs {
             match run.kind {
                 RunKind::Local => {
@@ -419,6 +506,15 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     if indices.is_empty() {
                         continue;
                     }
+                    // Reuse the pre-acquired capability for the FIRST fetch span so
+                    // the byte stream begins from the already-opened reader (no
+                    // double acquire / limiter loss). Later spans acquire normally.
+                    let fr = if !first_consumed {
+                        first_consumed = true;
+                        first_reserved.take()
+                    } else {
+                        None
+                    };
 
                     // ---- Per-chunk single-flight ----
                     //
@@ -525,6 +621,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                 w_start,
                                 w_end,
                                 faults,
+                                fr,
                                 Some(stx),
                                 Some(stage.clone()),
                                 cold,
@@ -729,6 +826,10 @@ pub async fn fill_chunk_run(
     sink: Option<mpsc::Sender<SpanMsg>>,
     stage: Option<StageClock>,
     cold: bool,
+    // P5: capability pre-acquired in `get_file` for the FIRST fetch span. When
+    // `Some`, the byte stream reuses it instead of re-acquiring (no double
+    // acquire / maxInFlight=1 limiter loss). Later spans get `None`.
+    existing_cap: Option<manager::ReservedCapability>,
 ) {
     let key = tf.cache_key();
 
@@ -822,16 +923,23 @@ pub async fn fill_chunk_run(
     if let Some(s) = stage.as_ref() {
         s.set_t1(acquire_start);
     }
-    let reserved = match manager.acquire_for_read(priority).await {
-        Ok(r) => r,
-        Err(_) => {
-            stager.abort();
-            mark(false, &[]);
-            if let Some(tx) = sink.as_ref() {
-                let _ = tx.send(SpanMsg::Failed).await;
+    // P5: reuse the capability pre-acquired in `get_file` for the FIRST fetch
+    // span (`existing_cap`). This hands the already-opened reader to the byte
+    // stream (no double acquire / maxInFlight=1 limiter loss). Later spans get
+    // `existing_cap == None` and acquire normally.
+    let reserved = match existing_cap {
+        Some(cap) => cap,
+        None => match manager.acquire_for_read(priority).await {
+            Ok(r) => r,
+            Err(_) => {
+                stager.abort();
+                mark(false, &[]);
+                if let Some(tx) = sink.as_ref() {
+                    let _ = tx.send(SpanMsg::Failed).await;
+                }
+                return;
             }
-            return;
-        }
+        },
     };
     let acquire_ms = acquire_start.elapsed();
     // ---- Slice 4.5 T2: a DeliveryCapability is ready. ----
@@ -961,6 +1069,9 @@ pub async fn serve_upstream_only(
     size: u64,
     is_single: bool,
     faults: Faults,
+    // P5: capability pre-acquired in `get_file` for the single / no-cache paths.
+    // When `Some`, reuse it; otherwise acquire normally.
+    existing_cap: Option<manager::ReservedCapability>,
     on_chunk: Option<Arc<dyn Fn(u64, &[u8]) + Send + Sync>>,
     stage: Option<StageClock>,
 ) -> bool {
@@ -970,9 +1081,14 @@ pub async fn serve_upstream_only(
     if let Some(s) = stage.as_ref() {
         s.set_t1(acquire_start);
     }
-    let reserved = match manager.acquire_for_read(priority).await {
-        Ok(r) => r,
-        Err(_) => return false,
+    // P5: reuse the pre-acquired capability for the single / no-cache paths when
+    // present, else acquire normally.
+    let reserved = match existing_cap {
+        Some(cap) => cap,
+        None => match manager.acquire_for_read(priority).await {
+            Ok(r) => r,
+            Err(_) => return false,
+        },
     };
     let acquire_ms = acquire_start.elapsed();
     // Slice 4.5 T2 — capability ready.
