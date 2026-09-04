@@ -471,6 +471,22 @@ export function createMovieWebDav({
   }
 
   async function openValidatedProviderRead(state, rangeHeader, validate) {
+    // P6 authority guard — regression-proof boundary for the legacy Node byte path.
+    // This function is ONLY reachable for durable VFS entries WITHOUT a TorrentFile
+    // (state.entry.torrentFileId === null). For any torrentFileId-present entry, byte
+    // authority is Rust-only (enforced in streamFile via streamFromDataPlane). Invoking
+    // this path for a tfId-present entry would silently re-grant Node provider
+    // byte-delivery authority, which P6 forbids — so we fail loud rather than mask it
+    // as a 200/206. This is the durable replacement for the deleted authority: the
+    // modern entry point (streamFile) already routes tfId-present to Rust, and this
+    // guard makes that invariant impossible to violate by accident.
+    if (state?.entry?.torrentFileId) {
+      throw new VfsError(
+        'Legacy Node byte path invoked for a durable (torrentFileId-present) entry; byte authority is Rust-only',
+        500,
+        'LEGACY_PATH_AUTHORITY_VIOLATION',
+      );
+    }
     let firstFailure = null;
     let sawReadRateLimit = false;
     let firstFailureDefinitive = false;
@@ -1067,6 +1083,11 @@ export function createMovieWebDav({
       }
     }
 
+    // ---- LEGACY COMPAT PATH (torrentFileId === null ONLY) ----
+    // Reached solely for entries without a durable TorrentFile. The guard at the
+    // top of openValidatedProviderRead rejects any tfId-present entry, so Node
+    // provider byte-delivery authority is strictly limited to legacy entries and
+    // can never be regained for modern durable VFS entries.
     const opened = await (async () => {
       try {
         return await openValidatedProviderRead(
