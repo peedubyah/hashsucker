@@ -468,18 +468,34 @@ CREATE INDEX IF NOT EXISTS idx_dmm_obs_fragment
 -- Two tables:
 --
 --   historical_provider_evidence_sightings
---     one row per (provider, source_id, source_version, info_hash,
---                  file_index_key, evidence_type). This is the
---                  idempotency boundary. New row = "this snapshot
---                  of this source reports this sighting".
+--     one row per (provider, source_id, source_event_id, info_hash,
+--                  file_index_key, evidence_type). source_event_id
+--                  is the stable, source-derived event identity:
+--                  e.g. RD torrent id, or a SHA256 of the immutable
+--                  source fields. It is NOT an acquisition timestamp.
+--                  A second acquisition of unchanged source content
+--                  re-uses the same source_event_id and is a no-op
+--                  (insert OR ignore). A genuinely new source event
+--                  (e.g. a new RD torrent) gets a fresh source_event_id
+--                  and creates a new row.
 --
 --   historical_provider_evidence
 --     one row per (provider, source_id, info_hash, file_index_key,
---                  evidence_type). Source version is NOT in the key.
+--                  evidence_type). source_event_id is NOT in the key.
 --     Maintained deterministically from the sightings table.
---     distinct_snapshot_count = COUNT(*) of sightings for the same
---     (provider, source_id) identity; first_seen_at / last_seen_at
---     aggregate across snapshots.
+--     distinct_snapshot_count = COUNT(DISTINCT source_version) of
+--     sightings for the same (provider, source_id) identity;
+--     first_seen_at / last_seen_at aggregate across sightings.
+--     source_version is a snapshot provenance field — distinct
+--     versions of the same source are NOT independent corroboration,
+--     they are repeated acquisitions of the same witness.
+--
+-- For non-event-derived sources (no source_event_id supplied by the
+-- caller), the importer synthesizes a deterministic
+-- "legacy:<source_version>:<info_hash>:<file_index_key>" event id so
+-- the PK uniqueness invariant is preserved without changing the
+-- generic source/version semantics. Legacy rows from before this
+-- migration are backfilled in migrateHistoricalProviderEvidenceEventId.
 --
 -- file_index_key=-1 is the canonical release-level coordinate
 -- (matching the convention used throughout dmm_source_observations,
@@ -494,16 +510,19 @@ CREATE TABLE IF NOT EXISTS historical_provider_evidence_sightings (
   evidence_type TEXT NOT NULL,
   source_id TEXT NOT NULL,
   source_version TEXT NOT NULL,
+  source_event_id TEXT NOT NULL DEFAULT '',
   first_seen_at INTEGER NOT NULL,
   last_seen_at INTEGER NOT NULL,
   observation_count INTEGER NOT NULL DEFAULT 1,
-  PRIMARY KEY (info_hash, file_index_key, provider, evidence_type, source_id, source_version)
+  PRIMARY KEY (info_hash, file_index_key, provider, evidence_type, source_id, source_event_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_hpe_sightings_candidate
   ON historical_provider_evidence_sightings(info_hash, file_index_key);
 CREATE INDEX IF NOT EXISTS idx_hpe_sightings_source
   ON historical_provider_evidence_sightings(provider, source_id, source_version);
+CREATE INDEX IF NOT EXISTS idx_hpe_sightings_event
+  ON historical_provider_evidence_sightings(provider, source_id, source_event_id);
 
 CREATE TABLE IF NOT EXISTS historical_provider_evidence (
   info_hash TEXT NOT NULL,
@@ -697,23 +716,35 @@ SELECT COUNT(*) AS n FROM dmm_source_observations WHERE generation_id = ?;
 //     is observable.
 // ============================================================================
 
-// 1. Per-snapshot witness (idempotency boundary).
-//    ON CONFLICT DO NOTHING: replay of the same (source_id, source_version)
-//    is a no-op. first_seen_at / last_seen_at / observation_count are
-//    recorded ONLY on the first ingest of that exact snapshot.
+// 1. Per-event witness (idempotency boundary).
+//    ON CONFLICT DO NOTHING: replay of the same (source_id, source_event_id)
+//    is a no-op. The unique key is now driven by source_event_id (the
+//    stable, source-derived event identity) instead of source_version
+//    (an acquisition provenance field). A second acquisition of the
+//    same underlying source event re-uses the same source_event_id and
+//    does not create a new row, does not bump counters. A genuinely
+//    new source event (different source_event_id) creates a new row.
+//    first_seen_at / last_seen_at / observation_count are recorded
+//    ONLY on the first ingest of that exact source event.
 const INSERT_HISTORICAL_PROVIDER_SIGHTING = `
 INSERT OR IGNORE INTO historical_provider_evidence_sightings
   (info_hash, file_index_key, provider, evidence_type,
-   source_id, source_version, first_seen_at, last_seen_at, observation_count)
+   source_id, source_version, source_event_id,
+   first_seen_at, last_seen_at, observation_count)
 VALUES
   (@info_hash, @file_index_key, @provider, @evidence_type,
-   @source_id, @source_version, @first_seen_at, @last_seen_at, @observation_count);
+   @source_id, @source_version, @source_event_id,
+   @first_seen_at, @last_seen_at, @observation_count);
 `;
 
-// 2. Aggregate recompute. Source version is NOT in the key. The aggregate
+// 2. Aggregate recompute. Source event id is NOT in the key. The aggregate
 //    is recomputed from the sightings table so that:
 //      - replay produces the same aggregate (idempotent)
 //      - snapshot evolution is observable via distinct_snapshot_count
+//        (count of distinct source_version values across sightings
+//         for this source_id, NOT count of sighting rows — so repeated
+//         acquisitions of unchanged source content do not strengthen
+//         historical evidence beyond a single new version)
 //      - first_seen_at = MIN(first_seen_at) across all sightings
 //      - last_seen_at  = MAX(last_seen_at)  across all sightings
 //      - account_scope = the first non-null scope across sightings
@@ -723,7 +754,8 @@ INSERT INTO historical_provider_evidence
    source_id, first_seen_at, last_seen_at, distinct_snapshot_count)
 SELECT
   s.info_hash, s.file_index_key, s.provider, @account_scope, s.evidence_type,
-  s.source_id, MIN(s.first_seen_at), MAX(s.last_seen_at), COUNT(*)
+  s.source_id, MIN(s.first_seen_at), MAX(s.last_seen_at),
+  COUNT(DISTINCT s.source_version)
 FROM historical_provider_evidence_sightings s
 WHERE s.provider          = @provider
   AND s.source_id         = @source_id
@@ -1332,6 +1364,165 @@ function migrateCacheProbeQueue(db) {
   ).run(CACHE_PROBE_QUEUE_SCHEMA, Date.now());
 }
 
+// =============================================================================
+// Historical provider evidence: introduce per-event identity.
+//
+// The sightings PK used to be (info_hash, file_index_key, provider,
+// evidence_type, source_id, source_version). This meant a second
+// acquisition of the same cumulative source (e.g. an RD history
+// re-read with a new acquisition timestamp) would treat the
+// source_version change as a brand-new batch of sightings, which is
+// wrong: repeated acquisition frequency must NOT strengthen
+// historical evidence.
+//
+// This migration:
+//   1. Adds a source_event_id column (TEXT NOT NULL DEFAULT '').
+//      For rows that pre-date the per-event identity, the column is
+//      backfilled with a deterministic legacy value derived from
+//      source_version|info_hash|file_index_key, which preserves the
+//      original snapshot-membership uniqueness for non-event-derived
+//      sources (e.g. DMM-corpus witnesses).
+//   2. Recreates the table with the new PRIMARY KEY
+//      (info_hash, file_index_key, provider, evidence_type, source_id,
+//       source_event_id) and copies rows in. Collisions on the new PK
+//      are not possible: the legacy value already incorporates all
+//      fields that made the old PK unique, so each row maps to a
+//      distinct (provider, source_id, source_event_id) tuple.
+//   3. Recreates the dependent indexes.
+//   4. Recomputes the aggregate distinct_snapshot_count using
+//      COUNT(DISTINCT source_version) — see the new UPSERT in SCHEMA.
+//
+// Fresh installs: SCHEMA's CREATE TABLE includes the new column
+// and PK, so this migration is a no-op for them.
+// =============================================================================
+const HISTORICAL_PROVIDER_EVENT_ID_MIGRATION = 'historical-provider-event-id-v1';
+
+function migrateHistoricalProviderEvidenceEventId(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(HISTORICAL_PROVIDER_EVENT_ID_MIGRATION);
+  if (applied) return;
+
+  const tableExists = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='historical_provider_evidence_sightings'"
+  ).get();
+  if (!tableExists) return; // fresh install — SCHEMA creates the new shape
+
+  const cols = db.prepare('PRAGMA table_info(historical_provider_evidence_sightings)').all();
+  const hasEventId = cols.some((c) => c.name === 'source_event_id');
+  if (!hasEventId) {
+    // Add the column with a non-empty default so existing rows get a
+    // stable legacy event id. We backfill below.
+    db.exec(`ALTER TABLE historical_provider_evidence_sightings
+             ADD COLUMN source_event_id TEXT NOT NULL DEFAULT ''`);
+  }
+
+  // Backfill any row that has the empty default. Use the deterministic
+  // legacy value `legacy:<source_version>:<info_hash>:<file_index_key>`.
+  // This preserves the old PK's uniqueness for non-event-derived
+  // sources: V1 hashA fileIndex=0 → distinct id; V2 hashA fileIndex=0
+  // → distinct id (the V1/V2 versions were the original snapshot
+  // discriminator and remain so via this synthesized id).
+  db.exec(`
+    UPDATE historical_provider_evidence_sightings
+       SET source_event_id = 'legacy:' || source_version
+                              || ':' || info_hash
+                              || ':' || file_index_key
+     WHERE source_event_id = ''
+  `);
+
+  // Detect the PK shape. If the PK is already keyed on source_event_id,
+  // we are done — only the backfill + aggregate UPSERT are needed.
+  // Otherwise, rebuild the table.
+  const pkInfo = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='historical_provider_evidence_sightings'"
+  ).get();
+  const pkSql = pkInfo ? String(pkInfo.sql) : '';
+  const needsRebuild = !/PRIMARY KEY\s*\([^)]*source_event_id/i.test(pkSql);
+
+  if (needsRebuild) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      // Move the existing data aside, then rebuild under the new shape.
+      // We use a unique temp name to avoid clashing with future migrations.
+      db.exec(`
+        ALTER TABLE historical_provider_evidence_sightings
+          RENAME TO historical_provider_evidence_sightings__legacy_pre_event;
+      `);
+      // Recreate the table with the new PK (matches SCHEMA's
+      // CREATE TABLE IF NOT EXISTS so a re-run after a fresh SCHEMA
+      // also lines up byte-for-byte).
+      db.exec(`
+        CREATE TABLE historical_provider_evidence_sightings (
+          info_hash TEXT NOT NULL,
+          file_index_key INTEGER NOT NULL DEFAULT -1,
+          provider TEXT NOT NULL,
+          evidence_type TEXT NOT NULL,
+          source_id TEXT NOT NULL,
+          source_version TEXT NOT NULL,
+          source_event_id TEXT NOT NULL DEFAULT '',
+          first_seen_at INTEGER NOT NULL,
+          last_seen_at INTEGER NOT NULL,
+          observation_count INTEGER NOT NULL DEFAULT 1,
+          PRIMARY KEY (info_hash, file_index_key, provider, evidence_type, source_id, source_event_id)
+        );
+      `);
+      db.exec(`
+        INSERT INTO historical_provider_evidence_sightings
+          (info_hash, file_index_key, provider, evidence_type, source_id,
+           source_version, source_event_id, first_seen_at, last_seen_at,
+           observation_count)
+        SELECT info_hash, file_index_key, provider, evidence_type, source_id,
+               source_version, source_event_id, first_seen_at, last_seen_at,
+               observation_count
+        FROM historical_provider_evidence_sightings__legacy_pre_event;
+      `);
+      db.exec('DROP TABLE historical_provider_evidence_sightings__legacy_pre_event;');
+      // Recreate indexes (the SCHEMA does this too, but we are not
+      // re-running SCHEMA here; fresh installs rely on SCHEMA's
+      // CREATE INDEX IF NOT EXISTS).
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_hpe_sightings_candidate
+          ON historical_provider_evidence_sightings(info_hash, file_index_key);
+        CREATE INDEX IF NOT EXISTS idx_hpe_sightings_source
+          ON historical_provider_evidence_sightings(provider, source_id, source_version);
+        CREATE INDEX IF NOT EXISTS idx_hpe_sightings_event
+          ON historical_provider_evidence_sightings(provider, source_id, source_event_id);
+      `);
+      db.exec('COMMIT');
+    } catch (err) {
+      try { db.exec('ROLLBACK'); } catch {}
+      throw err;
+    }
+  }
+
+  // Recompute the aggregate from the rebuilt sightings so that
+  // distinct_snapshot_count = COUNT(DISTINCT source_version) lines
+  // up with the new UPSERT semantics. We do this by re-running the
+  // aggregate UPSERT for every distinct (provider, source_id,
+  // evidence_type, info_hash, file_index_key) tuple.
+  db.exec(`
+    INSERT INTO historical_provider_evidence
+      (info_hash, file_index_key, provider, account_scope, evidence_type,
+       source_id, first_seen_at, last_seen_at, distinct_snapshot_count)
+    SELECT
+      s.info_hash, s.file_index_key, s.provider, NULL, s.evidence_type,
+      s.source_id, MIN(s.first_seen_at), MAX(s.last_seen_at),
+      COUNT(DISTINCT s.source_version)
+    FROM historical_provider_evidence_sightings s
+    GROUP BY s.info_hash, s.file_index_key, s.provider, s.evidence_type, s.source_id
+    ON CONFLICT(info_hash, file_index_key, provider, evidence_type, source_id)
+    DO UPDATE SET
+      first_seen_at           = MIN(historical_provider_evidence.first_seen_at, excluded.first_seen_at),
+      last_seen_at            = MAX(historical_provider_evidence.last_seen_at, excluded.last_seen_at),
+      distinct_snapshot_count = excluded.distinct_snapshot_count;
+  `);
+
+  db.prepare(
+    'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+  ).run(HISTORICAL_PROVIDER_EVENT_ID_MIGRATION, Date.now());
+}
+
 export function createDiscoveryCache({ dbPath = ':memory:', database = null } = {}) {
   const db = database || new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
@@ -1370,6 +1561,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     + 'ON playback_handoffs(torrent_file_id)'
   );
   migrateCacheProbeQueue(db);
+  migrateHistoricalProviderEvidenceEventId(db);
 
   const insertCandidateStmt = db.prepare(INSERT_CANDIDATE);
   const getCandidateStmt = db.prepare(GET_CANDIDATE);
@@ -1913,6 +2105,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
     const errors = [];
     let ingested = 0;
+    let inserted = 0;
     let skipped = 0;
 
     // Bounded transaction: process in one atomic unit.
@@ -1954,6 +2147,19 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
           ? obs.observationCount
           : 1;
 
+        // sourceEventId is the stable, source-derived event identity.
+        // When the caller (e.g. RD acquirer) supplies one, it is used
+        // verbatim as the PK member. When absent, we synthesize a
+        // deterministic legacy id from sourceVersion+infoHash+fileIndex
+        // so existing per-snapshot uniqueness behavior is preserved
+        // for non-event-derived sources.
+        let eventId = typeof obs.sourceEventId === 'string'
+          ? obs.sourceEventId.trim()
+          : '';
+        if (eventId.length === 0) {
+          eventId = `legacy:${sourceVersion}:${infoHash}:${fik}`;
+        }
+
         const insertParams = {
           info_hash: infoHash,
           file_index_key: fik,
@@ -1961,6 +2167,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
           evidence_type: evidenceType,
           source_id: sourceId,
           source_version: sourceVersion,
+          source_event_id: eventId,
           first_seen_at: firstSeenAt,
           last_seen_at: lastSeenAt,
           observation_count: delta,
@@ -1968,13 +2175,17 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
         try {
           // INSERT OR IGNORE: the entire idempotency contract.
-          // - Replay of the same (source_id, source_version) is a no-op
-          //   (changes() == 0, no aggregate recompute needed for THIS row).
+          // - Replay of the same source_event_id (same source, same event)
+          //   is a no-op (changes() == 0, no aggregate recompute needed
+          //   for THIS row). A second acquisition of unchanged RD history
+          //   re-uses the same source_event_id and does not strengthen
+          //   historical evidence.
           // - New sighting row → changes() == 1, we mark the candidate
           //   for aggregate recompute below.
           const r = insertHistoricalProviderSightingStmt.run(insertParams);
           ingested++;
           if (r.changes > 0) {
+            inserted++;
             affectedCandidates.add(`${infoHash}\x00${fik}`);
           }
         } catch (err) {
@@ -2019,6 +2230,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
     return {
       ingested,
+      inserted,
       skipped,
       errors,
       snapshots: countHistoricalProviderSightingsStmt.get()?.n ?? 0,

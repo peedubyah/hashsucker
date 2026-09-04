@@ -319,15 +319,24 @@ function csvColumnIndex(header, aliases) {
 // ---------------------------------------------------------------------------
 // Streaming parser
 //
-// Yields normalized rows: { infoHash, fileIndex, observedAt }.
+// Yields normalized rows: { infoHash, fileIndex, observedAt, sourceEventId }.
 // Tracks parse stats: { valid, invalid, duplicate }.
 //
 // Duplicate handling: a "duplicate" is a normalized row that we have
 // already yielded during this parse session for the same source/version.
 // The downstream ingestHistoricalProviderEvidence is also idempotent
-// (sightings PK enforces one-row-per-snapshot), so the parse-level
+// (sightings PK enforces one-row-per-source-event), so the parse-level
 // dedup is purely a stats signal. We keep the dedup set bounded to
 // the current batch to keep memory bounded.
+//
+// sourceEventId is a stable, source-derived event identity. When a row
+// provides it (e.g. RD acquirer output), the sightings table dedups on
+// (provider, source_id, source_event_id) so re-acquisitions of the
+// same source event do not strengthen historical evidence. When the
+// caller omits sourceEventId, the importer synthesizes a deterministic
+// `legacy:<source_version>:<infoHash>:<fileIndex>` id (see
+// ingestHistoricalProviderEvidence), preserving the original
+// snapshot-membership uniqueness for non-event-derived sources.
 // ---------------------------------------------------------------------------
 
 async function* streamParse({ inputPath, format, startLine, now, onStats }) {
@@ -344,6 +353,7 @@ async function* streamParse({ inputPath, format, startLine, now, onStats }) {
   let hashIdx = -1;
   let fileIdx = -1;
   let observedIdx = -1;
+  let eventIdIdx = -1;
   // Reserved for future expansion (e.g. JSONL preamble); currently
   // unused. The auto-detect path handles the "first line may be a
   // header or a data row" branching inline.
@@ -355,6 +365,9 @@ async function* streamParse({ inputPath, format, startLine, now, onStats }) {
       hashIdx = csvColumnIndex(header, ['info_hash', 'infohash', 'hash']);
       fileIdx = csvColumnIndex(header, ['file_index', 'fileindex', 'file_index_key']);
       observedIdx = csvColumnIndex(header, ['observed_at', 'observedat', 'last_seen_at', 'lastseenat']);
+      eventIdIdx = csvColumnIndex(header, [
+        'source_event_id', 'sourceeventid', 'event_id', 'eventid', 'rd_id', 'rdid',
+      ]);
       if (hashIdx < 0) {
         throw new Error(`csv header missing info_hash/infohash/hash column: ${headerLine}`);
       }
@@ -365,6 +378,7 @@ async function* streamParse({ inputPath, format, startLine, now, onStats }) {
     let infoHash = null;
     let fileIndex = null;
     let observedAt = null;
+    let sourceEventId = null;
 
     if (format === 'csv') {
       const cols = line.split(',');
@@ -372,6 +386,10 @@ async function* streamParse({ inputPath, format, startLine, now, onStats }) {
       if (infoHash) {
         if (fileIdx >= 0) fileIndex = parseFileIndex(cols[fileIdx]);
         if (observedIdx >= 0) observedAt = parseObservedAt(cols[observedIdx], now);
+        if (eventIdIdx >= 0 && cols[eventIdIdx] != null) {
+          const e = String(cols[eventIdIdx]).trim();
+          if (e.length > 0) sourceEventId = e;
+        }
       }
     } else if (format === 'rd-history') {
       if (trimmed.startsWith('{')) {
@@ -384,6 +402,9 @@ async function* streamParse({ inputPath, format, startLine, now, onStats }) {
             if (obj.observed_at != null) observedAt = parseObservedAt(String(obj.observed_at), now);
             else if (obj.observedAt != null) observedAt = parseObservedAt(String(obj.observedAt), now);
             else if (obj.last_seen_at != null) observedAt = parseObservedAt(String(obj.last_seen_at), now);
+            if (obj.source_event_id != null) sourceEventId = String(obj.source_event_id).trim() || null;
+            else if (obj.sourceEventId != null) sourceEventId = String(obj.sourceEventId).trim() || null;
+            else if (obj.event_id != null) sourceEventId = String(obj.event_id).trim() || null;
           }
         } catch {
           // fall through to ndhashes parse
@@ -395,6 +416,12 @@ async function* streamParse({ inputPath, format, startLine, now, onStats }) {
         if (infoHash && parts.length > 1) {
           fileIndex = parseFileIndex(parts[1]);
           if (parts.length > 2) observedAt = parseObservedAt(parts[2], now);
+          // 4th positional field is a non-standard event id (only emitted
+          // by RD-acquirer-style snapshots). Kept narrow on purpose.
+          if (parts.length > 3) {
+            const e = String(parts[3]).trim();
+            if (e.length > 0) sourceEventId = e;
+          }
         }
       }
     } else {
@@ -420,11 +447,11 @@ async function* streamParse({ inputPath, format, startLine, now, onStats }) {
       // and excluding it from the batch keeps the per-batch count of
       // new sightings accurate.
       onStats({ duplicate: 1, valid: 1 });
-      return { infoHash, fileIndex, observedAt, duplicate: true, skip: true };
+      return { infoHash, fileIndex, observedAt, sourceEventId, duplicate: true, skip: true };
     }
     seen.add(key);
     onStats({ valid: 1 });
-    return { infoHash, fileIndex, observedAt, duplicate: false };
+    return { infoHash, fileIndex, observedAt, sourceEventId, duplicate: false };
   }
 
   try {
@@ -856,6 +883,12 @@ export async function runFromOptions(args) {
       firstSeenAt: r.observedAt,
       lastSeenAt: r.observedAt,
       observationCount: 1,
+      // Forward the per-event identity when the source provides it
+      // (e.g. RD acquirer output). When absent, the cache API
+      // synthesizes a deterministic legacy id from
+      // (sourceVersion, infoHash, fileIndex), preserving the original
+      // snapshot-membership uniqueness for non-event-derived sources.
+      ...(r.sourceEventId ? { sourceEventId: r.sourceEventId } : {}),
     }));
     const r = cache.ingestHistoricalProviderEvidence({
       provider,
@@ -866,12 +899,10 @@ export async function runFromOptions(args) {
       evidenceType: 'historical_hit',
     });
     stats.batches += 1;
-    // r.ingested = rows attempted by the API; r.skipped = rows the API
-    // rejected (e.g. invalid hash). We do NOT pre-filter invalid hashes
-    // here, so skipped should be 0 in practice. The split between new
-    // and existing sightings is approximated as best-effort; exact
-    // values are available via a follow-up query if needed.
-    const newFromApi = Math.max(0, r.ingested - r.skipped);
+    // r.inserted = rows that were actually INSERTed (where the PK was not
+    // already present). This is the canonical new-sightings count.
+    // r.skipped = rows the API rejected (e.g. invalid hash).
+    const newFromApi = Math.max(0, r.inserted ?? (r.ingested - r.skipped));
     stats.rowsNewSightings += newFromApi;
     stats.rowsExistingSightings += (batch.length - newFromApi);
     batch = [];
