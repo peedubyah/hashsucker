@@ -1052,6 +1052,62 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     `).all(torrentFileId).map(rowToProviderFile);
   }
 
+  // ─── S-1: durable north truth projection for the Rust data plane ──────
+  //
+  // Projects the provider coordinates the south needs to acquire bytes for
+  // exactly one TorrentFile. This is a PROJECTION of durable north truth,
+  // not discovery and not ranking: the mapping
+  // (provider_files.torrent_file_id) already exists and was decided by
+  // north. Nothing here is invented for the data plane's convenience.
+  //
+  // Filters mirror the host's own canonical resolution so S-1 cannot
+  // disagree with the rest of north:
+  //   provider_files.present = 1              (resolveDeliveryCoordinates)
+  //   provider_files.mapping_state = 'mapped' (resolveDeliveryCoordinates)
+  //   provider_placements.state != 'removed'  (findPlacementByInfoHash)
+  //
+  // Deliberately provider-agnostic. resolveDeliveryCoordinates hardcodes
+  // 'torbox', but the durable mapping is NOT TorBox-specific and the Rust
+  // plane is provider-agnostic (it can also serve Real-Debrid). Narrowing
+  // S-1 to TorBox would bake a delivery policy into the identity contract.
+  // ORDER BY is for deterministic output only -- it is not ranking. Provider
+  // ORDERING/selection policy is north's job and is a later seam; this
+  // endpoint currently hands back every mapped coordinate.
+  //
+  // PATH NAMESPACE WARNING -- do not "fix" this.
+  //   provider_files.path        = PROVIDER INTERNAL path (a provider
+  //                                namespace address for one provider's copy)
+  //   torrent_files.internal_path = DURABLE TorrentFile IDENTITY, and is NOT
+  //                                a filesystem path in any namespace
+  // These are two different namespaces that share a field name in the S-1
+  // payload (providers[].canonicalInternalPath vs
+  // torrentFile.canonicalInternalPath). They must never be reconciled,
+  // collapsed, normalized into one another, or reinterpreted as a host,
+  // container, or VFS path. Neither is canonicalized here: internal_path was
+  // already canonicalized at write time by canonicalizeInternalPath(), and
+  // re-canonicalizing on read would mutate durable identity to make the
+  // response prettier.
+  function listDataPlaneCoordinates(torrentFileId) {
+    requireString(torrentFileId, 'torrentFileId');
+    return db.prepare(`
+      SELECT
+        pl.provider             AS provider,
+        pl.account_scope        AS account_scope,
+        pl.provider_resource_id AS provider_resource_id,
+        pl.state                AS placement_state,
+        pf.provider_file_id     AS provider_file_id,
+        pf.path                 AS provider_path,
+        pf.size                 AS size
+      FROM provider_files pf
+      JOIN provider_placements pl ON pl.id = pf.placement_id
+      WHERE pf.torrent_file_id = ?
+        AND pf.present = 1
+        AND pf.mapping_state = 'mapped'
+        AND pl.state != 'removed'
+      ORDER BY pl.provider, pl.account_scope, pf.provider_file_id
+    `).all(torrentFileId);
+  }
+
   function getProviderInventorySnapshot(placementId) {
     const row = db.prepare(
       'SELECT * FROM provider_inventory_snapshots WHERE placement_id = ?',
@@ -1800,6 +1856,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     findTorrentFile,
     listTorrentFilesForRelease,
     listProviderRefsForTorrentFile,
+    listDataPlaneCoordinates,
     recordFileMapping,
     recordExposure,
     recordZurgMetadataObservation,

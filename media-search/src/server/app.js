@@ -94,6 +94,18 @@ const CONTENT_TYPES = new Map([
   ['.webp', 'image/webp'],
 ]);
 
+// S-1 wire schema version for the Rust data-plane control contract.
+//
+// Must stay equal to SUPPORTED_SCHEMA_VERSION in the Rust plane. The Rust
+// side refuses to start on a mismatch rather than guessing at the payload
+// shape, so bumping this without bumping Rust is a deliberate, loud
+// breakage -- not a silent drift.
+//
+// NOTE: the Rust client builds `{controlUrl}/data-plane/files/{id}`, so
+// CONTROL_URL must be the /api prefix, e.g.
+//   CONTROL_URL=http://media-search:3000/api
+const DATA_PLANE_SCHEMA_VERSION = 1;
+
 function sendJson(response, status, body) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   response.end(JSON.stringify(body));
@@ -2185,6 +2197,84 @@ export function createRequestHandler(dependencies = {}) {
           stage6,
           shadowPlan,
         }));
+      }
+      // ─── S-1: data-plane control contract (Rust south) ────────────────
+      //
+      // GET /api/data-plane/files/:tfId
+      //
+      // The durable-north-truth projection the Rust data plane fetches.
+      // Rust owns MOTION, not TRUTH: it never opens host SQLite, never
+      // discovers or ranks providers, and never substitutes a TorrentFile.
+      // It reads this payload and selects the coordinate whose size matches
+      // the authoritative TorrentFile size (ControlResponse::target_file_id).
+      //
+      // Wire contract -- see hy4-data-plane/src/control.rs:
+      //   { schemaVersion,
+      //     torrentFile { id, infoHash, canonicalInternalPath, size },
+      //     providers[] { provider, accountScope, providerResourceId,
+      //                   providerFileId, state, canonicalInternalPath,
+      //                   size } }
+      //
+      // schemaVersion is stamped on EVERY response, including errors. Rust
+      // rejects a missing or unsupported version before it looks at any
+      // other field, so an unstamped error body is unreadable to it.
+      //
+      // 404 means exactly one thing to the client: "torrent file unknown to
+      // Node". A KNOWN TorrentFile with no usable coordinates therefore
+      // returns 200 with an empty providers[] -- Rust then reports
+      // "zero provider coordinates", which is accurate. Returning 404 for
+      // that case would make the client lie to the operator.
+      //
+      // Unauthenticated, matching the rest of /api/control-plane/*: these
+      // routes sit on the internal network and the Rust client sends no
+      // credentials. Adding auth here would break the client that this
+      // endpoint exists to serve.
+      const dataPlaneFileMatch = request.method === 'GET'
+        && url.pathname.match(/^\/api\/data-plane\/files\/([^/]+)$/);
+      if (dataPlaneFileMatch) {
+        requireControlPlaneStore(controlPlaneStore);
+        let torrentFileId = dataPlaneFileMatch[1];
+        try {
+          torrentFileId = decodeURIComponent(torrentFileId);
+        } catch {
+          // Malformed percent-encoding: fall through with the raw segment so
+          // the store's own validation rejects it.
+        }
+        const torrentFile = controlPlaneStore.getTorrentFile(torrentFileId);
+        if (!torrentFile) {
+          return sendJson(response, 404, {
+            schemaVersion: DATA_PLANE_SCHEMA_VERSION,
+            error: { code: 'TORRENT_FILE_NOT_FOUND', torrentFileId },
+          });
+        }
+        const dataPlaneCoords = controlPlaneStore
+          .listDataPlaneCoordinates(torrentFileId);
+        // A coordinate with no usable size can never satisfy
+        // target_file_id(), and emitting `size: null` would fail Rust's
+        // ControlResponse parse outright -- killing the entire control fetch
+        // behind a type error instead of an accurate "nothing to acquire".
+        // Drop them here, visibly, rather than silently inside SQL.
+        const sizedCoords = dataPlaneCoords.filter(
+          (coord) => Number.isSafeInteger(coord.size) && coord.size > 0,
+        );
+        return sendJson(response, 200, {
+          schemaVersion: DATA_PLANE_SCHEMA_VERSION,
+          torrentFile: {
+            id: torrentFile.id,
+            infoHash: torrentFile.infoHash,
+            canonicalInternalPath: torrentFile.internalPath,
+            size: torrentFile.size,
+          },
+          providers: sizedCoords.map((coord) => ({
+            provider: coord.provider,
+            accountScope: coord.account_scope,
+            providerResourceId: coord.provider_resource_id,
+            providerFileId: coord.provider_file_id,
+            state: coord.placement_state,
+            canonicalInternalPath: coord.provider_path,
+            size: coord.size,
+          })),
+        });
       }
       if (request.method === 'GET' && url.pathname === '/api/search/stats') {
         return sendJson(response, 200, getSearchStats(searchCache));
