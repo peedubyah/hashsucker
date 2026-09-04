@@ -509,7 +509,9 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     // Reuse the pre-acquired capability for the FIRST fetch span so
                     // the byte stream begins from the already-opened reader (no
                     // double acquire / limiter loss). Later spans acquire normally.
-                    let fr = if !first_consumed {
+                    // `mut` + `take()` so the pre-acquired cap is moved exactly once
+                    // even though the chunk-grouping loop may spawn several spans.
+                    let mut fr = if !first_consumed {
                         first_consumed = true;
                         first_reserved.take()
                     } else {
@@ -621,10 +623,10 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                 w_start,
                                 w_end,
                                 faults,
-                                fr,
                                 Some(stx),
                                 Some(stage.clone()),
                                 cold,
+                                fr.take(),
                             ));
                             items.push(FetchItem::Owned { rx: srx });
                             i = j + 1;
