@@ -60,7 +60,12 @@ struct NegEntry {
 
 pub struct Slot {
     pub coord: ProviderCoord,
+    /// Current host DB row id (`torrent_files.id`). RETAINED for
+    /// logging/forensics. NOT used for the single-flight key.
     pub tf_id: String,
+    /// Deterministic key derived from `(info_hash, canonical_path, size)`.
+    /// Stable across DB reconstruction; this is what `sf_key()` uses.
+    pub durable_key: String,
     pub target_file_id: String,
     pub breaker: Breaker,
     // acquired capabilities for this placement (length <= target).
@@ -70,11 +75,14 @@ pub struct Slot {
 
 impl Slot {
     fn sf_key(&self) -> String {
+        // P3 final identity check, conclusion B: the key is the stable
+        // (info_hash, canonical_path, size) tuple, NOT the mutable
+        // surrogate PK. Slot.tf_id is retained for logging only.
         format!(
             "{}|{}|{}|{}|{}",
             self.coord.provider,
             self.coord.account_scope,
-            self.tf_id,
+            self.durable_key,
             self.coord.provider_resource_id,
             self.coord.provider_file_id
         )
@@ -143,16 +151,22 @@ impl CapabilityManager {
                 .find(|f| f.size == tf.size)
                 .or_else(|| files.first());
             if let Some(t) = target {
+                // P3 final identity check, conclusion B: the slot
+                // carries the stable durable_key derived from
+                // (info_hash, canonical_path, size), NOT the mutable
+                // surrogate PK. The single-flight key and the
+                // negative cache therefore cannot alias sibling files
+                // AND survive a host DB reconstruction.
+                let durable_key = crate::cache::TorrentFileId::compute_durable_key(
+                    &tf.info_hash,
+                    tf.canonical_internal_path.as_deref().unwrap_or(""),
+                    tf.size,
+                );
                 slots.push(Slot {
                     coord: t.clone(),
-                    // Slot-level identity is the durable PK from S-1
-                    // (torrentFile.id). info_hash is NOT used here
-                    // because two sibling files in the same torrent
-                    // legitimately share the same info_hash. The
-                    // single-flight key (sf_key) and the negative cache
-                    // therefore cannot alias sibling files. See
-                    // docs/hy4/CROSS-FILE-KEYING-AUDIT.md (P3 correction).
+                    // Current host PK. Retained for logging/forensics.
                     tf_id: tf.id.clone(),
+                    durable_key,
                     target_file_id: t.provider_file_id.clone(),
                     breaker: Breaker::new(3, Duration::from_secs(30)),
                     caps: Mutex::new(Vec::new()),

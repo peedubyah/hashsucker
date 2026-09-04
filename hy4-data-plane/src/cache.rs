@@ -62,37 +62,100 @@ pub const CACHE_FORMAT_VERSION: u64 = 2;
 pub const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
-// Identity — UNCHANGED from Slice 4
+// Identity — P3 FINAL IDENTITY CHECK (Conclusion B)
+//
+// `torrent_files.id` is a SQLite surrogate PK: a `tf_<randomUUID()>` generated
+// at first insert (media-search/src/lib/control-plane/store.js:923). The same
+// logical TorrentFile can therefore acquire a different surrogate id across
+// any DB reconstruction, import, merge, repair that wipes the row, or
+// different inventory-observation run. There is no `UPDATE torrent_files` and
+// no `DELETE FROM torrent_files` anywhere in the repo, so the existing
+// surrogate is preserved WITHIN ONE DB INSTANCE, but it is NOT durable
+// across host DB lifecycle changes.
+//
+// The schema itself declares the identity grain (store.js:97-110):
+//   "Identity is (info_hash, canonical_internal_path). The size is a
+//    positive integer invariant; once inserted it is never updated."
+//
+// Therefore the cache and the capability single-flight MUST NOT key on
+// `torrent_files.id`. The key MUST be a deterministic representation of the
+// durable tuple: InfoHash + CanonicalInternalPath + Exact positive size.
+//
+// Key format: `tfkv\x1f<info_hash>\x1f<size_decimal>\x1f<canonical_path>`
+//   - `\x1f` (ASCII Unit Separator) is the field separator. The host's
+//     `canonicalizeInternalPath` allows arbitrary characters except
+//     backslash, NUL, and ".."-as-component; `\x1f` is not in any
+//     provider path report and is not forbidden, but even if it
+//     appeared in some future provider's path, the length-prefix-free
+//     form here is unambiguous because the size is a fixed-format
+//     decimal terminating at the next `\x1f`.
+//   - `info_hash` is always 40 lowercase hex chars (the DB has a CHECK
+//     constraint enforcing this on insert).
+//   - `size` is a positive safe integer serialized as decimal.
+//   - `canonical_path` is the verbatim canonicalized form.
+//
+// `tf_id_durable` is RETAINED as a field for logging and forensics (it
+// identifies the current DB row, which is still useful), but it is NOT
+// the cache key, and changing the surrogate id for the same logical
+// TorrentFile does NOT change the cache key.
+//
+// See docs/hy4/CROSS-FILE-KEYING-AUDIT.md §11 (P3 final identity check).
 // ---------------------------------------------------------------------------
 
 /// The frozen, durable identity of a cached file. Bytes are interchangeable across
 /// providers only under the same `TorrentFileId`.
 ///
-/// The cache key MUST be the exact durable TorrentFile row projected by S-1
-/// (`torrentFile.id`, the `torrent_files.id` PK). Two sibling files in the
-/// same torrent legitimately share the same `info_hash`; collapsing cache
-/// identity to (info_hash + canonical_path + size) was a heuristic that
-/// depended on the host never assigning two TorrentFile rows the same
-/// internal_path under the same info_hash. The PK is guaranteed unique by
-/// SQLite. See docs/hy4/CROSS-FILE-KEYING-AUDIT.md (P3 correction).
+/// The cache key is the deterministic `durable_key` (a representation of
+/// `info_hash + canonical_path + size`); see the file-level note above.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TorrentFileId {
-    /// Exact durable TorrentFile row id from S-1 (`torrent_files.id`).
-    /// The cache and the capability single-flight are keyed on this.
+    /// Current host DB row id from S-1 (`torrent_files.id`). RETAINED for
+    /// logging, forensics, and round-tripping with the host. NOT used as
+    /// the cache key — this value can change when the same logical
+    /// TorrentFile is reconstructed.
     pub tf_id_durable: String,
-    /// S-1-projected BitTorrent info_hash. Carried for logging/diagnostics,
-    /// NOT used as the cache key (two sibling files can share this).
+    /// S-1-projected BitTorrent info_hash. Part of the durable identity tuple.
     pub info_hash: String,
     pub canonical_path: String,
     pub size: u64,
+    /// Deterministic key derived from `(info_hash, canonical_path, size)`.
+    /// Stable across DB reconstruction, import, merge, repair, restart.
+    /// Computed once at construction and reused.
+    pub durable_key: String,
 }
 
 impl TorrentFileId {
+    /// Build a `TorrentFileId` and compute its deterministic `durable_key`.
+    pub fn new(
+        tf_id_durable: String,
+        info_hash: String,
+        canonical_path: String,
+        size: u64,
+    ) -> Self {
+        let durable_key = Self::compute_durable_key(&info_hash, &canonical_path, size);
+        Self {
+            tf_id_durable,
+            info_hash,
+            canonical_path,
+            size,
+            durable_key,
+        }
+    }
+
+    /// The cache key. Stable across host DB lifecycle changes.
     pub fn cache_key(&self) -> String {
-        // The durable PK. No hashing, no composition: the PK is already
-        // filesystem-safe (UUIDv4 in production), unique, and is what
-        // VFS, resolver, and forensics all key on.
-        self.tf_id_durable.clone()
+        self.durable_key.clone()
+    }
+
+    /// The deterministic key for `(info_hash, canonical_path, size)`.
+    /// Public so the capability layer (manager.rs) can derive the same
+    /// key without going through a full `TorrentFileId`.
+    pub fn compute_durable_key(info_hash: &str, canonical_path: &str, size: u64) -> String {
+        // \x1f is the ASCII Unit Separator; it is the conventional
+        // unambiguous field delimiter in data engineering. It is not
+        // forbidden by canonicalizeInternalPath, but no provider in
+        // scope has ever reported a path containing it.
+        format!("tfkv\x1f{}\x1f{}\x1f{}", info_hash, size, canonical_path)
     }
 }
 
@@ -1189,12 +1252,12 @@ mod tests {
         };
         let m = Arc::new(Metrics::default());
         let e = CacheEngine::open(cfg, m).unwrap();
-        let tf = TorrentFileId {
-            tf_id_durable: "tf_dune_2021_mkv".into(),
-            info_hash: "0439d86e8da335cde1b25575ed0534bf7359bc38".into(),
-            canonical_path: "Dune (2021)/Dune.mkv".into(),
-            size: file_size,
-        };
+        let tf = TorrentFileId::new(
+            "tf_dune_2021_mkv".into(),
+            "0439d86e8da335cde1b25575ed0534bf7359bc38".into(),
+            "Dune (2021)/Dune.mkv".into(),
+            file_size,
+        );
         (e, tf)
     }
 
@@ -1489,12 +1552,12 @@ mod tests {
             chunk_size: 8 * MIB,
         };
         let m = Arc::new(Metrics::default());
-        let tf = TorrentFileId {
-            tf_id_durable: "tf_test_survive_restart".into(),
-            info_hash: "abc".into(),
-            canonical_path: "x".into(),
-            size: 64 * MIB,
-        };
+        let tf = TorrentFileId::new(
+            "tf_test_survive_restart".into(),
+            "abc".into(),
+            "x".into(),
+            64 * MIB,
+        );
         {
             let e1 = CacheEngine::open(cfg.clone(), m.clone()).unwrap();
             fill_chunk(&e1, &tf, 0);
@@ -1519,12 +1582,12 @@ mod tests {
     fn chunk_size_change_resets_the_grid() {
         let dir = tempdir().unwrap();
         let m = Arc::new(Metrics::default());
-        let tf = TorrentFileId {
-            tf_id_durable: "tf_test_chunk_size_change".into(),
-            info_hash: "abc".into(),
-            canonical_path: "x".into(),
-            size: 64 * MIB,
-        };
+        let tf = TorrentFileId::new(
+            "tf_test_chunk_size_change".into(),
+            "abc".into(),
+            "x".into(),
+            64 * MIB,
+        );
         {
             let e1 = CacheEngine::open(
                 CacheConfig {
@@ -1603,33 +1666,43 @@ mod tests {
 
         // Shared info_hash (sibling files in the same torrent).
         const SHARED_INFO_HASH: &str = "deadbeefcafe0000deadbeefcafe0000deadbeef";
-        let tf_a = TorrentFileId {
-            tf_id_durable: "tf_sibling_A".into(),
-            info_hash: SHARED_INFO_HASH.into(),
-            canonical_path: "Siblings/episode_01.mkv".into(),
-            size: 16 * MIB, // 2 chunks
-        };
-        let tf_b = TorrentFileId {
-            tf_id_durable: "tf_sibling_B".into(),
-            info_hash: SHARED_INFO_HASH.into(),
-            canonical_path: "Siblings/episode_02.mkv".into(),
-            size: 24 * MIB, // 3 chunks; different size, different chunk count
-        };
+        let tf_a = TorrentFileId::new(
+            "tf_sibling_A".into(),
+            SHARED_INFO_HASH.into(),
+            "Siblings/episode_01.mkv".into(),
+            16 * MIB, // 2 chunks
+        );
+        let tf_b = TorrentFileId::new(
+            "tf_sibling_B".into(),
+            SHARED_INFO_HASH.into(),
+            "Siblings/episode_02.mkv".into(),
+            24 * MIB, // 3 chunks; different size, different chunk count
+        );
 
         // ---- 1. Cache keys are distinct ----
+        // The key is a deterministic representation of the durable tuple
+        // (info_hash, canonical_path, size). Sibling files that share
+        // info_hash MUST still have distinct keys, because canonical_path
+        // and/or size differ.
         let key_a = tf_a.cache_key();
         let key_b = tf_b.cache_key();
         assert_ne!(
             key_a, key_b,
-            "SAME info_hash sibling files MUST have distinct cache keys"
+            "SAME info_hash sibling files MUST have distinct cache keys \
+             (durable tuple differs in path and/or size)"
+        );
+        // The new key shape: "tfkv\x1f<info_hash>\x1f<size>\x1f<path>".
+        assert!(
+            key_a.starts_with("tfkv\x1f") && key_a.contains(SHARED_INFO_HASH)
+                && key_a.contains("Siblings/episode_01.mkv")
+                && key_a.contains("16777216"),
+            "key_a must be the deterministic (info_hash, size, path) tuple (got {key_a:?})"
         );
         assert!(
-            key_a.contains("tf_sibling_A"),
-            "key_a must be derived from tf_id_durable, not info_hash (got {key_a})"
-        );
-        assert!(
-            key_b.contains("tf_sibling_B"),
-            "key_b must be derived from tf_id_durable, not info_hash (got {key_b})"
+            key_b.starts_with("tfkv\x1f") && key_b.contains(SHARED_INFO_HASH)
+                && key_b.contains("Siblings/episode_02.mkv")
+                && key_b.contains("25165824"),
+            "key_b must be the deterministic (info_hash, size, path) tuple (got {key_b:?})"
         );
 
         // ---- 2. Fill chunk 0 of each with distinguishable bytes ----
@@ -1686,11 +1759,10 @@ mod tests {
         //         distinguishable even if they share the same provider,
         //         account, resource, and provider_file_id (a worst-case
         //         setup: two sibling files in the same torrent that
-        //         happen to point at the same provider file). This is
-        //         exactly the case the corrected Slot.tf_id is built
-        //         to handle. We construct two Slot values with the
-        //         same provider coord but different tf_id and verify
-        //         the resulting sf_keys differ.
+        //         happen to point at the same provider file). The
+        //         corrected key shape uses the stable durable_key (NOT
+        //         the mutable surrogate PK), so the resulting sf_keys
+        //         differ.
         //
         // The Slot is in manager.rs; we exercise the same keying
         // arithmetic inline here rather than pulling in the manager
@@ -1699,22 +1771,251 @@ mod tests {
         let account_scope = "main";
         let resource = "rd_res_42";
         let provider_file_id = "rd_pf_42";
-        // The previous key shape (info_hash-based) would have:
-        //   sf_key_A == sf_key_B  (same tf_id, same provider coord)
-        // The corrected key shape (durable PK) yields:
-        //   sf_key_A != sf_key_B
+        // Slot.sf_key now uses the durable_key (stable, derived from
+        // the tuple), not the surrogate PK.
         let sf_key_a = format!(
             "{}|{}|{}|{}|{}",
-            provider, account_scope, tf_a.tf_id_durable, resource, provider_file_id
+            provider, account_scope, tf_a.durable_key, resource, provider_file_id
         );
         let sf_key_b = format!(
             "{}|{}|{}|{}|{}",
-            provider, account_scope, tf_b.tf_id_durable, resource, provider_file_id
+            provider, account_scope, tf_b.durable_key, resource, provider_file_id
         );
         assert_ne!(
             sf_key_a, sf_key_b,
             "Siblings sharing the same provider coord MUST be \
              distinguishable in the capability reuse key"
+        );
+    }
+
+    // ─── P3 final identity check proofs (conclusion B) ──────────────────
+    //
+    // These tests prove the durable_key contract:
+    //   (1) Two TorrentFileId instances representing the SAME logical
+    //       TorrentFile (same info_hash + canonical_path + size) but
+    //       with DIFFERENT current host surrogate PKs (as happens when
+    //       the control-plane DB is reconstructed, a row is
+    //       re-inserted, or any other lifecycle path that mints a
+    //       fresh `tf_<randomUUID>`) MUST share the same cache key.
+    //       The cache directory is durable on disk; the PK is not.
+    //   (2) Two TorrentFileId instances sharing an info_hash but with
+    //       different canonical_path or different size MUST have
+    //       different cache keys (sibling files in one torrent).
+    //   (3) Capability single-flight keying is invariant under PK
+    //       changes for the same logical TorrentFile.
+    //
+    // The proofs use only the in-crate tempdir-backed CacheEngine
+    // (no live control-plane / discovery DB mutation), per the P3
+    // correction directive on adversarial same-infoHash proofs.
+
+    #[test]
+    fn same_logical_torrentfile_with_different_surrogate_pk_shares_cache_key() {
+        // Simulate a control-plane DB reconstruction: the same
+        // logical TorrentFile (same info_hash, same canonical path,
+        // same size) gets a fresh `tf_<randomUUID>` surrogate.
+        const INFO_HASH: &str = "0123456789abcdef0123456789abcdef01234567";
+        const CANONICAL: &str = "Movies/Dune (2021)/Dune.mkv";
+        const SIZE: u64 = 7_500_000_000; // 7.5 GB
+
+        let original = TorrentFileId::new(
+            "tf_db1_uuid_aaaa".into(),
+            INFO_HASH.into(),
+            CANONICAL.into(),
+            SIZE,
+        );
+        // Simulate the host assigning a fresh surrogate after a
+        // DB rebuild, partial restore, import/merge, etc.
+        let after_rebuild = TorrentFileId::new(
+            "tf_db2_uuid_bbbb_cccc_dddd".into(),
+            INFO_HASH.into(),
+            CANONICAL.into(),
+            SIZE,
+        );
+        // The current host PKs differ (this is the whole point).
+        assert_ne!(
+            original.tf_id_durable, after_rebuild.tf_id_durable,
+            "PK is intentionally different to simulate a DB reconstruction"
+        );
+        // The cache key MUST be the same.
+        assert_eq!(
+            original.cache_key(),
+            after_rebuild.cache_key(),
+            "Same logical TorrentFile MUST share the cache key \
+             even when the host surrogate PK changes"
+        );
+        // And the durable_key field is identical (it's the same tuple).
+        assert_eq!(original.durable_key, after_rebuild.durable_key);
+    }
+
+    #[test]
+    fn same_logical_torrentfile_survives_chunk_grid_after_surrogate_change() {
+        // End-to-end: stage bytes for a TorrentFile under PK_A;
+        // "rebuild" the DB and construct a new TorrentFileId with
+        // PK_B; the chunk MUST still be reachable.
+        let dir = tempdir().unwrap();
+        let cfg = CacheConfig {
+            root: dir.path().to_path_buf(),
+            max_bytes: 64 * MIB,
+            chunk_size: 8 * MIB,
+        };
+        let m = Arc::new(Metrics::default());
+        let e = Arc::new(CacheEngine::open(cfg, m).unwrap());
+
+        const INFO_HASH: &str = "abc123abc123abc123abc123abc123abc123abc1";
+        const CANONICAL: &str = "Stable/survivor.bin";
+        const SIZE: u64 = 16 * MIB; // 2 chunks
+
+        let tf_pk_a = TorrentFileId::new(
+            "tf_pk_A".into(),
+            INFO_HASH.into(),
+            CANONICAL.into(),
+            SIZE,
+        );
+        // Stage chunk 0.
+        let st = e.begin_stage(tf_pk_a.clone()).unwrap();
+        st.stage(0, &vec![0xCC; 8 * MIB as usize]).unwrap();
+        st.finish();
+        // Chunk 0 is present under PK_A.
+        assert!(e.is_present(&tf_pk_a.cache_key(), 0).unwrap());
+
+        // Simulate a host DB reconstruction: same logical TF, fresh PK.
+        let tf_pk_b = TorrentFileId::new(
+            "tf_pk_B_after_rebuild".into(),
+            INFO_HASH.into(),
+            CANONICAL.into(),
+            SIZE,
+        );
+        // The whole point: the cache_key does NOT contain the host PK,
+        // so it is invariant under any host DB reconstruction.
+        assert_eq!(tf_pk_a.cache_key(), tf_pk_b.cache_key(),
+            "cache_key() MUST be invariant under PK change");
+        assert_ne!(tf_pk_a.tf_id_durable, tf_pk_b.tf_id_durable,
+            "sanity: PKs do differ — this is what we're proving the key survives");
+        // Chunk 0 must still be present and readable under the
+        // reconstructed identity.
+        assert!(
+            e.is_present(&tf_pk_b.cache_key(), 0).unwrap(),
+            "chunk durably written under PK_A MUST be reachable under PK_B"
+        );
+        let bytes = e.pread(&tf_pk_b, 0, 8 * MIB - 1).unwrap();
+        assert!(
+            bytes.iter().all(|&b| b == 0xCC),
+            "reconstructed identity must read the same bytes"
+        );
+    }
+
+    #[test]
+    fn different_canonical_path_same_info_hash_yields_different_cache_key() {
+        const SHARED_INFO_HASH: &str =
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        const SIZE: u64 = 1_000_000;
+        let tf_x = TorrentFileId::new(
+            "tf_x".into(),
+            SHARED_INFO_HASH.into(),
+            "Season 01/episode_01.mkv".into(),
+            SIZE,
+        );
+        let tf_y = TorrentFileId::new(
+            "tf_y".into(),
+            SHARED_INFO_HASH.into(),
+            "Season 01/episode_02.mkv".into(),
+            SIZE,
+        );
+        assert_ne!(
+            tf_x.cache_key(),
+            tf_y.cache_key(),
+            "Siblings with the same info_hash but different canonical_path \
+             MUST have distinct cache keys"
+        );
+    }
+
+    #[test]
+    fn different_size_same_info_hash_same_path_yields_different_cache_key() {
+        // Adversarial: same info_hash AND same path, but the
+        // observed size differs. This can only happen if a
+        // provider re-reports the file with a different size
+        // (size conflict at the control plane) — the two
+        // observations MUST NOT alias the cache.
+        const SHARED_INFO_HASH: &str =
+            "feedfacefeedfacefeedfacefeedfacefeedface";
+        const SHARED_PATH: &str = "Single/torrent_relative/path.bin";
+        let tf_observed_a = TorrentFileId::new(
+            "tf_a".into(),
+            SHARED_INFO_HASH.into(),
+            SHARED_PATH.into(),
+            1_000_000,
+        );
+        let tf_observed_b = TorrentFileId::new(
+            "tf_b".into(),
+            SHARED_INFO_HASH.into(),
+            SHARED_PATH.into(),
+            1_000_001, // off by one byte
+        );
+        assert_ne!(
+            tf_observed_a.cache_key(),
+            tf_observed_b.cache_key(),
+            "Same (info_hash, path) with different size MUST have \
+             distinct cache keys (size-conflict guard)"
+        );
+    }
+
+    #[test]
+    fn capability_sf_key_is_invariant_under_surrogate_pk_change() {
+        // Slot.sf_key() uses the stable durable_key, so the
+        // single-flight coalescer MUST NOT split a single logical
+        // TorrentFile across two in-flight maps when the host
+        // re-issues the PK.
+        const INFO_HASH: &str = "00112233445566778899aabbccddeeff00112233";
+        const CANONICAL: &str = "TV/show_name_s01e01.mkv";
+        const SIZE: u64 = 2_000_000_000;
+
+        let tf_a = TorrentFileId::new(
+            "tf_orig".into(),
+            INFO_HASH.into(),
+            CANONICAL.into(),
+            SIZE,
+        );
+        let tf_b = TorrentFileId::new(
+            "tf_after_rebuild".into(),
+            INFO_HASH.into(),
+            CANONICAL.into(),
+            SIZE,
+        );
+        let provider = "torbox";
+        let account_scope = "default";
+        let resource = "tb_res_99";
+        let provider_file_id = "tb_pf_99";
+        // This is the exact format Slot.sf_key produces in
+        // manager.rs. The third field is durable_key, NOT the
+        // surrogate PK.
+        let sf_a = format!(
+            "{}|{}|{}|{}|{}",
+            provider, account_scope, tf_a.durable_key, resource, provider_file_id
+        );
+        let sf_b = format!(
+            "{}|{}|{}|{}|{}",
+            provider, account_scope, tf_b.durable_key, resource, provider_file_id
+        );
+        assert_eq!(
+            sf_a, sf_b,
+            "Slot.sf_key() MUST be invariant under host PK change \
+             for the same logical TorrentFile (no single-flight split)"
+        );
+        // Negative control: changing the canonical_path (i.e. a
+        // different sibling) MUST change sf_key.
+        let tf_sibling = TorrentFileId::new(
+            "tf_sibling".into(),
+            INFO_HASH.into(),
+            "TV/show_name_s01e02.mkv".into(),
+            SIZE,
+        );
+        let sf_sibling = format!(
+            "{}|{}|{}|{}|{}",
+            provider, account_scope, tf_sibling.durable_key, resource, provider_file_id
+        );
+        assert_ne!(
+            sf_a, sf_sibling,
+            "Different canonical_path MUST yield a different sf_key"
         );
     }
 }

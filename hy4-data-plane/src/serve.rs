@@ -72,13 +72,15 @@ pub enum SpanMsg {
 pub struct AppState {
     pub authoritative_size: u64,
     /// S-1 host-assigned TorrentFile id. Used for routing, logging, and the
-    /// `pool` summary. NOT used for cache keying (see `tf_id_durable`).
+    /// `pool` summary. NOT used for cache keying (see P3 final identity check).
     pub tf_id: String,
-    /// Exact durable TorrentFile row id from S-1 (`torrentFile.id`,
-    /// `torrent_files.id` PK). This is what the Slice 4 cache is keyed on.
-    /// Two sibling files in the same torrent legitimately share
-    /// `info_hash`; only the durable PK is guaranteed unique. See
-    /// docs/hy4/CROSS-FILE-KEYING-AUDIT.md (P3 correction).
+    /// Current host DB row id from S-1 (`torrentFile.id`, `torrent_files.id`
+    /// PK). RETAINED for logging and forensics. NOT used for cache keying:
+    /// the PK is a SQLite surrogate that can change when the same logical
+    /// TorrentFile is reconstructed. The cache key is the deterministic
+    /// `(info_hash, canonical_path, size)` tuple, computed by
+    /// `TorrentFileId::new()`. See docs/hy4/CROSS-FILE-KEYING-AUDIT.md
+    /// (P3 final identity check, conclusion B).
     pub tf_id_durable: String,
     /// S-1-projected BitTorrent info_hash (40-char hex). Carried for
     /// logging, magnet-link formatting, and capability fields. NOT the
@@ -223,17 +225,16 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     // upstream-only path — same contract as Slice 4.5.
     let plan: Option<ChunkPlan> = if !is_single {
         if let Some(cache) = state.cache.as_ref() {
-            let tf_id = TorrentFileId {
-                // Cache is keyed on the durable PK from S-1
-                // (torrentFile.id == torrent_files.id). info_hash and
-                // canonical_path are carried for diagnostics but not
-                // used as the key. See docs/hy4/CROSS-FILE-KEYING-AUDIT.md
-                // (P3 correction).
-                tf_id_durable: state.tf_id_durable.clone(),
-                info_hash: state.info_hash.clone(),
-                canonical_path: state.canonical_path.clone(),
+            let tf_id = TorrentFileId::new(
+                // Retained for logging/forensics; the cache key is
+                // (info_hash, canonical_path, size) computed by
+                // TorrentFileId::new. See docs/hy4/CROSS-FILE-KEYING-AUDIT.md
+                // (P3 final identity check, conclusion B).
+                state.tf_id_durable.clone(),
+                state.info_hash.clone(),
+                state.canonical_path.clone(),
                 size,
-            };
+            );
             match cache.plan_chunks(&tf_id, start, end) {
                 Ok(p) => Some(p),
                 Err(e) => {
@@ -359,16 +360,17 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             }
         };
 
-        let tf_id = TorrentFileId {
-            // Durable PK from S-1. The run-loop path was previously
-            // shadowed by `tf_id_clone` (the host label); that
-            // heuristic is replaced by the PK. See
-            // docs/hy4/CROSS-FILE-KEYING-AUDIT.md (P3 correction).
-            tf_id_durable: tf_id_durable_clone.clone(),
-            info_hash: tf_id_clone.clone(),
-            canonical_path: canonical_clone.clone(),
+        let tf_id = TorrentFileId::new(
+            // tf_id_durable is the current host PK; the cache key is
+            // (info_hash, canonical_path, size), computed by ::new().
+            // The run-loop previously shadowed this with the URL label;
+            // that is fixed (see P3 correction). See P3 final identity
+            // check for the durable_key contract.
+            tf_id_durable_clone.clone(),
+            tf_id_clone.clone(),
+            canonical_clone.clone(),
             size,
-        };
+        );
         // `plan` is Some only when a cache engine exists.
         let cache = match cache_clone.as_ref() {
             Some(c) => c.clone(),
