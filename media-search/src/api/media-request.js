@@ -433,6 +433,15 @@ export async function searchByMedia(cache, request) {
         // Slice 1.75: surface the per-file byte size carried by live
         // discovery. Null when the source stream had no numeric videoSize.
         selectedFileSize: hit.selectedFileSize ?? null,
+        // Slice 4: pass through the ranked-specific evidence fields so
+        // the persistence layer can build a frozen snapshot of what
+        // the scorer actually saw. Without these, the snapshot would
+        // be all-zeros and useless for post-restart explanation.
+        justification: hit.justification,
+        components: hit.components,
+        contributions: hit.contributions,
+        providerObservations: hit.providerObservations || [],
+        hasLiveDiscovery: hit.hasLiveDiscovery === true,
       };
     });
 
@@ -976,6 +985,15 @@ export async function searchByMedia(cache, request) {
       // from behaviorHints. The pre-publication identity helper is a
       // no-op when this is null.
       selectedFileSize: hit.selectedFileSize ?? null,
+      // Slice 4: pass through the ranked-specific evidence fields so
+      // the persistence layer can build a frozen snapshot of what
+      // the scorer actually saw. Without these, the snapshot would
+      // be all-zeros and useless for post-restart explanation.
+      justification: hit.justification,
+      components: hit.components,
+      contributions: hit.contributions,
+      providerObservations: hit.providerObservations || [],
+      hasLiveDiscovery: hit.hasLiveDiscovery === true,
     };
   });
 

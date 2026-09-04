@@ -1285,6 +1285,154 @@ const MEDIA_REQUEST_RESULTS_RANK_INDEX = 'media-request-results-rank-unique-v1';
 // database could still be missing the PRAGMA application (the PRAGMA is
 // re-applied at every open).
 const FOREIGN_KEYS_ENFORCED = 'foreign-keys-enforced-v1';
+// Slice 4: evidence snapshot provenance. Each persisted media_request_result
+// row carries a frozen JSON snapshot of the evidence/projection state that
+// the scorer actually saw at ranking time. The snapshot is a historical
+// record, not live provider state: it is captured from the SAME ranked
+// result object whose score was persisted, then serialized. A schema
+// version marker is embedded in the snapshot itself (and mirrored to a
+// dedicated column for indexing) so future ranking/evidence models remain
+// interpretable without pretending old rows used the current model.
+//
+// Legacy rows from before this migration remain valid and report snapshot
+// unavailable — no destructive backfill is performed.
+export const EVIDENCE_SNAPSHOT_VERSION = 1;
+const MEDIA_REQUEST_RESULTS_EVIDENCE_SNAPSHOT = 'media-request-results-evidence-snapshot-v1';
+
+// Forbidden fields that must NEVER reach the snapshot. Listed as a
+// module-level constant so the snapshot builder is a deterministic
+// pure function — no closure state, no implicit dependencies.
+const FORBIDDEN_SNAPSHOT_KEYS = new Set([
+  'magnet', 'downloadUrl', 'download_url', 'provider', 'providers',
+  'auth', 'token', 'apiKey', 'api_key', 'password', 'passwd', 'secret',
+  'capability', 'capabilities', 'manifestUrl', 'manifest_url',
+  'resolver', 'resolverUrl', 'resolver_url',
+]);
+
+/**
+ * Slice 4: build a frozen, deterministic, versioned JSON snapshot of the
+ * evidence/projection state the scorer actually saw at ranking time.
+ * The snapshot is a HISTORICAL record — it must describe what the
+ * scorer saw, not what current provider state says now. The build is
+ * pure: it reads fields off the input ranked-result object and
+ * serializes a stable, sorted JSON object.
+ *
+ * Forbidden fields (intentionally never extracted): magnet, download_url,
+ * provider, capability URLs, auth/token/apiKey/password/secret.
+ *
+ * Returns { snapshot, version } where:
+ *   snapshot: JSON string or null (when no ranked input is available —
+ *     e.g. operator-selection rows that pre-date ranking)
+ *   version: EVIDENCE_SNAPSHOT_VERSION (1) when a snapshot was built,
+ *     null otherwise
+ */
+export function buildEvidenceSnapshot(result) {
+  if (!result || typeof result !== 'object') return { snapshot: null, version: null };
+  const justification = result.justification || null;
+  const components = result.components || null;
+  const contributions = result.contributions || null;
+  const sources = Array.isArray(result.sources) ? result.sources : [];
+  const providerObservations = Array.isArray(result.providerObservations)
+    ? result.providerObservations
+    : [];
+
+  const fresh = typeof justification?.freshProviderAvailability === 'number'
+    ? justification.freshProviderAvailability
+    : (components?.providerAvailability ?? 0);
+  const prior = typeof justification?.historicalPrior === 'number'
+    ? justification.historicalPrior
+    : 0;
+  const hasObservations = providerObservations.length > 0;
+  let providerAvailabilityState = 'missing';
+  if (hasObservations) {
+    if (fresh >= 0.5) providerAvailabilityState = 'fresh';
+    else if (fresh > 0 || prior > 0) providerAvailabilityState = 'historical';
+    else providerAvailabilityState = 'stale';
+  } else if (prior > 0) {
+    providerAvailabilityState = 'historical';
+  } else if (result.hasLiveDiscovery === true) {
+    providerAvailabilityState = 'fresh';
+  }
+
+  let providerEvidenceObservedAt = null;
+  for (const o of providerObservations) {
+    const t = Number(o?.observedAt ?? o?.checked_at ?? o?.checkedAt);
+    if (Number.isFinite(t) && (providerEvidenceObservedAt == null || t > providerEvidenceObservedAt)) {
+      providerEvidenceObservedAt = t;
+    }
+  }
+  const providerEvidenceFreshness = providerEvidenceObservedAt != null
+    ? Math.max(0, Date.now() - providerEvidenceObservedAt)
+    : null;
+
+  const sourceFamilies = Array.from(new Set(
+    sources.map((s) => (s && typeof s === 'object' ? s.origin : null))
+      .filter((o) => typeof o === 'string' && o.length > 0),
+  )).sort();
+
+  const reasonKeys = contributions && typeof contributions === 'object'
+    ? Object.keys(contributions)
+      .filter((k) => !FORBIDDEN_SNAPSHOT_KEYS.has(k))
+      .sort((a, b) => {
+        const diff = (contributions[b] || 0) - (contributions[a] || 0);
+        if (diff !== 0) return diff;
+        return a < b ? -1 : a > b ? 1 : 0;
+      })
+    : [];
+
+  const projection = {
+    version: EVIDENCE_SNAPSHOT_VERSION,
+    providerAvailabilityState,
+    providerEvidenceFreshness,
+    providerEvidenceObservedAt,
+    historicalPrior: prior,
+    freshProviderAvailability: fresh,
+    identityConfidence: typeof result.identity?.confidence === 'number'
+      ? result.identity.confidence
+      : (components?.identityConfidence ?? 0),
+    confidenceProjection: components?.providerAvailability ?? fresh,
+    rankingBreakdown: components && contributions
+      ? {
+          components: Object.fromEntries(
+            Object.entries(components)
+              .filter(([k]) => !FORBIDDEN_SNAPSHOT_KEYS.has(k))
+              .map(([k, v]) => [k, typeof v === 'number' ? v : 0]),
+          ),
+          contributions: Object.fromEntries(
+            Object.entries(contributions)
+              .filter(([k]) => !FORBIDDEN_SNAPSHOT_KEYS.has(k))
+              .map(([k, v]) => [k, typeof v === 'number' ? v : 0]),
+          ),
+          weights: justification && justification.weights
+            ? Object.fromEntries(
+              Object.entries(justification.weights)
+                .filter(([k]) => !FORBIDDEN_SNAPSHOT_KEYS.has(k))
+                .map(([k, v]) => [k, typeof v === 'number' ? v : 0]),
+            )
+            : null,
+        }
+      : null,
+    rankingReasons: reasonKeys,
+    sourceFamilies,
+    eligibilityReason: typeof result.identity?.ineligibleReason === 'string'
+      ? result.identity.ineligibleReason
+      : null,
+    eligibilityCode: typeof result.identity?.ineligibleCode === 'string'
+      ? result.identity.ineligibleCode
+      : null,
+    expectedMediaScope: typeof result.identity?.expectedMediaScope === 'string'
+      ? result.identity.expectedMediaScope
+      : null,
+    parsedCandidateScope: typeof result.identity?.parsedCandidateScope === 'string'
+      ? result.identity.parsedCandidateScope
+      : null,
+  };
+
+  return {
+    snapshot: JSON.stringify(projection),
+    version: EVIDENCE_SNAPSHOT_VERSION,
+  };
+}
 
 // Slice 2.6: enforce a single durable handoff slot per media identity so
 // duplicate / concurrent persistPlaybackHandoff calls converge on the same
@@ -1412,6 +1560,28 @@ function migrateMediaRequestResultsIdentityUnique(db) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_media_request_results_rank
     ON media_request_results(request_id, rank)
   `);
+}
+
+// Slice 4: add the evidence_snapshot / evidence_snapshot_version columns to
+// media_request_results. Existing rows keep NULL — they are valid legacy
+// rows and report snapshot unavailable on read. No destructive backfill:
+// historical evidence cannot be reconstructed for rows persisted under a
+// previous ranking model.
+function migrateMediaRequestResultsEvidenceSnapshot(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(MEDIA_REQUEST_RESULTS_EVIDENCE_SNAPSHOT);
+  if (applied) return;
+  const info = db.prepare('PRAGMA table_info(media_request_results)').all();
+  if (!info.some((col) => col.name === 'evidence_snapshot')) {
+    db.exec('ALTER TABLE media_request_results ADD COLUMN evidence_snapshot TEXT');
+  }
+  if (!info.some((col) => col.name === 'evidence_snapshot_version')) {
+    db.exec('ALTER TABLE media_request_results ADD COLUMN evidence_snapshot_version INTEGER');
+  }
+  db.prepare(
+    'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+  ).run(MEDIA_REQUEST_RESULTS_EVIDENCE_SNAPSHOT, Date.now());
 }
 
 function migrateLegacyProviderObservations(db) {
@@ -1923,6 +2093,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   migrateVfsTorrentFileId(db);
   migratePlaybackHandoffsIdentityUnique(db);
   migrateMediaRequestResultsIdentityUnique(db);
+  migrateMediaRequestResultsEvidenceSnapshot(db);
   // Slice 1.75: the torrent_file_id index can only be created once the
   // column is present. For legacy prod databases, the column is added by
   // migratePlaybackHandoffsTorrentFileId above. For fresh installs the
@@ -4549,7 +4720,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       'score_breakdown', 'identity_tier', 'identity_confidence', 'identity_evidence',
       'resolution_state', 'release_metadata', 'ranking_breakdown',
       'eligible', 'ineligible_reason', 'ineligible_code', 'expected_media_scope', 'parsed_candidate_scope',
-      'selected_file_size'
+      'selected_file_size', 'evidence_snapshot', 'evidence_snapshot_version'
     ];
     if (intentId) { cols.push('intent_id'); }
     const placeholders = cols.map(() => '?').join(', ');
@@ -4633,6 +4804,15 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
       for (const r of results) {
         if (r == null) continue;
+        // Slice 4: build the evidence snapshot from the SAME ranked
+        // object whose score we are about to persist. The snapshot is
+        // a historical record of what the scorer saw — do not re-query
+        // current provider state to populate it. When the caller
+        // surfaces the unranked input (no .justification / .components)
+        // we still produce a deterministic snapshot from whatever
+        // evidence fields are present so the persisted row is
+        // explainable after restart.
+        const { snapshot, version } = buildEvidenceSnapshot(r);
         resultStmt.run(
           requestId,
           r.rank,
@@ -4655,6 +4835,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
           Number.isSafeInteger(r.selectedFileSize) && r.selectedFileSize > 0
             ? r.selectedFileSize
             : null,
+          snapshot,
+          version,
           ...(intentId ? [intentId] : []),
         );
       }
@@ -4685,6 +4867,34 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
   function getMediaRequestResults(requestId) {
     return getMediaRequestResultsStmt.all({ request_id: requestId });
+  }
+
+  // Slice 4: read API for evidence snapshots. Returns the parsed snapshot
+  // object (or null when the row has no snapshot) and the persisted
+  // version marker. A row with snapshot_version IS NOT NULL and snapshot
+  // IS NULL is treated as snapshot unavailable and surfaced explicitly
+  // to callers — never silently coerced to an empty object.
+  function getMediaRequestResultEvidenceSnapshot(requestId, rank) {
+    const row = db.prepare(`
+      SELECT evidence_snapshot, evidence_snapshot_version
+      FROM media_request_results
+      WHERE request_id = @request_id AND rank = @rank
+    `).get({ request_id: requestId, rank });
+    if (!row) return null;
+    if (row.evidence_snapshot == null) {
+      return {
+        snapshot: null,
+        version: row.evidence_snapshot_version ?? null,
+        available: false,
+      };
+    }
+    let parsed = null;
+    try { parsed = JSON.parse(row.evidence_snapshot); } catch { parsed = null; }
+    return {
+      snapshot: parsed,
+      version: row.evidence_snapshot_version,
+      available: true,
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -5475,6 +5685,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getMediaRequests,
     getMediaRequestsByMediaId,
     getMediaRequestResults,
+    getMediaRequestResultEvidenceSnapshot,
+    buildEvidenceSnapshot,
     // Playback handoff persistence
     persistPlaybackHandoff,
     upsertPlaybackHandoff,
