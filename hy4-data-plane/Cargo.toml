@@ -1,0 +1,33 @@
+[package]
+name = "hy4-data-plane"
+version = "0.1.0"
+edition = "2021"
+
+# NOTE: the Frankenstein donor was a binary crate with [[bin]] path = "src/main.rs".
+# P2 deliberately does NOT transplant the lab main.rs -- it is a single-TorrentFile
+# bootstrap/router that must be re-authored at the host seam (see
+# docs/hy4/HY4-PHASE1-CLASSIFICATION.md §0). Until the serving core is extracted,
+# this crate builds as a library only.
+[lib]
+name = "hy4_data_plane"
+path = "src/lib.rs"
+
+# Dependency set is byte-identical to the donor, including the exact `axum = "=0.7.5"`
+# pin, so the P2 build attempt answers B-4 (do the pinned crates resolve?) against the
+# real set rather than a reduced one. `axum`, `futures-util` and `tokio-stream` are
+# currently unused by these seven modules -- they are used by the lab main.rs serving
+# core that lands later, and keeping them here means resolution is tested now.
+[dependencies]
+axum = "=0.7.5"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+bytes = "1"
+futures-util = "0.3"
+tokio-stream = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
