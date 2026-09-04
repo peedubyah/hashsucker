@@ -4363,6 +4363,17 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     db.close();
   }
 
+  /**
+   * Escape hatch: returns the underlying node:sqlite DatabaseSync handle.
+   * Intended for opt-in tables (e.g. importer checkpoint state) that live
+   * alongside the cache but are not part of the discovery schema contract.
+   * Callers MUST NOT mutate any table that the cache manages directly.
+   * The returned handle is owned by the cache; do not close it.
+   */
+  function getRawDb() {
+    return db;
+  }
+
   return {
     upsertCandidate,
     getCandidate,
@@ -4377,6 +4388,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     ingestCandidate,
     isClosed,
     close,
+    getRawDb,
     // Release attributes (used by release-attributes.js)
     _insertReleaseAttributes,
     getReleaseAttributes,
@@ -4402,6 +4414,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     countHistoricalProviderSightings,
     countHistoricalProviderSightingsForCandidate,
     isValidInfoHash,
+    // Escape hatch for opt-in tables (importer checkpoint state etc.)
+    getRawDb,
     // Identity enrichment queue
     enqueueIdentityResolution,
     getPendingEnrichments,
