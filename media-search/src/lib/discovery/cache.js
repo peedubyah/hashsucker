@@ -1115,6 +1115,23 @@ INSERT INTO provider_observation_events (
 ) RETURNING id;
 `;
 
+// Slice 5: provider evidence reconciliation. A fresh transient
+// (state=error|unknown) MUST NOT erase a prior known state
+// (state=cached|uncached) at the current projection. The history log
+// always receives the new event; the current projection is gated so
+// the most recent KNOWN state survives a transient disruption.
+//
+// Concretely: the WHERE clause on the DO UPDATE branch is satisfied
+// only when (a) the new observation is at least as recent as the
+// current one AND (b) the new observation is NOT a transient that
+// would clobber a known current state.
+//
+// A transient MAY overwrite another transient (e.g. error→unknown is
+// allowed; unknown→error is allowed). A known state MAY overwrite a
+// transient (cached→unknown is forbidden but unknown→cached is allowed).
+// A known state MAY overwrite a known state of a different sign
+// (uncached→cached or cached→uncached — fresh contradictions are
+// resolved in favor of the newer observation, per spec rule 1+2).
 const UPSERT_CURRENT_OBSERVATION = `
 INSERT INTO provider_observation_current (
   provider, account_scope, scope, subject_type, subject_key,
@@ -1142,7 +1159,12 @@ ON CONFLICT(provider, account_scope, scope, subject_type, subject_key, kind) DO 
   latency_ms = EXCLUDED.latency_ms,
   correlation_id = EXCLUDED.correlation_id,
   event_id = EXCLUDED.event_id
-WHERE EXCLUDED.observed_at >= provider_observation_current.observed_at;
+WHERE EXCLUDED.observed_at >= provider_observation_current.observed_at
+  AND NOT (
+    -- A fresh transient MUST NOT erase a known current state.
+    EXCLUDED.state IN ('error', 'unknown')
+    AND provider_observation_current.state IN ('cached', 'uncached')
+  );
 `;
 
 const INSERT_MEDIA_ASSOCIATION = `
