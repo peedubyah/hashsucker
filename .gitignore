@@ -22,4 +22,24 @@ artifacts/dmm-rebuild/*.db-wal
 artifacts/stage3/enrichment-*.db
 artifacts/stage3/enrichment-*.db-shm
 artifacts/stage3/enrichment-*.db-wal
+
+# Runtime test/diagnostic snapshots (live enumeration output; not source)
+artifacts/preflight-*/
+artifacts/postrun-*/
+
+# Per-shell ad-hoc test scratch (created by interactive test runs)
+.tmp-tests/
+
+# Local forensic audit notes (read-only HY4 reference material; not part of HY4 baseline)
+media-search/.audit-*.md
+
+# Provider census dumps (re-runnable via scripts in src/scripts/)
+artifacts/dmm-rebuild/census-*.json
+artifacts/dmm-rebuild/rd-*.json
+artifacts/dmm-rebuild/rd-*.ndjson
+
+# Local RD API snapshots (re-runnable; census scripts)
+artifacts/dmm-rebuild/rd-census-*.json
+artifacts/dmm-rebuild/rd-downloads-*.json
+
 .worktrees/
