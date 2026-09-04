@@ -23,7 +23,7 @@ import {
   toLegacyCachedState,
 } from '../providers/observations.js';
 
-import { extractQualityFeatures } from './quality-features.js';
+import { extractQualityFeatures, getResolutionTierLabel } from './quality-features.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS candidates (
@@ -4860,6 +4860,25 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       const resultSql = INSERT_MEDIA_REQUEST_RESULT_IGNORE(intentId);
       const resultStmt = db.prepare(resultSql);
 
+      // Slice 7B: build the resolution-tier peer-cohort map BEFORE the
+      // result loop so extractQualityFeatures can receive the full
+      // sorted-size array per tier. Cohort = all results in this request
+      // sharing the same resolution tier label. The map is built from
+      // the SAME ranked objects whose scores we are persisting — no
+      // re-querying, no I/O.
+      const cohortByTier = new Map();
+      for (const r of results) {
+        if (r == null) continue;
+        const size = Number.isSafeInteger(r.selectedFileSize) && r.selectedFileSize > 0
+          ? r.selectedFileSize
+          : null;
+        if (size == null) continue;
+        const tier = getResolutionTierLabel(r.release || {}, r.filename || '');
+        if (!cohortByTier.has(tier)) cohortByTier.set(tier, []);
+        cohortByTier.get(tier).push(size);
+      }
+      for (const sizes of cohortByTier.values()) sizes.sort((a, b) => a - b);
+
       for (const r of results) {
         if (r == null) continue;
         // Slice 4: build the evidence snapshot from the SAME ranked
@@ -4875,7 +4894,13 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
         // whose score we are about to persist. Pure extraction — no
         // re-querying, no re-ranking. Provider/auth data never enters
         // the snapshot. Unknown values stay null/unknown.
-        const qualityFeatures = extractQualityFeatures(r);
+        // Slice 7B: pass the resolution-tier peer-cohort so the extractor
+        // can derive percentile rank and ratio to peer median. The cohort
+        // is the sorted array of all valid sizes in the same tier —
+        // derived from the SAME ranked objects we are persisting.
+        const tier = getResolutionTierLabel(r.release || {}, r.filename || '');
+        const peerCohort = cohortByTier.get(tier) || null;
+        const qualityFeatures = extractQualityFeatures(r, { peerCohort });
         resultStmt.run(
           requestId,
           r.rank,

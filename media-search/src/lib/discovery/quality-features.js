@@ -88,10 +88,93 @@ const CONTAINER_EXT = {
 // Normalization helpers (pure)
 // ---------------------------------------------------------------------------
 
-function normalizeResolution(res) {
+export function normalizeResolution(res) {
   if (!res) return null;
   const key = String(res).toLowerCase().replace(/[\s.-]/g, '');
   return RESOLUTION_MAP[key] || null;
+}
+
+/**
+ * Compute the resolution tier label for a candidate result.
+ * Encapsulates the same resolution-detection logic used by extractQualityFeatures
+ * (explicit parsed resolution → filename fallback) so callers can build peer
+ * cohorts without duplicating the matching rules.
+ *
+ * @param {Object} [release] — release_attributes (may contain .resolution)
+ * @param {string} [filename] — release filename
+ * @returns {string} Canonical tier label ('2160p'|'1440p'|'1080p'|'720p'|'sd'|'unknown')
+ */
+export function getResolutionTierLabel(release = {}, filename = '') {
+  const explicit = normalizeResolution(release.resolution);
+  if (explicit) return explicit;
+  const resMatch = filename.match(/\b(8640p|4320p|2160p|1440p|1080p|1080i|720p|576p|480p|360p|4[kk]|uhd)\b/i);
+  if (resMatch) return normalizeResolution(resMatch[1]);
+  return 'unknown';
+}
+
+/**
+ * Compute peer-relative size features for a candidate within its resolution-tier cohort.
+ *
+ * Pure function — no I/O, no DB. Takes the candidate's exact byte size and the
+ * sorted array of all valid sizes in the same resolution tier (including this
+ * candidate's own size). Returns percentile rank, ratio to median, peer count,
+ * and median byte size.
+ *
+ * Percentile uses the standard "percentile rank" formula:
+ *   round(count_smaller / (n - 1) * 100)
+ * A single-peer cohort returns percentile 50 (the candidate is its own median).
+ *
+ * @param {number|null} sizeBytes — This candidate's exact byte size (positive safe integer)
+ * @param {number[]} [cohortSizes] — Sorted ascending array of all sizes in the same tier
+ * @returns {{sizeWithinResolutionPeerPercentile: number|null, peerRatio: number|null, peerCount: number, peerMedianBytes: number|null}}
+ */
+export function computePeerRelativeSizeFeatures(sizeBytes, cohortSizes) {
+  if (sizeBytes == null || !Array.isArray(cohortSizes) || cohortSizes.length === 0) {
+    return {
+      sizeWithinResolutionPeerPercentile: null,
+      peerRatio: null,
+      peerCount: 0,
+      peerMedianBytes: null,
+    };
+  }
+
+  const peerCount = cohortSizes.length;
+  const median = computeMedian(cohortSizes);
+
+  let percentile;
+  if (peerCount === 1) {
+    percentile = 50;
+  } else {
+    let smallerCount = 0;
+    for (const s of cohortSizes) {
+      if (s < sizeBytes) smallerCount++;
+    }
+    percentile = Math.round((smallerCount / (peerCount - 1)) * 100);
+  }
+
+  const peerRatio = median > 0 ? Number((sizeBytes / median).toFixed(4)) : null;
+
+  return {
+    sizeWithinResolutionPeerPercentile: percentile,
+    peerRatio,
+    peerCount,
+    peerMedianBytes: median,
+  };
+}
+
+/**
+ * Compute the median of a sorted (ascending) number array.
+ * For even-length arrays, returns the arithmetic mean of the two central values.
+ * @param {number[]} sortedArray — Must be sorted ascending
+ * @returns {number}
+ */
+function computeMedian(sortedArray) {
+  const n = sortedArray.length;
+  if (n === 0) return null;
+  const mid = Math.floor(n / 2);
+  return n % 2 === 0
+    ? (sortedArray[mid - 1] + sortedArray[mid]) / 2
+    : sortedArray[mid];
 }
 
 function normalizeSource(src) {
@@ -152,6 +235,10 @@ function normalizeReleaseGroup(raw) {
  *   - candidate.selectedFileSize (number|null) — exact byte size
  * @param {Object} [context] - Optional context for future enhancements:
  *   - context.runtimeMinutes (number|null) — media runtime if known
+ *   - context.peerCohort (number[]) — sorted ascending array of all valid sizes
+ *     in the same resolution tier (including this candidate's own size). When
+ *     provided, populates derived.sizeWithinResolutionPeerPercentile, peerRatio,
+ *     peerCount, and peerMedianBytes. When absent, those fields remain null.
  * @returns {Object} Frozen, versioned quality feature snapshot
  */
 export function extractQualityFeatures(candidate, context = {}) {
@@ -193,6 +280,15 @@ export function extractQualityFeatures(candidate, context = {}) {
   const bytesPerMinute = (exactBytes != null && runtimeMinutes != null)
     ? Math.round(exactBytes / runtimeMinutes)
     : null;
+
+  // -----------------------------------------------------------------------
+  // Peer-relative size features: percentile rank within resolution tier,
+  // ratio to peer median, peer count, and median byte size. Pure derivation
+  // from the cohort array — no I/O, no DB. When context.peerCohort is absent
+  // or empty, these fields remain null (the extractor stays backward-compatible
+  // with callers that don't supply cohort data).
+  // -----------------------------------------------------------------------
+  const peerFeatures = computePeerRelativeSizeFeatures(exactBytes, context.peerCohort);
 
   // -----------------------------------------------------------------------
   // Source type: prefer release_attributes.source_type, fall back to filename.
@@ -260,7 +356,10 @@ export function extractQualityFeatures(candidate, context = {}) {
     }),
     derived: Object.freeze({
       runtimeMinutes,
-      sizeWithinResolutionPeerPercentile: null,
+      sizeWithinResolutionPeerPercentile: peerFeatures.sizeWithinResolutionPeerPercentile,
+      peerRatio: peerFeatures.peerRatio,
+      peerCount: peerFeatures.peerCount,
+      peerMedianBytes: peerFeatures.peerMedianBytes,
     }),
   });
 }

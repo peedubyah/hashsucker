@@ -20,6 +20,8 @@ import { join } from 'node:path';
 
 import {
   extractQualityFeatures,
+  computePeerRelativeSizeFeatures,
+  getResolutionTierLabel,
 } from '../src/lib/discovery/quality-features.js';
 import { createDiscoveryCache } from '../src/lib/discovery/cache.js';
 
@@ -158,6 +160,13 @@ test('E: persisted selected_file_size equals quality_features.size.bytes', () =>
   rmSync(join(dbPath, '..'), { recursive: true, force: true });
 });
 
+test('G: getResolutionTierLabel — explicit parsed preferred over filename', () => {
+  assert.equal(getResolutionTierLabel({ resolution: '2160p' }, 'Movie.1080p.mkv'), '2160p');
+  assert.equal(getResolutionTierLabel({ resolution: null }, 'Movie.2160p.UHD.mkv'), '2160p');
+  assert.equal(getResolutionTierLabel({}, 'Movie.mkv'), 'unknown');
+  assert.equal(getResolutionTierLabel({}, ''), 'unknown');
+});
+
 test('E: persisted null when no exact size available', () => {
   const dbPath = tempDbPath('nosize');
   const cache = createDiscoveryCache({ dbPath });
@@ -178,26 +187,64 @@ test('E: persisted null when no exact size available', () => {
 });
 
 // ===========================================================================
-// G. Peer-relative features (basic shape + YIFY proof)
+// G. Peer-relative features (percentile, ratio, peerCount, median)
 // ===========================================================================
 
-test('G: peer-relative features shape and YIFY low-percentile proof', () => {
+test('G: computePeerRelativeSizeFeatures pure helper — percentile math', () => {
+  // Sorted cohort: [1.3, 4, 8, 12] GiB
+  const cohort = [1395864371, 4294967296, 8589934592, 12884901888];
+
+  // Smallest: 0th percentile (0 smaller / 3 = 0)
+  const smallest = computePeerRelativeSizeFeatures(1395864371, cohort);
+  assert.equal(smallest.sizeWithinResolutionPeerPercentile, 0);
+  assert.equal(smallest.peerCount, 4);
+  assert.equal(smallest.peerMedianBytes, (4294967296 + 8589934592) / 2);
+  assert.ok(smallest.peerRatio < 1); // below median
+
+  // Largest: 100th percentile (3 smaller / 3 = 100)
+  const largest = computePeerRelativeSizeFeatures(12884901888, cohort);
+  assert.equal(largest.sizeWithinResolutionPeerPercentile, 100);
+  assert.ok(largest.peerRatio > 1); // above median
+
+  // Single-peer cohort: percentile 50
+  const single = computePeerRelativeSizeFeatures(8589934592, [8589934592]);
+  assert.equal(single.sizeWithinResolutionPeerPercentile, 50);
+  assert.equal(single.peerRatio, 1);
+  assert.equal(single.peerCount, 1);
+
+  // Null size → all null
+  const nullSize = computePeerRelativeSizeFeatures(null, cohort);
+  assert.equal(nullSize.sizeWithinResolutionPeerPercentile, null);
+  assert.equal(nullSize.peerRatio, null);
+  assert.equal(nullSize.peerCount, 0);
+
+  // Empty cohort → all null
+  const emptyCohort = computePeerRelativeSizeFeatures(8589934592, []);
+  assert.equal(emptyCohort.sizeWithinResolutionPeerPercentile, null);
+  assert.equal(emptyCohort.peerCount, 0);
+});
+
+test('G: extractQualityFeatures populates derived peer features when peerCohort provided', () => {
   // Same movie, same 1080p tier, different sizes (YIFY ~1.3GB, normal ~4GB, remux ~12GB)
+  const cohort = [1395864371, 4294967296, 12884901888];
+
   const yify = extractQualityFeatures({
     release: { resolution: '1080p', source_type: 'BluRay', codec: 'x264', release_group: 'YIFY' },
     filename: 'Movie.2024.1080p.BluRay.x264-YIFY.mkv',
     selectedFileSize: 1395864371, // ~1.3 GiB
-  });
+  }, { peerCohort: cohort });
+
   const normal = extractQualityFeatures({
     release: { resolution: '1080p', source_type: 'BluRay', codec: 'x264', release_group: 'FLUX' },
     filename: 'Movie.2024.1080p.BluRay.x264-FLUX.mkv',
     selectedFileSize: 4294967296, // 4 GiB
-  });
+  }, { peerCohort: cohort });
+
   const remux = extractQualityFeatures({
     release: { resolution: '1080p', source_type: 'BluRay', codec: 'hevc', release_group: 'FGT' },
     filename: 'Movie.2024.1080p.BluRay.HEVC-FGT.mkv',
     selectedFileSize: 12884901888, // 12 GiB
-  });
+  }, { peerCohort: cohort });
 
   // All same resolution tier
   assert.equal(yify.resolution.label, '1080p');
@@ -208,10 +255,41 @@ test('G: peer-relative features shape and YIFY low-percentile proof', () => {
   assert.ok(yify.size.bytes < normal.size.bytes);
   assert.ok(normal.size.bytes < remux.size.bytes);
 
+  // Peer features populated
+  assert.equal(yify.derived.peerCount, 3);
+  assert.equal(normal.derived.peerCount, 3);
+  assert.equal(remux.derived.peerCount, 3);
+
+  // YIFY is smallest → low percentile
+  assert.equal(yify.derived.sizeWithinResolutionPeerPercentile, 0);
+  // Remux is largest → high percentile
+  assert.equal(remux.derived.sizeWithinResolutionPeerPercentile, 100);
+  // Normal is middle → 50th percentile (1 smaller / 2 = 50)
+  assert.equal(normal.derived.sizeWithinResolutionPeerPercentile, 50);
+
+  // Peer ratio: YIFY < 1, remux > 1, normal ≈ 1
+  assert.ok(yify.derived.peerRatio < 1);
+  assert.ok(remux.derived.peerRatio > 1);
+
+  // Median bytes
+  assert.equal(yify.derived.peerMedianBytes, 4294967296);
+
   // No quality_score (non-goal)
   assert.equal(yify.quality_score, undefined);
   assert.equal(normal.quality_score, undefined);
   assert.equal(remux.quality_score, undefined);
+});
+
+test('G: peer features null when no peerCohort provided (backward-compatible)', () => {
+  const features = extractQualityFeatures({
+    release: { resolution: '1080p', source_type: 'BluRay', codec: 'x264', release_group: 'YIFY' },
+    filename: 'Movie.2024.1080p.BluRay.x264-YIFY.mkv',
+    selectedFileSize: 1395864371,
+  });
+  assert.equal(features.derived.sizeWithinResolutionPeerPercentile, null);
+  assert.equal(features.derived.peerRatio, null);
+  assert.equal(features.derived.peerCount, 0);
+  assert.equal(features.derived.peerMedianBytes, null);
 });
 
 // ===========================================================================
@@ -300,29 +378,41 @@ test('L: no ranking influence from size features', () => {
 // F. Peer cohort definition (basic)
 // ===========================================================================
 
-test('F: peer cohort is same mediaId + same resolution tier', () => {
+test('F: peer cohort is same mediaId + same resolution tier — end-to-end derivation', () => {
   const dbPath = tempDbPath('cohort');
   const cache = createDiscoveryCache({ dbPath });
 
-  // Movie A 1080p candidates
+  // Movie A 1080p candidates (3 peers in same tier: YIFY ~1.4GB, FLUX ~8GB, another FLUX ~8GB)
   const movieA_1080p_v1 = rankedResult({ rank: 1, selectedFileSize: 8589934592, release: { resolution: '1080p' } });
   const movieA_1080p_v2 = rankedResult({ rank: 2, infoHash: 'B'.repeat(40), selectedFileSize: 1401946675, release: { resolution: '1080p' } });
 
-  // Movie A 2160p (different tier, not peer)
+  // Movie A 2160p (different tier, not peer to 1080p)
   const movieA_2160p = rankedResult({ rank: 3, infoHash: 'C'.repeat(40), selectedFileSize: 25769803776, release: { resolution: '2160p' } });
 
-  // Movie B 1080p (different media, not peer)
+  // Movie B 1080p (same request, so it IS in the 1080p cohort)
   const movieB_1080p = rankedResult({ rank: 4, infoHash: 'D'.repeat(40), selectedFileSize: 8589934592, release: { resolution: '1080p' } });
 
   const requestId = cache.persistMediaRequest({ mediaId: 'tt0000010', mediaType: 'movie' }, [movieA_1080p_v1, movieA_1080p_v2, movieA_2160p, movieB_1080p]);
 
-  // Verify persistence
+  // 1080p cohort: [1401946675, 8589934592, 8589934592] (3 peers)
   const qf1 = cache.getMediaRequestResultQualityFeatures(requestId, 1);
   assert.equal(qf1.features.size.bytes, 8589934592);
   assert.equal(qf1.features.resolution.label, '1080p');
+  assert.equal(qf1.features.derived.peerCount, 3);
+  // size 8589934592: 1 smaller (1401946675) → round(1/2*100) = 50
+  assert.equal(qf1.features.derived.sizeWithinResolutionPeerPercentile, 50);
 
+  const qf2 = cache.getMediaRequestResultQualityFeatures(requestId, 2);
+  assert.equal(qf2.features.size.bytes, 1401946675);
+  assert.equal(qf2.features.derived.peerCount, 3);
+  // size 1401946675: 0 smaller → 0th percentile
+  assert.equal(qf2.features.derived.sizeWithinResolutionPeerPercentile, 0);
+
+  // 2160p cohort: [25769803776] (single peer → percentile 50)
   const qf3 = cache.getMediaRequestResultQualityFeatures(requestId, 3);
   assert.equal(qf3.features.resolution.label, '2160p');
+  assert.equal(qf3.features.derived.peerCount, 1);
+  assert.equal(qf3.features.derived.sizeWithinResolutionPeerPercentile, 50);
 
   cache.close();
   rmSync(join(dbPath, '..'), { recursive: true, force: true });
