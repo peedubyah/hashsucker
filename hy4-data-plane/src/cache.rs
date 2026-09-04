@@ -48,6 +48,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use rusqlite::{params, Connection};
+use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 use crate::metrics::Metrics;
@@ -81,32 +82,40 @@ pub const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 // `torrent_files.id`. The key MUST be a deterministic representation of the
 // durable tuple: InfoHash + CanonicalInternalPath + Exact positive size.
 //
-// Key format: `tfkv\x1f<info_hash>\x1f<size_decimal>\x1f<canonical_path>`
-//   - `\x1f` (ASCII Unit Separator) is the field separator. The host's
-//     `canonicalizeInternalPath` allows arbitrary characters except
-//     backslash, NUL, and ".."-as-component; `\x1f` is not in any
-//     provider path report and is not forbidden, but even if it
-//     appeared in some future provider's path, the length-prefix-free
-//     form here is unambiguous because the size is a fixed-format
-//     decimal terminating at the next `\x1f`.
-//   - `info_hash` is always 40 lowercase hex chars (the DB has a CHECK
-//     constraint enforcing this on insert).
-//   - `size` is a positive safe integer serialized as decimal.
-//   - `canonical_path` is the verbatim canonicalized form.
+// Two-layer design (see also the §12.4 note in
+// docs/hy4/CROSS-FILE-KEYING-AUDIT.md):
+//
+//   1. LOGICAL key (`durable_key`) — a human-inspectable representation of
+//      the tuple, kept for metrics, forensics, and the in-memory
+//      capability single-flight (`sf_key`). Format:
+//        `tfkv\x1f<info_hash>\x1f<size_decimal>\x1f<canonical_path>`
+//      This string is NOT used to build any filesystem path.
+//
+//   2. PHYSICAL key (`physical_cache_key`, what `cache_key()` returns) — a
+//      fixed-width SHA-256 digest of an UNAMBIGUOUS LENGTH-PREFIXED
+//      encoding of (info_hash, canonical_path, size). The digest is a
+//      64-char lowercase hex string with NO path-unsafe characters, so it
+//      is safe as a single directory name under `cache/<digest>/<chunk>.chunk`
+//      and as an object-store key. The length-prefixed encoding prevents
+//      the delimiter-ambiguity failures that a naive `info_hash|path|size`
+//      concatenation would have (e.g. "ab"+"cde"+"10" vs "abc"+"de"+"10"
+//      both collapse to "abcde10").
 //
 // `tf_id_durable` is RETAINED as a field for logging and forensics (it
 // identifies the current DB row, which is still useful), but it is NOT
 // the cache key, and changing the surrogate id for the same logical
 // TorrentFile does NOT change the cache key.
 //
-// See docs/hy4/CROSS-FILE-KEYING-AUDIT.md §11 (P3 final identity check).
+// See docs/hy4/CROSS-FILE-KEYING-AUDIT.md §11 (P3 final identity check)
+// and §12 (the corrected cache key, two-layer design).
 // ---------------------------------------------------------------------------
 
 /// The frozen, durable identity of a cached file. Bytes are interchangeable across
 /// providers only under the same `TorrentFileId`.
 ///
-/// The cache key is the deterministic `durable_key` (a representation of
-/// `info_hash + canonical_path + size`); see the file-level note above.
+/// The physical cache key (`cache_key()`, a SHA-256 digest of the durable
+/// tuple) is stable across host DB lifecycle changes; see the file-level
+/// note above for the two-layer design.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TorrentFileId {
     /// Current host DB row id from S-1 (`torrent_files.id`). RETAINED for
@@ -118,14 +127,20 @@ pub struct TorrentFileId {
     pub info_hash: String,
     pub canonical_path: String,
     pub size: u64,
-    /// Deterministic key derived from `(info_hash, canonical_path, size)`.
-    /// Stable across DB reconstruction, import, merge, repair, restart.
-    /// Computed once at construction and reused.
+    /// LOGICAL key: a human-inspectable representation of
+    /// `(info_hash, canonical_path, size)`. Used for metrics, forensics,
+    /// and the in-memory capability single-flight (`sf_key`). NOT used to
+    /// build any filesystem path.
     pub durable_key: String,
+    /// PHYSICAL key: fixed-width SHA-256 digest of the length-prefixed
+    /// tuple. This is what `cache_key()` returns and the only string used
+    /// to build filesystem/object paths. Safe as a single directory name.
+    pub physical_cache_key: String,
 }
 
 impl TorrentFileId {
-    /// Build a `TorrentFileId` and compute its deterministic `durable_key`.
+    /// Build a `TorrentFileId` and compute both the logical `durable_key`
+    /// and the physical `physical_cache_key`.
     pub fn new(
         tf_id_durable: String,
         info_hash: String,
@@ -133,29 +148,61 @@ impl TorrentFileId {
         size: u64,
     ) -> Self {
         let durable_key = Self::compute_durable_key(&info_hash, &canonical_path, size);
+        let physical_cache_key =
+            Self::compute_physical_cache_key(&info_hash, &canonical_path, size);
         Self {
             tf_id_durable,
             info_hash,
             canonical_path,
             size,
             durable_key,
+            physical_cache_key,
         }
     }
 
-    /// The cache key. Stable across host DB lifecycle changes.
+    /// The cache key: a fixed-width SHA-256 digest of the durable tuple.
+    /// Stable across host DB lifecycle changes and SAFE as a single path
+    /// component (`cache/<digest>/<chunk>.chunk`) and as an object-store key.
     pub fn cache_key(&self) -> String {
-        self.durable_key.clone()
+        self.physical_cache_key.clone()
     }
 
-    /// The deterministic key for `(info_hash, canonical_path, size)`.
-    /// Public so the capability layer (manager.rs) can derive the same
-    /// key without going through a full `TorrentFileId`.
+    /// LOGICAL key for `(info_hash, canonical_path, size)`. Public so the
+    /// capability layer (manager.rs) can derive the same key without going
+    /// through a full `TorrentFileId`. Used for `sf_key`, not for paths.
     pub fn compute_durable_key(info_hash: &str, canonical_path: &str, size: u64) -> String {
         // \x1f is the ASCII Unit Separator; it is the conventional
-        // unambiguous field delimiter in data engineering. It is not
-        // forbidden by canonicalizeInternalPath, but no provider in
-        // scope has ever reported a path containing it.
+        // unambiguous field delimiter in data engineering. This string is
+        // the LOGICAL key only — it is never used to build a path.
         format!("tfkv\x1f{}\x1f{}\x1f{}", info_hash, size, canonical_path)
+    }
+
+    /// PHYSICAL key: SHA-256 (hex, 64 chars) over an unambiguous
+    /// length-prefixed encoding of `(info_hash, canonical_path, size)`.
+    /// The length prefix makes the encoding delimiter-free, so two tuples
+    /// that would collide under naive concatenation stay distinct. The
+    /// resulting digest is path-safe: no `/`, no `\x1f`, no spaces, fixed 64
+    /// lowercase hex chars.
+    pub fn compute_physical_cache_key(
+        info_hash: &str,
+        canonical_path: &str,
+        size: u64,
+    ) -> String {
+        let mut buf = Vec::with_capacity(
+            4 + info_hash.len() + 4 + canonical_path.len() + 8,
+        );
+        let ih = info_hash.as_bytes();
+        let cp = canonical_path.as_bytes();
+        // Length-prefixed, big-endian. Unambiguous regardless of which
+        // characters the canonical path contains (including `/`, spaces,
+        // Unicode, or `\x1f`).
+        buf.extend_from_slice(&(ih.len() as u32).to_be_bytes());
+        buf.extend_from_slice(ih);
+        buf.extend_from_slice(&(cp.len() as u32).to_be_bytes());
+        buf.extend_from_slice(cp);
+        buf.extend_from_slice(&size.to_be_bytes());
+        let digest = Sha256::digest(&buf);
+        hex::encode(digest)
     }
 }
 
@@ -1680,9 +1727,9 @@ mod tests {
         );
 
         // ---- 1. Cache keys are distinct ----
-        // The key is a deterministic representation of the durable tuple
-        // (info_hash, canonical_path, size). Sibling files that share
-        // info_hash MUST still have distinct keys, because canonical_path
+        // The PHYSICAL key (`cache_key()`) is a SHA-256 digest of the durable
+        // tuple (info_hash, canonical_path, size). Sibling files that share
+        // info_hash MUST still have distinct digests, because canonical_path
         // and/or size differ.
         let key_a = tf_a.cache_key();
         let key_b = tf_b.cache_key();
@@ -1691,19 +1738,22 @@ mod tests {
             "SAME info_hash sibling files MUST have distinct cache keys \
              (durable tuple differs in path and/or size)"
         );
-        // The new key shape: "tfkv\x1f<info_hash>\x1f<size>\x1f<path>".
-        assert!(
-            key_a.starts_with("tfkv\x1f") && key_a.contains(SHARED_INFO_HASH)
-                && key_a.contains("Siblings/episode_01.mkv")
-                && key_a.contains("16777216"),
-            "key_a must be the deterministic (info_hash, size, path) tuple (got {key_a:?})"
-        );
-        assert!(
-            key_b.starts_with("tfkv\x1f") && key_b.contains(SHARED_INFO_HASH)
-                && key_b.contains("Siblings/episode_02.mkv")
-                && key_b.contains("25165824"),
-            "key_b must be the deterministic (info_hash, size, path) tuple (got {key_b:?})"
-        );
+        // The physical key is a fixed-width 64-char lowercase hex digest,
+        // path-safe (no `/`, no `\x1f`, no spaces) — so it can be a single
+        // directory name under `cache/<digest>/<chunk>.chunk`.
+        for (label, k) in [("key_a", &key_a), ("key_b", &key_b)] {
+            assert!(
+                k.len() == 64 && k.bytes().all(|b| b.is_ascii_hexdigit()),
+                "{label} must be a 64-char hex SHA-256 digest (got {k:?})"
+            );
+            assert!(
+                !k.contains('/') && !k.contains('\x1f') && !k.contains(' '),
+                "{label} must be path-safe (got {k:?})"
+            );
+        }
+        // The LOGICAL key still carries the tuple for inspectability.
+        assert!(tf_a.durable_key.contains(SHARED_INFO_HASH));
+        assert!(tf_b.durable_key.contains(SHARED_INFO_HASH));
 
         // ---- 2. Fill chunk 0 of each with distinguishable bytes ----
         let grid_a = e.grid_for(&tf_a);
@@ -2017,5 +2067,193 @@ mod tests {
             sf_a, sf_sibling,
             "Different canonical_path MUST yield a different sf_key"
         );
+    }
+
+    // ─── P3 microscopic correction: physical key must be path-safe ──────
+    //
+    // The logical durable tuple
+    //   `tfkv\x1f<info_hash>\x1f<size>\x1f<canonical_path>`
+    // is NOT used for any filesystem path. The physical key is a fixed-width
+    // SHA-256 digest of a length-prefixed encoding of the tuple, so even a
+    // canonical path that contains `/`, spaces, Unicode, the old `\x1f`
+    // delimiter, `..` traversal sequences, or Windows-style `\` separators
+    // MUST map to a single flat, path-safe cache directory — never a nested
+    // path, never containing the raw path text.
+
+    #[test]
+    fn cache_key_is_path_safe_and_stable_for_adversarial_canonical_paths() {
+        // Adversarial canonical paths: nested directories, spaces,
+        // Unicode, ASCII Unit Separator (the old delimiter), `..`
+        // traversal attempts, and Windows-style backslash separators.
+        // Every one MUST map to a single flat, path-safe, deterministic
+        // cache directory — never a nested path and never containing the
+        // raw path.
+        let adversarial: &[&str] = &[
+            "Season 01/Episode 02.mkv",
+            "Movie Title (2024)/Part 1/Clip.mkv",
+            "日本語/ファイル名.mkv",
+            "weird\x1fname.mkv",
+            "../escape/attempt.mkv",
+            "dir\\sub\\file.mkv",
+            "foo bar/baz qux.mkv",
+            "🎬/movie✓.mkv",
+            "a/b/c/d/e/f/g/h/nested.mkv",
+        ];
+        const INFO_HASH: &str = "0123456789abcdef0123456789abcdef01234567";
+        const SIZE: u64 = 1_000_000_000;
+
+        let (e, _tf) = mk();
+        let root_comps = e.cfg.root.components().count();
+
+        for p in adversarial {
+            // Determinism across construction methods.
+            let k1 = TorrentFileId::compute_physical_cache_key(INFO_HASH, p, SIZE);
+            let k2 = TorrentFileId::new("tf_x".into(), INFO_HASH.into(), p.to_string(), SIZE)
+                .cache_key();
+            assert_eq!(k1, k2, "compute_physical_cache_key and cache_key() must agree for {p:?}");
+
+            // Fixed-width 64-char lowercase hex digest.
+            assert!(
+                k1.len() == 64 && k1.bytes().all(|b| b.is_ascii_hexdigit()),
+                "physical key for {p:?} must be a 64-char hex digest (got {k1:?})"
+            );
+            // Path-safe: no separators, no control char, no space.
+            assert!(
+                !k1.contains('/')
+                    && !k1.contains('\\')
+                    && !k1.contains('\x1f')
+                    && !k1.contains(' '),
+                "physical key for {p:?} must be path-safe (got {k1:?})"
+            );
+
+            // The raw canonical path must NOT appear anywhere in the
+            // on-disk path (this is the core of the correction).
+            let chunk_path = e.chunk_path(&k1, 0);
+            let ps = chunk_path.to_string_lossy();
+            assert!(
+                !ps.contains(p),
+                "raw canonical path {p:?} MUST NOT appear in the filesystem path {ps:?}"
+            );
+
+            // The cache directory MUST be exactly one level beneath root
+            // (flat), proving a nested `/`-laden canonical path does not
+            // expand into a directory tree.
+            let dir_comps = e.chunk_dir(&k1).components().count();
+            assert_eq!(
+                dir_comps,
+                root_comps + 1,
+                "cache dir for {p:?} must be a single level beneath root (flat), not nested"
+            );
+        }
+    }
+
+    #[test]
+    fn adversarial_path_with_slashes_and_unicode_survives_surrogate_pk_change() {
+        const INFO_HASH: &str = "deadbeefcafe0000deadbeefcafe0000deadbeef";
+        // A real-world torrent-internal path: nested directories, spaces,
+        // parentheses, and Unicode. This is precisely the content that made
+        // the old `root.join("tfkv\x1f...canonical_path")` key unsafe.
+        const CANONICAL: &str = "Season 01/ Episode 02 (1080p) — 日本語.mkv";
+        const SIZE: u64 = 3_500_000_000;
+
+        let before = TorrentFileId::new(
+            "tf_before_rebuild".into(),
+            INFO_HASH.into(),
+            CANONICAL.into(),
+            SIZE,
+        );
+        let after = TorrentFileId::new(
+            "tf_after_rebuild_uuid".into(),
+            INFO_HASH.into(),
+            CANONICAL.into(),
+            SIZE,
+        );
+
+        assert_ne!(
+            before.tf_id_durable, after.tf_id_durable,
+            "PKs differ by construction — simulating a host DB rebuild"
+        );
+        // Same logical TorrentFile → identical digest even though the path
+        // contains '/', spaces, and Unicode.
+        assert_eq!(
+            before.cache_key(),
+            after.cache_key(),
+            "cache_key() MUST be invariant under PK change even with an \
+             adversarial (nested/Unicode) canonical path"
+        );
+        // And the digest is a single flat directory name: it must not
+        // contain the raw path, nor any path-unsafe character.
+        let k = before.cache_key();
+        assert!(k.len() == 64 && k.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(
+            !k.contains('/') && !k.contains('\\') && !k.contains('\x1f') && !k.contains(' '),
+            "adversarial-path digest must be path-safe (got {k:?})"
+        );
+        assert!(
+            !k.contains("Season") && !k.contains("日本語"),
+            "raw canonical path MUST NOT leak into the physical cache key"
+        );
+    }
+
+    #[test]
+    fn length_prefixed_encoding_avoids_concatenation_collision() {
+        // Two DISTINCT tuples whose fields would collide under naive byte
+        // concatenation (no length prefix): "ab"+"cde"+"10" == "abc"+"de"+"10".
+        let ih1 = "ab";
+        let cp1 = "cde";
+        let size1: u64 = 10;
+        let ih2 = "abc";
+        let cp2 = "de";
+        let size2: u64 = 10;
+
+        // Demonstrate the naive failure mode (this is exactly the bug a
+        // delimiter-free length-prefixed encoding is required to avoid).
+        let naive1 = format!("{ih1}{cp1}{size1}");
+        let naive2 = format!("{ih2}{cp2}{size2}");
+        assert_eq!(
+            naive1, naive2,
+            "naive concatenation of these two DISTINCT tuples collides — \
+             this is the failure mode the length-prefix must prevent"
+        );
+
+        // The length-prefixed SHA-256 digest keeps them distinct.
+        let k1 = TorrentFileId::compute_physical_cache_key(ih1, cp1, size1);
+        let k2 = TorrentFileId::compute_physical_cache_key(ih2, cp2, size2);
+        assert_ne!(
+            k1, k2,
+            "length-prefixed encoding MUST keep tuples distinct even when \
+             naive concatenation collides"
+        );
+        // And both are proper digests.
+        for k in [&k1, &k2] {
+            assert!(
+                k.len() == 64 && k.bytes().all(|b| b.is_ascii_hexdigit()),
+                "physical key must be a 64-char hex digest (got {k:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn sibling_adversarial_paths_yield_distinct_cache_keys() {
+        const SHARED_INFO_HASH: &str = "cafebeefcafebeefcafebeefcafebeefcafebeef";
+        const SIZE: u64 = 1_234_567;
+        // Two sibling files whose canonical paths differ ONLY in a
+        // separator-like or Unicode character — the kind of near-collision
+        // that a weak key would alias.
+        let cases: &[(&str, &str)] = &[
+            ("Season 01/Episode 01.mkv", "Season 01/Episode 02.mkv"),
+            ("Movies/Семнадцать.mkv", "Movies/Семнадцать!.mkv"), // Cyrillic
+            ("path\x1fname.mkv", "path\x1fname2.mkv"),            // \x1f separator-like
+            ("dir/sub/file.mkv", "dir\\sub\\file.mkv"),           // '/' vs '\'
+        ];
+        for (pa, pb) in cases {
+            let ta = TorrentFileId::new("tf_a".into(), SHARED_INFO_HASH.into(), pa.to_string(), SIZE);
+            let tb = TorrentFileId::new("tf_b".into(), SHARED_INFO_HASH.into(), pb.to_string(), SIZE);
+            assert_ne!(
+                ta.cache_key(),
+                tb.cache_key(),
+                "sibling paths {pa:?} vs {pb:?} MUST yield distinct cache keys"
+            );
+        }
     }
 }

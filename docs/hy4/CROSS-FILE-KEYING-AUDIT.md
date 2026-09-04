@@ -58,6 +58,17 @@ Three genuine keying issues were found and fixed at the narrowest seam:
    `info_hash + canonical_path + size`. See §11 for the durability
    audit and §12 for the corrected key.
 
+4. **P3 microscopic correction (physical encoding).** The durable tuple
+   is the correct *logical* key, but using it directly as a directory
+   name via `root.join(key)` is unsafe: torrent-internal `canonical_path`
+   contains `/` (nested-dir + `../` traversal concern) and the `\x1f`
+   delimiter is not Windows-FS-safe. The fix (§12.4) separates logical
+   identity from physical storage encoding — the tuple stays the semantic
+   key (`durable_key`), while `cache_key()` returns a fixed-width
+   SHA-256 digest of a length-prefixed tuple, safe as a single directory
+   name `cache/<digest>/<chunk>.chunk` and as an object-store key. VFS is
+   gated on this correction.
+
 After all three fixes, every shared key in the service is file-specific
 by construction, and the cache keying has no heuristic dependency on
 host normalization and no dependency on the (non-durable) host PK.
@@ -123,23 +134,43 @@ itself declares as the identity grain. The PK is retained for logging
 and forensics:
 
 ```rust
-// after P3 correction + P3 final identity check
+// after P3 correction + P3 final identity check + P3 microscopic correction
 impl TorrentFileId {
     pub fn new(tf_id_durable: String, info_hash: String,
                canonical_path: String, size: u64) -> Self {
         let durable_key = Self::compute_durable_key(
             &info_hash, &canonical_path, size);
-        Self { tf_id_durable, info_hash, canonical_path, size, durable_key }
+        let physical_cache_key = Self::compute_physical_cache_key(
+            &info_hash, &canonical_path, size);
+        Self { tf_id_durable, info_hash, canonical_path, size,
+               durable_key, physical_cache_key }
     }
+    /// PHYSICAL key: SHA-256 digest of a length-prefixed tuple. Returned
+    /// by cache_key(); the only string used to build filesystem/object
+    /// paths. NOT the host PK (surrogate, can change) and NOT the logical
+    /// tuple string (not path-safe).
     pub fn cache_key(&self) -> String {
-        // The deterministic tuple key. NOT the host PK — the PK is
-        // a SQLite surrogate that can change across reconstruction.
-        // The tuple key is invariant under any host DB change.
-        self.durable_key.clone()
+        self.physical_cache_key.clone()
     }
     pub fn compute_durable_key(info_hash: &str, canonical_path: &str,
                                size: u64) -> String {
         format!("tfkv\x1f{}\x1f{}\x1f{}", info_hash, size, canonical_path)
+    }
+    pub fn compute_physical_cache_key(info_hash: &str, canonical_path: &str,
+                                      size: u64) -> String {
+        // Length-prefixed (big-endian u32 len + bytes) so the encoding is
+        // delimiter-free and cannot collide under naive concatenation.
+        // SHA-256 -> 64-char lowercase hex digest, safe as a single path
+        // component and as an object-store key.
+        let mut buf = Vec::new();
+        let ih = info_hash.as_bytes();
+        let cp = canonical_path.as_bytes();
+        buf.extend_from_slice(&(ih.len() as u32).to_be_bytes());
+        buf.extend_from_slice(ih);
+        buf.extend_from_slice(&(cp.len() as u32).to_be_bytes());
+        buf.extend_from_slice(cp);
+        buf.extend_from_slice(&size.to_be_bytes());
+        hex::encode(sha2::Sha256::digest(&buf))
     }
 }
 ```
@@ -175,23 +206,36 @@ reconstruction that changes the surrogate PK.
 - Three-line change in `provider.rs` (3 sites): only comments updated
   (the value passed is `tf.id.clone()` — informational, not a key).
 
-No new crate dependencies. `sha2` / `hex` not used: the literal
-`\x1f`-delimited tuple format is collision-free without hashing. The
-Slice 4 cache on-disk layout is unchanged (file-per-chunk keyed by a
-string). Existing cached bytes written under any of the previous keys
-(PK-as-key, or the pre-P3 heuristic composite) are orphaned in the
-same volume but not matchable by the new key — this is acceptable
-because the only pre-existing volume contents are the lab's smoke
-fixtures and are not load-bearing.
+**NEW crate dependencies (P3 microscopic correction).** `sha2 = "0.10"`
+and `hex = "0.4"` are now required and pinned in `Cargo.toml` /
+`Cargo.lock`. They power `compute_physical_cache_key` only; the logical
+`durable_key` (tuple) carries no hashing dependency. The Slice 4 cache
+on-disk layout changes from `cache/<tuple-string>/<chunk>.chunk` to
+`cache/<64-hex-digest>/<chunk>.chunk` — a single flat directory per
+TorrentFile, never nested. Existing cached bytes written under any of the
+previous keys (PK-as-key, the pre-P3 heuristic composite, or the raw
+`tfkv\x1f...` tuple string) are orphaned in the same volume but not
+matchable by the new digest key — acceptable because the only
+pre-existing volume contents are the lab's smoke fixtures and are not
+load-bearing.
 
 ## 2. Cache keying (`cache.rs`)
 
-`TorrentFileId::cache_key()` is now a deterministic representation of
-the durable tuple `(info_hash, canonical_path, size)`. The format is
-`tfkv\x1f<info_hash>\x1f<size_decimal>\x1f<canonical_path>` where
-`\x1f` is the ASCII Unit Separator. This is **not** the host PK
-(`torrent_files.id`); it is derived only from the three fields the
-schema itself declares as the identity grain (see §11 and §12).
+`TorrentFileId` uses a **two-layer key** (see §12.4):
+
+- **Logical key** (`durable_key: String`) — the human-inspectable tuple
+  `tfkv\x1f<info_hash>\x1f<size_decimal>\x1f<canonical_path>` (where
+  `\x1f` is the ASCII Unit Separator). Used for `Slot::sf_key()`,
+  metrics, and forensics. **Never** used to build a filesystem path.
+- **Physical key** (`physical_cache_key: String`, what `cache_key()`
+  returns) — a fixed-width SHA-256 digest (64-char lowercase hex) of a
+  length-prefixed encoding of `(info_hash, canonical_path, size)`. This
+  is the only string used to build on-disk paths
+  (`cache/<digest>/<chunk>.chunk`) and is safe as an object-store key.
+
+Both are derived only from the three fields the schema itself declares as
+the identity grain (see §11), and **neither** is the host PK
+(`torrent_files.id`).
 
 The current host PK is still carried on `TorrentFileId.tf_id_durable`
 for logging, forensics, and downstream messaging — but it is NOT the
@@ -303,11 +347,13 @@ explicitly.
 
 ## 7. Items the brief asked about, in order
 
-- **Cache keys** — `TorrentFileId::cache_key()` is the deterministic
-  tuple `tfkv\x1f<info_hash>\x1f<size>\x1f<canonical_path>`. File-specific.
-  P3 correction replaced the heuristic composite with the host PK; the
-  P3 final identity check replaced the host PK with the deterministic
-  tuple (because the PK is a surrogate, not durable — see §11, §12).
+- **Cache keys** — `TorrentFileId::cache_key()` returns the **physical**
+  SHA-256 digest of the length-prefixed durable tuple
+  `(info_hash, canonical_path, size)` (see §12.4). The logical
+  `durable_key` `tfkv\x1f<info_hash>\x1f<size>\x1f<canonical_path>` is the
+  inspectable tuple used for `Slot::sf_key()` and metrics. Both are
+  file-specific and invariant under any host DB reconstruction that changes
+  the surrogate PK (because neither is the PK — see §11, §12).
 - **Capability-manager keys** — `Slot::sf_key` 5-tuple where the
   `tf_id` slot is the deterministic durable_key (the same tuple).
   File-specific and invariant under any host DB reconstruction that
@@ -365,8 +411,11 @@ explicitly.
     `durable_key` once at construction.
   - Added `TorrentFileId::compute_durable_key(info_hash, canonical_path,
     size)` static method.
-  - `cache_key()` now returns `self.durable_key.clone()` — the
-    deterministic tuple key, not the host PK.
+  - `cache_key()` now returns `self.physical_cache_key.clone()` — the
+    SHA-256 digest of the length-prefixed tuple (the physical key), not
+    the host PK and not the literal tuple string. A new field
+    `physical_cache_key` and method `compute_physical_cache_key` were
+    added; `durable_key` remains the logical key.
   - Five new in-crate tests cover the durability contract (see §11).
   - All existing test sites converted to `::new()`; the sibling-file
     test rewritten to assert the new key shape.
@@ -429,18 +478,21 @@ P3 step 3 fix did not have a single, consistent identity for the cache
 key. There were two distinct `TorrentFileId` construction sites in
 `serve.rs`, each with a different (and in one case, wrong) identity.
 
-After the P3 correction, both construction sites use the host PK
-(`tf_id_durable`) for `TorrentFileId::cache_key()`. The new in-crate
-test `same_info_hash_sibling_files_get_distinct_cache_entries` proves
-this end-to-end at the cache layer.
+After the P3 final identity check, both construction sites use
+`TorrentFileId::new(...)`, which computes both the logical `durable_key`
+and the physical `physical_cache_key`. `cache_key()` returns the physical
+digest; the host PK is never the cache key. The new in-crate test
+`same_info_hash_sibling_files_get_distinct_cache_entries` proves this
+end-to-end at the cache layer.
 
 **P3 final identity check refinement.** The P3 final identity check
 (§11) further refines this: `tf_id_durable` is *not* durable across
 host DB reconstruction. The run-loop's `tf_id_durable_clone` is now
 passed to `TorrentFileId::new(...)` and used as the
 `tf_id_durable` field of the struct, but `cache_key()` is the
-deterministic tuple `tfkv\x1f<info_hash>\x1f<size>\x1f<canonical_path>`
-— *not* `tf_id_durable.clone()`. The PK is informational only.
+physical `physical_cache_key` (a SHA-256 digest of the length-prefixed
+tuple — see §12.4) — *not* `tf_id_durable.clone()`. The PK is
+informational only.
 
 ## 11. P3 final identity check — durability audit
 
@@ -573,15 +625,30 @@ new assertions check the `tfkv\x1f...` shape directly).
 
 ## 12. The corrected cache key
 
-### 12.1 Why a deterministic tuple, not a hash
+### 12.1 Why the tuple is the logical key, and a hash is the physical key
 
 The natural temptation is to hash `(info_hash, canonical_path, size)`
-and use the hex digest as the cache key. The P3 brief is explicit:
-"do not derive from provider path. Do not use providerFileId." A
-hash adds a dependency (`sha2` / `hex` in `Cargo.toml`) for no
-correctness benefit — the literal tuple is already
-collision-free, filesystem-safe, and human-readable in
-diagnostics.
+and use the hex digest directly as *both* the key and the path. The P3
+brief is explicit: "do not derive from provider path. Do not use
+providerFileId." The literal tuple `tfkv\x1f<info_hash>\x1f<size>\x1f<canonical_path>`
+is kept as the **logical** key (`durable_key`) because it is already
+collision-free and human-readable in diagnostics, with no dependency
+needed for *that* layer.
+
+But the literal tuple is **not filesystem-safe**, so it cannot be the
+**physical** path component:
+
+- torrent-internal `canonical_path` routinely contains `/`
+  (e.g. `Season 01/Episode 02.mkv`); used directly as `root.join(key)`
+  it would expand into nested directories and reintroduce `../`
+  traversal concerns;
+- the `\x1f` Unit-Separator control character is not Windows-FS-safe if
+  the cache ever leaves the Linux Docker volume.
+
+The microscopic correction (§12.4) therefore splits the two: the tuple
+stays the semantic/logical key, and `cache_key()` returns a fixed-width
+SHA-256 digest of a length-prefixed tuple encoding — `sha2` / `hex` in
+`Cargo.toml` are now required, but only for the physical namespace.
 
 The chosen format is:
 
@@ -616,9 +683,13 @@ callers:
    from the S-1 projected fields:
    `crate::cache::TorrentFileId::compute_durable_key(&tf.info_hash, tf.canonical_internal_path.as_deref().unwrap_or(""), tf.size)`.
 
-`Slot::sf_key()` and `TorrentFileId::cache_key()` are both
-implementations of "use the `durable_key` field, verbatim." There is
-no other code path that derives a cache or single-flight key.
+`Slot::sf_key()` uses the logical `durable_key` field verbatim (in-memory
+single-flight, never a path). `TorrentFileId::cache_key()` returns the
+**physical** `physical_cache_key` (the SHA-256 digest) and is the only
+string used to build on-disk paths. The two are intentionally distinct:
+a logical key must stay human-readable and stable for forensics, while a
+physical key must be path-safe and fixed-width. There is no other code
+path that derives a cache or single-flight key.
 
 ### 12.3 What the host PK is good for, after the change
 
@@ -626,8 +697,59 @@ no other code path that derives a cache or single-flight key.
 are still populated from `torrentFile.id`. Their new role is
 **informational**: logging, forensics, and any future
 host-aware messaging. They MUST NOT be used to namespace any
-persistent on-disk state. The doc comments on both fields say so
-explicitly.
+   persistent on-disk state. The doc comments on both fields say so
+   explicitly.
+
+### 12.4 Microscopic correction — separate logical identity from physical storage encoding
+
+**Problem.** The durable tuple decision (§12.1–12.3) is correct, but the
+*storage encoding* was not: `cache_key()` returned the literal
+`tfkv\x1f<info_hash>\x1f<size>\x1f<canonical_path>` and that string was
+used directly as a directory name via `root.join(key)`. Two defects:
+
+1. `canonical_path` can contain `/` (normal for torrent-internal paths).
+   `Season 01/Episode 02.mkv` turned the cache namespace into nested
+   directories, and `../`-style content became a path-construction
+   concern again.
+2. `\x1f` is not Windows-filesystem-safe if the cache ever leaves the
+   Linux Docker volume. The raw canonical path cannot be a single path
+   component.
+
+**Fix — two layers.**
+
+| Layer | Field | Value | Used for |
+|-------|-------|-------|----------|
+| Logical | `durable_key` | `tfkv\x1f<info_hash>\x1f<size>\x1f<canonical_path>` | metrics, forensics, `Slot::sf_key()` — never a path |
+| Physical | `physical_cache_key` (= `cache_key()`) | SHA-256 hex (64 chars) of length-prefixed `(info_hash, canonical_path, size)` | `cache/<digest>/<chunk>.chunk` and object-store keys |
+
+The digest is computed over an **unambiguous length-prefixed**
+representation — big-endian `u32` length + bytes for `info_hash`, then
+`canonical_path`, then `u64` size. The length prefix makes the encoding
+delimiter-free, so two tuples that would collide under naive
+concatenation (e.g. `(ab, cde, 10)` vs `(abc, de, 10)` → both
+`abcde10`) stay distinct. The resulting digest is path-safe: no `/`,
+no `\x1f`, no spaces, fixed 64 lowercase hex chars.
+
+This also fits the future object-store direction: the physical key is
+already a valid object key.
+
+**Tests added** (`hy4-data-plane/src/cache.rs`):
+
+- `cache_key_is_path_safe_and_stable_for_adversarial_canonical_paths` —
+  table of paths with `/`, spaces, Unicode, `\x1f`, `..`, and `\`
+  separators; asserts the digest is deterministic, 64-hex, path-safe,
+  that the raw path never appears in the on-disk path, and that the cache
+  directory is exactly one level beneath `root` (flat, never nested).
+- `adversarial_path_with_slashes_and_unicode_survives_surrogate_pk_change` —
+  a `/`-and-Unicode path with two different surrogate PKs yields the same
+  digest.
+- `length_prefixed_encoding_avoids_concatenation_collision` — proves the
+  length-prefixed encoding keeps two naively-colliding tuples distinct.
+- `sibling_adversarial_paths_yield_distinct_cache_keys` — sibling files
+  differing only in a separator/Unicode character get distinct digests.
+
+VFS is gated on this correction: HY4 must not enter VFS until the
+physical key is path-safe.
 
 ## 13. Adversarial same-infoHash proof (P3 correction test)
 
@@ -638,7 +760,8 @@ that proves the P3 correction under a worst-case setup:
 - Different `tf_id_durable`, different `canonical_path`, different `size`
 - The test fills chunk 0 of each with distinguishable bytes (0xAA vs
   0xBB) and asserts:
-  1. `cache_key()` values are distinct and contain the durable tuple key.
+  1. `cache_key()` values are distinct SHA-256 digests (the physical key);
+     the logical `durable_key` still carries the inspectable tuple.
   2. Both chunks are PRESENT (independent SQLite rows).
   3. `pread()` returns 0xAA for A and 0xBB for B (no cross-bleed).
   4. Warm reread cannot cross-alias.
