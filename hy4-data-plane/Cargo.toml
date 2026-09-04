@@ -3,20 +3,19 @@ name = "hy4-data-plane"
 version = "0.1.0"
 edition = "2021"
 
-# NOTE: the Frankenstein donor was a binary crate with [[bin]] path = "src/main.rs".
-# P2 deliberately does NOT transplant the lab main.rs -- it is a single-TorrentFile
-# bootstrap/router that must be re-authored at the host seam (see
-# docs/hy4/HY4-PHASE1-CLASSIFICATION.md §0). Until the serving core is extracted,
-# this crate builds as a library only.
 [lib]
 name = "hy4_data_plane"
 path = "src/lib.rs"
 
-# Dependency set is byte-identical to the donor, including the exact `axum = "=0.7.5"`
-# pin, so the P2 build attempt answers B-4 (do the pinned crates resolve?) against the
-# real set rather than a reduced one. `axum`, `futures-util` and `tokio-stream` are
-# currently unused by these seven modules -- they are used by the lab main.rs serving
-# core that lands later, and keeping them here means resolution is tested now.
+# P3 binary: multi-TorrentFile /files/:tfId + /metrics. This binary owns
+# startup. The serving core is in src/serve.rs (a library module, not a
+# duplicate of the lab main.rs). The lab's main.rs is NOT carried over.
+[[bin]]
+name = "hy4-data-plane"
+path = "src/main.rs"
+
+# Dependency set is byte-identical to the donor, including the exact
+# `axum = "=0.7.5"` pin. Cargo.lock pins the resolved graph.
 [dependencies]
 axum = "=0.7.5"
 tokio = { version = "1", features = ["full"] }
