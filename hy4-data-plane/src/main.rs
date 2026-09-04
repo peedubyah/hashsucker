@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use axum::{
     extract::{Path, State as AxumState},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -168,6 +168,7 @@ impl ServiceState {
 async fn handle_files(
     AxumState(svc): AxumState<Arc<ServiceState>>,
     Path(tf_id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
     // Per-request identity: fetch S-1, build a request-local AppState.
     // The lab's AppState carried the same five fields the new one does,
@@ -228,7 +229,7 @@ async fn handle_files(
         cache: svc.cache.as_ref().map(Arc::clone),
     });
 
-    get_file(axum::extract::State(state), Default::default()).await
+    get_file(axum::extract::State(state), headers).await
 }
 
 async fn handle_metrics(AxumState(svc): AxumState<Arc<ServiceState>>) -> Response {

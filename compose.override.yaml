@@ -1,0 +1,21 @@
+# P4 bring-up override (Windows dev host).
+#
+# The committed compose.yaml binds the media-search discovery store to the Linux
+# path /home/patrick/hashsucker-data/discovery, which does not exist on this
+# Windows dev host (a Windows-specific bind-path failure, NOT a credentials
+# problem). This override remaps the host bind to DISCOVERY_HOST_PATH (set in
+# .env to the preserved Windows state ./hy4-data/discovery, which holds the real
+# discovery-cache.db + control-plane.db with their -wal/-shm), and explicitly
+# points the VFS forwarder at the Rust data plane. The Rust data plane
+# (hy4-data-plane) uses a named volume (hy4-cache) and needs no host bind, so it
+# is untouched.
+#
+# Provided by the user (P4 bring-up):
+services:
+  media-search:
+    environment:
+      DATA_PLANE_URL: http://hy4-data-plane:3001
+    volumes:
+      - ${DISCOVERY_HOST_PATH:?Set DISCOVERY_HOST_PATH in .env}:/data
+      - ${REQUESTS_HOST_PATH:?Set REQUESTS_HOST_PATH in .env}:/requests
+      - ${STRM_HOST_PATH:?Set STRM_HOST_PATH in .env}:/strm
