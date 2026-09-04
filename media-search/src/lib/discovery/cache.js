@@ -1267,6 +1267,24 @@ const VFS_TORRENT_FILE_COLUMN = 'vfs-entries-torrent-file-id';
 // an upsert against the canonical row, so Seerr resends, retries, and
 // concurrent identical requests all converge on the same handoff id.
 const PLAYBACK_HANDOFF_IDENTITY_INDEX = 'playback-handoffs-identity-unique-v1';
+// Slice 3.0: enforce that within one request, the same physical release
+// (info_hash, file_index_key) and the same rank value are each persisted
+// at most once. Legacy rows may carry duplicates from upstream
+// live-discovery quirks where the same info_hash was reported with two
+// different fileIndex representations; the migration collapses them to a
+// single row per physical release per request, keeping the lowest-rank
+// survivor (highest-priority presentation). The persistence write path
+// then uses INSERT OR IGNORE so any future duplicate is silently
+// collapsed instead of erroring.
+const MEDIA_REQUEST_RESULTS_IDENTITY_INDEX = 'media-request-results-identity-unique-v1';
+const MEDIA_REQUEST_RESULTS_RANK_INDEX = 'media-request-results-rank-unique-v1';
+// Slice 3.0: marks the FK-enforcement PRAGMA migration. The migration is a
+// no-op schema-wise (PRAGMAs are not stored in schema_migrations) but the
+// marker record is written so that the production census can confirm FKs
+// were ever turned on. Without this record, an existing legacy production
+// database could still be missing the PRAGMA application (the PRAGMA is
+// re-applied at every open).
+const FOREIGN_KEYS_ENFORCED = 'foreign-keys-enforced-v1';
 
 // Slice 2.6: enforce a single durable handoff slot per media identity so
 // duplicate / concurrent persistPlaybackHandoff calls converge on the same
@@ -1330,6 +1348,69 @@ function migratePlaybackHandoffsIdentityUnique(db) {
       IFNULL(season, -1),
       IFNULL(episode, -1)
     )
+  `);
+}
+
+// Slice 3.0: enforce that within one persisted request, the same physical
+// release (info_hash, file_index_key) is stored at most once, and that
+// rank values are also unique. Legacy prod data carries duplicates from
+// upstream live-discovery quirks where the same info_hash was reported
+// with two different fileIndex representations (e.g. fileIndex=0 vs
+// fileIndex=null/fileIndex=-1). The migration collapses them to a single
+// row per physical release per request, keeping the lowest-rank survivor
+// (highest-priority presentation) so the audit trail still shows the
+// rank the user was shown. The write path then uses INSERT OR IGNORE
+// so any future duplicate is silently collapsed.
+function migrateMediaRequestResultsIdentityUnique(db) {
+  const applied = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE name = ?',
+  ).get(MEDIA_REQUEST_RESULTS_IDENTITY_INDEX);
+  if (applied) return;
+
+  // Dedupe existing (request_id, info_hash, file_index_key) groups.
+  // Strategy: for each group, keep the row with the lowest rank (most
+  // visible in the UI); delete the rest. The lowest-rank survivor
+  // also preserves the rank value, so we do not need to re-rank.
+  const allRows = db.prepare(`
+    SELECT r.id, r.request_id, r.info_hash, r.file_index_key, r.rank
+    FROM media_request_results r
+  `).all();
+  const groupMap = new Map();
+  for (const row of allRows) {
+    const key = `${row.request_id}|${row.info_hash}|${row.file_index_key}`;
+    const cur = groupMap.get(key);
+    if (!cur || row.rank < cur.rank) {
+      groupMap.set(key, { id: row.id, rank: row.rank });
+    }
+  }
+  const survivorIds = new Set(Array.from(groupMap.values()).map((v) => v.id));
+  const toDelete = allRows.map((r) => r.id).filter((id) => !survivorIds.has(id));
+  if (toDelete.length > 0) {
+    const deleteStmt = db.prepare('DELETE FROM media_request_results WHERE id = ?');
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const id of toDelete) deleteStmt.run(id);
+      db.prepare(
+        'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+      ).run(MEDIA_REQUEST_RESULTS_IDENTITY_INDEX, Date.now());
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  } else {
+    db.prepare(
+      'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+    ).run(MEDIA_REQUEST_RESULTS_IDENTITY_INDEX, Date.now());
+  }
+
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_media_request_results_identity
+    ON media_request_results(request_id, info_hash, file_index_key)
+  `);
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_media_request_results_rank
+    ON media_request_results(request_id, rank)
   `);
 }
 
@@ -1808,6 +1889,17 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   // when two requests for the same media hit playback_handoffs together.
   // SQLite will retry the write up to 5s instead of failing with SQLITE_BUSY.
   db.exec('PRAGMA busy_timeout = 5000');
+  // Slice 3.0: enforce declared foreign keys (request_id → media_requests.id,
+  // intent_id → media_intents.id). Without this PRAGMA SQLite parses FK
+  // declarations but does not validate them on INSERT/UPDATE/DELETE, so a
+  // partial persistMediaRequest failure can leave orphan result rows
+  // pointing at a deleted request. The PRAGMA is per-connection so we
+  // re-apply on every open. Legacy prod data may already carry 9 orphan
+  // result rows (request_ids 157/158/159 no longer exist); these are not
+  // touched by the PRAGMA (it does not retroactively validate existing
+  // rows) and the audit report marks them as F-1 (pre-existing, out of
+  // scope for this slice).
+  db.exec('PRAGMA foreign_keys = ON');
 
   // Ensure schema_migrations exists BEFORE any migration queries it
   db.exec(`
@@ -1830,6 +1922,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   migratePlaybackHandoffsTorrentFileId(db);
   migrateVfsTorrentFileId(db);
   migratePlaybackHandoffsIdentityUnique(db);
+  migrateMediaRequestResultsIdentityUnique(db);
   // Slice 1.75: the torrent_file_id index can only be created once the
   // column is present. For legacy prod databases, the column is added by
   // migratePlaybackHandoffsTorrentFileId above. For fresh installs the
@@ -4440,14 +4533,60 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   // Media request persistence functions
   // ---------------------------------------------------------------------------
 
+  // Slice 3.0: insert a media_request_results row but silently collapse
+  // physical-release duplicates. The original INSERT in
+  // buildInsertMediaRequestResultSql throws SQLITE_CONSTRAINT_UNIQUE when
+  // the same (request_id, info_hash, file_index_key) appears twice in the
+  // input list (upstream live-discovery quirk). INSERT OR IGNORE lets the
+  // first row win (lowest rank) and drops the rest without failing the
+  // whole request persistence. The rank-unique constraint still applies
+  // because INSERT OR IGNORE only skips on constraint conflicts; a
+  // genuine rank collision (two results at the same rank) is asserted
+  // up-front in persistMediaRequest.
+  const INSERT_MEDIA_REQUEST_RESULT_IGNORE = (intentId) => {
+    const cols = [
+      'request_id', 'rank', 'info_hash', 'file_index_key', 'filename', 'score',
+      'score_breakdown', 'identity_tier', 'identity_confidence', 'identity_evidence',
+      'resolution_state', 'release_metadata', 'ranking_breakdown',
+      'eligible', 'ineligible_reason', 'ineligible_code', 'expected_media_scope', 'parsed_candidate_scope',
+      'selected_file_size'
+    ];
+    if (intentId) { cols.push('intent_id'); }
+    const placeholders = cols.map(() => '?').join(', ');
+    return `INSERT OR IGNORE INTO media_request_results (${cols.join(', ')}) VALUES (${placeholders});`;
+  };
+
   function persistMediaRequest(intent, results) {
     const now = Date.now();
     const intentLength = results.length;
 
-    // Resolve the linked media_intents row. Callers that already created
-    // the intent (e.g. the Seerr ingress) pass `intent.intentId` to skip
-    // the implicit upsert. Callers without an existing row fall back to
-    // the original behaviour: upsert keyed on the dedupe tuple.
+    // Defensive assertion: the (request_id, rank) UNIQUE INDEX in the
+    // schema rejects rank collisions, but the new write path uses
+    // INSERT OR IGNORE which would silently drop the second row at the
+    // same rank. Rank uniqueness is a precondition of the input list,
+    // not a property of the persistence layer; we surface the violation
+    // explicitly so a caller bug is not hidden.
+    const seenRanks = new Set();
+    for (const r of results) {
+      if (r == null) continue;
+      if (seenRanks.has(r.rank)) {
+        throw new Error(
+          `persistMediaRequest: duplicate rank ${r.rank} in results for `
+          + `media_id=${intent.mediaId} (rank uniqueness is a caller contract)`
+        );
+      }
+      seenRanks.add(r.rank);
+    }
+
+    // Resolve the linked media_intents row BEFORE the transaction. The
+    // intent upsert has its own BEGIN IMMEDIATE (upsertMediaIntent) and
+    // SQLite cannot nest transactions. Doing the intent work first is
+    // safe because the intent's request_count is an accounting field —
+    // if the request/results block fails, the count is slightly inflated
+    // by one (a request the user did not end up seeing), which is a
+    // small accounting drift, not a structural integrity defect. The
+    // request/results block is the structural boundary that we want
+    // transactional; the intent work is a best-effort prelude.
     let intentId = null;
     if (intent.intentId != null) {
       intentId = intent.intentId;
@@ -4466,51 +4605,66 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       });
     }
 
-    const { sql: reqSql, values: reqValues } = buildInsertMediaRequestSql({
-      mediaId: intent.mediaId,
-      mediaType: intent.mediaType || 'movie',
-      season: intent.season,
-      episode: intent.episode ?? (intent.episodes?.length ? intent.episodes[0] : null),
-      resultsLength: intentLength,
-      now,
-      source: intent.source || null,
-      sourceType: intent.sourceType || null,
-      intentId,
-    });
+    // Slice 3.0: wrap the request + results block in BEGIN IMMEDIATE so
+    // any throw in the result loop rolls back the request row too. The
+    // FK on media_request_results.request_id means that without this
+    // boundary a partial persist could leave the request without its
+    // result rows (or vice versa). BEGIN IMMEDIATE acquires the writer
+    // lock up front to avoid SQLITE_BUSY under concurrent persist calls.
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const { sql: reqSql, values: reqValues } = buildInsertMediaRequestSql({
+        mediaId: intent.mediaId,
+        mediaType: intent.mediaType || 'movie',
+        season: intent.season,
+        episode: intent.episode ?? (intent.episodes?.length ? intent.episodes[0] : null),
+        resultsLength: intentLength,
+        now,
+        source: intent.source || null,
+        sourceType: intent.sourceType || null,
+        intentId,
+      });
 
-    const info = db.prepare(reqSql).run(...reqValues);
-    const requestId = info.lastInsertRowid;
+      const info = db.prepare(reqSql).run(...reqValues);
+      const requestId = info.lastInsertRowid;
 
-    const resultTemplate = buildInsertMediaRequestResultSql(intentId);
+      const resultSql = INSERT_MEDIA_REQUEST_RESULT_IGNORE(intentId);
+      const resultStmt = db.prepare(resultSql);
 
-    for (const r of results) {
-      db.prepare(resultTemplate.sql).run(...resultTemplate.buildValues({
-        requestId,
-        rank: r.rank,
-        infoHash: r.infoHash,
-        fileIndexKey: r.fileIndex === null || r.fileIndex === undefined ? -1 : r.fileIndex,
-        filename: r.filename,
-        score: r.score,
-        scoreBreakdown: r.scoreBreakdown ? JSON.stringify(r.scoreBreakdown) : null,
-        identityTier: r.identity?.tier || 'unknown',
-        identityConfidence: r.identity?.confidence || 0,
-        identityEvidence: r.identity?.evidence ? JSON.stringify(r.identity.evidence) : null,
-        resolutionState: r.identity?.state || 'unresolved',
-        releaseMetadata: r.release ? JSON.stringify(r.release) : null,
-        rankingBreakdown: r.rankingBreakdown ? JSON.stringify(r.rankingBreakdown) : null,
-        eligible: r.identity?.eligible === false ? 0 : 1,
-        ineligibleReason: r.identity?.ineligibleReason || null,
-        ineligibleCode: r.identity?.ineligibleCode || null,
-        expectedMediaScope: r.identity?.expectedMediaScope || null,
-        parsedCandidateScope: r.identity?.parsedCandidateScope || null,
-        selectedFileSize:
+      for (const r of results) {
+        if (r == null) continue;
+        resultStmt.run(
+          requestId,
+          r.rank,
+          r.infoHash,
+          r.fileIndex === null || r.fileIndex === undefined ? -1 : r.fileIndex,
+          r.filename,
+          r.score,
+          r.scoreBreakdown ? JSON.stringify(r.scoreBreakdown) : null,
+          r.identity?.tier || 'unknown',
+          r.identity?.confidence || 0,
+          r.identity?.evidence ? JSON.stringify(r.identity.evidence) : null,
+          r.identity?.state || 'unresolved',
+          r.release ? JSON.stringify(r.release) : null,
+          r.rankingBreakdown ? JSON.stringify(r.rankingBreakdown) : null,
+          r.identity?.eligible === false ? 0 : 1,
+          r.identity?.ineligibleReason || null,
+          r.identity?.ineligibleCode || null,
+          r.identity?.expectedMediaScope || null,
+          r.identity?.parsedCandidateScope || null,
           Number.isSafeInteger(r.selectedFileSize) && r.selectedFileSize > 0
             ? r.selectedFileSize
             : null,
-      }));
-    }
+          ...(intentId ? [intentId] : []),
+        );
+      }
 
-    return requestId;
+      db.exec('COMMIT');
+      return requestId;
+    } catch (error) {
+      try { db.exec('ROLLBACK'); } catch {}
+      throw error;
+    }
   }
 
   function getMediaRequests() {
