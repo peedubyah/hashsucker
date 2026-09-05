@@ -55,7 +55,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::cache::{CacheEngine, ChunkPlan, RunKind, TorrentFileId};
 use crate::metrics::{CacheDecision, Metrics, StageClock, StageReport};
-use crate::playback_intel::PlaybackIntelligence;
+use crate::playback_intel::{PlaybackIntelligence, PrefetchMode};
 use crate::transport::{Faults, OpenError, ResilientRangeReader, Step};
 
 pub const SUPPORTED_SCHEMA_VERSION: u64 = 1;
@@ -493,14 +493,26 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                 let pf = state.playback.clone();
                 tokio::spawn(async move {
                     // Speculative capability acquire, gated by the configured mode.
-                    //  * Try  : non-blocking — only fills when a capability is IMMEDIATELY
-                    //           free, so it can never delay demand or amplify provider API.
+                    //  * Auto (default): use Wait-style read-ahead ONLY when the capability
+                    //    manager reports a HEALTHY IDLE LANE (spare_capacity > 0); otherwise
+                    //    fall back to Try (non-blocking no-op). This keeps prefetch strictly
+                    //    safe under saturated demand — Wait is only ever chosen when a lane is
+                    //    provably idle, so demand can never be delayed by speculative work.
                     //  * Wait : bounded wait for a busy capability to free (idle gaps),
                     //           delivering real read-ahead; bounded so demand is never
                     //           delayed beyond one chunk fill.
+                    //  * Try  : non-blocking — only fills when a capability is IMMEDIATELY
+                    //           free, so it can never delay demand or amplify provider API.
                     // Either way: never grows the pool (no 2nd capability / extra requestdl)
                     // and never waits out a Throttle cooldown.
-                    let cap = if pf.config.is_wait() {
+                    let spare = mg.spare_capacity();
+                    let use_wait = match pf.config.mode {
+                        PrefetchMode::Wait => true,
+                        PrefetchMode::Try => false,
+                        PrefetchMode::Auto => spare > 0,
+                    };
+                    pf.record_auto_decision(spare, use_wait);
+                    let cap = if use_wait {
                         match mg.acquire_for_read_prefetch(pf.config.prefetch_priority).await {
                             Some(c) => c,
                             None => return,
@@ -521,6 +533,9 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         drop(cap);
                         return;
                     }
+                    // Claimed (owned) the coalescer record for this chunk: attribute it to
+                    // prefetch so a later demand read can observe & count it as prefetch-served.
+                    pf.mark_prefetch_inflight(&t.cache_key(), idx);
                     pf.chunks_requested.fetch_add(1, Ordering::SeqCst);
                     let g = c.grid_for(&t);
                     let f_start = g.chunk_start(idx);
@@ -560,11 +575,27 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     .await;
                     let ok = c.is_present(&t.cache_key(), idx).unwrap_or(false);
                     if ok {
+                        pf.mark_prefetch_completed(&t.cache_key(), idx);
                         pf.chunks_completed.fetch_add(1, Ordering::SeqCst);
                     } else {
                         pf.failures.fetch_add(1, Ordering::SeqCst);
                     }
                 });
+            }
+        }
+
+        // ---- P10: record demand-side prefetch usefulness ----
+        // For each chunk this demand will read, check whether it is ALREADY durable
+        // because of speculative prefetch (served_demand) or currently in-flight as a
+        // prefetch fill this demand joined (joined_by_demand). Purely observational —
+        // never blocks and never acquires a capability. Placed AFTER the prefetch spawn
+        // above so it observes prefetch state from *prior* requests, not this one.
+        if state.playback.config.enabled {
+            let last = grid.file_size.saturating_sub(1);
+            let d0 = grid.index_of(start);
+            let d1 = grid.index_of(end.min(last));
+            for di in d0..=d1 {
+                state.playback.record_demand_chunk(&key, di);
             }
         }
 

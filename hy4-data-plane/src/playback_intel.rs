@@ -30,8 +30,8 @@
 //     prefetch is issued for a superseded position, and prefetch always runs at
 //     the lowest priority so it never contends ahead of real demand.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -42,11 +42,18 @@ use crate::cache::{CacheEngine, ChunkGrid, TorrentFileId};
 /// How aggressively prefetch contends for a provider capability.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PrefetchMode {
+    /// Auto (default when prefetch is enabled): gate Wait-style read-ahead on REAL
+    /// spare capacity. If the capability manager reports a healthy idle lane
+    /// (spare_capacity > 0), use Wait (true read-ahead during idle gaps); otherwise
+    /// fall back to Try (non-blocking no-op). Conservative by construction — it can
+    /// never let speculative work delay demand, because the only time it escalates
+    /// to Wait is when a lane is provably idle.
+    Auto,
     /// Try-once, never wait. Prefetch only fills when a capability is IMMEDIATELY
     /// free, so it can never delay demand and never amplifies provider API. Under a
     /// saturated single-capability workload this yields 100% (harmless no-op); it
     /// fires whenever genuine idle capacity exists (multi-capability TorrentFiles,
-    /// or bursty/idle demand). SAFEST — the conservative default.
+    /// or bursty/idle demand). SAFEST — the conservative fallback.
     Try,
     /// Wait (briefly, bounded) for a busy capability to free, then fill ahead.
     /// Delivers true read-ahead during idle gaps, but may serialize behind demand
@@ -98,7 +105,8 @@ impl PfConfig {
             .as_deref()
         {
             Ok("wait") => PrefetchMode::Wait,
-            _ => PrefetchMode::Try,
+            Ok("try") => PrefetchMode::Try,
+            _ => PrefetchMode::Auto,
         };
         Self {
             enabled,
@@ -107,11 +115,6 @@ impl PfConfig {
             prefetch_priority,
             mode,
         }
-    }
-
-    /// True when prefetch should wait (bounded) for a busy capability to free.
-    pub fn is_wait(&self) -> bool {
-        matches!(self.mode, PrefetchMode::Wait)
     }
 }
 
@@ -138,6 +141,12 @@ struct PfTfState {
     generation: u64,
     hot: Vec<HotChunk>,
     last_active: Instant,
+    /// Chunks made durable by a COMPLETED prefetch fill. A later demand read that
+    /// hits one is genuinely served by prefetch (not by demand / earlier cache).
+    prefetched_done: HashSet<u64>,
+    /// Chunks currently claimed by an in-flight prefetch fill. A demand arriving now
+    /// would JOIN this fill, not find it durable yet.
+    prefetched_inflight: HashSet<u64>,
 }
 
 impl PfTfState {
@@ -151,6 +160,8 @@ impl PfTfState {
             generation: 0,
             hot: Vec::new(),
             last_active: Instant::now(),
+            prefetched_done: HashSet::new(),
+            prefetched_inflight: HashSet::new(),
         }
     }
 
@@ -288,6 +299,19 @@ pub struct PlaybackIntelligence {
     pub failures: AtomicU64,
     /// Number of seek events that reprioritized (generation bumps).
     pub seek_reprioritizations: AtomicU64,
+    // ---- P10: usefulness / value metrics ----
+    /// Demand reads that hit a chunk ALREADY made durable by prefetch before the
+    /// demand arrived. The core "prefetch is useful" signal.
+    pub served_demand: AtomicU64,
+    /// Demand reads that JOINED a prefetch fill still in-flight (chunk not yet
+    /// durable; demand waited on the SAME coalescer fill). Tracked separately
+    /// from `served_demand` per brief semantics (do not double-count).
+    pub joined_by_demand: AtomicU64,
+    /// Last observed spare-capacity signal (manager.spare_capacity). 0 = saturated.
+    pub last_spare_capacity: AtomicU32,
+    /// Auto-mode decisions: how often auto chose Wait (spare present) vs Try (no spare).
+    pub auto_selected_wait: AtomicU64,
+    pub auto_selected_try: AtomicU64,
 }
 
 impl PlaybackIntelligence {
@@ -302,6 +326,11 @@ impl PlaybackIntelligence {
             joined_inflight: AtomicU64::new(0),
             failures: AtomicU64::new(0),
             seek_reprioritizations: AtomicU64::new(0),
+            served_demand: AtomicU64::new(0),
+            joined_by_demand: AtomicU64::new(0),
+            last_spare_capacity: AtomicU32::new(0),
+            auto_selected_wait: AtomicU64::new(0),
+            auto_selected_try: AtomicU64::new(0),
         })
     }
 
@@ -411,6 +440,61 @@ impl PlaybackIntelligence {
         self.map.lock().unwrap().len()
     }
 
+    // ---- P10: prefetch attribution + demand-side usefulness ----
+
+    /// Mark a chunk as claimed by an in-flight prefetch fill. Called from the
+    /// background fill task immediately after the SAME coalescer claim succeeds, so a
+    /// simultaneous demand read can observe that it would JOIN this fill.
+    pub fn mark_prefetch_inflight(&self, key: &str, idx: u64) {
+        if let Some(s) = self.map.lock().unwrap().get_mut(key) {
+            s.prefetched_inflight.insert(idx);
+        }
+    }
+
+    /// Mark a chunk as made durable by a COMPLETED prefetch fill: move it out of the
+    /// in-flight set into the "done" set so a later demand read that hits it is
+    /// credited as `served_demand` (not merely joined).
+    pub fn mark_prefetch_completed(&self, key: &str, idx: u64) {
+        if let Some(s) = self.map.lock().unwrap().get_mut(key) {
+            s.prefetched_inflight.remove(&idx);
+            s.prefetched_done.insert(idx);
+        }
+    }
+
+    /// Record a demand read touching chunk `idx`, counting prefetch usefulness with
+    /// EXACT semantics:
+    ///   * served_demand    — chunk ALREADY durable because prefetch completed it
+    ///                        BEFORE this demand arrived (prefetch-credited, already-present).
+    ///   * joined_by_demand — chunk currently in-flight as a prefetch fill, so this
+    ///                        demand joined the SAME coalescer fill (not yet durable).
+    /// NOT counted: normal demand-filled chunks (in neither set); chunks already
+    /// durable for other reasons (earlier demand, not prefetch). Purely observational —
+    /// never blocks and never acquires a capability.
+    pub fn record_demand_chunk(&self, key: &str, idx: u64) {
+        if !self.config.enabled {
+            return;
+        }
+        let mut map = self.map.lock().unwrap();
+        if let Some(s) = map.get_mut(key) {
+            if s.prefetched_done.contains(&idx) {
+                self.served_demand.fetch_add(1, Ordering::SeqCst);
+            } else if s.prefetched_inflight.contains(&idx) {
+                self.joined_by_demand.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Record the Auto-mode gating decision so the proof can show which branch was
+    /// taken (and that Wait was never chosen under saturated demand).
+    pub fn record_auto_decision(&self, spare: u32, use_wait: bool) {
+        self.last_spare_capacity.store(spare, Ordering::SeqCst);
+        if use_wait {
+            self.auto_selected_wait.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.auto_selected_try.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     /// Serde snapshot for the /metrics endpoint. Bounded: returns the 8 most
     /// recently active TorrentFiles with their observed shape.
     pub fn snapshot(&self) -> serde_json::Value {
@@ -434,7 +518,7 @@ impl PlaybackIntelligence {
         };
         json!({
             "enabled": self.config.enabled,
-            "mode": match self.config.mode { PrefetchMode::Try => "try", PrefetchMode::Wait => "wait" },
+            "mode": match self.config.mode { PrefetchMode::Auto => "auto", PrefetchMode::Try => "try", PrefetchMode::Wait => "wait" },
             "ahead_chunks": self.config.ahead_chunks,
             "sequential_threshold": self.config.sequential_threshold,
             "prefetch_priority": self.config.prefetch_priority,
@@ -445,6 +529,11 @@ impl PlaybackIntelligence {
             "prefetch_joined_inflight": self.joined_inflight.load(Ordering::SeqCst),
             "prefetch_failures": self.failures.load(Ordering::SeqCst),
             "seek_reprioritizations": self.seek_reprioritizations.load(Ordering::SeqCst),
+            "prefetch_served_demand": self.served_demand.load(Ordering::SeqCst),
+            "prefetch_joined_by_demand": self.joined_by_demand.load(Ordering::SeqCst),
+            "spare_capacity": self.last_spare_capacity.load(Ordering::SeqCst),
+            "auto_selected_wait": self.auto_selected_wait.load(Ordering::SeqCst),
+            "auto_selected_try": self.auto_selected_try.load(Ordering::SeqCst),
             "active_torrent_files": self.active_count(),
             "top": top,
         })

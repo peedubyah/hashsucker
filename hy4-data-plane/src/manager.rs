@@ -604,6 +604,32 @@ impl CapabilityManager {
         None
     }
 
+    /// P10 — read-only SPARE-CAPACITY signal for gating Wait-style prefetch.
+    ///
+    /// Returns the count of capabilities that are *immediately free* right now:
+    /// `usable_now()` (not Dead/expired/Throttled) AND their maxInFlight=1 permit is
+    /// available. This is the exact number of healthy idle lanes. It does NOT redesign
+    /// the scheduler and does NOT create a queue — it is a single O(slots×caps) scan
+    /// used only to answer "is there a lane a speculative fill can borrow without making
+    /// demand wait?". `0` ⇒ the only lane is busy with demand ⇒ prefetch must stay in
+    /// Try mode (never Wait). No amplification, no pool growth, no new concurrency domain.
+    pub fn spare_capacity(&self) -> u32 {
+        let now = Instant::now();
+        let mut free = 0u32;
+        for slot in &self.slots {
+            if slot.breaker.is_open(now) {
+                continue;
+            }
+            let caps = slot.caps.lock().unwrap();
+            for cap in caps.iter() {
+                if cap.usable_now(now) && cap.limiter.available_permits() > 0 {
+                    free += 1;
+                }
+            }
+        }
+        free
+    }
+
     /// §5 DEAD-link path: a capability came back 401/403/404/410 (or provider dead-link
     /// evidence) on actual media use. The cap is suspect/dead, so we single-flight
     /// re-acquire a FRESH capability for the same coord ONCE and let the caller retry the
