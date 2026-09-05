@@ -31,6 +31,7 @@ pub mod capability;
 pub mod control;
 pub mod manager;
 pub mod metrics;
+pub mod playback_intel;
 pub mod provider;
 pub mod serve;
 pub mod transport;

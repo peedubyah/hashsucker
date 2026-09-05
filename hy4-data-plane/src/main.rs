@@ -45,6 +45,7 @@ use hy4_data_plane::{
     control::{fetch_control, ControlTorrentFile},
     manager::CapabilityManager,
     metrics::Metrics,
+    playback_intel::{PfConfig, PlaybackIntelligence},
     serve::{
         data_plane_error, get_file, metrics_handler, AppState, SUPPORTED_SCHEMA_VERSION,
     },
@@ -92,6 +93,9 @@ struct ServiceState {
     client: reqwest::Client,
     metrics: Arc<Metrics>,
     cache: Option<Arc<CacheEngine>>,
+    /// P9 playback-intelligence subsystem (shared, runtime-only). Constructed once
+    /// per process from env; disabled by default.
+    playback: Arc<PlaybackIntelligence>,
     /// Cache of per-tfId CapabilityManagers. The lab constructs one
     /// per process; we construct one per tfId and cache it. The keys
     /// here are S-1-projected identity; identity bleed would require
@@ -110,6 +114,7 @@ impl ServiceState {
             .build()
             .map_err(|e| format!("reqwest client build: {e}"))?;
         let metrics = Arc::new(Metrics::default());
+        let playback = PlaybackIntelligence::new(PfConfig::from_env());
         let cache = if let Some(root) = cfg.cache_root.as_ref() {
             let engine = CacheEngine::open(
                 CacheConfig {
@@ -134,6 +139,7 @@ impl ServiceState {
             client,
             metrics,
             cache,
+            playback,
             managers: tokio::sync::Mutex::new(HashMap::new()),
         }))
     }
@@ -234,6 +240,7 @@ async fn handle_files(
         metrics: svc.metrics.clone(),
         manager,
         cache: svc.cache.as_ref().map(Arc::clone),
+        playback: svc.playback.clone(),
     });
 
     get_file(axum::extract::State(state), headers).await
@@ -271,6 +278,7 @@ async fn handle_metrics(AxumState(svc): AxumState<Arc<ServiceState>>) -> Respons
         metrics: svc.metrics.clone(),
         manager: empty_mgr,
         cache: svc.cache.as_ref().map(Arc::clone),
+        playback: svc.playback.clone(),
     });
 
     metrics_handler(axum::extract::State(state)).await

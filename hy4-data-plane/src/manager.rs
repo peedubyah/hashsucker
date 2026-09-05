@@ -507,6 +507,103 @@ impl CapabilityManager {
         })
     }
 
+    /// P9 — best-effort, NON-BLOCKING capability acquire for SPECULATIVE
+    /// (prefetch) work.
+    ///
+    /// Returns `Some(cap)` only when a capability is *immediately free* — i.e.
+    /// `usable_now()` is true AND its `maxInFlight=1` permit is available. It
+    /// NEVER blocks on a busy permit, NEVER grows the pool (no 2nd capability /
+    /// extra requestdl), and NEVER waits out a Throttle cooldown. If no
+    /// capability is free right now, it returns `None` so the caller can drop the
+    /// speculative fill and never delay a real demand read.
+    ///
+    /// This is the single seam that keeps prefetch inside the SAME provider
+    /// scheduler/limiter/breaker the demand path uses: prefetch reuses an idle
+    /// capability instead of opening a parallel provider stack, and because the
+    /// acquire is non-blocking it can never sit in front of demand in the
+    /// limiter's wait queue.
+    pub fn acquire_for_read_try(&self, _priority: u8) -> Option<ReservedCapability> {
+        let now = Instant::now();
+        for slot in &self.slots {
+            if slot.breaker.is_open(now) {
+                continue;
+            }
+            // Drop dead/expired caps so a free one isn't masked by a prunable one.
+            // Scoped so the lock is released before first_usable_free re-locks.
+            {
+                let mut caps = slot.caps.lock().unwrap();
+                caps.retain(|c| !c.prunable(now));
+            }
+            if let Some(cap) = self.first_usable_free(slot, now) {
+                if let Some(r) = self.try_reserve(&cap) {
+                    self.metrics.record_cap_reuse();
+                    return Some(r);
+                }
+            }
+        }
+        None
+    }
+
+    /// P9 — bounded, speculation-aware capability acquire for prefetch.
+    ///
+    /// Like `acquire_for_read_try` it NEVER grows the pool (no 2nd capability /
+    /// extra requestdl) and NEVER waits out a Throttle cooldown. Unlike the try
+    /// variant it is willing to wait BRIEFLY for a currently-busy capability to
+    /// free, so prefetch can actually run during idle gaps in demand and stage
+    /// the next chunk(s) ahead — the real read-ahead benefit. The wait is BOUNDED
+    /// by `PREFETCH_WAIT_BUDGET` so prefetch can never sit in front of demand for
+    /// longer than a genuine idle gap: if the capability does not free within the
+    /// budget (demand is keeping it busy), prefetch bails and demand is never
+    /// delayed. Picks ONE usable (non-throttled) cap and waits on ITS limiter —
+    /// the same single concurrency domain demand uses, so there is no parallel
+    /// provider stack and no API amplification.
+    pub async fn acquire_for_read_prefetch(&self, _priority: u8) -> Option<ReservedCapability> {
+        const BUDGET: std::time::Duration = std::time::Duration::from_millis(1000);
+        let now = Instant::now();
+        for slot in &self.slots {
+            if slot.breaker.is_open(now) {
+                continue;
+            }
+            {
+                let mut caps = slot.caps.lock().unwrap();
+                caps.retain(|c| !c.prunable(now));
+            }
+            // (1) immediately free?
+            if let Some(cap) = self.first_usable_free(slot, now) {
+                if let Some(r) = self.try_reserve(&cap) {
+                    self.metrics.record_cap_reuse();
+                    return Some(r);
+                }
+            }
+            // (2) wait (bounded) for a usable, non-throttled cap to free. No pool
+            //     growth, no re-acquire: we block on the SAME cap's limiter.
+            let waitable = slot
+                .caps
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.usable_now(now) && !matches!(c.status(), CapabilityStatus::Throttled))
+                .cloned();
+            if let Some(cap) = waitable {
+                match tokio::time::timeout(BUDGET, cap.limiter.clone().acquire_owned()).await {
+                    Ok(Ok(permit)) => {
+                        cap.in_flight.fetch_add(1, Ordering::SeqCst);
+                        self.metrics.record_cap_reuse();
+                        return Some(ReservedCapability {
+                            cap: cap.clone(),
+                            _permit: permit,
+                        });
+                    }
+                    _ => return None, // timed out or closed: bail, never delay demand
+                }
+            }
+            // (3) only throttled/dead caps: do not pile onto a throttling provider;
+            //     bail so demand (which waits out the cooldown itself) is never made
+            //     to wait behind speculative work.
+        }
+        None
+    }
+
     /// §5 DEAD-link path: a capability came back 401/403/404/410 (or provider dead-link
     /// evidence) on actual media use. The cap is suspect/dead, so we single-flight
     /// re-acquire a FRESH capability for the same coord ONCE and let the caller retry the

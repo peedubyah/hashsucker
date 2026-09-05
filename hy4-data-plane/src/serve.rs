@@ -55,6 +55,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::cache::{CacheEngine, ChunkPlan, RunKind, TorrentFileId};
 use crate::metrics::{CacheDecision, Metrics, StageClock, StageReport};
+use crate::playback_intel::PlaybackIntelligence;
 use crate::transport::{Faults, OpenError, ResilientRangeReader, Step};
 
 pub const SUPPORTED_SCHEMA_VERSION: u64 = 1;
@@ -92,6 +93,9 @@ pub struct AppState {
     pub manager: Arc<manager::CapabilityManager>,
     /// Optional Slice 4 cache engine. None when SLICE4_CACHE=0 is set (cold-proxy mode).
     pub cache: Option<Arc<CacheEngine>>,
+    /// P9 playback-intelligence subsystem (sequential detection / bounded prefetch
+    /// / seek reprioritization / hot-range observation). Shared per process.
+    pub playback: Arc<PlaybackIntelligence>,
 }
 
 // ---- range parsing (unchanged from Slice 2) ---------------------------------
@@ -465,6 +469,104 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         let key = tf_id.cache_key();
         let grid = plan.grid;
         let runs = plan.runs();
+
+        // ---- P9: playback intelligence (sequential prefetch) ----
+        // Observe this demand read. If sequential confidence is armed, CLAIM the
+        // next `ahead_chunks` chunks via the SAME in-flight coalescer the demand
+        // path uses (so a later demand read that needs them joins as a waiter and
+        // reads locally — never a duplicate upstream fetch), then fill them with
+        // the SAME fill_chunk_run (same capability pool/limiter/breaker, same cache
+        // staging). Runs as background tasks: it never holds the client's reserved
+        // capability and never blocks the client byte stream. Failure shielding is
+        // inherent — a prefetch failure stays inside the background task and never
+        // reaches the client or triggers Node's candidate fallback.
+        if state.playback.config.enabled {
+            let pf_plan = state
+                .playback
+                .observe_and_claim_prefetch(&cache, &tf_id, &grid, start, end);
+            for idx in pf_plan.targets {
+                let c = cache.clone();
+                let m = metrics.clone();
+                let mg = manager_clone.clone();
+                let cl = client_clone.clone();
+                let t = tf_id.clone();
+                let pf = state.playback.clone();
+                tokio::spawn(async move {
+                    // Speculative capability acquire, gated by the configured mode.
+                    //  * Try  : non-blocking — only fills when a capability is IMMEDIATELY
+                    //           free, so it can never delay demand or amplify provider API.
+                    //  * Wait : bounded wait for a busy capability to free (idle gaps),
+                    //           delivering real read-ahead; bounded so demand is never
+                    //           delayed beyond one chunk fill.
+                    // Either way: never grows the pool (no 2nd capability / extra requestdl)
+                    // and never waits out a Throttle cooldown.
+                    let cap = if pf.config.is_wait() {
+                        match mg.acquire_for_read_prefetch(pf.config.prefetch_priority).await {
+                            Some(c) => c,
+                            None => return,
+                        }
+                    } else {
+                        match mg.acquire_for_read_try(pf.config.prefetch_priority) {
+                            Some(c) => c,
+                            None => return,
+                        }
+                    };
+                    // Now — and only now — claim via the SAME single-flight coalescer the
+                    // demand path uses, so a simultaneous demand read joins us instead of
+                    // double-fetching. If demand already owns it, release the cap (we don't
+                    // need it) and let demand drive the fill.
+                    let joins = c.inflight().join_or_claim_many(&t.cache_key(), &[idx]);
+                    if joins[0].joined_existing {
+                        pf.joined_inflight.fetch_add(1, Ordering::SeqCst);
+                        drop(cap);
+                        return;
+                    }
+                    pf.chunks_requested.fetch_add(1, Ordering::SeqCst);
+                    let g = c.grid_for(&t);
+                    let f_start = g.chunk_start(idx);
+                    let f_end = match g.chunk_end(idx) {
+                        Some(e) => e,
+                        None => {
+                            drop(cap);
+                            return;
+                        }
+                    };
+                    let faults = Faults {
+                        fault_429_always: false,
+                        fault_429_once: false,
+                        fault_dead_once: false,
+                        fault_midbody_once: false,
+                    };
+                    // Lowest priority; existing_cap=Some means fill_chunk_run reuses the
+                    // pre-acquired capability and never calls the blocking acquire.
+                    fill_chunk_run(
+                        c.clone(),
+                        m.clone(),
+                        mg.clone(),
+                        cl.clone(),
+                        pf.config.prefetch_priority,
+                        t.clone(),
+                        vec![idx],
+                        f_start,
+                        f_end,
+                        f_start,
+                        f_end,
+                        faults,
+                        None,
+                        None,
+                        false,
+                        Some(cap),
+                    )
+                    .await;
+                    let ok = c.is_present(&t.cache_key(), idx).unwrap_or(false);
+                    if ok {
+                        pf.chunks_completed.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        pf.failures.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        }
 
         // ---- Slice 4.5 A.1/A.2: prove every gap enters the SAME coalescer.
         //
@@ -1391,6 +1493,10 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
         // last 64 so concurrent bursts stay attributable.
         "stages_last": m.stage_last.lock().unwrap().as_ref().map(|r| r.to_json()),
         "stages_recent": m.stage_reports_json(),
+        // P9 — playback-intelligence (sequential prefetch) telemetry. Surfaced so
+        // the benchmark can attribute "later chunk served locally" to prefetch
+        // rather than guessing, and so ON/OFF runs are directly comparable.
+        "playback_intelligence": state.playback.snapshot(),
     })
     .to_string();
     Response::builder()
