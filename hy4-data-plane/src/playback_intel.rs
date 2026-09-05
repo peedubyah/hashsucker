@@ -62,11 +62,14 @@ pub enum PrefetchMode {
     Wait,
 }
 
-/// Conservative, opt-in configuration. Disabled by default so the existing
-/// behavior is unchanged until an operator explicitly turns it on.
+/// Configuration with a default-ON prefetch (P12). Operators can kill-switch at
+/// runtime via the explicit `PREFETCH_ENABLED=0` env var, which still wins over
+/// the unset default. PREFETCH_MODE retains its default of `auto` (spare cap ->
+/// Wait, no spare -> Try) so single-cap saturated workloads still no-op safely.
 #[derive(Clone, Copy)]
 pub struct PfConfig {
-    /// Master switch. Default OFF (PREFETCH_ENABLED unset / not "1"/"true").
+    /// Master switch. Default ON (PREFETCH_ENABLED unset -> "1"/"true"). An
+    /// explicit `PREFETCH_ENABLED=0` remains an immediate kill switch.
     pub enabled: bool,
     /// How many chunks to prefetch ahead once sequential confidence is armed.
     /// Clamped to 1..=4. Default 1.
@@ -83,9 +86,11 @@ pub struct PfConfig {
 
 impl PfConfig {
     pub fn from_env() -> Self {
+        // P12: default-ON. Explicit `PREFETCH_ENABLED=0` still wins as a kill
+        // switch (map returns false for any non-"1"/"true" value, including "0").
         let enabled = std::env::var("PREFETCH_ENABLED")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .unwrap_or(true);
         let ahead_chunks = std::env::var("PREFETCH_AHEAD_CHUNKS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())

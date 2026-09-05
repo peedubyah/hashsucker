@@ -1,0 +1,6 @@
+CONTAINER ID   IMAGE                  COMMAND                  CREATED          STATUS                    PORTS                      NAMES
+5c903a6501be   hy4-data-plane:local   "/sbin/tini -- /app/…"   21 seconds ago   Up 21 seconds (healthy)   127.0.0.1:3014->3001/tcp   p12-pf-off-1
+dbfcd0b42335   hy4-data-plane:local   "/sbin/tini -- /app/…"   2 minutes ago    Up 2 minutes (healthy)    127.0.0.1:3013->3001/tcp   p12-pf-wait-2
+8c32ea3322bc   hy4-data-plane:local   "/sbin/tini -- /app/…"   4 minutes ago    Up 4 minutes (healthy)    127.0.0.1:3012->3001/tcp   p12-pf-wait-1
+f28b1b6b14b0   ed2d25bf43b4           "/sbin/tini -- /app/…"   5 hours ago      Up 5 hours (healthy)      3001/tcp                   hashsucker-hy4-data-plane-1
+92c8e9a7cb91   media-search:local     "docker-entrypoint.s…"   6 hours ago      Up 6 hours (healthy)      127.0.0.1:3300->3000/tcp   hashsucker-media-search-1

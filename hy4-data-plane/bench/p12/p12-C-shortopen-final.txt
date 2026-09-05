@@ -1,0 +1,27 @@
+[p12-C] p12-C DP=http://127.0.0.1:3017 TFID=tf_46203b5e-2a8d-44f7-9a93-20114c60b24d
+[p12-C] p12-C reading chunk 0 (then abandoning)
+[p12-C] p12-C # 0 status=206 ttfb=1935ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+1 pf=+0/0/0 pj=+0 pji=+0 chunks_present=1 cap.acq=1 cap.reuse=0
+[p12-C] p12-C waiting 6s to let prefetch settle...
+[p12-C] p12-C :: FINAL playback_intelligence:
+  active_torrent_files = 1
+  ahead_chunks = 1
+  auto_selected_try = 0
+  auto_selected_wait = 0
+  enabled = true
+  mode = auto
+  prefetch_chunks_completed = 0
+  prefetch_chunks_requested = 0
+  prefetch_chunks_skipped_present = 0
+  prefetch_failures = 0
+  prefetch_joined_by_demand = 0
+  prefetch_joined_inflight = 0
+  prefetch_priority = 0
+  prefetch_served_demand = 0
+  prefetch_triggered = 0
+  seek_reprioritizations = 0
+  sequential_threshold = 2
+  spare_capacity = 0
+[p12-C] p12-C :: hot: [{"confidence":0.5,"forward_region":[0,8388607],"forward_run":1,"generation":0,"hot_chunks":[{"count":1,"idx":0}]}]
+[p12-C] p12-C :: cache: bytes_upstream_issued=8388608 chunk_claims=1 chunks_present=1
+[p12-C] p12-C :: upstream: layer_A_api.requests=1 layer_C_cdn[206]=1 cap.acq=1 cap.reuse=0
+[p12-C] p12-C :: WASTE: 0 chunks (0 bytes) = 0.0% of demand bytes (8388608)

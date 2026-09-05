@@ -1,0 +1,33 @@
+[p12-A] DP=http://127.0.0.1:3012 TFID=tf_46203b5e-2a8d-44f7-9a93-20114c60b24d N=8 GAP_MS=200
+[p12-A] p12-A-wait-quick # 0 status=206 ttfb=  19ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0/0 skip=+0 auto=0+0 spare=0
+  sha256[0] = 4b8d73ce8652f142...
+[p12-A] p12-A-wait-quick # 1 status=206 ttfb=  19ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0/0 skip=+0 auto=0+0 spare=0
+[p12-A] p12-A-wait-quick # 2 status=206 ttfb=  18ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0/0 skip=+0 auto=0+0 spare=0
+[p12-A] p12-A-wait-quick # 3 status=206 ttfb=  20ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0/0 skip=+0 auto=0+0 spare=0
+[p12-A] p12-A-wait-quick # 4 status=206 ttfb=  26ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0/0 skip=+0 auto=0+0 spare=0
+[p12-A] p12-A-wait-quick # 5 status=206 ttfb=  17ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0/0 skip=+0 auto=0+0 spare=0
+[p12-A] p12-A-wait-quick # 6 status=206 ttfb=  18ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0/0 skip=+0 auto=0+0 spare=0
+[p12-A] p12-A-wait-quick # 7 status=206 ttfb=  17ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0/0 skip=+0 auto=0+0 spare=0
+  sha256[7] = cf275140301054b2...
+
+[p12-A] p12-A-wait-quick :: FINAL playback_intelligence:
+  active_torrent_files = 1
+  ahead_chunks = 1
+  auto_selected_try = 0
+  auto_selected_wait = 0
+  enabled = true
+  mode = wait
+  prefetch_chunks_completed = 0
+  prefetch_chunks_requested = 0
+  prefetch_chunks_skipped_present = 0
+  prefetch_failures = 0
+  prefetch_joined_by_demand = 0
+  prefetch_joined_inflight = 0
+  prefetch_priority = 0
+  prefetch_served_demand = 0
+  prefetch_triggered = 0
+  seek_reprioritizations = 0
+  sequential_threshold = 2
+  spare_capacity = 0
+[p12-A] p12-A-wait-quick :: cache: bytes_upstream_issued=8388608 bytes_fetched_upstream=8388608 chunk_claims=1 chunks_present=1
+[p12-A] p12-A-wait-quick :: upstream: layer_A_api.requests=1 layer_C_cdn[206]=1 cap.acq=1 cap.reuse=0

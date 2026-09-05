@@ -1,0 +1,52 @@
+[p12-A] DP=http://127.0.0.1:3020 TFID=tf_46203b5e-2a8d-44f7-9a93-20114c60b24d N=26 GAP_MS=1200
+[p12-A] p12-A-on2 # 0 status=206 ttfb=1496ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+1 pf=+0/0/0/0 skip=+0 auto=0+0 spare=0
+  sha256[0] = 4b8d73ce8652f142...
+[p12-A] p12-A-on2 # 1 status=206 ttfb= 825ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 # 2 status=206 ttfb= 834ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 # 3 status=206 ttfb= 866ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 # 4 status=206 ttfb= 975ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 # 5 status=206 ttfb=1066ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 # 6 status=206 ttfb=1164ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 # 7 status=206 ttfb= 955ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 # 8 status=206 ttfb= 835ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 # 9 status=206 ttfb= 853ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #10 status=206 ttfb= 791ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #11 status=206 ttfb= 848ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #12 status=206 ttfb= 959ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+  sha256[12] = 0a94f1b488279b50...
+[p12-A] p12-A-on2 #13 status=206 ttfb= 821ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #14 status=206 ttfb=1229ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #15 status=206 ttfb= 854ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #16 status=206 ttfb= 880ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #17 status=206 ttfb= 810ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #18 status=206 ttfb= 900ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #19 status=206 ttfb= 908ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #20 status=206 ttfb= 856ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #21 status=206 ttfb= 826ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #22 status=206 ttfb= 813ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #23 status=206 ttfb= 848ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #24 status=206 ttfb= 797ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 auto=1+0 spare=0
+[p12-A] p12-A-on2 #25 status=206 ttfb= 376ms bytes=1837145 bytes_up=+1837145 cdn=+1 api=+0 pf=+0/0/0/0 skip=+0 auto=0+0 spare=0
+  sha256[25] = 23f86b4a5b2d2026...
+
+[p12-A] p12-A-on2 :: FINAL playback_intelligence:
+  active_torrent_files = 1
+  ahead_chunks = 1
+  auto_selected_try = 24
+  auto_selected_wait = 0
+  enabled = true
+  mode = auto
+  prefetch_chunks_completed = 0
+  prefetch_chunks_requested = 0
+  prefetch_chunks_skipped_present = 0
+  prefetch_failures = 0
+  prefetch_joined_by_demand = 0
+  prefetch_joined_inflight = 0
+  prefetch_priority = 0
+  prefetch_served_demand = 0
+  prefetch_triggered = 24
+  seek_reprioritizations = 0
+  sequential_threshold = 2
+  spare_capacity = 0
+[p12-A] p12-A-on2 :: cache: bytes_upstream_issued=211552345 bytes_fetched_upstream=211552345 chunk_claims=26 chunks_present=26
+[p12-A] p12-A-on2 :: upstream: layer_A_api.requests=1 layer_C_cdn[206]=26 cap.acq=1 cap.reuse=25
