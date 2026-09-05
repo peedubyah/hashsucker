@@ -182,7 +182,7 @@ async fn handle_files(
     // The lab's AppState carried the same five fields the new one does,
     // but the lab built it ONCE at boot. We build it PER REQUEST, so a
     // single process can serve any tfId, not one.
-    let resp = match fetch_control(
+    let mut resp = match fetch_control(
         &svc.client,
         &svc.cfg.control_url,
         &tf_id,
@@ -204,6 +204,33 @@ async fn handle_files(
             );
         }
     };
+
+    // ---- P13-A: per-provider coord filter (test fault, mirrors
+    // HY4_FORCE_EXHAUST_TFID in serve.rs) ----
+    // Format: HY4_FORCE_PROVIDER="tfId1:providerA,providerB;tfId2:providerA"
+    // Empty env var = disabled. Semicolon separates tfIds; comma separates
+    // the allowlist per tfId. NEVER set in production.
+    // Applied to the S-1 coord list BEFORE CapabilityManager construction
+    // (manager.rs:127), so the per-tfId manager sees only the allowed
+    // providers. No durable state is touched. Restart required to invert.
+    if let Ok(spec) = std::env::var("HY4_FORCE_PROVIDER") {
+        for entry in spec.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let mut parts = entry.splitn(2, ':');
+            if let (Some(t), Some(p)) = (parts.next(), parts.next()) {
+                if t.trim() == tf_id {
+                    let allowed: Vec<&str> =
+                        p.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                    let before = resp.providers.len();
+                    resp.providers.retain(|c| allowed.iter().any(|a| *a == c.provider));
+                    let after = resp.providers.len();
+                    eprintln!(
+                        "[p13] HY4_FORCE_PROVIDER: tfId={} allowed={:?} providers {}->{}",
+                        tf_id, allowed, before, after
+                    );
+                }
+            }
+        }
+    }
 
     // Acquire (or fetch) the per-tfId CapabilityManager. The cache lives
     // in ServiceState; the manager itself is built from S-1 coordinates,
