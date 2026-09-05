@@ -8,10 +8,12 @@
 // never preserve requestdl itself as the media-byte origin. (Legacy redirect=true mode is
 // kept ONLY behind TB_REDIRECT_TRUE for the §10 before/after comparison.)
 //
-// RealDebrid MODE A: reuse an existing /downloads artifact that already matches the
-// authoritative size (no new provider state). MODE B (gated RD_MODE_B=1): addMagnet +
-// selectFiles + poll until ready + unrestrict + Range-validate. MODE B creates provider
-// state and is OFF by default to avoid side effects; it is reported as INFERRED.
+// RealDebrid MODE A: identify the user's torrent by infoHash via /torrents, then identify
+// the exact file by canonicalInternalPath + exact size via /torrents/info/{id}, then obtain
+// the CDN delivery URL via /unrestrict/link. No new provider state created. MODE B (gated
+// RD_MODE_B=1): addMagnet + selectFiles + poll until ready + unrestrict + Range-validate.
+// MODE B creates provider state and is OFF by default to avoid side effects; it is reported
+// as INFERRED.
 
 use crate::capability::{AcquireError, ApiKeys, DeliveryCapability, parse_retry_after};
 use crate::control::{ControlTorrentFile, ProviderCoord};
@@ -199,7 +201,11 @@ async fn acquire_realdebrid(
     ))
 }
 
-// MODE A: GET /downloads, find an artifact whose filesize == authoritative size.
+// MODE A: GET /torrents -> match by infoHash -> GET /torrents/info/{id} -> match per-file
+// by canonicalInternalPath + exact size -> POST /unrestrict/link -> build capability around
+// the unrestricted CDN URL. Identity is preserved at every step: infoHash, path, exact size.
+// P14 fix: the previous /downloads path used size-only matching and is unavailable on basic
+// RD tier; /torrents + /torrents/info/{id} are the working APIs for this key.
 async fn acquire_rd_mode_a(
     coord: &ProviderCoord,
     tf: &ControlTorrentFile,
@@ -207,76 +213,248 @@ async fn acquire_rd_mode_a(
     client: &reqwest::Client,
     metrics: &Metrics,
 ) -> Result<Arc<DeliveryCapability>, AcquireError> {
-    let url = format!("{REALDEBRID_API_BASE}/downloads?limit=100");
+    let want_hash = tf.info_hash.to_ascii_lowercase();
+    let want_path = tf
+        .canonical_internal_path
+        .as_deref()
+        .or(coord.canonical_internal_path.as_deref())
+        .map(|s| s.trim_start_matches('/').to_string());
+
+    // Step 1: enumerate user's RD torrents and find the one whose `hash` matches
+    // the authoritative infoHash.
+    let list_url = format!("{REALDEBRID_API_BASE}/torrents?limit=100");
     let started = std::time::Instant::now();
-    let resp = match tokio::time::timeout(
+    let list_resp = match tokio::time::timeout(
         Duration::from_secs(25),
         client
-            .get(&url)
+            .get(&list_url)
             .header(AUTHORIZATION, format!("Bearer {}", keys.realdebrid))
             .header(ACCEPT, "application/json")
             .send(),
     )
     .await
     {
-        Ok(r) => r.map_err(|e| AcquireError::Transient(format!("rd downloads: {e}")))?,
+        Ok(r) => r.map_err(|e| AcquireError::Transient(format!("rd torrents: {e}")))?,
         Err(_) => {
             return Err(AcquireError::Transient(
-                "rd downloads timed out (25s)".into(),
+                "rd torrents timed out (25s)".into(),
             ))
         }
     };
-    metrics.record_api(resp.status().as_u16(), started.elapsed());
-
-    if resp.status().as_u16() == 429 {
+    metrics.record_api(list_resp.status().as_u16(), started.elapsed());
+    if list_resp.status().as_u16() == 429 {
         let ra = parse_retry_after(
-            resp.headers()
+            list_resp
+                .headers()
                 .get(RETRY_AFTER)
                 .and_then(|v| v.to_str().ok()),
         );
         return Err(AcquireError::RateLimited(ra));
     }
-    if !resp.status().is_success() {
+    if !list_resp.status().is_success() {
         return Err(AcquireError::NoCapability(format!(
-            "rd downloads status {}",
-            resp.status()
+            "rd torrents status {}",
+            list_resp.status()
         )));
     }
-    let arr: serde_json::Value = resp
+    let list_json: serde_json::Value = list_resp
         .json()
         .await
-        .map_err(|e| AcquireError::Transient(format!("rd downloads json: {e}")))?;
-    let list = arr
+        .map_err(|e| AcquireError::Transient(format!("rd torrents json: {e}")))?;
+    let torrents = list_json
         .as_array()
-        .ok_or_else(|| AcquireError::NoCapability("rd downloads not an array".into()))?;
+        .ok_or_else(|| AcquireError::NoCapability("rd torrents not an array".into()))?;
 
-    for d in list {
-        let fs = d.get("filesize").and_then(|v| v.as_u64()).unwrap_or(0);
-        if fs == tf.size {
-            if let Some(dl) = d.get("download").and_then(|v| v.as_str()) {
-                let ttl = std::env::var("RD_TTL_SECONDS")
-                    .ok()
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(3600);
-                let cap = DeliveryCapability::new(
-                    dl.to_string(),
-                    "realdebrid".into(),
-                    coord.account_scope.clone(),
-                    // Informational; capability REUSE is keyed by
-                    // Slot.sf_key (uses durable_key).
-                    tf.id.clone(),
-                    coord.provider_resource_id.clone(),
-                    coord.provider_file_id.clone(),
-                    Some(Duration::from_secs(ttl)),
-                );
-                metrics.capability_acquisitions.fetch_add(1, Ordering::SeqCst);
-                return Ok(cap);
+    let mut matched_id: Option<String> = None;
+    for t in torrents {
+        let h = t
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_ascii_lowercase());
+        if h.as_deref() == Some(want_hash.as_str()) {
+            if let Some(id) = t.get("id").and_then(|v| v.as_str()) {
+                matched_id = Some(id.to_string());
+                break;
             }
         }
     }
-    Err(AcquireError::NoCapability(
-        "rd downloads: no artifact matching authoritative size".into(),
-    ))
+    let rid = matched_id
+        .ok_or_else(|| AcquireError::NoCapability("rd torrents: no torrent for infoHash".into()))?;
+
+    // Step 2: per-torrent detail to identify the exact file by path + exact size.
+    let info_url = format!("{REALDEBRID_API_BASE}/torrents/info/{rid}");
+    let info_started = std::time::Instant::now();
+    let info_resp = match tokio::time::timeout(
+        Duration::from_secs(25),
+        client
+            .get(&info_url)
+            .header(AUTHORIZATION, format!("Bearer {}", keys.realdebrid))
+            .header(ACCEPT, "application/json")
+            .send(),
+    )
+    .await
+    {
+        Ok(r) => r.map_err(|e| AcquireError::Transient(format!("rd info: {e}")))?,
+        Err(_) => {
+            return Err(AcquireError::Transient(
+                "rd info timed out (25s)".into(),
+            ))
+        }
+    };
+    metrics.record_api(info_resp.status().as_u16(), info_started.elapsed());
+    if info_resp.status().as_u16() == 429 {
+        let ra = parse_retry_after(
+            info_resp
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+        );
+        return Err(AcquireError::RateLimited(ra));
+    }
+    if !info_resp.status().is_success() {
+        return Err(AcquireError::NoCapability(format!(
+            "rd info status {}",
+            info_resp.status()
+        )));
+    }
+    let info_json: serde_json::Value = info_resp
+        .json()
+        .await
+        .map_err(|e| AcquireError::Transient(format!("rd info json: {e}")))?;
+
+    // RD /torrents/info/{id} returns the torrent with `links` (per-file unrestrictable links)
+    // when the torrent is ready (status 4 = downloaded). Identify the file with the exact
+    // size + matching canonical path. RD's `links` array is aligned 1:1 with `files` in the
+    // same order.
+    let files = info_json
+        .get("files")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| AcquireError::NoCapability("rd info: no files array".into()))?;
+    let links = info_json.get("links").and_then(|v| v.as_array());
+    let status = info_json
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let mut file_idx: Option<usize> = None;
+    // First pass: exact path + exact size (strongest identity).
+    if let Some(want_p) = want_path.as_deref() {
+        for (i, f) in files.iter().enumerate() {
+            let bytes = f.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+            if bytes != tf.size {
+                continue;
+            }
+            if let Some(p) = f.get("path").and_then(|v| v.as_str()) {
+                let norm = p.trim_start_matches('/');
+                if norm == want_p {
+                    file_idx = Some(i);
+                    break;
+                }
+            }
+        }
+    }
+    // Second pass: exact size only, but require a single unambiguous file match.
+    if file_idx.is_none() {
+        let mut exact_size_indices: Vec<usize> = Vec::new();
+        for (i, f) in files.iter().enumerate() {
+            let bytes = f.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+            if bytes == tf.size {
+                exact_size_indices.push(i);
+            }
+        }
+        if exact_size_indices.len() == 1 {
+            file_idx = Some(exact_size_indices[0]);
+        } else if exact_size_indices.is_empty() {
+            return Err(AcquireError::NoCapability(
+                "rd info: no file matches authoritative size".into(),
+            ));
+        } else {
+            return Err(AcquireError::NoCapability(format!(
+                "rd info: {} files match size, ambiguous without canonical path",
+                exact_size_indices.len()
+            )));
+        }
+    }
+    let file_idx = file_idx.unwrap();
+
+    // Pick the unrestrictable link for the identified file (aligned 1:1 with `files`).
+    let link = if let Some(la) = links {
+        la.get(file_idx)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    }
+    .ok_or_else(|| {
+        AcquireError::NoCapability(format!(
+            "rd info: no link for file idx={file_idx} (torrent status={status})"
+        ))
+    })?;
+
+    // Step 3: POST /unrestrict/link to obtain the actual CDN delivery URL.
+    let unres_started = std::time::Instant::now();
+    let unres_resp = match tokio::time::timeout(
+        Duration::from_secs(25),
+        client
+            .post(format!("{REALDEBRID_API_BASE}/unrestrict/link"))
+            .header(AUTHORIZATION, format!("Bearer {}", keys.realdebrid))
+            .header(ACCEPT, "application/json")
+            .form(&[("link", link.as_str())])
+            .send(),
+    )
+    .await
+    {
+        Ok(r) => r.map_err(|e| AcquireError::Transient(format!("rd unrestrict: {e}")))?,
+        Err(_) => {
+            return Err(AcquireError::Transient(
+                "rd unrestrict timed out (25s)".into(),
+            ))
+        }
+    };
+    metrics.record_api(unres_resp.status().as_u16(), unres_started.elapsed());
+    if unres_resp.status().as_u16() == 429 {
+        let ra = parse_retry_after(
+            unres_resp
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+        );
+        return Err(AcquireError::RateLimited(ra));
+    }
+    if !unres_resp.status().is_success() {
+        return Err(AcquireError::NoCapability(format!(
+            "rd unrestrict status {}",
+            unres_resp.status()
+        )));
+    }
+    let uj: serde_json::Value = unres_resp
+        .json()
+        .await
+        .map_err(|e| AcquireError::Transient(format!("rd unrestrict json: {e}")))?;
+    let dl = uj
+        .get("download")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            AcquireError::NoCapability("rd unrestrict missing download field".into())
+        })?;
+
+    let ttl = std::env::var("RD_TTL_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(3600);
+    let cap = DeliveryCapability::new(
+        dl.to_string(),
+        "realdebrid".into(),
+        coord.account_scope.clone(),
+        // Informational; capability REUSE is keyed by
+        // Slot.sf_key (uses durable_key).
+        tf.id.clone(),
+        coord.provider_resource_id.clone(),
+        coord.provider_file_id.clone(),
+        Some(Duration::from_secs(ttl)),
+    );
+    metrics.capability_acquisitions.fetch_add(1, Ordering::SeqCst);
+    Ok(cap)
 }
 
 // MODE B (INFERRED — gated, not exercised by default): addMagnet -> selectFiles(all)

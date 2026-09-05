@@ -232,6 +232,35 @@ async fn handle_files(
         }
     }
 
+    // ---- P14-B: per-provider slot fault (deny a single provider) ----
+    // Format: HY4_FORCE_FAIL_PROVIDER="tfId1:providerA;tfId2:providerB"
+    // Empty env var = disabled. Operates AFTER S-1 coord discovery and
+    // AFTER the allowlist above; BEFORE CapabilityManager construction.
+    // The denied provider's coord is removed from the list, so the
+    // CapabilityManager never even sees that slot — no per-slot breaker
+    // trips, no metadata persisted. The remaining provider(s) are served
+    // normally. This is the surgical fault used to prove TB->RD / RD->TB
+    // shielding while the OTHER provider is healthy. NEVER set in
+    // production.
+    if let Ok(spec) = std::env::var("HY4_FORCE_FAIL_PROVIDER") {
+        for entry in spec.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let mut parts = entry.splitn(2, ':');
+            if let (Some(t), Some(p)) = (parts.next(), parts.next()) {
+                if t.trim() == tf_id {
+                    let denied: Vec<&str> =
+                        p.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                    let before = resp.providers.len();
+                    resp.providers.retain(|c| !denied.iter().any(|d| *d == c.provider));
+                    let after = resp.providers.len();
+                    eprintln!(
+                        "[p14] HY4_FORCE_FAIL_PROVIDER: tfId={} denied={:?} providers {}->{}",
+                        tf_id, denied, before, after
+                    );
+                }
+            }
+        }
+    }
+
     // Acquire (or fetch) the per-tfId CapabilityManager. The cache lives
     // in ServiceState; the manager itself is built from S-1 coordinates,
     // so identity bleed would require S-1 to lie about the tf_id.
