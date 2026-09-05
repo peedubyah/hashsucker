@@ -131,71 +131,83 @@ impl CapabilityManager {
         client: reqwest::Client,
         metrics: Arc<Metrics>,
     ) -> Self {
-        // Group coords by placement while preserving the S-1 coord order
-        // (Node supplies the preference order; we must respect it for
-        // predictable failover semantics). Deduplicate by (provider,
-        // account_scope, provider_resource_id); the first occurrence wins.
-        let mut seen: std::collections::HashSet<(String, String, String)> =
-            std::collections::HashSet::new();
-        let mut ordered: Vec<ProviderCoord> = Vec::new();
+        // Default slot grouping: identical to the pre-P15 behavior. We
+        // group coords by placement, pick the file whose size matches the
+        // authoritative TorrentFile, and build a Slot per group. The
+        // resulting slot iteration order is whatever HashMap iteration
+        // produces, which is what the existing system has always done
+        // (and is what other code paths and tests rely on). S-1 order
+        // is NOT modified here. P15's bench uses an EXPLICIT,
+        // opt-in, reversible env-var gate (HY4_FORCE_SLOT_ORDER) below
+        // to deterministically target a specific provider as the first
+        // slot; the default is unchanged.
+        let mut groups: HashMap<(String, String, String), Vec<ProviderCoord>> = HashMap::new();
         for c in coords {
-            let key = (
-                c.provider.clone(),
-                c.account_scope.clone(),
-                c.provider_resource_id.clone(),
-            );
-            if seen.insert(key) {
-                ordered.push(c);
+            groups
+                .entry((
+                    c.provider.clone(),
+                    c.account_scope.clone(),
+                    c.provider_resource_id.clone(),
+                ))
+                .or_default()
+                .push(c);
+        }
+        let mut slots = Vec::new();
+        for ((provider, scope, resource), files) in groups {
+            let target = files
+                .iter()
+                .find(|f| f.size == tf.size)
+                .or_else(|| files.first());
+            if let Some(t) = target {
+                // P3 final identity check, conclusion B: the slot
+                // carries the stable durable_key derived from
+                // (info_hash, canonical_path, size), NOT the mutable
+                // surrogate PK. The single-flight key and the
+                // negative cache therefore cannot alias sibling files
+                // AND survive a host DB reconstruction.
+                let durable_key = crate::cache::TorrentFileId::compute_durable_key(
+                    &tf.info_hash,
+                    tf.canonical_internal_path.as_deref().unwrap_or(""),
+                    tf.size,
+                );
+                slots.push(Slot {
+                    coord: t.clone(),
+                    // Current host PK. Retained for logging/forensics.
+                    tf_id: tf.id.clone(),
+                    durable_key,
+                    target_file_id: t.provider_file_id.clone(),
+                    breaker: Breaker::new(3, Duration::from_secs(30)),
+                    caps: Mutex::new(Vec::new()),
+                    target: AtomicUsize::new(1),
+                });
+                let _ = (provider, scope, resource);
             }
         }
-        // P15: optional per-tfId slot re-ordering. The bench needs to force
-        // a SPECIFIC provider into the FIRST-slot position so the
-        // HY4_FORCE_SLOT_FAILURE can deterministically target it. Without
-        // this, S-1 order is fixed and the targeted slot might be first
-        // or second depending on Node's coord emission order.
+        // P15: OPTIONAL, REVERSIBLE bench-only ordering gate. When unset
+        // (the default), slot iteration order is identical to the
+        // pre-P15 system (HashMap iteration; not deterministic). When
+        // set, moves the named provider to the FRONT of its tfId's slot
+        // list so the bench can deterministically force a specific
+        // provider as the first-tried slot and HY4_FORCE_SLOT_FAILURE
+        // can target it. Relative order among non-named providers is
+        // preserved.
         // Format: HY4_FORCE_SLOT_ORDER="tfId:provider;tfId2:provider"
-        // Each named provider is moved to the FRONT of its tfId's slot
-        // list; relative order among non-named providers is preserved.
-        // Empty env = disabled. NEVER set in production.
+        // Empty env var = disabled (DEFAULT). NEVER set in production.
         if let Ok(spec) = std::env::var("HY4_FORCE_SLOT_ORDER") {
             for entry in spec.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
                 let mut parts = entry.splitn(2, ':');
                 if let (Some(t), Some(p)) = (parts.next(), parts.next()) {
                     if t.trim() == tf.id {
                         let target_provider = p.trim().to_string();
-                        if let Some(pos) = ordered.iter().position(|c| c.provider == target_provider) {
+                        if let Some(pos) = slots.iter().position(|s| s.coord.provider == target_provider) {
                             if pos > 0 {
-                                let c = ordered.remove(pos);
-                                ordered.insert(0, c);
+                                let s = slots.remove(pos);
+                                slots.insert(0, s);
                             }
                         }
                     }
                 }
             }
-        }
-        let mut slots = Vec::new();
-        for c in ordered {
-            // P3 final identity check, conclusion B: the slot
-            // carries the stable durable_key derived from
-            // (info_hash, canonical_path, size), NOT the mutable
-            // surrogate PK. The single-flight key and the
-            // negative cache therefore cannot alias sibling files
-            // AND survive a host DB reconstruction.
-            let durable_key = crate::cache::TorrentFileId::compute_durable_key(
-                &tf.info_hash,
-                tf.canonical_internal_path.as_deref().unwrap_or(""),
-                tf.size,
-            );
-            slots.push(Slot {
-                coord: c.clone(),
-                // Current host PK. Retained for logging/forensics.
-                tf_id: tf.id.clone(),
-                durable_key,
-                target_file_id: c.provider_file_id.clone(),
-                breaker: Breaker::new(3, Duration::from_secs(30)),
-                caps: Mutex::new(Vec::new()),
-                target: AtomicUsize::new(1),
-            });
         }
         let pool_max_default = std::env::var("POOL_MAX")
             .ok()
@@ -286,14 +298,24 @@ impl CapabilityManager {
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
-                // P15: runtime-slot fault injection. The denied provider's slot
-                // exists in the manager (both coords were already constructed),
-                // but THIS specific acquire call returns NoCapability so the
-                // outer acquire_for_read can failover within the same tfId.
-                // The fault is the narrowest possible: only the targeted
-                // provider's acquire fails; the provider API is never called
-                // (so no RD/TB quota is consumed); no DB writes; no
-                // DeliveryCapability persisted. Other slots remain healthy.
+                // P15: RUNTIME fault injection, INSIDE the per-slot acquisition
+                // path. This is after manager construction (the slot already
+                // exists in self.slots, the in-flight dedupe key has been
+                // claimed, and the per-slot breaker is healthy), and before
+                // the actual provider::acquire call. The denied provider's
+                // slot is NOT removed from the slot list (BOTH coords still
+                // entered the manager) but THIS specific acquire call
+                // returns NoCapability, which:
+                //   1) is classified as a HARD failure by is_hard_failure
+                //   2) populates the bounded negative cache (existing neg_ttl)
+                //   3) is returned to try_slot which records
+                //      slot.breaker.record_failure()
+                //   4) is returned to acquire_for_read which iterates to the
+                //      next slot in the same tfId
+                // No provider API is called by the denied slot (no TB
+                // requestdl, no RD /torrents + /torrents/info/{id} +
+                // /unrestrict/link). Zero DB writes. Zero DeliveryCapability
+                // persisted. Other slots remain healthy.
                 // Format: HY4_FORCE_SLOT_FAILURE="tfId:provider;tfId2:provider"
                 // Empty = disabled. NEVER set in production.
                 if let Ok(spec) = std::env::var("HY4_FORCE_SLOT_FAILURE") {
