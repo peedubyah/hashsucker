@@ -131,49 +131,71 @@ impl CapabilityManager {
         client: reqwest::Client,
         metrics: Arc<Metrics>,
     ) -> Self {
-        // Group coords by placement; pick the file whose size matches the authoritative
-        // TorrentFile (Node already supplied the mapping — we do NOT discover it).
-        let mut groups: HashMap<(String, String, String), Vec<ProviderCoord>> = HashMap::new();
+        // Group coords by placement while preserving the S-1 coord order
+        // (Node supplies the preference order; we must respect it for
+        // predictable failover semantics). Deduplicate by (provider,
+        // account_scope, provider_resource_id); the first occurrence wins.
+        let mut seen: std::collections::HashSet<(String, String, String)> =
+            std::collections::HashSet::new();
+        let mut ordered: Vec<ProviderCoord> = Vec::new();
         for c in coords {
-            groups
-                .entry((
-                    c.provider.clone(),
-                    c.account_scope.clone(),
-                    c.provider_resource_id.clone(),
-                ))
-                .or_default()
-                .push(c);
+            let key = (
+                c.provider.clone(),
+                c.account_scope.clone(),
+                c.provider_resource_id.clone(),
+            );
+            if seen.insert(key) {
+                ordered.push(c);
+            }
+        }
+        // P15: optional per-tfId slot re-ordering. The bench needs to force
+        // a SPECIFIC provider into the FIRST-slot position so the
+        // HY4_FORCE_SLOT_FAILURE can deterministically target it. Without
+        // this, S-1 order is fixed and the targeted slot might be first
+        // or second depending on Node's coord emission order.
+        // Format: HY4_FORCE_SLOT_ORDER="tfId:provider;tfId2:provider"
+        // Each named provider is moved to the FRONT of its tfId's slot
+        // list; relative order among non-named providers is preserved.
+        // Empty env = disabled. NEVER set in production.
+        if let Ok(spec) = std::env::var("HY4_FORCE_SLOT_ORDER") {
+            for entry in spec.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let mut parts = entry.splitn(2, ':');
+                if let (Some(t), Some(p)) = (parts.next(), parts.next()) {
+                    if t.trim() == tf.id {
+                        let target_provider = p.trim().to_string();
+                        if let Some(pos) = ordered.iter().position(|c| c.provider == target_provider) {
+                            if pos > 0 {
+                                let c = ordered.remove(pos);
+                                ordered.insert(0, c);
+                            }
+                        }
+                    }
+                }
+            }
         }
         let mut slots = Vec::new();
-        for ((provider, scope, resource), files) in groups {
-            let target = files
-                .iter()
-                .find(|f| f.size == tf.size)
-                .or_else(|| files.first());
-            if let Some(t) = target {
-                // P3 final identity check, conclusion B: the slot
-                // carries the stable durable_key derived from
-                // (info_hash, canonical_path, size), NOT the mutable
-                // surrogate PK. The single-flight key and the
-                // negative cache therefore cannot alias sibling files
-                // AND survive a host DB reconstruction.
-                let durable_key = crate::cache::TorrentFileId::compute_durable_key(
-                    &tf.info_hash,
-                    tf.canonical_internal_path.as_deref().unwrap_or(""),
-                    tf.size,
-                );
-                slots.push(Slot {
-                    coord: t.clone(),
-                    // Current host PK. Retained for logging/forensics.
-                    tf_id: tf.id.clone(),
-                    durable_key,
-                    target_file_id: t.provider_file_id.clone(),
-                    breaker: Breaker::new(3, Duration::from_secs(30)),
-                    caps: Mutex::new(Vec::new()),
-                    target: AtomicUsize::new(1),
-                });
-                let _ = (provider, scope, resource);
-            }
+        for c in ordered {
+            // P3 final identity check, conclusion B: the slot
+            // carries the stable durable_key derived from
+            // (info_hash, canonical_path, size), NOT the mutable
+            // surrogate PK. The single-flight key and the
+            // negative cache therefore cannot alias sibling files
+            // AND survive a host DB reconstruction.
+            let durable_key = crate::cache::TorrentFileId::compute_durable_key(
+                &tf.info_hash,
+                tf.canonical_internal_path.as_deref().unwrap_or(""),
+                tf.size,
+            );
+            slots.push(Slot {
+                coord: c.clone(),
+                // Current host PK. Retained for logging/forensics.
+                tf_id: tf.id.clone(),
+                durable_key,
+                target_file_id: c.provider_file_id.clone(),
+                breaker: Breaker::new(3, Duration::from_secs(30)),
+                caps: Mutex::new(Vec::new()),
+                target: AtomicUsize::new(1),
+            });
         }
         let pool_max_default = std::env::var("POOL_MAX")
             .ok()
@@ -264,7 +286,75 @@ impl CapabilityManager {
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
+                // P15: runtime-slot fault injection. The denied provider's slot
+                // exists in the manager (both coords were already constructed),
+                // but THIS specific acquire call returns NoCapability so the
+                // outer acquire_for_read can failover within the same tfId.
+                // The fault is the narrowest possible: only the targeted
+                // provider's acquire fails; the provider API is never called
+                // (so no RD/TB quota is consumed); no DB writes; no
+                // DeliveryCapability persisted. Other slots remain healthy.
+                // Format: HY4_FORCE_SLOT_FAILURE="tfId:provider;tfId2:provider"
+                // Empty = disabled. NEVER set in production.
+                if let Ok(spec) = std::env::var("HY4_FORCE_SLOT_FAILURE") {
+                    let mut denied = false;
+                    for entry in spec.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                        let mut parts = entry.splitn(2, ':');
+                        if let (Some(t), Some(p)) = (parts.next(), parts.next()) {
+                            if t.trim() == tf.id && p.trim() == coord.provider {
+                                denied = true;
+                                break;
+                            }
+                        }
+                    }
+                    if denied {
+                        eprintln!(
+                            "[p15] HY4_FORCE_SLOT_FAILURE: tfId={} provider={} slot_attempted=1 slot_failed=1 reason=runtime_injected",
+                            tf.id, coord.provider
+                        );
+                        let res: Result<Arc<DeliveryCapability>, AcquireError> = Err(
+                            AcquireError::NoCapability(format!(
+                                "p15 runtime fault: tfId={} provider={} denied",
+                                tf.id, coord.provider
+                            )),
+                        );
+                        // Cache the hard failure briefly so concurrent readers
+                        // don't all repeat the injection (consistent with the
+                        // existing hard-failure path below).
+                        self.neg_cache.lock().unwrap().insert(
+                            key.clone(),
+                            NegEntry {
+                                expires_at: Instant::now() + self.neg_ttl,
+                                err: res.as_ref().unwrap_err().clone(),
+                            },
+                        );
+                        *entry.result.lock().unwrap() = Some(res.clone());
+                        entry.done.store(true, Ordering::SeqCst);
+                        entry.notify.notify_waiters();
+                        self.inflight.lock().await.remove(&key);
+                        return res;
+                    }
+                }
                 let res = provider::acquire(&coord, &tf, &keys, &client, &metrics).await;
+                // P15: log first-ever attempt per slot (one line per slot per
+                // process lifetime, guarded by a static mutex). This is the
+                // evidence that a given provider's slot was actually exercised
+                // inside the manager. Pair with the failure line above to
+                // prove attempt+fail+failover within a single tfId.
+                if res.is_ok() {
+                    use std::sync::OnceLock;
+                    static LOGGED: OnceLock<std::sync::Mutex<std::collections::HashSet<(String,String)>>> =
+                        OnceLock::new();
+                    let set = LOGGED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+                    let mut g = set.lock().unwrap();
+                    let key2 = (tf.id.clone(), coord.provider.clone());
+                    if g.insert(key2) {
+                        eprintln!(
+                            "[p15] slot_attempted: tfId={} provider={} slot_served=1",
+                            tf.id, coord.provider
+                        );
+                    }
+                }
                 if res.is_err() {
                     // Cache only HARD failures briefly (§7). Transient 429/5xx are not
                     // allowed to become long-lived negative state.
