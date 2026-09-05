@@ -1,0 +1,29 @@
+P11 §9 — byte correctness verification
+=====================================
+
+Three independent checks (all chunks are 8 MiB = 8388608 bytes):
+
+chunk 4 (joined_by_demand case from inflight-pfb-N8-final.txt):
+  pf-a (port 3011) served via direct fill + cache:  8c8924d1716a2350f84307b462f5174cb67190521f137c7b79e2983c4da993a3
+  pf-b (port 3013) served via joined_by_demand path: 8c8924d1716a2350f84307b462f5174cb67190521f137c7b79e2983c4da993a3
+  pf-off (port 3009) served via direct (no prefetch): 8c8924d1716a2350f84307b462f5174cb67190521f137c7b79e2983c4da993a3
+  → all three identical
+
+chunk 5 (served_demand case from condb-pfa-N12-final.txt):
+  pf-a (port 3011) served via served_demand path:     2fdd301d10d7f0e92833308659812bcf74f4ff276f89c41b4a7fd0487bd15417
+  pf-off (port 3009) served via direct (no prefetch): 2fdd301d10d7f0e92833308659812bcf74f4ff276f89c41b4a7fd0487bd15417
+  → both identical
+
+chunk 14 (served_demand case from condb-pfb-N16-final.txt):
+  pf-b (port 3013) served via served_demand path:     ce38390bf6bf3f9b47969d28d4dda4414c9f7afc50df54a6cf53485a2b639fb4
+  pf-off (port 3009) served via direct (no prefetch): ce38390bf6bf3f9b47969d28d4dda4414c9f7afc50df54a6cf53485a2b639fb4
+  → both identical
+
+Method: curl Range request bytes=N*8388608..(N+1)*8388608-1, SHA-256 of returned body.
+Each chunk returned by the P11 demand-path seam is bit-identical to the chunk
+returned by the no-prefetch direct path, regardless of whether the demand
+read was served from prefetched_done (served_demand), joined to an in-flight
+prefetch fill (joined_by_demand), or fetched directly.
+
+P11 demand-path seam returns the same bytes the provider does, in all three
+delivery paths.

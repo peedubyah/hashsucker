@@ -461,6 +461,29 @@ impl PlaybackIntelligence {
         }
     }
 
+    /// P11 §6 — clear a chunk from the in-flight attribution set without moving it
+    /// to "done". Used when a prefetch fill FAILS so a later demand read does not
+    /// falsely count it as `joined_by_demand`. Cache presence is the real authority
+    /// (the P11 demand-path seam re-checks `is_present`), but this prevents the
+    /// attribution sets from lying indefinitely about a chunk that never made it
+    /// durable. Narrowest possible cleanup; no lifecycle subsystem.
+    pub fn clear_prefetch_inflight(&self, key: &str, idx: u64) {
+        if let Some(s) = self.map.lock().unwrap().get_mut(key) {
+            s.prefetched_inflight.remove(&idx);
+        }
+    }
+
+    /// P11 §6 — opportunistic eviction/invalidation cleanup. If the cache
+    /// (authoritative) reports a chunk is no longer present but the attribution
+    /// set still claims `prefetched_done` for it, remove the stale entry. Byte
+    /// delivery is unaffected — the demand path always re-checks the cache —
+    /// this is purely telemetry hygiene so the metrics reflect reality.
+    pub fn clear_prefetched_done(&self, key: &str, idx: u64) {
+        if let Some(s) = self.map.lock().unwrap().get_mut(key) {
+            s.prefetched_done.remove(&idx);
+        }
+    }
+
     /// Record a demand read touching chunk `idx`, counting prefetch usefulness with
     /// EXACT semantics:
     ///   * served_demand    — chunk ALREADY durable because prefetch completed it

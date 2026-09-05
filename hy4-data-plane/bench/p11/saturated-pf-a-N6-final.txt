@@ -1,0 +1,24 @@
+[p11-sat] sat-pfa-clean :: size=211552345 N=6 warm=1 gap=0ms
+[p11-sat] sat-pfa-clean :: warm 1 concurrent
+  sat-pfa-clean chunk 0: ttfb=6ms dur=16ms bytes=8388608
+  sat-pfa-clean chunk 1: ttfb=195ms dur=833ms bytes=8388608
+  sat-pfa-clean chunk 2: ttfb=234ms dur=840ms bytes=8388608
+  sat-pfa-clean chunk 3: ttfb=363ms dur=1027ms bytes=8388608
+  sat-pfa-clean chunk 4: ttfb=259ms dur=881ms bytes=8388608
+  sat-pfa-clean chunk 5: ttfb=192ms dur=809ms bytes=8388608
+
+[p11-sat] sat-pfa-clean :: DELTAS
+  bytes_up = +50331648
+  cdn = +6
+  api = +0
+  cap = +0
+  served = +0
+  completed = +0
+  wait = +0
+  try_n = +4
+  spare = +0
+  chunk_claims = +6
+  chunks_present = +6
+  final.spare = 0
+  final.chunks_present = 6
+  verdict: try=4 wait=0 completed=0 served=0 (must be try-only, 0 completions, 0 served)

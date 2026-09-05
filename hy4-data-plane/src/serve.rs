@@ -40,6 +40,7 @@
 use crate::cache;
 use crate::manager;
 
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -578,6 +579,13 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         pf.mark_prefetch_completed(&t.cache_key(), idx);
                         pf.chunks_completed.fetch_add(1, Ordering::SeqCst);
                     } else {
+                        // P11 §6 — clear stale attribution on failed prefetch so a
+                        // later demand read does not falsely count this chunk as
+                        // `joined_by_demand`. The cache itself is the authority (the
+                        // P11 demand-path seam re-checks `is_present`), but leaving
+                        // a chunk in `prefetched_inflight` forever would lie about
+                        // what actually happened. Narrowest possible cleanup.
+                        pf.clear_prefetch_inflight(&t.cache_key(), idx);
                         pf.failures.fetch_add(1, Ordering::SeqCst);
                     }
                 });
@@ -639,26 +647,55 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     if indices.is_empty() {
                         continue;
                     }
-                    // Reuse the pre-acquired capability for the FIRST fetch span so
-                    // the byte stream begins from the already-opened reader (no
-                    // double acquire / limiter loss). Later spans acquire normally.
-                    // `mut` + `take()` so the pre-acquired cap is moved exactly once
-                    // even though the chunk-grouping loop may spawn several spans.
-                    let mut fr = if !first_consumed {
-                        first_consumed = true;
-                        first_reserved.take()
-                    } else {
-                        None
-                    };
 
-                    // ---- Per-chunk single-flight ----
+                    // ---- P11: completed-prefetch handoff ----
+                    // The plan marked these chunks MISSING at request start, before
+                    // any speculative prefetch could complete them. If prefetch has
+                    // since made a chunk durable in the cache, the cache — NOT the
+                    // attribution bit — is authoritative: serve it locally and do NOT
+                    // issue a duplicate upstream fill. This closes the duplicate-fetch
+                    // inflation P10 measured (+72 MiB in Condition B). In-flight
+                    // prefetch is handled below by the coalescer: demand JOINS an
+                    // existing fill, never double-fetches.
                     //
-                    // The whole batch is claimed under ONE lock acquisition.
-                    // Claiming indices one at a time is a deadlock: reader A
-                    // could own chunk 10 while reader B owns 11 and 12 of the
-                    // same run, and each would then wait for the other to drive
-                    // the piece it does not own.
-                    let joins = cache.inflight().join_or_claim_many(&key, &indices);
+                    // P11 §6 opportunistic cleanup: if a chunk is in the
+                    // `prefetched_done` set but the cache says it's NOT present
+                    // (e.g. it was evicted between the prefetch completion and
+                    // this demand), remove it from the attribution set so the
+                    // telemetry does not lie. The cache itself is authoritative,
+                    // so this is purely an attribution hygiene pass — byte
+                    // delivery is already correct via the `is_present` check.
+                    let mut present_now: HashSet<u64> = HashSet::new();
+                    let mut missing: Vec<u64> = Vec::new();
+                    for &idx in &indices {
+                        match cache.is_present(&key, idx) {
+                            Ok(true) => {
+                                present_now.insert(idx);
+                            }
+                            _ => {
+                                missing.push(idx);
+                                // Eviction / invalidation / cache-reset:
+                                // the cache is the authority, not the
+                                // attribution bit. Opportunistic cleanup so
+                                // `prefetched_done` does not lie forever about
+                                // a chunk that is no longer durable.
+                                state.playback.clear_prefetched_done(&key, idx);
+                            }
+                        }
+                    }
+
+                    // Already-durable chunks (prefetch-completed or otherwise) -> serve
+                    // locally. Keyed by chunk index for a final ascending sort.
+                    let mut ordered: Vec<(u64, FetchItem)> = Vec::new();
+                    for &idx in &present_now {
+                        ordered.push((idx, FetchItem::Local { index: idx }));
+                    }
+
+                    let joins = if missing.is_empty() {
+                        Vec::new()
+                    } else {
+                        cache.inflight().join_or_claim_many(&key, &missing)
+                    };
 
                     cache
                         .metrics
@@ -691,30 +728,35 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         }
                     }
 
-                    // ---- Group consecutive OWNED chunks into fetch spans ----
+                    // ---- Group consecutive OWNED missing chunks into fetch spans ----
                     //
                     // The chunk is the unit of DURABLE truth, not necessarily of
                     // NETWORK I/O: adjacent missing chunks collapse into ONE
                     // provider Range and are split back into chunks on arrival.
+                    // A present (prefetch-durable) chunk may sit BETWEEN two missing
+                    // ones, so group only CONSECUTIVE chunk indices.
                     let present_before: Vec<(u64, u64)> = plan.segments[run.seg_from..run.seg_to]
                         .iter()
                         .filter(|s| s.present)
                         .map(|s| (s.start, s.end))
                         .collect();
-                    let mut items: Vec<FetchItem> = Vec::new();
-                    let mut i = 0usize;
-                    while i < indices.len() {
-                        if joins[i].owned {
-                            let mut j = i;
-                            while j + 1 < indices.len() && joins[j + 1].owned {
+                    let mut k = 0usize;
+                    while k < missing.len() {
+                        if joins[k].owned {
+                            let mut j = k;
+                            while j + 1 < missing.len()
+                                && joins[j + 1].owned
+                                && missing[j + 1] == missing[j] + 1
+                            {
                                 j += 1;
                             }
-                            let sub: Vec<u64> = indices[i..=j].to_vec();
+                            let sub: Vec<u64> = missing[k..=j].to_vec();
+                            let sub_start = sub[0];
                             let f_start = grid.chunk_start(sub[0]);
                             let f_end = match grid.chunk_end(*sub.last().unwrap()) {
                                 Some(e) => e,
                                 None => {
-                                    i = j + 1;
+                                    k = j + 1;
                                     continue;
                                 }
                             };
@@ -729,8 +771,8 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                 missing: (w_start, w_end),
                                 chunk_indices: sub.clone(),
                                 fetch_span: Some((f_start, f_end)),
-                                joined_inflight: joins[i..=j].iter().any(|x| x.joined_existing),
-                                overlap_bytes_avoided: joins[i..=j]
+                                joined_inflight: joins[k..=j].iter().any(|x| x.joined_existing),
+                                overlap_bytes_avoided: joins[k..=j]
                                     .iter()
                                     .filter(|x| x.joined_existing)
                                     .map(|x| grid.chunk_len(x.index))
@@ -740,6 +782,14 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                             });
 
                             let (stx, srx) = mpsc::channel::<SpanMsg>(32);
+                            // Reuse the pre-acquired capability for the FIRST fetch
+                            // span only (first_consumed guards a single take).
+                            let fr = if !first_consumed {
+                                first_consumed = true;
+                                first_reserved.take()
+                            } else {
+                                None
+                            };
                             // Fill CONCURRENTLY with the other spans in this run.
                             // Sequential driving would deadlock whenever a run
                             // is split between two readers (see above).
@@ -759,18 +809,25 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                 Some(stx),
                                 Some(stage.clone()),
                                 cold,
-                                fr.take(),
+                                fr,
                             ));
-                            items.push(FetchItem::Owned { rx: srx });
-                            i = j + 1;
+                            ordered.push((sub_start, FetchItem::Owned { rx: srx }));
+                            k = j + 1;
                         } else {
-                            items.push(FetchItem::Waiter {
-                                index: indices[i],
-                                record: joins[i].record.clone(),
-                            });
-                            i += 1;
+                            ordered.push((
+                                missing[k],
+                                FetchItem::Waiter {
+                                    index: missing[k],
+                                    record: joins[k].record.clone(),
+                                },
+                            ));
+                            k += 1;
                         }
                     }
+
+                    // Ascending chunk order so the client sees one ordered byte stream.
+                    ordered.sort_by_key(|(idx, _)| *idx);
+                    let items: Vec<FetchItem> = ordered.into_iter().map(|(_, it)| it).collect();
 
                     // ---- Consume in ascending chunk order ----
                     //
@@ -850,6 +907,40 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                     return;
                                 }
                             }
+                            FetchItem::Local { index } => {
+                                // P11 completed-prefetch handoff: this chunk is
+                                // already durable in the cache (a completed prefetch
+                                // fill, or any prior fill). The cache is authoritative
+                                // — read it locally, no upstream.
+                                let cs = grid.chunk_start(index);
+                                let ce = match grid.chunk_end(index) {
+                                    Some(e) => e,
+                                    None => return,
+                                };
+                                let s = run.start.max(cs);
+                                let e = run.end.min(ce);
+                                let bytes = match cache.pread(&tf_id, s, e) {
+                                    Ok(b) => b,
+                                    Err(err) => {
+                                        eprintln!(
+                                            "[rust-proxy] cache pread failed on prefetch-durable chunk {index}: {err}"
+                                        );
+                                        return;
+                                    }
+                                };
+                                if first_byte {
+                                    first_byte = false;
+                                    stage.set_t5(Instant::now());
+                                    metrics
+                                        .record_first_byte(open_start.elapsed().as_millis() as u64);
+                                }
+                                if tx.send(Ok(bytes::Bytes::from(bytes))).await.is_err() {
+                                    metrics
+                                        .client_cancellations
+                                        .fetch_add(1, Ordering::SeqCst);
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
@@ -898,6 +989,13 @@ enum FetchItem {
     Waiter {
         index: u64,
         record: Arc<cache::ChunkInFlightRecord>,
+    },
+    /// A chunk already durable in the cache (a completed prefetch fill, or any
+    /// prior fill). Served from disk — no upstream fetch, no coalescer claim.
+    /// P11 added this so demand consumes useful prefetch work instead of
+    /// duplicating it.
+    Local {
+        index: u64,
     },
 }
 
