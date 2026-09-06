@@ -55,7 +55,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::cache::{CacheEngine, ChunkPlan, RunKind, TorrentFileId};
-use crate::metrics::{CacheDecision, Metrics, StageClock, StageReport, WorkClass};
+use crate::metrics::{CacheDecision, Metrics, MetricsExt, StageClock, StageReport, WorkClass};
 use crate::playback_intel::{PlaybackIntelligence, PrefetchMode};
 use crate::transport::{Faults, OpenError, ResilientRangeReader, Step};
 
@@ -359,6 +359,11 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     } else {
         None
     };
+    // GAP 2 (§15 Phase 2): RAII guard increments concurrent_demand_current
+    // on acquire and decrements on drop (all exit paths covered).
+    let _demand_guard = first_reserved
+        .as_ref()
+        .map(|_| state.metrics.start_demand());
     let mut first_reserved = first_reserved;
 
     let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
@@ -1468,6 +1473,16 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
         .as_ref()
         .map(|c| c.chunk_counts())
         .unwrap_or((0, 0));
+    // GAP 2/3 pre-computed values (serde_json::json!() does not support let bindings)
+    let concurrent_current = m.concurrent_demand_current.load(Ordering::SeqCst);
+    let concurrent_peak = m.concurrent_demand_peak.load(Ordering::SeqCst);
+    let caps_total = pool.iter().map(|(_, len, _)| *len as u64).sum::<u64>();
+    let target_total = pool.iter().map(|(_, _, tgt)| *tgt as u64).sum::<u64>();
+    let utilization_pct = if target_total > 0 {
+        ((caps_total as f64 / target_total as f64) * 100.0).round() as u64
+    } else {
+        0u64
+    };
     let body = serde_json::json!({
         "authoritative_size": state.authoritative_size,
         "torrent_file_id": state.tf_id,
@@ -1533,7 +1548,17 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
         "rate_limited": m.rate_limited.load(Ordering::SeqCst),
         "all_same_tf": m.all_same_tf.load(Ordering::SeqCst),
         "pool_growths": m.pool_growths.load(Ordering::SeqCst),
-        // Two kinds of "wait behind the limiter", reported separately. See the
+        // GAP 2 (§15 Phase 2): concurrent demand peak tracking.
+        "concurrent_demand": {
+            "current": concurrent_current,
+            "peak": concurrent_peak,
+        },
+        // GAP 3 (§15 Phase 2): pool aggregates computed from existing pool_summary().
+        "pool_aggregate": {
+            "caps": caps_total,
+            "target": target_total,
+            "utilization_pct": utilization_pct,
+        },
         // field comment in metrics.rs. A bare `limiter_waits: 0` must never be
         // read as "no contention" — check `limiter_permit_waits` too.
         "limiter_waits": m.limiter_waits.load(Ordering::SeqCst),

@@ -10,7 +10,7 @@
 // only (§12/§15: no TTFB optimization this slice); we preserve stage timing so a future TTFB
 // waterfall can explain where first-byte time goes.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -82,6 +82,14 @@ pub struct Metrics {
     /// Nonzero proves demand can stall behind another reader's fill.
     pub demand_joined_fill: AtomicU64,
     pub breaker_opens: AtomicU64,
+
+    // ---- Concurrency observability (§15, Phase 2 GAP 2) ----
+    /// Current number of active demand reads holding a ReservedCapability.
+    /// Decremented when ReservedCapability is dropped (task ends).
+    pub concurrent_demand_current: AtomicU32,
+    /// High-water mark of concurrent demand reads — peak observed since process start.
+    /// Updated whenever concurrent_demand_current exceeds the current value.
+    pub concurrent_demand_peak: AtomicU32,
 
     // Other TorBox APIs (expected 0 — proves they never enter the Range hot path)
     pub mylist_calls: AtomicU64,
@@ -175,6 +183,52 @@ impl Metrics {
             .iter()
             .map(|r| r.to_json())
             .collect()
+    }
+}
+
+/// RAII guard: records demand completion when dropped. Created by
+/// `Metrics::start_demand()`. Stores `Arc<Metrics>` so the guard works with
+/// the `Arc<Metrics>` that `AppState` holds.
+pub struct DemandGuard {
+    metrics: Arc<Metrics>,
+    // bool field prevents double-decrement on explicit drop + RAII drop
+    done: bool,
+}
+
+impl Drop for DemandGuard {
+    fn drop(&mut self) {
+        if !self.done {
+            self.done = true;
+            self.metrics.record_demand_done();
+        }
+    }
+}
+
+impl Metrics {
+    /// Start a demand read: increment current and update peak.
+    /// Returns a guard that calls `record_demand_done()` on drop.
+    /// Works on `&Metrics` (used by `Arc<Metrics>` via Deref).
+    pub fn start_demand(&self) -> DemandGuard {
+        self.record_demand_active();
+        DemandGuard {
+            metrics: Arc::new(Metrics::default()),
+            done: false,
+        }
+    }
+}
+
+/// Extension trait so `Arc<Metrics>::start_demand()` is callable in serve.rs.
+pub trait MetricsExt {
+    fn start_demand(&self) -> DemandGuard;
+}
+
+impl MetricsExt for Arc<Metrics> {
+    fn start_demand(&self) -> DemandGuard {
+        self.record_demand_active();
+        DemandGuard {
+            metrics: self.clone(),
+            done: false,
+        }
     }
 }
 
@@ -752,6 +806,22 @@ impl Metrics {
     }
     pub fn record_breaker_open(&self) {
         self.breaker_opens.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Increment concurrent demand counter and update peak if new high.
+    pub fn record_demand_active(&self) {
+        let prev = self.concurrent_demand_current.fetch_add(1, Ordering::SeqCst);
+        // Update peak if we exceeded it
+        if prev + 1 > self.concurrent_demand_peak.load(Ordering::SeqCst) {
+            let _ = self.concurrent_demand_peak.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |_| {
+                Some((prev + 1) as u32)
+            });
+        }
+    }
+
+    /// Decrement concurrent demand counter.
+    pub fn record_demand_done(&self) {
+        self.concurrent_demand_current.fetch_sub(1, Ordering::SeqCst);
     }
 
     // ---- §10 recovery-budget accounting ----
