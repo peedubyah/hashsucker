@@ -1,0 +1,14 @@
+# Line-ending fence (P20 convergence).
+#
+# Shell scripts and Rust sources are executed/compiled inside Linux
+# containers. A CRLF working tree breaks them (`\r: command not found`),
+# and core.autocrlf=true on a Windows host would otherwise smudge every
+# text file to CRLF on checkout. Pin these paths to LF in every working
+# tree, independent of the host's core.autocrlf setting.
+#
+# Deliberately narrow: only paths that are executed or compiled in a
+# Linux container. This is not an aesthetic repo-wide normalization and
+# it does not rewrite any existing file.
+
+*.sh text eol=lf
+*.rs text eol=lf
