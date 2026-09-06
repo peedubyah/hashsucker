@@ -84,6 +84,8 @@ struct Recovery {
     /// `Some(t)` once the reader has entered the recovery path; used to measure wall time.
     /// `None` while the read is still in normal transfer or after `finalize` has run.
     recovery_started_at: Option<Instant>,
+    /// Monotonic attempt counter for per-attempt CDN telemetry.
+    attempt: u32,
 }
 
 pub struct ResilientRangeReader {
@@ -113,6 +115,8 @@ pub struct ResilientRangeReader {
     /// exposes neither as a separate timing, so we stamp them ourselves at the
     /// observable points rather than inventing a TCP/TLS timestamp.
     stage: Option<StageClock>,
+    /// Instant when the most recent CDN response headers were received.
+    last_headers_at: Option<Instant>,
 }
 
 impl ResilientRangeReader {
@@ -171,12 +175,14 @@ impl ResilientRangeReader {
                 reacquires: 0,
                 wall_ms: 0,
                 recovery_started_at: None,
+                attempt: 1,
             },
             faults,
             first_attempt: true,
             midbody_triggered: false,
             on_chunk,
             stage: None,
+            last_headers_at: None,
         }
     }
 
@@ -231,6 +237,15 @@ impl ResilientRangeReader {
                     Ok(r) => r,
                     Err(_) => {
                         // Network/transport error -> transient (Class B).
+                        // Per-attempt telemetry: transport error.
+                        let failed_instant = Instant::now();
+                        let headers_ms = failed_instant.saturating_duration_since(cdn_start).as_millis() as u64;
+                        let attempt = self.recovery.attempt;
+                        if let Some(s) = self.stage.as_ref() {
+                            s.record_attempt_headers(attempt, host_of(&url).unwrap_or_default(), 0, cdn_start, headers_ms, None);
+                            s.record_attempt_retry(attempt, cdn_start, failed_instant, true);
+                        }
+                        self.recovery.attempt += 1;
                         self.metrics
                             .upstream_errors
                             .fetch_add(1, Ordering::SeqCst);
@@ -248,6 +263,11 @@ impl ResilientRangeReader {
                 status = resp.status().as_u16();
                 let host = host_of(&url).unwrap_or_default();
                 self.metrics.record_cdn(status, cdn_elapsed, &host);
+                // Per-attempt telemetry: record headers receipt.
+                let attempt = self.recovery.attempt;
+                if let Some(s) = self.stage.as_ref() {
+                    s.record_attempt_headers(attempt, host.clone(), status, cdn_start, cdn_elapsed.as_millis() as u64, None);
+                }
                 provider_ra = parse_retry_after(
                     resp.headers()
                         .get(RETRY_AFTER)
@@ -269,6 +289,8 @@ impl ResilientRangeReader {
                         }
                     }
                     self.response = Some(Box::new(resp));
+                    // Stamp headers receipt instant for T4/body timing.
+                    self.last_headers_at = Some(Instant::now());
                     return Ok(());
                 }
             }
@@ -322,6 +344,21 @@ impl ResilientRangeReader {
         self.enter_recovery();
         self.current.cap.throttle(Instant::now() + effective);
         self.metrics.record_recovery_attempt();
+        // Per-attempt telemetry: Class B same-cap retry decision.
+        let next_attempt = self.recovery.attempt + 1;
+        if let Some(s) = self.stage.as_ref() {
+            // same_cap=true; decision instant is now.
+            s.record_attempt_retry(next_attempt, Instant::now(), Instant::now(), true);
+        }
+        self.recovery.attempt += 1;
+        // Record the enforced wait on the NEW attempt entry so the timeline shows:
+        // "attempt 1 failed -> waited N ms -> attempt 2 headers_ms=Y".
+        let retry_wait = self.current.cap.throttle_until()
+            .saturating_duration_since(Instant::now())
+            .as_millis() as u64;
+        if let Some(s) = self.stage.as_ref() {
+            s.set_attempt_retry_wait(next_attempt, retry_wait);
+        }
         self.recovery.same_cap_retries += 1;
         let applied_ms = effective.as_millis() as u64;
         self.metrics
@@ -354,6 +391,18 @@ impl ResilientRangeReader {
             .upstream_errors
             .fetch_add(1, Ordering::SeqCst);
         self.metrics.record_recovery_attempt();
+        // Per-attempt telemetry: Class C reacquire decision.
+        let next_attempt = self.recovery.attempt + 1;
+        if let Some(s) = self.stage.as_ref() {
+            // same_cap=false; decision instant is now.
+            s.record_attempt_retry(next_attempt, Instant::now(), Instant::now(), false);
+        }
+        self.recovery.attempt += 1;
+        // Class C reacquires fresh caps: no throttle wait, but still record
+        // so the timeline is complete.
+        if let Some(s) = self.stage.as_ref() {
+            s.set_attempt_retry_wait(next_attempt, 0);
+        }
         self.recovery.reacquires += 1;
         if self.recovery.reacquires <= MAX_REACQUIRES {
             match self.manager.reacquire_for_read(self.priority).await {
@@ -411,6 +460,13 @@ impl ResilientRangeReader {
                     // the header-to-first-body gap.
                     if let Some(s) = self.stage.as_ref() {
                         s.set_t4(Instant::now());
+                    // Per-attempt telemetry: record T4/body instant.
+                    if let Some(hdr_instant) = self.last_headers_at.take() {
+                        let attempt = self.recovery.attempt;
+                        if let Some(s) = self.stage.as_ref() {
+                            s.record_attempt_body(attempt, hdr_instant, Instant::now());
+                        }
+                    }
                     }
                     if self.is_single && self.pos == self.start {
                         // RD_SINGLE_BYTE_WORKAROUND: provider gave 2 bytes; hand back exactly 1.

@@ -55,7 +55,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::cache::{CacheEngine, ChunkPlan, RunKind, TorrentFileId};
-use crate::metrics::{CacheDecision, Metrics, StageClock, StageReport};
+use crate::metrics::{CacheDecision, Metrics, StageClock, StageReport, WorkClass};
 use crate::playback_intel::{PlaybackIntelligence, PrefetchMode};
 use crate::transport::{Faults, OpenError, ResilientRangeReader, Step};
 
@@ -405,6 +405,8 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                 cache_hit: false,
                 api_requests_delta: metrics.api_requests.load(Ordering::SeqCst) - api_before,
                 cdn_requests_delta: metrics.cdn_requests.load(Ordering::SeqCst) - cdn_before,
+                work_class: WorkClass::Demand,
+                cdn_attempts: stage.take_attempts(),
             });
             return;
         }
@@ -446,6 +448,8 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     cache_hit: false,
                     api_requests_delta: metrics.api_requests.load(Ordering::SeqCst) - api_before,
                     cdn_requests_delta: metrics.cdn_requests.load(Ordering::SeqCst) - cdn_before,
+                    work_class: WorkClass::Demand,
+                    cdn_attempts: stage.take_attempts(),
                 });
                 return;
             }
@@ -513,15 +517,24 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         PrefetchMode::Auto => spare > 0,
                     };
                     pf.record_auto_decision(spare, use_wait);
+                    let prefetch_start = Instant::now();
                     let cap = if use_wait {
                         match mg.acquire_for_read_prefetch(pf.config.prefetch_priority).await {
                             Some(c) => c,
-                            None => return,
+                            // Wait budget exceeded — demand is saturating the lane; correctly defer.
+                            None => {
+                                pf.prefetches_bailed.fetch_add(1, Ordering::SeqCst);
+                                return;
+                            }
                         }
                     } else {
                         match mg.acquire_for_read_try(pf.config.prefetch_priority) {
                             Some(c) => c,
-                            None => return,
+                            // No idle lane; correctly defer to demand.
+                            None => {
+                                pf.prefetches_bailed.fetch_add(1, Ordering::SeqCst);
+                                return;
+                            }
                         }
                     };
                     // Now — and only now — claim via the SAME single-flight coalescer the
@@ -555,6 +568,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     };
                     // Lowest priority; existing_cap=Some means fill_chunk_run reuses the
                     // pre-acquired capability and never calls the blocking acquire.
+                    let pf_stage = StageClock::new(prefetch_start);
                     fill_chunk_run(
                         c.clone(),
                         m.clone(),
@@ -588,6 +602,17 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         pf.clear_prefetch_inflight(&t.cache_key(), idx);
                         pf.failures.fetch_add(1, Ordering::SeqCst);
                     }
+                    // Record prefetch stage timing alongside demand in stages_recent so
+                    // a stalled demand can be correlated against in-flight prefetch work.
+                    m.record_stage_report(StageReport {
+                        instants: pf_stage.snapshot(),
+                        request: (f_start, f_end),
+                        cache_hit: false,
+                        api_requests_delta: 0,
+                        cdn_requests_delta: 1,
+                        work_class: WorkClass::Prefetch,
+                        cdn_attempts: pf_stage.take_attempts(),
+                    });
                 });
             }
         }
@@ -865,6 +890,29 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                 }
                             },
                             FetchItem::Waiter { index, record } => {
+                                // Demand arrived while a fill was already in-flight: demand waits
+                                // on the coalescer, possibly behind prefetch or another demand.
+                                // Record this so the "demand blocked behind prefetch" question
+                                // is answered with evidence, not silence.
+                                metrics.record_demand_joined_fill();
+                                // Emit a stage report at the join moment. T2/T4 are the fill
+                                // owner's timestamps; the join clock captures when demand arrived.
+                                // A later correlating pass can match this report against the
+                                // prefetch stage report for the same chunk to establish causality.
+                                let join_clock = StageClock::new(Instant::now());
+                                let join_stage = join_clock.snapshot();
+                                let join_report = StageReport {
+                                    instants: join_stage,
+                                    // The client Range this demand read needed (approximate from run).
+                                    request: (run.start, run.end),
+                                    cache_hit: false,
+                                    api_requests_delta: 0,
+                                    cdn_requests_delta: 0,
+                                    work_class: WorkClass::DemandJoinedFill,
+                                    // DemandJoinedFill: CDN attempts are attributed to the fill owner.
+                                    cdn_attempts: vec![],
+                                };
+                                metrics.record_stage_report(join_report);
                                 // `notify_waiters()` stores NO permit, so a
                                 // `notified().await` registered after the
                                 // notification was delivered blocks forever.
@@ -961,6 +1009,8 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             cache_hit,
             api_requests_delta: metrics.api_requests.load(Ordering::SeqCst) - api_before,
             cdn_requests_delta: metrics.cdn_requests.load(Ordering::SeqCst) - cdn_before,
+            work_class: WorkClass::Demand,
+            cdn_attempts: stage.take_attempts(),
         });
     });
 
@@ -1488,6 +1538,9 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
         // read as "no contention" — check `limiter_permit_waits` too.
         "limiter_waits": m.limiter_waits.load(Ordering::SeqCst),
         "limiter_permit_waits": m.limiter_permit_waits.load(Ordering::SeqCst),
+        // Demand reads that waited on a coalescer fill already in-flight. Proves
+        // demand can stall behind another reader's fill even without permit contention.
+        "demand_joined_fill": m.demand_joined_fill.load(Ordering::SeqCst),
         "breaker_opens": m.breaker_opens.load(Ordering::SeqCst),
         // §15 — shared-limiter vs internal-recovery timing (observational)
         "timing": {

@@ -114,6 +114,8 @@ services:
       CACHE_ROOT: "/data/cache"
       TORBOX_API_KEY: ${TORBOX_API_KEY:?Set TORBOX_API_KEY in .env}
       REALDEBRID_API_KEY: ${REALDEBRID_API_KEY:-}
+      # DIAGNOSTIC: disable prefetch so demand reads are not coalesced into prefetch fills
+      PREFETCH_ENABLED: "0"
     depends_on:
       - media-search
     volumes:

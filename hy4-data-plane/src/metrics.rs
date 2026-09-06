@@ -75,6 +75,12 @@ pub struct Metrics {
     // limiter, and a bare 0 read as "no contention" when the opposite was true.
     pub limiter_waits: AtomicU64,
     pub limiter_permit_waits: AtomicU64,
+    /// Demand reads that waited on a coalescer fill already in-flight when demand arrived.
+    /// Distinct from `limiter_permit_waits` (blocked on a permit) and from upstream_errors
+    /// (provider failure). This is the coalescer-join wait — demand arrived after prefetch
+    /// or a prior demand fill started; the coalescer serializes them and demand waits.
+    /// Nonzero proves demand can stall behind another reader's fill.
+    pub demand_joined_fill: AtomicU64,
     pub breaker_opens: AtomicU64,
 
     // Other TorBox APIs (expected 0 — proves they never enter the Range hot path)
@@ -153,7 +159,7 @@ impl Metrics {
     /// Publish a completed request's stage waterfall. Retains the last
     /// `STAGE_REPORT_CAP` so concurrent bursts stay inspectable.
     pub fn record_stage_report(&self, r: StageReport) {
-        *self.stage_last.lock().unwrap() = Some(r);
+        *self.stage_last.lock().unwrap() = Some(r.clone());
         let mut v = self.stage_reports.lock().unwrap();
         v.push(r);
         if v.len() > STAGE_REPORT_CAP {
@@ -371,23 +377,78 @@ impl StageInstants {
     }
 }
 
+/// One CDN request attempt inside a single demand fill.
+/// Represents ONE iteration of the transport retry loop: one HTTP request that
+/// receives headers and optionally body bytes before either succeeding (206)
+/// or triggering a retry/recovery decision.
+///
+/// All timing is offsets in ms from the StageClock's T0 (request received).
+#[derive(Clone, serde::Serialize)]
+pub struct CdnAttempt {
+    /// Monotonic attempt number (1-indexed).
+    pub attempt: u32,
+    /// CDN host (sanitized: domain + TLD only, no credentials/paths).
+    pub host: String,
+    /// HTTP status code received. 0 if the request failed at the transport layer
+    /// (connection refused, DNS failure, timeout before headers).
+    pub status: u16,
+    /// Milliseconds from `send()` call to response headers received.
+    /// This includes TCP connect + TLS handshake + server processing + headers.
+    /// Zero if the request failed before headers.
+    pub headers_ms: u64,
+    /// Milliseconds from headers received to first body byte received.
+    /// None if: (a) the attempt failed before body, (b) this is a mid-body resume
+    /// (the first byte after recovery, not the first byte of the attempt).
+    pub ttfb_ms: Option<u64>,
+    /// For attempts that triggered a retry: milliseconds from `send()` to the
+    /// decision to retry (headers + body wait + classification). For the final
+    /// successful attempt, this is None (no retry decision made).
+    pub retry_decision_ms: Option<u64>,
+    /// True if this attempt used the SAME DeliveryCapability URL as the previous
+    /// attempt (same-cap retry). False if this was a reacquired capability
+    /// (dead-link reacquire) or the first attempt.
+    pub same_cap: bool,
+    /// Milliseconds the retry/reacquire decision caused us to wait before this
+    /// attempt's request was sent. Set on the NEXT attempt's entry by
+    /// apply_transient/apply_dead. None for the first attempt and for the
+    /// final successful attempt (no prior retry decision).
+    pub retry_wait_ms: Option<u64>,
+}
+
 /// Shared, interior-mutable stage clock. Created per client request and handed
 /// to the resilient reader so T3/T4 are stamped at the REAL dispatch and
 /// first-body-byte points inside the transport, rather than inferred from total
 /// latency at the caller.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct StageClock {
+    t0: Instant,
     inner: Arc<Mutex<StageInstants>>,
+    /// Per-attempt CDN telemetry. Pushed by the transport layer on every CDN request.
+    /// Bounded to avoid unbounded growth on pathological retry chains.
+    attempts: Arc<Mutex<Vec<CdnAttempt>>>,
+}
+
+impl Default for StageClock {
+    fn default() -> Self {
+        Self::new(Instant::now())
+    }
 }
 
 impl StageClock {
     pub fn new(t0: Instant) -> Self {
         Self {
+            t0,
             inner: Arc::new(Mutex::new(StageInstants {
                 t0_received: Some(t0),
                 ..Default::default()
             })),
+            attempts: Arc::new(Mutex::new(Vec::with_capacity(8))),
         }
+    }
+
+    /// Returns the T0 of this clock, for computing offsets in the transport layer.
+    pub fn t0(&self) -> Instant {
+        self.t0
     }
     pub fn set_t1(&self, t: Instant) {
         self.inner.lock().unwrap().t1_acquire_issued = Some(t);
@@ -418,11 +479,133 @@ impl StageClock {
     pub fn snapshot(&self) -> StageInstants {
         *self.inner.lock().unwrap()
     }
+
+    /// Record that a CDN request received its HTTP response headers.
+    /// `attempt` is the 1-indexed attempt number.
+    /// `host` is the sanitized CDN host.
+    /// `status` is the HTTP status code.
+    /// `send_instant` is when the request was dispatched (after T3 is stamped).
+    /// `headers_ms` is the time from `send_instant` to headers received. For transport
+    /// Record that a CDN request received response headers.
+    /// `retry_wait_ms` is the enforced wait from the prior retry/reacquire decision.
+    /// None for the first attempt and after Class A (206) with no prior retry.
+    pub fn record_attempt_headers(
+        &self,
+        attempt: u32,
+        host: String,
+        status: u16,
+        send_instant: Instant,
+        headers_ms: u64,
+        retry_wait_ms: Option<u64>,
+    ) {
+        let mut g = self.attempts.lock().unwrap();
+        if g.len() < 16 {
+            // Bound: pathological retry chains don't grow the vec forever.
+            g.push(CdnAttempt {
+                attempt,
+                host,
+                status,
+                headers_ms,
+                ttfb_ms: None,
+                retry_decision_ms: None,
+                same_cap: true,
+                retry_wait_ms,
+            });
+        }
+    }
+
+    /// Record that a CDN request received its first body byte.
+    /// `attempt` is the 1-indexed attempt number.
+    /// `headers_instant` is when headers were received.
+    /// `body_instant` is when the first body byte arrived (now).
+    pub fn record_attempt_body(
+        &self,
+        attempt: u32,
+        headers_instant: Instant,
+        body_instant: Instant,
+    ) {
+        let ttfb_ms = body_instant.saturating_duration_since(headers_instant).as_millis() as u64;
+        let mut g = self.attempts.lock().unwrap();
+        // Mid-body resume fires `record_attempt_body` for the RESUME attempt
+        // AFTER a prior attempt already has ttfb_ms. Don't overwrite.
+        if let Some(a) = g.iter_mut().find(|a| a.attempt == attempt && a.ttfb_ms.is_none()) {
+            a.ttfb_ms = Some(ttfb_ms);
+        }
+    }
+
+    /// Record that a CDN attempt triggered a retry/recovery decision.
+    /// `attempt` is the 1-indexed attempt number.
+    /// `send_instant` is when the request was sent.
+    /// `decision_instant` is when the retry decision was made.
+    /// `same_cap` is true for same-cap retries (Class B), false for reacquires (Class C).
+    pub fn record_attempt_retry(
+        &self,
+        attempt: u32,
+        send_instant: Instant,
+        decision_instant: Instant,
+        same_cap: bool,
+    ) {
+        let retry_decision_ms = decision_instant.saturating_duration_since(send_instant).as_millis() as u64;
+        let mut g = self.attempts.lock().unwrap();
+        // Mid-body resume: the resume attempt may fire retry before body, which is fine.
+        // Mid-body success: the final attempt has no retry_decision_ms.
+        if let Some(a) = g.iter_mut().find(|a| a.attempt == attempt) {
+            // Only set if not already set (final success has None).
+            if a.retry_decision_ms.is_none() {
+                a.retry_decision_ms = Some(retry_decision_ms);
+            }
+            a.same_cap = same_cap;
+        }
+    }
+
+    /// Set the retry_wait_ms on an existing attempt entry.
+    /// Used by apply_transient/apply_dead to record the enforced wait time
+    /// on the NEW attempt's entry, so the timeline shows the causal chain:
+    /// "attempt 1 failed -> waited N ms -> attempt 2 started".
+    pub fn set_attempt_retry_wait(&self, attempt: u32, retry_wait_ms: u64) {
+        if let Ok(mut g) = self.attempts.lock() {
+            if let Some(a) = g.iter_mut().find(|a| a.attempt == attempt) {
+                a.retry_wait_ms = Some(retry_wait_ms);
+            }
+        }
+    }
+
+    /// Take and return all recorded CDN attempts. Consumed so the report captures
+    /// the state at the time of report creation, not a live snapshot.
+    pub fn take_attempts(&self) -> Vec<CdnAttempt> {
+        let mut g = self.attempts.lock().unwrap();
+        std::mem::take(&mut *g)
+    }
+}
+
+/// Work-class label for attributing stage reports to real demand vs speculative prefetch.
+/// This is the primary seam for answering "is demand blocked behind prefetch?"
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkClass {
+    /// A genuine client read (Plex browser request, benchmark demand, etc.)
+    Demand,
+    /// A speculative prefetch fill spawned by playback intelligence.
+    /// Prefetch spans are identifiable in `stages_recent` so demand can be correlated
+    /// to determine whether a stalled demand was waiting behind a prefetch fill.
+    Prefetch,
+    /// A demand read that waited on a coalescer fill that was in-flight when demand arrived.
+    /// The fill owner may be a prior demand read OR a prefetch fill — the coalescer has no
+    /// attribution for who started the fill. This class makes the wait explicit even when
+    /// the stage report's T2/T3/T4 belong to the FILL OWNER's work, not demand's own.
+    /// Used to answer: did demand stall because a prefetch (or another demand) was filling
+    /// the bytes it needed?
+    DemandJoinedFill,
+}
+
+impl Default for WorkClass {
+    fn default() -> Self {
+        WorkClass::Demand
+    }
 }
 
 /// One completed request's stage waterfall, in the shape the benchmark consumes.
 /// All stage fields are nullable; see `StageInstants`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct StageReport {
     pub instants: StageInstants,
     pub request: (u64, u64),
@@ -433,6 +616,14 @@ pub struct StageReport {
     pub api_requests_delta: u64,
     /// CDN Range requests made by this request.
     pub cdn_requests_delta: u64,
+    /// Whether this was a genuine demand read or a speculative prefetch fill.
+    /// Used to answer: is stalled demand blocked behind prefetch work?
+    pub work_class: WorkClass,
+    /// Per-attempt CDN telemetry. One entry per CDN request made during this fill.
+    /// Each entry has its own headers_ms, ttfb_ms, retry_decision_ms, and same_cap.
+    /// This decomposes the T3→T4 upstream phase into individual attempts so we can
+    /// answer: was the ~55s stall ONE bad request, a retry chain, or something else?
+    pub cdn_attempts: Vec<CdnAttempt>,
 }
 
 impl StageReport {
@@ -464,6 +655,16 @@ impl StageReport {
             "downstream_handoff_ms": StageInstants::span_ms(i.t4_first_upstream_byte, i.t5_first_client_byte),
             "capability_to_client_ms": StageInstants::span_ms(i.t2_capability_ready, i.t5_first_client_byte),
             "total_open_ttfb_ms": StageInstants::span_ms(i.t0_received, i.t5_first_client_byte),
+            // Work class: distinguishes demand from prefetch fills in stages_recent so
+            // a stalled demand can be correlated against in-flight prefetch work.
+            // DemandJoinedFill means demand arrived while a fill was already in-flight.
+            "work_class": match self.work_class {
+                WorkClass::Demand => "demand",
+                WorkClass::Prefetch => "prefetch",
+                WorkClass::DemandJoinedFill => "demand_joined_fill",
+            },
+            // Per-attempt CDN telemetry: decomposes T3→T4 into individual attempts.
+            "cdn_attempts": self.cdn_attempts,
         })
     }
 }
@@ -544,6 +745,10 @@ impl Metrics {
     /// the field comment on `limiter_waits` for why they are kept separate.
     pub fn record_limiter_permit_wait(&self) {
         self.limiter_permit_waits.fetch_add(1, Ordering::SeqCst);
+    }
+    /// Record a demand read that waited on a coalescer fill already in-flight.
+    pub fn record_demand_joined_fill(&self) {
+        self.demand_joined_fill.fetch_add(1, Ordering::SeqCst);
     }
     pub fn record_breaker_open(&self) {
         self.breaker_opens.fetch_add(1, Ordering::SeqCst);

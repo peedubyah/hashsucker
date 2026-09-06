@@ -304,6 +304,11 @@ pub struct PlaybackIntelligence {
     pub failures: AtomicU64,
     /// Number of seek events that reprioritized (generation bumps).
     pub seek_reprioritizations: AtomicU64,
+    /// Number of prefetch acquisitions that bailed (capability not immediately available
+    /// AND Wait budget exceeded). This is a demand-preference signal: nonzero means
+    /// prefetch saw a busy lane and correctly deferred to demand. Distinct from
+    /// `failures` which is a provider-side failure.
+    pub prefetches_bailed: AtomicU64,
     // ---- P10: usefulness / value metrics ----
     /// Demand reads that hit a chunk ALREADY made durable by prefetch before the
     /// demand arrived. The core "prefetch is useful" signal.
@@ -331,6 +336,7 @@ impl PlaybackIntelligence {
             joined_inflight: AtomicU64::new(0),
             failures: AtomicU64::new(0),
             seek_reprioritizations: AtomicU64::new(0),
+            prefetches_bailed: AtomicU64::new(0),
             served_demand: AtomicU64::new(0),
             joined_by_demand: AtomicU64::new(0),
             last_spare_capacity: AtomicU32::new(0),
@@ -556,6 +562,7 @@ impl PlaybackIntelligence {
             "prefetch_chunks_skipped_present": self.skipped_present.load(Ordering::SeqCst),
             "prefetch_joined_inflight": self.joined_inflight.load(Ordering::SeqCst),
             "prefetch_failures": self.failures.load(Ordering::SeqCst),
+            "prefetches_bailed": self.prefetches_bailed.load(Ordering::SeqCst),
             "seek_reprioritizations": self.seek_reprioritizations.load(Ordering::SeqCst),
             "prefetch_served_demand": self.served_demand.load(Ordering::SeqCst),
             "prefetch_joined_by_demand": self.joined_by_demand.load(Ordering::SeqCst),
