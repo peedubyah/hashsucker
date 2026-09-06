@@ -202,26 +202,90 @@ async fn acquire_realdebrid(
 }
 
 // MODE A: GET /torrents -> match by infoHash -> GET /torrents/info/{id} -> match per-file
-// by canonicalInternalPath + exact size -> POST /unrestrict/link -> build capability around
-// the unrestricted CDN URL. Identity is preserved at every step: infoHash, path, exact size.
-// P14 fix: the previous /downloads path used size-only matching and is unavailable on basic
-// RD tier; /torrents + /torrents/info/{id} are the working APIs for this key.
-async fn acquire_rd_mode_a(
-    coord: &ProviderCoord,
-    tf: &ControlTorrentFile,
+// ---- P17: RD MODE A id resolution helpers --------------------------------
+//
+// Historically MODE A resolved the RD torrent id by scanning
+// `GET /torrents?limit=100` for a `hash` matching the authoritative infoHash,
+// then fetched `/torrents/info/{id}`. That scan is a whole extra serial API
+// round trip on the cold path before any CDN byte can be requested.
+//
+// P17 §3 established against the live account that the S-1 coord already
+// carries that same id in `provider_resource_id`, and that
+// `/torrents/info/{id}.hash` equals the authoritative infoHash. So the scan is
+// redundant. We now use the coord id directly and only fall back to the scan
+// if the coord id cannot be verified.
+//
+// Correctness is deliberately NOT relaxed: every path still requires the
+// detail payload's `hash` to equal the authoritative infoHash, and file
+// selection is still exact-path+exact-size (then unambiguous exact-size).
+
+/// GET `/torrents/info/{rid}` and confirm it describes `want_hash`.
+///
+/// Returns:
+///   `Ok(Some(json))` -- usable torrent detail (identity verified)
+///   `Ok(None)`       -- not usable as a shortcut: non-success status, or the
+///                       payload's `hash` does not match. Caller decides.
+///   `Err(..)`        -- hard failure (rate limit / timeout / transport), which
+///                       must NOT be silently retried via another code path.
+async fn rd_info_checked(
+    rid: &str,
+    want_hash: &str,
     keys: &ApiKeys,
     client: &reqwest::Client,
     metrics: &Metrics,
-) -> Result<Arc<DeliveryCapability>, AcquireError> {
-    let want_hash = tf.info_hash.to_ascii_lowercase();
-    let want_path = tf
-        .canonical_internal_path
-        .as_deref()
-        .or(coord.canonical_internal_path.as_deref())
-        .map(|s| s.trim_start_matches('/').to_string());
+) -> Result<Option<serde_json::Value>, AcquireError> {
+    let info_url = format!("{REALDEBRID_API_BASE}/torrents/info/{rid}");
+    let info_started = std::time::Instant::now();
+    let info_resp = match tokio::time::timeout(
+        Duration::from_secs(25),
+        client
+            .get(&info_url)
+            .header(AUTHORIZATION, format!("Bearer {}", keys.realdebrid))
+            .header(ACCEPT, "application/json")
+            .send(),
+    )
+    .await
+    {
+        Ok(r) => r.map_err(|e| AcquireError::Transient(format!("rd info: {e}")))?,
+        Err(_) => return Err(AcquireError::Transient("rd info timed out (25s)".into())),
+    };
+    metrics.record_api(info_resp.status().as_u16(), info_started.elapsed());
+    if info_resp.status().as_u16() == 429 {
+        let ra = parse_retry_after(
+            info_resp
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+        );
+        return Err(AcquireError::RateLimited(ra));
+    }
+    if !info_resp.status().is_success() {
+        return Ok(None);
+    }
+    let info_json: serde_json::Value = info_resp
+        .json()
+        .await
+        .map_err(|e| AcquireError::Transient(format!("rd info json: {e}")))?;
+    let got_hash = info_json
+        .get("hash")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if got_hash != want_hash {
+        return Ok(None);
+    }
+    Ok(Some(info_json))
+}
 
-    // Step 1: enumerate user's RD torrents and find the one whose `hash` matches
-    // the authoritative infoHash.
+/// Fallback id resolution: enumerate the account's RD torrents and return the
+/// one whose `hash` matches `want_hash`. This is the exact pre-P17 behaviour
+/// and is only reached when the coord-supplied id could not be verified.
+async fn rd_list_scan_rid(
+    want_hash: &str,
+    keys: &ApiKeys,
+    client: &reqwest::Client,
+    metrics: &Metrics,
+) -> Result<String, AcquireError> {
     let list_url = format!("{REALDEBRID_API_BASE}/torrents?limit=100");
     let started = std::time::Instant::now();
     let list_resp = match tokio::time::timeout(
@@ -265,62 +329,82 @@ async fn acquire_rd_mode_a(
         .as_array()
         .ok_or_else(|| AcquireError::NoCapability("rd torrents not an array".into()))?;
 
-    let mut matched_id: Option<String> = None;
     for t in torrents {
         let h = t
             .get("hash")
             .and_then(|v| v.as_str())
             .map(|s| s.to_ascii_lowercase());
-        if h.as_deref() == Some(want_hash.as_str()) {
+        if h.as_deref() == Some(want_hash) {
             if let Some(id) = t.get("id").and_then(|v| v.as_str()) {
-                matched_id = Some(id.to_string());
-                break;
+                return Ok(id.to_string());
             }
         }
     }
-    let rid = matched_id
-        .ok_or_else(|| AcquireError::NoCapability("rd torrents: no torrent for infoHash".into()))?;
+    Err(AcquireError::NoCapability(
+        "rd torrents: no torrent for infoHash".into(),
+    ))
+}
 
-    // Step 2: per-torrent detail to identify the exact file by path + exact size.
-    let info_url = format!("{REALDEBRID_API_BASE}/torrents/info/{rid}");
-    let info_started = std::time::Instant::now();
-    let info_resp = match tokio::time::timeout(
-        Duration::from_secs(25),
-        client
-            .get(&info_url)
-            .header(AUTHORIZATION, format!("Bearer {}", keys.realdebrid))
-            .header(ACCEPT, "application/json")
-            .send(),
-    )
-    .await
-    {
-        Ok(r) => r.map_err(|e| AcquireError::Transient(format!("rd info: {e}")))?,
-        Err(_) => {
-            return Err(AcquireError::Transient(
-                "rd info timed out (25s)".into(),
-            ))
+// by canonicalInternalPath + exact size -> POST /unrestrict/link -> build capability around
+// the unrestricted CDN URL. Identity is preserved at every step: infoHash, path, exact size.
+// P14 fix: the previous /downloads path used size-only matching and is unavailable on basic
+// RD tier; /torrents + /torrents/info/{id} are the working APIs for this key.
+async fn acquire_rd_mode_a(
+    coord: &ProviderCoord,
+    tf: &ControlTorrentFile,
+    keys: &ApiKeys,
+    client: &reqwest::Client,
+    metrics: &Metrics,
+) -> Result<Arc<DeliveryCapability>, AcquireError> {
+    let want_hash = tf.info_hash.to_ascii_lowercase();
+    let want_path = tf
+        .canonical_internal_path
+        .as_deref()
+        .or(coord.canonical_internal_path.as_deref())
+        .map(|s| s.trim_start_matches('/').to_string());
+
+    // ---- Step 1 (P17): resolve the RD torrent id WITHOUT the list scan ----
+    //
+    // The S-1 coord already carries the authoritative RD torrent id in
+    // `provider_resource_id`, so we can go straight to the per-torrent detail.
+    // `rd_info_checked` still verifies the payload's `hash` against the
+    // authoritative infoHash, so this shortcut can never bind the wrong
+    // torrent: on any mismatch (or a missing/blank coord id) we fall back to
+    // the pre-P17 list scan.
+    let trimmed_rid = coord.provider_resource_id.trim();
+    let coord_rid: Option<&str> = if trimmed_rid.is_empty() {
+        None
+    } else {
+        Some(trimmed_rid)
+    };
+
+    let mut direct_json: Option<serde_json::Value> = None;
+    if let Some(rid) = coord_rid {
+        match rd_info_checked(rid, &want_hash, keys, client, metrics).await? {
+            Some(j) => direct_json = Some(j),
+            None => {
+                eprintln!(
+                    "[p17] rd: coord provider_resource_id={rid} unverified; falling back to /torrents list scan"
+                );
+            }
+        }
+    }
+
+    // ---- Step 2: per-torrent detail to identify the exact file by path + exact size. ----
+    let info_json: serde_json::Value = match direct_json {
+        Some(j) => j,
+        None => {
+            let rid = rd_list_scan_rid(&want_hash, keys, client, metrics).await?;
+            match rd_info_checked(&rid, &want_hash, keys, client, metrics).await? {
+                Some(j) => j,
+                None => {
+                    return Err(AcquireError::NoCapability(format!(
+                        "rd info: torrent {rid} does not match authoritative infoHash"
+                    )))
+                }
+            }
         }
     };
-    metrics.record_api(info_resp.status().as_u16(), info_started.elapsed());
-    if info_resp.status().as_u16() == 429 {
-        let ra = parse_retry_after(
-            info_resp
-                .headers()
-                .get(RETRY_AFTER)
-                .and_then(|v| v.to_str().ok()),
-        );
-        return Err(AcquireError::RateLimited(ra));
-    }
-    if !info_resp.status().is_success() {
-        return Err(AcquireError::NoCapability(format!(
-            "rd info status {}",
-            info_resp.status()
-        )));
-    }
-    let info_json: serde_json::Value = info_resp
-        .json()
-        .await
-        .map_err(|e| AcquireError::Transient(format!("rd info json: {e}")))?;
 
     // RD /torrents/info/{id} returns the torrent with `links` (per-file unrestrictable links)
     // when the torrent is ready (status 4 = downloaded). Identify the file with the exact
