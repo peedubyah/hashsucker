@@ -1284,7 +1284,7 @@ async function tryAlternateCandidateFallback({
           // and the binding write. Reuse normal machinery — no parallel
           // writer.
           try {
-            materializeVfsEntry(
+            await materializeVfsEntry(
               searchCache,
               promotion.handoff,
               controlPlaneStore,

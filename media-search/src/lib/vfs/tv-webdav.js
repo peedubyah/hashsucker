@@ -279,9 +279,9 @@ export function createTvWebDav({
 }) {
   const states = new Map();
 
-  function getCatalog() {
+  async function getCatalog() {
     for (const handoff of searchCache.listTvPlaybackHandoffs()) {
-      materializeVfsEntry(searchCache, handoff, controlPlaneStore, now, { allowLegacy: true });
+      await materializeVfsEntry(searchCache, handoff, controlPlaneStore, now, { allowLegacy: true });
     }
     const nextStates = [];
     for (const entry of searchCache.listVfsTvEntries()) {
@@ -1050,7 +1050,7 @@ export function createTvWebDav({
 
     // 5. Reuse the single owner of the VFS row + binding write.
     try {
-      materializeVfsEntry(searchCache, promotion.handoff, controlPlaneStore, now, { allowLegacy: true });
+      await materializeVfsEntry(searchCache, promotion.handoff, controlPlaneStore, now, { allowLegacy: true });
     } catch (e) {
       console.warn(`[vfs-tv] materializeVfsEntry failed for release=${candidate.releaseKey}: ${e.message}`);
       return false;
@@ -1217,7 +1217,7 @@ export function createTvWebDav({
 
   const handleTvWebDav = async function handleTvWebDav(request, response, url) {
     if (!url.pathname.startsWith('/vfs/TV')) return false;
-    const tree = getCatalog();
+    const tree = await getCatalog();
     const pathname = normalizePath(url.pathname);
 
     if (request.method === 'PROPFIND') {

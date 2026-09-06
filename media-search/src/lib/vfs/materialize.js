@@ -6,6 +6,7 @@ import {
 } from '../control-plane/canonical-path.js';
 import { notifyBindingActivated } from '../control-plane/durability-enroller.js';
 import { createDefaultRdPlacementRealizer } from '../control-plane/rd-placement-realizer.js';
+import { getMedia } from '../metadata/cinemeta.js';
 
 // P19 — one lazily-bound RD placement realizer per process. The control-plane
 // store is a singleton, so we bind on first use. When Real-Debrid is not
@@ -220,6 +221,50 @@ function movieIdentity(filename, mediaId) {
   return { title, year, extension };
 }
 
+/**
+ * Resolve the presentation title and year for VFS path construction.
+ *
+ * Priority:
+ *   1. handoff.canonicalTitle / handoff.canonicalYear  (explicit API override)
+ *   2. Cinemeta metadata for the mediaId                  (clean canonical name)
+ *   3. movieIdentity() on the filename                    (last-resort fallback)
+ *
+ * This mirrors the logic in publishStrm() so that VFS and STRM paths agree.
+ *
+ * @param {object} handoff
+ * @returns {Promise<{title: string, year: number|null, extension: string|null}>}
+ */
+async function resolvePresentationIdentity(handoff) {
+  // Priority 1: explicit canonical override
+  if (typeof handoff.canonicalTitle === 'string' && handoff.canonicalTitle.trim()) {
+    return {
+      title: handoff.canonicalTitle.trim(),
+      year: Number.isSafeInteger(handoff.canonicalYear) && handoff.canonicalYear >= 0
+        ? handoff.canonicalYear
+        : null,
+      extension: movieIdentity(handoff.filename, handoff.mediaId).extension,
+    };
+  }
+
+  // Priority 2: Cinemeta lookup (the same source strm-publisher uses)
+  try {
+    const type = handoff.mediaType === 'series' ? 'series' : 'movie';
+    const meta = await getMedia(type, handoff.mediaId);
+    if (meta?.title) {
+      return {
+        title: meta.title,
+        year: Number.isSafeInteger(meta.year) ? Number(meta.year) : null,
+        extension: movieIdentity(handoff.filename, handoff.mediaId).extension,
+      };
+    }
+  } catch {
+    // Cinemeta unavailable — fall through to priority 3
+  }
+
+  // Priority 3: filename parsing (existing last-resort behavior)
+  return movieIdentity(handoff.filename, handoff.mediaId);
+}
+
 function episodeIdentity(filename, mediaId) {
   const basename = path.posix.basename(String(filename || '').replaceAll('\\', '/'));
   const parsed = path.posix.parse(basename);
@@ -410,7 +455,7 @@ function raceRecoverVfsTvEntry(searchCache, handoff, torrentFile, now) {
   return assertExistingIdentityOrThrow(existing, handoff, torrentFile);
 }
 
-export function materializeVfsEntry(
+export async function materializeVfsEntry(
   searchCache,
   handoff,
   controlPlaneStore = null,
@@ -491,14 +536,9 @@ export function materializeVfsEntry(
     // to the provider release filename only when no canonical identity
     // was supplied. The provider-backed `filename` and `infoHash` are
     // unchanged either way.
-    const movie = movieIdentity(handoff.filename, handoff.mediaId);
+    const { title: presentationTitle, year: presentationYear, extension: presentationExt } =
+      await resolvePresentationIdentity(handoff);
     const physicalFile = movieIdentity(torrentFile?.internalPath ?? handoff.filename, handoff.mediaId);
-    const presentationTitle = typeof handoff.canonicalTitle === 'string' && handoff.canonicalTitle.trim()
-      ? handoff.canonicalTitle.trim()
-      : (torrentFile ? handoff.mediaId : movie.title);
-    const presentationYear = Number.isSafeInteger(handoff.canonicalYear) && handoff.canonicalYear >= 0
-      ? handoff.canonicalYear
-      : (torrentFile ? null : movie.year);
     let canonicalPath = buildPreferredCanonicalPath({
       mediaType: 'movie',
       mediaId: handoff.mediaId,

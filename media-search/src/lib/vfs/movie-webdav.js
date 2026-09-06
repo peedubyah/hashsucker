@@ -271,9 +271,9 @@ export function createMovieWebDav({
 }) {
   const states = new Map();
 
-  function getCatalog() {
+  async function getCatalog() {
     for (const handoff of searchCache.listMoviePlaybackHandoffs()) {
-      materializeVfsEntry(searchCache, handoff, controlPlaneStore, now, { allowLegacy: true });
+      await materializeVfsEntry(searchCache, handoff, controlPlaneStore, now, { allowLegacy: true });
     }
     const nextStates = [];
     for (const entry of searchCache.listVfsMovieEntries()) {
@@ -860,7 +860,7 @@ export function createMovieWebDav({
     }
     // Build the catalog so the state map is populated without depending on
     // a prior WebDAV request.
-    getCatalog();
+    await getCatalog();
     const state = states.get(releaseKey);
     if (!state) {
       throw new VfsError(`VFS movie state not found for ${releaseKey}`, 503, 'VFS_STATE_MISSING');
@@ -993,7 +993,7 @@ export function createMovieWebDav({
 
     // 5. Reuse the single owner of the VFS row + binding write.
     try {
-      materializeVfsEntry(searchCache, promotion.handoff, controlPlaneStore, now, { allowLegacy: true });
+      await materializeVfsEntry(searchCache, promotion.handoff, controlPlaneStore, now, { allowLegacy: true });
     } catch (e) {
       console.warn(`[vfs] materializeVfsEntry failed for release=${candidate.releaseKey}: ${e.message}`);
       return false;
@@ -1191,7 +1191,7 @@ export function createMovieWebDav({
         return true;
       }
 
-      const tree = getCatalog();
+      const tree = await getCatalog();
       if (method === 'PROPFIND') {
         const depth = request.headers.depth ?? '1';
         if (depth !== '0' && depth !== '1') {

@@ -220,7 +220,7 @@ async function main() {
         selectedAt: Date.now(),
       };
       try {
-        const result = materializeVfsEntry(
+        const result = await materializeVfsEntry(
           cache, handoff, controlPlaneStore, () => Date.now(), { allowLegacy: false },
         );
         console.log(

@@ -555,7 +555,7 @@ export async function searchByMedia(cache, request) {
           cache.persistPlaybackHandoff(handoff);
           let vfsEntry = null;
           try {
-            vfsEntry = materializeVfsEntry(
+            vfsEntry = await materializeVfsEntry(
               cache,
               handoff,
               request.controlPlaneStore ?? null,
