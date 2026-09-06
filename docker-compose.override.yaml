@@ -1,0 +1,6 @@
+services:
+  media-search:
+    environment:
+      BACKGROUND_DURABILITY_MODE: observe
+      # BACKGROUND_DURABILITY_TORBOX intentionally unset; observer mode
+      # records intent without making any provider calls.

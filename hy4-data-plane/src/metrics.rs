@@ -204,19 +204,6 @@ impl Drop for DemandGuard {
     }
 }
 
-impl Metrics {
-    /// Start a demand read: increment current and update peak.
-    /// Returns a guard that calls `record_demand_done()` on drop.
-    /// Works on `&Metrics` (used by `Arc<Metrics>` via Deref).
-    pub fn start_demand(&self) -> DemandGuard {
-        self.record_demand_active();
-        DemandGuard {
-            metrics: Arc::new(Metrics::default()),
-            done: false,
-        }
-    }
-}
-
 /// Extension trait so `Arc<Metrics>::start_demand()` is callable in serve.rs.
 pub trait MetricsExt {
     fn start_demand(&self) -> DemandGuard;
