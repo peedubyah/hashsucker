@@ -1,0 +1,39 @@
+[p12-C] DP=http://127.0.0.1:3015 TFID=tf_46203b5e-2a8d-44f7-9a93-20114c60b24d N_CYCLES=5
+[p12-C] initial state: chunks_present=0
+[p12-C] p12-C cycle 0: short-open 0,1
+[p12-C] cycle0.0 status=206 bytes=8388608 bytes_up=+8388608 cdn=+1 api=+1 pf=+0/0/0 chunks_present=1
+[p12-C] cycle0.1 status=206 bytes=8388608 bytes_up=+16777216 cdn=+1 api=+0 pf=+1/0/0 chunks_present=2
+[p12-C] p12-C cycle 1: short-open 0,1
+[p12-C] cycle1.0 status=206 bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0 chunks_present=3
+[p12-C] cycle1.1 status=206 bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0 chunks_present=3
+[p12-C] p12-C cycle 2: short-open 0,1
+[p12-C] cycle2.0 status=206 bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0 chunks_present=3
+[p12-C] cycle2.1 status=206 bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0 chunks_present=3
+[p12-C] p12-C cycle 3: short-open 0,1
+[p12-C] cycle3.0 status=206 bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0 chunks_present=3
+[p12-C] cycle3.1 status=206 bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0 chunks_present=3
+[p12-C] p12-C cycle 4: short-open 0,1
+[p12-C] cycle4.0 status=206 bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0 chunks_present=3
+[p12-C] cycle4.1 status=206 bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0 chunks_present=3
+
+[p12-C] p12-C :: FINAL playback_intelligence:
+  active_torrent_files = 1
+  ahead_chunks = 1
+  auto_selected_try = 0
+  auto_selected_wait = 1
+  enabled = true
+  mode = wait
+  prefetch_chunks_completed = 1
+  prefetch_chunks_requested = 1
+  prefetch_chunks_skipped_present = 0
+  prefetch_failures = 0
+  prefetch_joined_by_demand = 0
+  prefetch_joined_inflight = 0
+  prefetch_priority = 0
+  prefetch_served_demand = 0
+  prefetch_triggered = 1
+  seek_reprioritizations = 0
+  sequential_threshold = 2
+  spare_capacity = 0
+[p12-C] p12-C :: cache: bytes_upstream_issued=25165824 chunk_claims=2 chunks_present=3
+[p12-C] p12-C :: upstream: layer_A_api.requests=1 layer_C_cdn[206]=3 cap.acq=1 cap.reuse=10

@@ -1,0 +1,9 @@
+target/
+**/target/
+.git/
+**/.git/
+artifacts/
+**/artifacts/
+*.log
+**/*.log
+.DS_Store

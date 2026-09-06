@@ -1,0 +1,45 @@
+[p12-D] DP=http://127.0.0.1:3011 TFID=tf_46203b5e-2a8d-44f7-9a93-20114c60b24d
+[p12-D] p12-D PHASE-1: pre-restart sequential 0..7
+[p12-D] p12-D # 0 status=206 ttfb=  18ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0 seek_repri=+0 chunks_present=15 cap.acq=1 cap.reuse=15 sha=4b8d73ce8652
+[p12-D] p12-D # 1 status=206 ttfb=  18ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0 seek_repri=+0 chunks_present=15 cap.acq=1 cap.reuse=16 sha=2b863fd5d54f
+[p12-D] p12-D # 2 status=206 ttfb=  18ms bytes=8388608 bytes_up=+8388608 cdn=+0 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=15 cap.acq=1 cap.reuse=18 sha=ed65202bd049
+[p12-D] p12-D # 3 status=206 ttfb= 296ms bytes=8388608 bytes_up=+0 cdn=+1 api=+1 pf=+1/0/0 seek_repri=+0 chunks_present=15 cap.acq=2 cap.reuse=19 sha=09e588718a21
+[p12-D] p12-D # 4 status=206 ttfb=  19ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=15 cap.acq=2 cap.reuse=21 sha=8c8924d1716a
+[p12-D] p12-D # 5 status=206 ttfb=  20ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=15 cap.acq=2 cap.reuse=23 sha=2fdd301d10d7
+[p12-D] p12-D # 6 status=206 ttfb=  18ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=15 cap.acq=2 cap.reuse=25 sha=551d48df2b38
+[p12-D] p12-D # 7 status=206 ttfb=  17ms bytes=8388608 bytes_up=+8388608 cdn=+0 api=+0 pf=+1/1/0 seek_repri=+0 chunks_present=16 cap.acq=2 cap.reuse=27 sha=cf2751403010
+[p12-D] p12-D PRE-RESTART playback_intel: seek_repri=1 forward_run=?? (not exposed); chunks_present=16
+[p12-D] p12-D PHASE-2: RESTART (external) — waiting 6s for container to come back up...
+[p12-D] p12-D POST-RESTART probe ok (attempt 1)
+[p12-D] p12-D PHASE-3a: re-read 0..3 (should hit cache)
+[p12-D] p12-D # 0 status=206 ttfb=  16ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0 seek_repri=+0 chunks_present=17 cap.acq=2 cap.reuse=28 sha=4b8d73ce8652
+[p12-D] p12-D # 1 status=206 ttfb=  18ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+0/0/0 seek_repri=+0 chunks_present=17 cap.acq=2 cap.reuse=29 sha=2b863fd5d54f
+[p12-D] p12-D # 2 status=206 ttfb=  17ms bytes=8388608 bytes_up=+8388608 cdn=+0 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=17 cap.acq=2 cap.reuse=31 sha=ed65202bd049
+[p12-D] p12-D # 3 status=206 ttfb=  20ms bytes=8388608 bytes_up=+0 cdn=+1 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=17 cap.acq=2 cap.reuse=33 sha=09e588718a21
+[p12-D] p12-D PHASE-3b: read new chunk 15 (should fetch upstream)
+[p12-D] p12-D #15 status=206 ttfb=1347ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/1/0 seek_repri=+1 chunks_present=19 cap.acq=2 cap.reuse=34 sha=2380f0136efd
+[p12-D] p12-D #16 status=206 ttfb=1028ms bytes=8388608 bytes_up=+16777216 cdn=+2 api=+0 pf=+1/1/0 seek_repri=+0 chunks_present=21 cap.acq=2 cap.reuse=36 sha=8bc85ed1a79c
+
+[p12-D] p12-D :: FINAL playback_intelligence:
+  active_torrent_files = 1
+  ahead_chunks = 1
+  auto_selected_try = 13
+  auto_selected_wait = 9
+  enabled = true
+  mode = auto
+  prefetch_chunks_completed = 4
+  prefetch_chunks_requested = 4
+  prefetch_chunks_skipped_present = 45
+  prefetch_failures = 0
+  prefetch_joined_by_demand = 0
+  prefetch_joined_inflight = 5
+  prefetch_priority = 0
+  prefetch_served_demand = 0
+  prefetch_triggered = 22
+  seek_reprioritizations = 2
+  sequential_threshold = 2
+  spare_capacity = 1
+[p12-D] p12-D :: cache: bytes_upstream_issued=176160768 chunk_claims=17 chunks_present=21
+[p12-D] p12-D :: upstream: layer_A_api.requests=2 layer_C_cdn[206]=21 cap.acq=2 cap.reuse=36
+p12-pf-d-1
+[p12-D-runner] bench complete

@@ -1,0 +1,37 @@
+[p12-E] p12-E DP=http://127.0.0.1:3018 TFID=tf_46203b5e-2a8d-44f7-9a93-20114c60b24d
+[p12-E] p12-E interleaving two streams on the same tfId
+[p12-E] p12-E # 0 status=206 ttfb=3019ms bytes=8388608 stream=A bytes_up=+8388608 cdn=+1 api=+1 pf=+0/0/0 pj=+0 pji=+0 chunks_present=1 cap.acq=1 cap.reuse=0
+[p12-E] p12-E #10 status=206 ttfb=1673ms bytes=8388608 stream=B bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0 pj=+0 pji=+0 chunks_present=2 cap.acq=1 cap.reuse=1
+[p12-E] p12-E # 1 status=206 ttfb= 912ms bytes=8388608 stream=A bytes_up=+8388608 cdn=+1 api=+0 pf=+0/0/0 pj=+0 pji=+0 chunks_present=3 cap.acq=1 cap.reuse=2
+[p12-E] p12-E #11 status=206 ttfb= 954ms bytes=8388608 stream=B bytes_up=+8388608 cdn=+1 api=+0 pf=+0/0/0 pj=+0 pji=+0 chunks_present=4 cap.acq=1 cap.reuse=3
+[p12-E] p12-E # 2 status=206 ttfb= 898ms bytes=8388608 stream=A bytes_up=+8388608 cdn=+1 api=+0 pf=+0/0/0 pj=+0 pji=+0 chunks_present=5 cap.acq=1 cap.reuse=4
+[p12-E] p12-E #12 status=206 ttfb=1102ms bytes=8388608 stream=B bytes_up=+8388608 cdn=+1 api=+0 pf=+0/0/0 pj=+0 pji=+0 chunks_present=6 cap.acq=1 cap.reuse=5
+[p12-E] p12-E # 3 status=206 ttfb= 771ms bytes=8388608 stream=A bytes_up=+8388608 cdn=+1 api=+0 pf=+0/0/0 pj=+0 pji=+0 chunks_present=7 cap.acq=1 cap.reuse=6
+[p12-E] p12-E #13 status=206 ttfb= 908ms bytes=8388608 stream=B bytes_up=+8388608 cdn=+1 api=+0 pf=+0/0/0 pj=+0 pji=+0 chunks_present=8 cap.acq=1 cap.reuse=7
+[p12-E] p12-E # 4 status=206 ttfb= 874ms bytes=8388608 stream=A bytes_up=+8388608 cdn=+1 api=+0 pf=+0/0/0 pj=+0 pji=+0 chunks_present=9 cap.acq=1 cap.reuse=8
+[p12-E] p12-E #14 status=206 ttfb=1164ms bytes=8388608 stream=B bytes_up=+8388608 cdn=+1 api=+0 pf=+0/0/0 pj=+0 pji=+0 chunks_present=10 cap.acq=1 cap.reuse=9
+[p12-E] p12-E waiting 4s for prefetch to settle
+
+[p12-E] p12-E :: FINAL playback_intelligence:
+  active_torrent_files = 1
+  ahead_chunks = 1
+  auto_selected_try = 1
+  auto_selected_wait = 0
+  enabled = true
+  mode = auto
+  prefetch_chunks_completed = 0
+  prefetch_chunks_requested = 0
+  prefetch_chunks_skipped_present = 0
+  prefetch_failures = 0
+  prefetch_joined_by_demand = 0
+  prefetch_joined_inflight = 0
+  prefetch_priority = 0
+  prefetch_served_demand = 0
+  prefetch_triggered = 1
+  seek_reprioritizations = 5
+  sequential_threshold = 2
+  spare_capacity = 0
+[p12-E] p12-E :: top.length=1 (one per known tfId)
+[p12-E] p12-E :: hot: forward_run=1 confidence=0.5 region=[117440512,125829119] hot_chunks_count=10
+[p12-E] p12-E :: cache: bytes_upstream_issued=83886080 chunk_claims=10 chunks_present=10
+[p12-E] p12-E :: upstream: layer_A_api.requests=1 layer_C_cdn[206]=10 cap.acq=1 cap.reuse=9

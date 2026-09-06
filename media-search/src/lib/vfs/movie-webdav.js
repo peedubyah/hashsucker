@@ -10,6 +10,8 @@ import {
   validateRangeResponseHeaders,
   classifyReadFailure,
 } from './range-response-validator.js';
+import { streamFromDataPlane } from './data-plane-forward.js';
+import { REVALIDATION_OUTCOME } from '../resolver/availability-revalidation.js';
 
 const DAV_ROOT = '/vfs';
 const MOVIES_PATH = `${DAV_ROOT}/Movies`;
@@ -258,9 +260,14 @@ export function createMovieWebDav({
   rdResolutionCache,
   resolveTorBoxDeliverySeam,
   torBoxDownloadUrlCache,
+  // P5: persisted-candidate fallback seam (findUsableAlternate / promoteAlternate /
+  // buildFallbackTelemetry). Wired from app.js so the VFS reuses the EXISTING
+  // alternate lifecycle rather than reimplementing discovery/rerank.
+  alternateFallback = null,
   terminalEvidenceStore = null,
   now = () => Date.now(),
   fetchFn = fetch,
+  dataPlaneBaseUrl = 'http://hy4-data-plane:3001',
 }) {
   const states = new Map();
 
@@ -464,6 +471,22 @@ export function createMovieWebDav({
   }
 
   async function openValidatedProviderRead(state, rangeHeader, validate) {
+    // P6 authority guard — regression-proof boundary for the legacy Node byte path.
+    // This function is ONLY reachable for durable VFS entries WITHOUT a TorrentFile
+    // (state.entry.torrentFileId === null). For any torrentFileId-present entry, byte
+    // authority is Rust-only (enforced in streamFile via streamFromDataPlane). Invoking
+    // this path for a tfId-present entry would silently re-grant Node provider
+    // byte-delivery authority, which P6 forbids — so we fail loud rather than mask it
+    // as a 200/206. This is the durable replacement for the deleted authority: the
+    // modern entry point (streamFile) already routes tfId-present to Rust, and this
+    // guard makes that invariant impossible to violate by accident.
+    if (state?.entry?.torrentFileId) {
+      throw new VfsError(
+        'Legacy Node byte path invoked for a durable (torrentFileId-present) entry; byte authority is Rust-only',
+        500,
+        'LEGACY_PATH_AUTHORITY_VIOLATION',
+      );
+    }
     let firstFailure = null;
     let sawReadRateLimit = false;
     let firstFailureDefinitive = false;
@@ -852,6 +875,165 @@ export function createMovieWebDav({
     };
   }
 
+  /**
+   * P5 persisted-candidate fallback seam (durable VFS entries only).
+   *
+   * Invoked ONLY when Rust returns a class-D failure (PROVIDER_EXHAUSTED) for a
+   * tfId-present entry. Reuses the EXISTING persisted-candidate lifecycle:
+   *   findUsableAlternate → resolveTorBoxDeliverySeam → isUrlLive →
+   *   promoteAlternate → materializeVfsEntry → re-forward to Rust with the NEW
+   *   durable TorrentFile.
+   *
+   * It does NOT rediscover/rerank and does NOT touch the legacy Node provider
+   * byte path. On any failure (no candidate, no durable TorrentFile, validation
+   * failed) it returns false so the caller emits the explicit Rust 5xx (no
+   * legacy escape). Rust owns same-TorrentFile recovery; this only switches TF.
+   *
+   * @returns {Promise<boolean>} true if the alternate was served (response fully
+   *   written); false if the caller must emit the terminal error.
+   */
+  async function attemptPersistedAlternateFallback({ error, state, request, response, metadata }) {
+    if (error?.class !== 'D') return false;
+    if (!alternateFallback || typeof alternateFallback.findUsableAlternate !== 'function') {
+      return false;
+    }
+
+    const mediaType = 'movie';
+    const expectedScope = {
+      media_type: mediaType,
+      season: state.entry.season ?? null,
+      episode: state.entry.episode ?? null,
+    };
+
+    // 1. Find a persisted, TorBox-CACHED alternate (durable TorrentFile exists).
+    let fallback;
+    try {
+      fallback = await alternateFallback.findUsableAlternate({
+        mediaId: state.entry.mediaId,
+        primaryReleaseKey: state.entry.releaseKey,
+        expectedScope,
+      });
+    } catch (e) {
+      console.warn(
+        `[vfs] persisted-alternate lookup failed for release=${state.entry.releaseKey}: ${e.message}`,
+      );
+      return false;
+    }
+    if (!fallback) {
+      console.warn(
+        `[vfs] no usable persisted alternate for tfId=${state.entry.torrentFileId} release=${state.entry.releaseKey}`,
+      );
+      return false;
+    }
+
+    // VFS Rust path REQUIRES a durable TorrentFile. A TorBox-CACHED candidate has
+    // one; an RD-only candidate does not, so it cannot be served here (P5 §10: no
+    // provider-persistence expansion).
+    if (fallback.revalidation?.cacheState !== REVALIDATION_OUTCOME.CACHED) {
+      console.warn(
+        `[vfs] persisted alternate for release=${state.entry.releaseKey} is not TorBox-cached (${fallback.revalidation?.cacheState}); cannot serve via Rust`,
+      );
+      return false;
+    }
+
+    const { candidate } = fallback;
+
+    // 2. Resolve the authoritative delivery seam (reuses existing placement).
+    let delivery;
+    try {
+      delivery = await resolveTorBoxDeliverySeam({
+        infoHash: candidate.info_hash,
+        fileIndex: candidate.fileIndex,
+        releaseKey: candidate.releaseKey,
+        filename: candidate.filename,
+      });
+    } catch (e) {
+      console.warn(`[vfs] delivery seam failed for release=${candidate.releaseKey}: ${e.message}`);
+      return false;
+    }
+
+    // 3. Validate a single bounded byte response from the delivery URL.
+    let validatedBytes = false;
+    try {
+      validatedBytes = await isUrlLive(delivery.url);
+    } catch {
+      validatedBytes = false;
+    }
+    if (!validatedBytes) {
+      console.warn(`[vfs] delivery URL not live for release=${candidate.releaseKey}; skipping alternate`);
+      return false;
+    }
+
+    // 4. Promote through the normal authoritative lifecycle (idempotent).
+    let promotion;
+    try {
+      promotion = alternateFallback.promoteAlternate({
+        candidate,
+        delivery,
+        controlPlaneStore,
+        evidence: { validatedBytes: true },
+        mediaRequest: {
+          mediaId: state.entry.mediaId,
+          media_type: mediaType,
+          season: expectedScope.season,
+          episode: expectedScope.episode,
+        },
+        now,
+      });
+    } catch (e) {
+      console.warn(`[vfs] promoteAlternate threw for release=${candidate.releaseKey}: ${e.message}`);
+      return false;
+    }
+    if (!promotion?.promoted) {
+      console.warn(
+        `[vfs] promoteAlternate refused for release=${candidate.releaseKey}: ${promotion?.reason ?? 'unknown'}`,
+      );
+      return false;
+    }
+
+    // 5. Reuse the single owner of the VFS row + binding write.
+    try {
+      materializeVfsEntry(searchCache, promotion.handoff, controlPlaneStore, now, { allowLegacy: true });
+    } catch (e) {
+      console.warn(`[vfs] materializeVfsEntry failed for release=${candidate.releaseKey}: ${e.message}`);
+      return false;
+    }
+
+    // 6. Reuse buildFallbackTelemetry so the fallback is observable with the same
+    // envelope the resolver path uses (P5 §6).
+    const fallbackTelemetry = alternateFallback.buildFallbackTelemetry({
+      originalReleaseKey: state.entry.releaseKey,
+      selectedReleaseKey: candidate.releaseKey,
+      fallbackRank: candidate.rank,
+      reason: 'PRIMARY_PROVIDER_EXHAUSTED',
+    });
+    console.log(
+      `[vfs] persisted-alternate fallback used for media=${state.entry.mediaId} `
+        + `from=${state.entry.releaseKey} to=${candidate.releaseKey} rank=${candidate.rank} `
+        + `newTfId=${promotion.handoff.torrentFileId}`,
+      fallbackTelemetry,
+    );
+
+    // 7. Identity carried EXACTLY: re-forward to Rust with the NEW durable
+    // TorrentFile id. Rust owns same-TorrentFile recovery; we only switch TF.
+    try {
+      await streamFromDataPlane({
+        fetchFn,
+        baseUrl: dataPlaneBaseUrl,
+        tfId: promotion.handoff.torrentFileId,
+        request,
+        response,
+        contentType: CONTENT_TYPE,
+      });
+      return true;
+    } catch (e2) {
+      console.warn(
+        `[vfs] re-forward to alternate tfId=${promotion.handoff.torrentFileId} failed: ${e2?.message ?? e2}`,
+      );
+      return false;
+    }
+  }
+
   async function streamFile(request, response, state, metadata) {
     let requestedRange;
     try {
@@ -861,6 +1043,51 @@ export function createMovieWebDav({
       sendError(response, error, { size: metadata.size });
       return;
     }
+
+    // ---- P5 authoritative Rust byte path + persisted-candidate fallback ------
+    // For any durable VFS entry (state.entry.torrentFileId != null), Rust is the
+    // ONLY byte-serving authority. We forward to Rust and only one of two things
+    // may happen:
+    //   (a) Rust succeeds → bytes proxied to the client (return).
+    //   (b) Rust returns a classified failure:
+    //       - class D (PROVIDER_EXHAUSTED): reuse the persisted-candidate
+    //         fallback to switch to a DIFFERENT durable TorrentFile and re-forward
+    //         to Rust. If that serves bytes, return.
+    //       - any other class (A/B/C/unreachable): explicit terminal failure.
+    // In NO case do we fall through to the legacy Node provider byte path for a
+    // tfId-present entry (P5 §1). The legacy path below is reachable ONLY for
+    // entries without a durable TorrentFile (torrentFileId === null).
+    if (state.entry.torrentFileId) {
+      try {
+        await streamFromDataPlane({
+          fetchFn,
+          baseUrl: dataPlaneBaseUrl,
+          tfId: state.entry.torrentFileId,
+          request,
+          response,
+          contentType: CONTENT_TYPE,
+        });
+        return;
+      } catch (error) {
+        const recovered = await attemptPersistedAlternateFallback({
+          error,
+          state,
+          request,
+          response,
+          metadata,
+        });
+        if (recovered) return;
+        // Terminal: emit the classified Rust failure verbatim. NO legacy escape.
+        sendError(response, error, { size: metadata.size });
+        return;
+      }
+    }
+
+    // ---- LEGACY COMPAT PATH (torrentFileId === null ONLY) ----
+    // Reached solely for entries without a durable TorrentFile. The guard at the
+    // top of openValidatedProviderRead rejects any tfId-present entry, so Node
+    // provider byte-delivery authority is strictly limited to legacy entries and
+    // can never be regained for modern durable VFS entries.
     const opened = await (async () => {
       try {
         return await openValidatedProviderRead(

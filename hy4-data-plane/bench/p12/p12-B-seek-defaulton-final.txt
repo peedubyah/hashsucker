@@ -1,0 +1,46 @@
+[p12-B] DP=http://127.0.0.1:3011 TFID=tf_46203b5e-2a8d-44f7-9a93-20114c60b24d GAP_MS=400
+[p12-B] p12-B PHASE-1: low-region sequential 0..4
+[p12-B] p12-B # 0 status=206 ttfb=2016ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+1 pf=+0/0/0/0 skip=+0 seek_repri=+0 auto=0+0 spare=0
+  sha256[0] = 4b8d73ce8652f142...
+[p12-B] p12-B # 1 status=206 ttfb= 848ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 seek_repri=+0 auto=1+0 spare=0
+[p12-B] p12-B # 2 status=206 ttfb= 838ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 seek_repri=+0 auto=1+0 spare=0
+[p12-B] p12-B # 3 status=206 ttfb= 822ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 seek_repri=+0 auto=1+0 spare=0
+[p12-B] p12-B # 4 status=206 ttfb= 890ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 seek_repri=+0 auto=1+0 spare=0
+[p12-B] p12-B PHASE-2: SEEK to chunk 20 (far jump)
+[p12-B] p12-B #20 status=206 ttfb= 852ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 seek_repri=+1 auto=1+0 spare=0
+[p12-B] p12-B PHASE-3: high-region sequential 20..24
+[p12-B] p12-B #21 status=206 ttfb= 887ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 seek_repri=+0 auto=1+0 spare=0
+[p12-B] p12-B #22 status=206 ttfb= 935ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 seek_repri=+0 auto=1+0 spare=0
+[p12-B] p12-B #23 status=206 ttfb= 866ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 seek_repri=+0 auto=1+0 spare=0
+[p12-B] p12-B #24 status=206 ttfb= 837ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 seek_repri=+0 auto=1+0 spare=0
+  sha256[24] = d0ec38f7b9c7c329...
+[p12-B] p12-B PHASE-4: SEEK to chunk 5 (back jump)
+[p12-B] p12-B # 5 status=206 ttfb= 964ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+0/0/0/0 skip=+0 seek_repri=+0 auto=0+0 spare=0
+[p12-B] p12-B PHASE-5: low-region sequential 5..9
+[p12-B] p12-B # 6 status=206 ttfb= 852ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+0/0/0/0 skip=+0 seek_repri=+0 auto=0+0 spare=0
+[p12-B] p12-B # 7 status=206 ttfb= 845ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 seek_repri=+0 auto=1+0 spare=0
+[p12-B] p12-B # 8 status=206 ttfb= 845ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 seek_repri=+0 auto=1+0 spare=0
+[p12-B] p12-B # 9 status=206 ttfb=1130ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0/0 skip=+0 seek_repri=+0 auto=1+0 spare=0
+  sha256[9] = 890171e21f48de6b...
+
+[p12-B] p12-B :: FINAL playback_intelligence:
+  active_torrent_files = 1
+  ahead_chunks = 1
+  auto_selected_try = 12
+  auto_selected_wait = 0
+  enabled = true
+  mode = auto
+  prefetch_chunks_completed = 0
+  prefetch_chunks_requested = 0
+  prefetch_chunks_skipped_present = 0
+  prefetch_failures = 0
+  prefetch_joined_by_demand = 0
+  prefetch_joined_inflight = 0
+  prefetch_priority = 0
+  prefetch_served_demand = 0
+  prefetch_triggered = 12
+  seek_reprioritizations = 1
+  sequential_threshold = 2
+  spare_capacity = 0
+[p12-B] p12-B :: cache: bytes_upstream_issued=125829120 chunk_claims=15 chunks_present=15
+[p12-B] p12-B :: upstream: layer_A_api.requests=1 layer_C_cdn[206]=15 cap.acq=1 cap.reuse=14

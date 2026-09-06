@@ -1,0 +1,34 @@
+[p11-control] inflight-pfb-clean :: size=211552345 N=8 pre_ahead=1
+[p11-control] inflight-pfb-clean :: warm pool (2 concurrent on chunks 0, 1)
+[p11-control] inflight-pfb-clean :: sequential 0..7 gap=200ms
+  chunk 0 ttfb=6ms bytes=8388608 sha=4b8d73ce8652 dur=21ms | served_demand=+0 joined_by_demand=+0 completed=+0 join_inflight=+0 wait=+0 try=+0 bytes_up=+0 cap=+0 api=+0 cdn=+0 chunks_present=2
+  chunk 1 ttfb=6ms bytes=8388608 sha=2b863fd5d54f dur=18ms | served_demand=+0 joined_by_demand=+0 completed=+0 join_inflight=+0 wait=+0 try=+0 bytes_up=+0 cap=+0 api=+0 cdn=+0 chunks_present=2
+  chunk 2 ttfb=550ms bytes=8388608 sha=ed65202bd049 dur=1402ms | served_demand=+0 joined_by_demand=+0 completed=+1 join_inflight=+0 wait=+1 try=+0 bytes_up=+16777216 cap=+0 api=+0 cdn=+2 chunks_present=4
+  chunk 3 ttfb=6ms bytes=8388608 sha=09e588718a21 dur=18ms | served_demand=+1 joined_by_demand=+0 completed=+0 join_inflight=+0 wait=+1 try=+0 bytes_up=+8388608 cap=+0 api=+0 cdn=+0 chunks_present=4
+  chunk 4 ttfb=706ms bytes=8388608 sha=8c8924d1716a dur=719ms | served_demand=+0 joined_by_demand=+1 completed=+1 join_inflight=+0 wait=+0 try=+1 bytes_up=+0 cap=+0 api=+0 cdn=+0 chunks_present=5
+  chunk 5 ttfb=462ms bytes=8388608 sha=2fdd301d10d7 dur=1073ms | served_demand=+0 joined_by_demand=+0 completed=+1 join_inflight=+0 wait=+1 try=+0 bytes_up=+16777216 cap=+0 api=+0 cdn=+2 chunks_present=7
+  chunk 6 ttfb=6ms bytes=8388608 sha=551d48df2b38 dur=17ms | served_demand=+1 joined_by_demand=+0 completed=+0 join_inflight=+0 wait=+1 try=+0 bytes_up=+8388608 cap=+0 api=+0 cdn=+0 chunks_present=7
+  chunk 7 ttfb=573ms bytes=8388608 sha=cf2751403010 dur=584ms | served_demand=+0 joined_by_demand=+1 completed=+1 join_inflight=+0 wait=+0 try=+1 bytes_up=+0 cap=+0 api=+0 cdn=+0 chunks_present=8
+(node:6940) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 error listeners added to [Socket]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(Use `node --trace-warnings ...` to show where the warning was created)
+[p11-control] inflight-pfb-clean :: seek0 ttfb=6ms bytes=8388608 sha=4b8d73ce8652 | bytes_up=+0 api=+0 cdn=+0 cap=+0 (must be 0 upstream; cache PRESENT)
+
+[p11-control] inflight-pfb-clean :: FINAL playback_intelligence:
+  active_torrent_files = 1
+  ahead_chunks = 1
+  auto_selected_try = 3
+  auto_selected_wait = 4
+  enabled = true
+  mode = auto
+  prefetch_chunks_completed = 4
+  prefetch_chunks_requested = 4
+  prefetch_chunks_skipped_present = 0
+  prefetch_failures = 0
+  prefetch_joined_by_demand = 2
+  prefetch_joined_inflight = 0
+  prefetch_priority = 0
+  prefetch_served_demand = 2
+  prefetch_triggered = 7
+  seek_reprioritizations = 0
+  sequential_threshold = 2
+  spare_capacity = 0

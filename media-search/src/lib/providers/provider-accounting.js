@@ -44,6 +44,39 @@
  *   providerAccounting.reset();
  */
 
+/**
+ * P6 OWNERSHIP CONTRACT (accounting / telemetry reconciliation).
+ *
+ * After the HY4 transplant, provider byte-delivery work is split by durable
+ * TorrentFile identity, NOT by file:
+ *
+ *   - torrentFileId != null  →  Rust data plane is the ONLY byte authority.
+ *       The Rust data plane owns and emits ALL provider-facing counters for
+ *       these entries (provider API request count, link acquisition, retries,
+ *       Retry-After waits, breaker/cooldown, provider bytes fetched, cache-fill
+ *       upstream bytes, capability acquisition/reacquisition). Those counters
+ *       are surfaced by the data plane's own /metrics endpoint and are NOT
+ *       duplicated here. Node performs no provider byte work for these entries.
+ *
+ *   - torrentFileId == null  →  legacy Node compat path only (temporary).
+ *       The delivery_* counters below are emitted by openValidatedProviderRead,
+ *       which is hard-guarded (LEGACY_PATH_AUTHORITY_VIOLATION) to reject any
+ *       tfId-present entry. Therefore delivery_* can NEVER fire for a modern
+ *       Rust-authoritative entry and there is no double-claim of provider work.
+ *
+ * Node-owned counters in this registry (legitimate, never duplicated by Rust):
+ *   - availability_*, placement_*, requestdl_*, background_*  → resolver /
+ *     non-VFS / durability work north of byte delivery (Node-owned per the
+ *     frozen ownership split: discovery, ranking, persisted candidates).
+ *   - realdebrid_*  → RD fallback resolution (resolver + non-VFS server route).
+ *   - delivery_*    → legacy no-tfId Node byte-read state machine ONLY (guarded).
+ *
+ * Telemetry (request/fallback lifecycle) owned by Node and emitted via
+ * buildFallbackTelemetry: fallbackUsed, originalReleaseKey, selectedReleaseKey,
+ * fallbackRank, reason. These describe the VFS request outcome, not provider
+ * bytes, and are intentionally not emitted by Rust.
+ */
+
 const CATEGORIES = Object.freeze([
   'availability_checkcached',
   'placement_lookup_mylist',

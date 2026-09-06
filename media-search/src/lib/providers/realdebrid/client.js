@@ -7,6 +7,7 @@
  *
  * Supported endpoints:
  *   GET /user
+ *   GET /torrents?limit=N            (bounded single page, P19)
  *   POST /torrents/addMagnet
  *   GET /torrents/info/{id}
  *   POST /torrents/selectFiles/{id}
@@ -381,6 +382,43 @@ export function createRealDebridClient({
         operation: 'torrents-info',
         resolverSafe: options.resolverSafe ?? false,
       });
+    },
+
+    /**
+     * List the authenticated account's torrents in ONE bounded request.
+     * GET /torrents?limit={limit}
+     *
+     * P19 — this is the only account-list call permitted on the request
+     * path. It is deliberately a single request with a hard page cap and no
+     * offset/pagination loop, so Real-Debrid placement realization can never
+     * degenerate into a bulk account sweep (see acquisition/rd-history.js,
+     * which is the offline batch walker and is NOT used here).
+     *
+     * Real-Debrid answers HTTP 204 with an empty body when the account has
+     * no torrents, and it does not honour `offset` on this endpoint. Both
+     * behaviours are normalized here.
+     *
+     * @param {Object} [options]
+     * @param {number} [options.limit=100] - Page size, clamped to [1, 5000].
+     * @returns {Promise<Array<Object>>} Bounded list of torrent entries.
+     */
+    async listTorrents({ limit = 100 } = {}) {
+      const bounded = Math.min(Math.max(1, Math.trunc(Number(limit) || 100)), 5000);
+      const payload = await request('GET', `/torrents?limit=${bounded}`, {
+        operation: 'torrents-list',
+      });
+      // HTTP 204 / empty body => no torrents. The shared request() helper
+      // only JSON-parses a non-empty body, so payload is null here.
+      if (payload == null) return [];
+      if (!Array.isArray(payload)) {
+        throw new ProviderOperationError('Real-Debrid torrents list must return an array', {
+          provider: 'realdebrid',
+          operation: 'torrents-list',
+          category: 'invalid-response',
+          retryable: false,
+        });
+      }
+      return payload;
     },
 
     /**

@@ -1,0 +1,52 @@
+[D-driver] === restart p12-pf-d-1 on port 3016 vol=p12-pf-d-1-vol wipe=True ===
+[D-driver] WARNING: container did not come up on 3016
+[D-driver] === PHASE 1: pre-restart 0..7 on 3016 ===
+[p12-D] p12-D PHASE-1: pre-restart sequential 0..7 DP=http://127.0.0.1:3016
+[p12-D] p12-D # 0 status=206 ttfb=1927ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+1 pf=+0/0/0 seek_repri=+0 chunks_present=1 cap.acq=1 cap.reuse=0 sha=4b8d73ce8652
+[p12-D] p12-D # 1 status=206 ttfb= 921ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=2 cap.acq=1 cap.reuse=1 sha=2b863fd5d54f
+[p12-D] p12-D # 2 status=206 ttfb= 842ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=3 cap.acq=1 cap.reuse=2 sha=ed65202bd049
+[p12-D] p12-D # 3 status=206 ttfb= 969ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=4 cap.acq=1 cap.reuse=3 sha=09e588718a21
+[p12-D] p12-D # 4 status=206 ttfb= 894ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=5 cap.acq=1 cap.reuse=4 sha=8c8924d1716a
+[p12-D] p12-D # 5 status=206 ttfb= 795ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=6 cap.acq=1 cap.reuse=5 sha=2fdd301d10d7
+[p12-D] p12-D # 6 status=206 ttfb= 831ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=7 cap.acq=1 cap.reuse=6 sha=551d48df2b38
+[p12-D] p12-D # 7 status=206 ttfb= 883ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=8 cap.acq=1 cap.reuse=7 sha=cf2751403010
+[p12-D] p12-D PHASE-1 done
+[D-driver] phase1 rc=0
+[D-driver] === restart p12-pf-d-1 on port 3016 vol=p12-pf-d-1-vol wipe=False ===
+[D-driver] WARNING: container did not come up on 3016
+[D-driver] === PHASE 3: post-restart on 3016 ===
+[p12-D] p12-D PHASE-3: post-restart DP=http://127.0.0.1:3016
+[p12-D] p12-D POST-RESTART probe ok (attempt 1)
+[p12-D] p12-D PHASE-3a: re-read 0..3 (should hit cache)
+[p12-D] p12-D # 0 status=206 ttfb= 283ms bytes=8388608 bytes_up=+0 cdn=+0 api=+1 pf=+0/0/0 seek_repri=+0 chunks_present=8 cap.acq=1 cap.reuse=0 sha=4b8d73ce8652
+[p12-D] p12-D # 1 status=206 ttfb=  18ms bytes=8388608 bytes_up=+8388608 cdn=+0 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=8 cap.acq=1 cap.reuse=2 sha=2b863fd5d54f
+[p12-D] p12-D # 2 status=206 ttfb= 223ms bytes=8388608 bytes_up=+0 cdn=+1 api=+1 pf=+1/0/0 seek_repri=+0 chunks_present=8 cap.acq=2 cap.reuse=3 sha=ed65202bd049
+[p12-D] p12-D # 3 status=206 ttfb=  17ms bytes=8388608 bytes_up=+0 cdn=+0 api=+0 pf=+1/0/0 seek_repri=+0 chunks_present=8 cap.acq=2 cap.reuse=5 sha=09e588718a21
+[p12-D] p12-D PHASE-3b: read new chunk 15, 16 (should fetch upstream)
+[p12-D] p12-D #15 status=206 ttfb=1561ms bytes=8388608 bytes_up=+8388608 cdn=+1 api=+0 pf=+1/1/0 seek_repri=+1 chunks_present=10 cap.acq=2 cap.reuse=6 sha=2380f0136efd
+[p12-D] p12-D #16 status=206 ttfb=1179ms bytes=8388608 bytes_up=+16777216 cdn=+2 api=+0 pf=+1/1/0 seek_repri=+0 chunks_present=12 cap.acq=2 cap.reuse=8 sha=8bc85ed1a79c
+
+[p12-D] p12-D :: FINAL playback_intelligence:
+  active_torrent_files = 1
+  ahead_chunks = 1
+  auto_selected_try = 1
+  auto_selected_wait = 4
+  enabled = true
+  mode = auto
+  prefetch_chunks_completed = 2
+  prefetch_chunks_requested = 2
+  prefetch_chunks_skipped_present = 15
+  prefetch_failures = 0
+  prefetch_joined_by_demand = 0
+  prefetch_joined_inflight = 2
+  prefetch_priority = 0
+  prefetch_served_demand = 0
+  prefetch_triggered = 5
+  seek_reprioritizations = 1
+  sequential_threshold = 2
+  spare_capacity = 1
+[p12-D] p12-D :: hot: [{"confidence":1,"forward_region":[134217728,142606335],"forward_run":6,"generation":1,"hot_chunks":[{"count":1,"idx":0},{"count":1,"idx":1},{"count":1,"idx":2},{"count":1,"idx":3},{"count":1,"idx":15},{"count":1,"idx":16}]}]
+[p12-D] p12-D :: cache: bytes_upstream_issued=33554432 chunk_claims=2 chunks_present=12
+[p12-D] p12-D :: upstream: layer_A_api.requests=2 layer_C_cdn[206]=4 cap.acq=2 cap.reuse=8
+[D-driver] phase3 rc=0
+[D-driver] === done ===

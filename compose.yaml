@@ -89,5 +89,38 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # P3: the Rust data plane. Reads the S-1 control endpoint over the
+  # internal compose network (CONTROL_URL below) and serves two routes:
+  #   GET /files/:tfId  per-request S-1 fetch -> per-request AppState
+  #   GET /metrics      process-aggregate counters
+  #
+  # The Slice 4 cache lives on a named volume (hy4-cache) so docker compose
+  # restart/recreate preserves durable bytes -- proof C in the P3 ladder
+  # is that a fresh container reuses the same on-disk cache path without
+  # any manual code injection.
+  #
+  # S-1 reachability: CONTROL_URL is the in-network hostname of the north
+  # service. Port 3000 is the internal port; no auth, matching the rest
+  # of /api/control-plane/* (see S1-CONTROL-CONTRACT.md).
+  hy4-data-plane:
+    build:
+      context: ./hy4-data-plane
+      dockerfile: Dockerfile
+    image: hy4-data-plane:local
+    restart: unless-stopped
+    environment:
+      LISTEN: "0.0.0.0:3001"
+      CONTROL_URL: "http://media-search:3000/api"
+      CACHE_ROOT: "/data/cache"
+      TORBOX_API_KEY: ${TORBOX_API_KEY:?Set TORBOX_API_KEY in .env}
+      REALDEBRID_API_KEY: ${REALDEBRID_API_KEY:-}
+    depends_on:
+      - media-search
+    volumes:
+      - hy4-cache:/data
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   discovery-data:
+  hy4-cache:

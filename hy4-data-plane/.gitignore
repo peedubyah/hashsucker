@@ -1,0 +1,8 @@
+# Cargo build output. The repo-root .gitignore has no Rust rules; scope them here so
+# they cannot leak into the host's Node/artifacts rules.
+/target/
+**/*.rs.bk
+
+# Cargo.lock for a library is normally not committed, but this crate carries an exact
+# pin (axum = "=0.7.5") and becomes a binary once the serving core lands, so the lock
+# is committed deliberately for reproducible builds.
