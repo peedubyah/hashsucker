@@ -5,6 +5,44 @@ import {
   buildPreferredCanonicalPath,
 } from '../control-plane/canonical-path.js';
 import { notifyBindingActivated } from '../control-plane/durability-enroller.js';
+import { createDefaultRdPlacementRealizer } from '../control-plane/rd-placement-realizer.js';
+
+// P19 — one lazily-bound RD placement realizer per process. The control-plane
+// store is a singleton, so we bind on first use. When Real-Debrid is not
+// configured the factory returns null and every call below is a no-op.
+let rdRealizer = null;
+let rdRealizerBound = false;
+
+function rdRealizerFor(controlPlaneStore) {
+  if (!rdRealizerBound) {
+    rdRealizerBound = true;
+    try {
+      rdRealizer = createDefaultRdPlacementRealizer(controlPlaneStore);
+    } catch (error) {
+      console.warn(`[vfs] rd placement realizer unavailable: ${error.message}`);
+      rdRealizer = null;
+    }
+  }
+  return rdRealizer;
+}
+
+/**
+ * P19 — offer the freshly-materialized TorrentFile to the Real-Debrid
+ * placement realizer. Purely additive and strictly non-blocking: a Real-Debrid
+ * coordinate is a bonus, never a precondition, so realization runs in the
+ * background and every failure is swallowed. The TorBox binding above is
+ * untouched.
+ */
+function tryRealizeRdPlacement(controlPlaneStore, torrentFile) {
+  if (!torrentFile || !torrentFile.id) return;
+  try {
+    const realizer = rdRealizerFor(controlPlaneStore);
+    if (!realizer) return;
+    realizer.kickRealization(torrentFile);
+  } catch (error) {
+    console.warn(`[vfs] rd placement realization skipped: ${error.message}`);
+  }
+}
 
 function isRealControlPlaneStore(store) {
   // Legacy / test stubs expose only getTorrentFile(). The authoritative
@@ -401,6 +439,10 @@ export function materializeVfsEntry(
       reason,
       observedAt,
     });
+    // P19: after the authoritative binding is in place, give the Real-Debrid
+    // placement realizer a chance to publish an RD coordinate for the same
+    // durable TorrentFile. Non-blocking and failure-swallowed.
+    tryRealizeRdPlacement(controlPlaneStore, torrentFile);
     return entry;
   };
 
