@@ -497,6 +497,14 @@ pub struct CdnAttempt {
     /// For the final successful attempt, this is send→headers (same as headers_ms).
     /// Terminal outcome of this attempt. `Pending` until body/retry/failure resolves it.
     pub outcome: AttemptOutcome,
+    /// Recovery path label for this attempt. Set when this attempt triggered a retry/recovery
+    /// decision. None for the first attempt and for attempts that succeeded without recovery.
+    /// Bounded, sanitized, safe for /metrics. Distinguishes:
+    /// - "headerless_timeout_zero_cooldown": reqwest timeout before headers, immediate retry
+    /// - "generic_transient_cooldown": 429/5xx/transport drop, throttled retry
+    /// - "dead_capability_reacquire": 401/403/404/410, reacquire fresh capability
+    /// - "mid_body_resume": transport failure mid-body, resume at current offset
+    pub recovery_path: Option<String>,
 }
 
 /// Shared, interior-mutable stage clock. Created per client request and handed
@@ -614,6 +622,7 @@ impl StageClock {
                 started_at_ms,
                 headers_received,
                 outcome,
+                recovery_path: None,
             });
         }
     }
@@ -677,6 +686,17 @@ impl StageClock {
         if let Ok(mut g) = self.attempts.lock() {
             if let Some(a) = g.iter_mut().find(|a| a.attempt == attempt) {
                 a.retry_wait_ms = Some(retry_wait_ms);
+            }
+        }
+    }
+
+    /// Set the recovery_path label on an existing attempt entry.
+    /// Used by apply_transient/apply_transient_headerless_timeout/apply_dead
+    /// to record which recovery path was taken after this attempt failed.
+    pub fn set_attempt_recovery_path(&self, attempt: u32, recovery_path: &str) {
+        if let Ok(mut g) = self.attempts.lock() {
+            if let Some(a) = g.iter_mut().find(|a| a.attempt == attempt) {
+                a.recovery_path = Some(recovery_path.to_string());
             }
         }
     }

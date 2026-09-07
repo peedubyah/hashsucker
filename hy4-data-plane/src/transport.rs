@@ -373,6 +373,7 @@ impl ResilientRangeReader {
             .as_millis() as u64;
         if let Some(s) = self.stage.as_ref() {
             s.set_attempt_retry_wait(self.recovery.attempt, retry_wait);
+            s.set_attempt_recovery_path(self.recovery.attempt, "generic_transient_cooldown");
         }
         self.recovery.attempt += 1;
         let applied_ms = effective.as_millis() as u64;
@@ -414,6 +415,7 @@ impl ResilientRangeReader {
         // Telemetry: explicit zero cooldown so the timeline is unambiguous.
         if let Some(s) = self.stage.as_ref() {
             s.set_attempt_retry_wait(self.recovery.attempt, 0);
+            s.set_attempt_recovery_path(self.recovery.attempt, "headerless_timeout_zero_cooldown");
         }
         self.recovery.attempt += 1;
         let applied_ms = 0;
@@ -442,6 +444,7 @@ impl ResilientRangeReader {
         // on the failing attempt so the timeline is complete.
         if let Some(s) = self.stage.as_ref() {
             s.set_attempt_retry_wait(self.recovery.attempt, 0);
+            s.set_attempt_recovery_path(self.recovery.attempt, "dead_capability_reacquire");
         }
         self.recovery.attempt += 1;
         self.recovery.reacquires += 1;
@@ -538,6 +541,9 @@ impl ResilientRangeReader {
                         self.response = None;
                         self.metrics.record_mid_body_resume();
                         self.metrics.record_recovery_attempt();
+                        if let Some(s) = self.stage.as_ref() {
+                            s.set_attempt_recovery_path(self.recovery.attempt, "mid_body_resume");
+                        }
                         self.recovery.same_cap_retries += 1;
                     }
                     // Slice 4: notify the cache layer of the authoritative bytes we just
@@ -582,6 +588,9 @@ impl ResilientRangeReader {
                         self.metrics.record_mid_body_resume();
                     }
                     self.metrics.record_recovery_attempt();
+                    if let Some(s) = self.stage.as_ref() {
+                        s.set_attempt_recovery_path(self.recovery.attempt, "mid_body_resume");
+                    }
                     self.recovery.same_cap_retries += 1;
                     if self.recovery.same_cap_retries <= MAX_SAME_CAP_RETRIES {
                         match self.open_at().await {
