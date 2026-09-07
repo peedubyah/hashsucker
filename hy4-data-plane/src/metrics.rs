@@ -495,7 +495,6 @@ pub struct CdnAttempt {
     /// Total milliseconds from send() to terminal outcome (headers received for
     /// success/http-error, failure instant for timeout/transport-error).
     /// For the final successful attempt, this is send→headers (same as headers_ms).
-    pub elapsed_ms: u64,
     /// Terminal outcome of this attempt. `Pending` until body/retry/failure resolves it.
     pub outcome: AttemptOutcome,
 }
@@ -614,7 +613,6 @@ impl StageClock {
                 corr_id,
                 started_at_ms,
                 headers_received,
-                elapsed_ms: headers_ms,
                 outcome,
             });
         }

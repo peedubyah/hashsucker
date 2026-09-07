@@ -251,7 +251,6 @@ impl ResilientRangeReader {
                             s.record_attempt_headers(attempt, host_of(&url).unwrap_or_default(), 0, cdn_start, headers_ms, None, self.current.cap.provider.clone(), self.current.cap.cap_id.clone(), s.corr_id(), outcome);
                             s.record_attempt_retry(attempt, cdn_start, failed_instant, true);
                         }
-                        self.recovery.attempt += 1;
                         self.metrics
                             .upstream_errors
                             .fetch_add(1, Ordering::SeqCst);
@@ -350,22 +349,16 @@ impl ResilientRangeReader {
         self.enter_recovery();
         self.current.cap.throttle(Instant::now() + effective);
         self.metrics.record_recovery_attempt();
-        // Per-attempt telemetry: Class B same-cap retry decision.
-        let next_attempt = self.recovery.attempt + 1;
-        if let Some(s) = self.stage.as_ref() {
-            // same_cap=true; decision instant is now.
-            s.record_attempt_retry(next_attempt, Instant::now(), Instant::now(), true);
-        }
-        self.recovery.attempt += 1;
-        // Record the enforced wait on the NEW attempt entry so the timeline shows:
-        // "attempt 1 failed -> waited N ms -> attempt 2 headers_ms=Y".
+        self.recovery.same_cap_retries += 1;
+        // Record the enforced wait on the FAILING attempt BEFORE incrementing,
+        // so the timeline reads: "attempt N failed -> waited W ms -> attempt N+1".
         let retry_wait = self.current.cap.throttle_until()
             .saturating_duration_since(Instant::now())
             .as_millis() as u64;
         if let Some(s) = self.stage.as_ref() {
-            s.set_attempt_retry_wait(next_attempt, retry_wait);
+            s.set_attempt_retry_wait(self.recovery.attempt, retry_wait);
         }
-        self.recovery.same_cap_retries += 1;
+        self.recovery.attempt += 1;
         let applied_ms = effective.as_millis() as u64;
         self.metrics
             .record_retry_after(provider_ra.map(|d| d.as_secs()), effective.as_secs());
@@ -397,18 +390,13 @@ impl ResilientRangeReader {
             .upstream_errors
             .fetch_add(1, Ordering::SeqCst);
         self.metrics.record_recovery_attempt();
-        // Per-attempt telemetry: Class C reacquire decision.
-        let next_attempt = self.recovery.attempt + 1;
+        // Record retry wait on the failing attempt BEFORE incrementing.
+        // Class C reacquires fresh caps: no throttle wait, but still record
+        // on the failing attempt so the timeline is complete.
         if let Some(s) = self.stage.as_ref() {
-            // same_cap=false; decision instant is now.
-            s.record_attempt_retry(next_attempt, Instant::now(), Instant::now(), false);
+            s.set_attempt_retry_wait(self.recovery.attempt, 0);
         }
         self.recovery.attempt += 1;
-        // Class C reacquires fresh caps: no throttle wait, but still record
-        // so the timeline is complete.
-        if let Some(s) = self.stage.as_ref() {
-            s.set_attempt_retry_wait(next_attempt, 0);
-        }
         self.recovery.reacquires += 1;
         if self.recovery.reacquires <= MAX_REACQUIRES {
             match self.manager.reacquire_for_read(self.priority).await {
