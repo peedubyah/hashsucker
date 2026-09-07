@@ -375,6 +375,9 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             r.cap.account_scope.clone(),
         )
     });
+    // Observability-only: runtime correlation id. Same id will appear on the
+    // StageReport and every CdnAttempt for this demand/fill.
+    let corr_id = stage.corr_id();
 
     let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
     let metrics = state.metrics.clone();
@@ -425,6 +428,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                 provider: provider_attribution.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_default(),
                 cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
                 account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
+                corr_id: corr_id.clone(),
             });
             return;
         }
@@ -471,6 +475,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     provider: provider_attribution.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_default(),
                     cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
                     account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
+                    corr_id: corr_id.clone(),
                 });
                 return;
             }
@@ -638,6 +643,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         provider: pf_provider.0.clone(),
                         cap_id: pf_provider.1.clone(),
                         account_scope: pf_provider.2.clone(),
+                        corr_id: pf_stage.corr_id(),
                     });
                 });
             }
@@ -941,6 +947,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                     provider: String::new(),
                                     cap_id: String::new(),
                                     account_scope: String::new(),
+                                    corr_id: join_clock.corr_id(),
                                 };
                                 metrics.record_stage_report(join_report);
                                 // `notify_waiters()` stores NO permit, so a
@@ -1044,6 +1051,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             provider: provider_attribution.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_default(),
             cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
             account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
+            corr_id: corr_id.clone(),
         });
     });
 

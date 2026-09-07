@@ -242,7 +242,7 @@ impl ResilientRangeReader {
                         let headers_ms = failed_instant.saturating_duration_since(cdn_start).as_millis() as u64;
                         let attempt = self.recovery.attempt;
                         if let Some(s) = self.stage.as_ref() {
-                            s.record_attempt_headers(attempt, host_of(&url).unwrap_or_default(), 0, cdn_start, headers_ms, None, self.current.cap.provider.clone(), self.current.cap.cap_id.clone());
+                            s.record_attempt_headers(attempt, host_of(&url).unwrap_or_default(), 0, cdn_start, headers_ms, None, self.current.cap.provider.clone(), self.current.cap.cap_id.clone(), s.corr_id());
                             s.record_attempt_retry(attempt, cdn_start, failed_instant, true);
                         }
                         self.recovery.attempt += 1;
@@ -266,7 +266,7 @@ impl ResilientRangeReader {
                 // Per-attempt telemetry: record headers receipt.
                 let attempt = self.recovery.attempt;
                 if let Some(s) = self.stage.as_ref() {
-                    s.record_attempt_headers(attempt, host.clone(), status, cdn_start, cdn_elapsed.as_millis() as u64, None, self.current.cap.provider.clone(), self.current.cap.cap_id.clone());
+                    s.record_attempt_headers(attempt, host.clone(), status, cdn_start, cdn_elapsed.as_millis() as u64, None, self.current.cap.provider.clone(), self.current.cap.cap_id.clone(), s.corr_id());
                 }
                 provider_ra = parse_retry_after(
                     resp.headers()

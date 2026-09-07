@@ -14,6 +14,11 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Monotonic correlation-ID counter. Each StageClock gets a unique corr_id at
+/// construction so a single demand/fill can be followed through its StageReport
+/// and every CdnAttempt. Runtime-only: never persisted, never part of cache identity.
+static CORR_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Default)]
 pub struct Metrics {
     // request-facing
@@ -459,6 +464,9 @@ pub struct CdnAttempt {
     pub provider: String,
     /// Observability-only: the unique capability id that served this attempt.
     pub cap_id: String,
+    /// Observability-only: runtime correlation id linking this attempt to its
+    /// StageReport. Not persisted; not part of cache/TorrentFile identity.
+    pub corr_id: String,
 }
 
 /// Shared, interior-mutable stage clock. Created per client request and handed
@@ -472,6 +480,9 @@ pub struct StageClock {
     /// Per-attempt CDN telemetry. Pushed by the transport layer on every CDN request.
     /// Bounded to avoid unbounded growth on pathological retry chains.
     attempts: Arc<Mutex<Vec<CdnAttempt>>>,
+    /// Runtime correlation id. Generated at construction so every StageReport and
+    /// CdnAttempt sharing this clock carries the same id. Not persisted.
+    corr_id: String,
 }
 
 impl Default for StageClock {
@@ -489,12 +500,17 @@ impl StageClock {
                 ..Default::default()
             })),
             attempts: Arc::new(Mutex::new(Vec::with_capacity(8))),
+            corr_id: format!("corr-{}", CORR_ID_COUNTER.fetch_add(1, Ordering::SeqCst)),
         }
     }
 
     /// Returns the T0 of this clock, for computing offsets in the transport layer.
     pub fn t0(&self) -> Instant {
         self.t0
+    }
+    /// Returns the runtime correlation id for this clock's request/fill.
+    pub fn corr_id(&self) -> String {
+        self.corr_id.clone()
     }
     pub fn set_t1(&self, t: Instant) {
         self.inner.lock().unwrap().t1_acquire_issued = Some(t);
@@ -545,6 +561,7 @@ impl StageClock {
         retry_wait_ms: Option<u64>,
         provider: String,
         cap_id: String,
+        corr_id: String,
     ) {
         let mut g = self.attempts.lock().unwrap();
         if g.len() < 16 {
@@ -560,6 +577,7 @@ impl StageClock {
                 retry_wait_ms,
                 provider,
                 cap_id,
+                corr_id,
             });
         }
     }
@@ -681,6 +699,9 @@ pub struct StageReport {
     pub cap_id: String,
     /// Observability-only: the account scope of the capability used for this request.
     pub account_scope: String,
+    /// Observability-only: runtime correlation id linking this report to its
+    /// CdnAttempt(s). Not persisted; not part of cache/TorrentFile identity.
+    pub corr_id: String,
 }
 
 impl StageReport {
@@ -726,6 +747,7 @@ impl StageReport {
             "provider": self.provider,
             "cap_id": self.cap_id,
             "account_scope": self.account_scope,
+            "corr_id": self.corr_id,
         })
     }
 }
