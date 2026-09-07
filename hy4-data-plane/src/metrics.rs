@@ -454,6 +454,11 @@ pub struct CdnAttempt {
     /// apply_transient/apply_dead. None for the first attempt and for the
     /// final successful attempt (no prior retry decision).
     pub retry_wait_ms: Option<u64>,
+    /// Observability-only: the provider that owned this capability (torbox | realdebrid).
+    /// Provider is execution metadata, NOT part of TorrentFile/cache byte identity.
+    pub provider: String,
+    /// Observability-only: the unique capability id that served this attempt.
+    pub cap_id: String,
 }
 
 /// Shared, interior-mutable stage clock. Created per client request and handed
@@ -538,6 +543,8 @@ impl StageClock {
         send_instant: Instant,
         headers_ms: u64,
         retry_wait_ms: Option<u64>,
+        provider: String,
+        cap_id: String,
     ) {
         let mut g = self.attempts.lock().unwrap();
         if g.len() < 16 {
@@ -551,6 +558,8 @@ impl StageClock {
                 retry_decision_ms: None,
                 same_cap: true,
                 retry_wait_ms,
+                provider,
+                cap_id,
             });
         }
     }
@@ -665,6 +674,13 @@ pub struct StageReport {
     /// This decomposes the T3→T4 upstream phase into individual attempts so we can
     /// answer: was the ~55s stall ONE bad request, a retry chain, or something else?
     pub cdn_attempts: Vec<CdnAttempt>,
+    /// Observability-only: the provider that owned the capability used for this request.
+    /// Provider is execution metadata, NOT part of TorrentFile/cache byte identity.
+    pub provider: String,
+    /// Observability-only: the unique capability id that served this request.
+    pub cap_id: String,
+    /// Observability-only: the account scope of the capability used for this request.
+    pub account_scope: String,
 }
 
 impl StageReport {
@@ -706,6 +722,10 @@ impl StageReport {
             },
             // Per-attempt CDN telemetry: decomposes T3→T4 into individual attempts.
             "cdn_attempts": self.cdn_attempts,
+            // Observability-only: provider attribution for this request.
+            "provider": self.provider,
+            "cap_id": self.cap_id,
+            "account_scope": self.account_scope,
         })
     }
 }

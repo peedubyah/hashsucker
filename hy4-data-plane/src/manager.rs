@@ -803,4 +803,35 @@ impl CapabilityManager {
             })
             .collect()
     }
+
+    /// Observability-only per-capability pool attribution for the /metrics pool_attribution field.
+    /// Each entry carries provider, capability id, status, busy/free, and breaker state.
+    /// Provider is execution metadata, NOT part of TorrentFile/cache byte identity.
+    pub fn pool_attribution(&self) -> Vec<serde_json::Value> {
+        use serde_json::json;
+        let now = Instant::now();
+        let mut out = Vec::new();
+        for s in &self.slots {
+            for c in s.caps.lock().unwrap().iter() {
+                let status = c.status();
+                let busy = c.limiter.available_permits() == 0 || c.in_flight.load(Ordering::SeqCst) > 0;
+                out.push(json!({
+                    "provider": c.provider,
+                    "cap_id": c.cap_id,
+                    "account_scope": c.account_scope,
+                    "provider_resource_id": c.provider_resource_id,
+                    "status": match status {
+                        CapabilityStatus::Alive => "alive",
+                        CapabilityStatus::Degraded => "degraded",
+                        CapabilityStatus::Throttled => "throttled",
+                        CapabilityStatus::Dead => "dead",
+                    },
+                    "busy": busy,
+                    "expires_in_ms": c.expires_in_ms(now),
+                    "breaker_open": s.breaker.is_open(now),
+                }));
+            }
+        }
+        out
+    }
 }

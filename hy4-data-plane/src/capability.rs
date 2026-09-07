@@ -15,6 +15,11 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
 
+/// Observability-only unique capability id. Stable for the lifetime of this Arc;
+/// never used for routing, identity, or cache keying. Exposed in pool_attribution
+/// so live provider attribution is provable without signed URLs or tokens.
+static CAP_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityStatus {
     Alive,
@@ -51,6 +56,11 @@ pub struct DeliveryCapability {
     pub torrent_file_id: String, // current host DB row id (torrentFile.id); informational only, NOT a key
     pub provider_resource_id: String,
     pub provider_file_id: String,
+    /// Observability-only unique capability id. Stable for the lifetime of this
+    /// Arc; never used for routing, identity, or cache keying. Exposed in
+    /// CdnAttempt / StageReport / pool_attribution so live provider attribution
+    /// is provable without signed URLs or tokens.
+    pub cap_id: String,
     pub acquired_at: Instant,
     expires_at: Mutex<Option<Instant>>,
     status: Mutex<CapabilityStatus>,
@@ -71,6 +81,12 @@ impl DeliveryCapability {
         provider_file_id: String,
         ttl: Option<Duration>,
     ) -> Arc<Self> {
+        let cap_id = format!(
+            "{}-{}-{}",
+            provider,
+            provider_file_id,
+            CAP_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
+        );
         Arc::new(Self {
             runtime_url,
             provider,
@@ -78,6 +94,7 @@ impl DeliveryCapability {
             torrent_file_id,
             provider_resource_id,
             provider_file_id,
+            cap_id,
             acquired_at: Instant::now(),
             expires_at: Mutex::new(ttl.map(|d| Instant::now() + d)),
             status: Mutex::new(CapabilityStatus::Alive),
@@ -98,6 +115,14 @@ impl DeliveryCapability {
     /// Usable right now? False if Dead, or expired (CASE A), or inside a Throttled
     /// cooldown window (CASE D). After a Throttled cooldown elapses the cap becomes
     /// usable AGAIN with its SAME URL (§5: 429 is transient, do NOT re-acquire).
+    /// Observability-only: milliseconds until this capability expires.
+    /// None if no expiry is set (capability lives until dead/revoked).
+    pub fn expires_in_ms(&self, now: Instant) -> Option<u64> {
+        self.expires_at.lock().unwrap().map(|exp| {
+            if exp > now { exp.duration_since(now).as_millis() as u64 } else { 0 }
+        })
+    }
+
     pub fn usable_now(&self, now: Instant) -> bool {
         if matches!(self.status(), CapabilityStatus::Dead) {
             return false;

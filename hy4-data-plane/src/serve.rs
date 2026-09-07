@@ -365,6 +365,16 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         .as_ref()
         .map(|_| state.metrics.start_demand());
     let mut first_reserved = first_reserved;
+    // Observability-only: extract provider attribution from the reserved capability
+    // before it's consumed by the read path. Provider is execution metadata, NOT
+    // part of TorrentFile/cache byte identity.
+    let provider_attribution = first_reserved.as_ref().map(|r| {
+        (
+            r.cap.provider.clone(),
+            r.cap.cap_id.clone(),
+            r.cap.account_scope.clone(),
+        )
+    });
 
     let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
     let metrics = state.metrics.clone();
@@ -412,6 +422,9 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                 cdn_requests_delta: metrics.cdn_requests.load(Ordering::SeqCst) - cdn_before,
                 work_class: WorkClass::Demand,
                 cdn_attempts: stage.take_attempts(),
+                provider: provider_attribution.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_default(),
+                cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
+                account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
             });
             return;
         }
@@ -455,6 +468,9 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     cdn_requests_delta: metrics.cdn_requests.load(Ordering::SeqCst) - cdn_before,
                     work_class: WorkClass::Demand,
                     cdn_attempts: stage.take_attempts(),
+                    provider: provider_attribution.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_default(),
+                    cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
+                    account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
                 });
                 return;
             }
@@ -571,6 +587,8 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         fault_dead_once: false,
                         fault_midbody_once: false,
                     };
+                    // Observability-only: extract provider attribution from the prefetch cap.
+                    let pf_provider = (cap.cap.provider.clone(), cap.cap.cap_id.clone(), cap.cap.account_scope.clone());
                     // Lowest priority; existing_cap=Some means fill_chunk_run reuses the
                     // pre-acquired capability and never calls the blocking acquire.
                     let pf_stage = StageClock::new(prefetch_start);
@@ -617,6 +635,9 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         cdn_requests_delta: 1,
                         work_class: WorkClass::Prefetch,
                         cdn_attempts: pf_stage.take_attempts(),
+                        provider: pf_provider.0.clone(),
+                        cap_id: pf_provider.1.clone(),
+                        account_scope: pf_provider.2.clone(),
                     });
                 });
             }
@@ -916,6 +937,10 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                     work_class: WorkClass::DemandJoinedFill,
                                     // DemandJoinedFill: CDN attempts are attributed to the fill owner.
                                     cdn_attempts: vec![],
+                                    // Provider attribution is on the fill owner's stage report.
+                                    provider: String::new(),
+                                    cap_id: String::new(),
+                                    account_scope: String::new(),
                                 };
                                 metrics.record_stage_report(join_report);
                                 // `notify_waiters()` stores NO permit, so a
@@ -1016,6 +1041,9 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             cdn_requests_delta: metrics.cdn_requests.load(Ordering::SeqCst) - cdn_before,
             work_class: WorkClass::Demand,
             cdn_attempts: stage.take_attempts(),
+            provider: provider_attribution.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_default(),
+            cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
+            account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
         });
     });
 
@@ -1580,6 +1608,8 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
         },
         // pool snapshot
         "pool": pool.iter().map(|(k, len, tgt)| serde_json::json!({"slot": k, "caps": len, "target": tgt})).collect::<Vec<_>>(),
+        // Observability-only per-capability pool attribution.
+        "pool_attribution": state.manager.pool_attribution(),
         // stage timing (observational only; preserved for a future TTFB waterfall)
         "stage_timing": {
             "cold_ttfb_ms": *m.cold_ttfb_ms.lock().unwrap(),
