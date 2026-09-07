@@ -424,6 +424,25 @@ impl StageInstants {
 }
 
 /// One CDN request attempt inside a single demand fill.
+/// Terminal outcome of a CDN attempt. Bounded, sanitized, safe for /metrics.
+/// Never exposes raw provider URLs/tokens/secrets.
+#[derive(Clone, PartialEq, serde::Serialize)]
+pub enum AttemptOutcome {
+    /// 206 received, body streaming started.
+    Success,
+    /// HTTP status received that triggered a retry (429/5xx for Class B,
+    /// 401/403/404/410 for Class C).
+    HttpError,
+    /// reqwest client timeout fired before usable response headers.
+    /// This is the pathological Oppenheimer case: the ~25s client timeout
+    /// elapses with no headers received.
+    Timeout,
+    /// Transport-layer error (connection refused, DNS failure, reset) before headers.
+    TransportError,
+    /// Attempt still in progress (headers received, body not yet started).
+    Pending,
+}
+
 /// Represents ONE iteration of the transport retry loop: one HTTP request that
 /// receives headers and optionally body bytes before either succeeding (206)
 /// or triggering a retry/recovery decision.
@@ -467,6 +486,18 @@ pub struct CdnAttempt {
     /// Observability-only: runtime correlation id linking this attempt to its
     /// StageReport. Not persisted; not part of cache/TorrentFile identity.
     pub corr_id: String,
+    /// Milliseconds from StageClock T0 to when this attempt's HTTP request was sent.
+    /// Relative offset, not wall-clock, so it stays compact and T0-anchored.
+    pub started_at_ms: u64,
+    /// Whether HTTP response headers were received for this attempt.
+    /// False for timeout/transport-error cases that fail before headers.
+    pub headers_received: bool,
+    /// Total milliseconds from send() to terminal outcome (headers received for
+    /// success/http-error, failure instant for timeout/transport-error).
+    /// For the final successful attempt, this is send→headers (same as headers_ms).
+    pub elapsed_ms: u64,
+    /// Terminal outcome of this attempt. `Pending` until body/retry/failure resolves it.
+    pub outcome: AttemptOutcome,
 }
 
 /// Shared, interior-mutable stage clock. Created per client request and handed
@@ -562,7 +593,10 @@ impl StageClock {
         provider: String,
         cap_id: String,
         corr_id: String,
+        outcome: AttemptOutcome,
     ) {
+        let started_at_ms = send_instant.saturating_duration_since(self.t0).as_millis() as u64;
+        let headers_received = status != 0;
         let mut g = self.attempts.lock().unwrap();
         if g.len() < 16 {
             // Bound: pathological retry chains don't grow the vec forever.
@@ -578,6 +612,10 @@ impl StageClock {
                 provider,
                 cap_id,
                 corr_id,
+                started_at_ms,
+                headers_received,
+                elapsed_ms: headers_ms,
+                outcome,
             });
         }
     }
@@ -598,6 +636,8 @@ impl StageClock {
         // AFTER a prior attempt already has ttfb_ms. Don't overwrite.
         if let Some(a) = g.iter_mut().find(|a| a.attempt == attempt && a.ttfb_ms.is_none()) {
             a.ttfb_ms = Some(ttfb_ms);
+            // First body byte arrived: this attempt succeeded.
+            a.outcome = AttemptOutcome::Success;
         }
     }
 
@@ -623,6 +663,11 @@ impl StageClock {
                 a.retry_decision_ms = Some(retry_decision_ms);
             }
             a.same_cap = same_cap;
+            // HTTP status triggered a retry: mark outcome as HttpError.
+            // (Timeout/TransportError are set at the record_attempt_headers call site.)
+            if a.outcome == AttemptOutcome::Pending {
+                a.outcome = AttemptOutcome::HttpError;
+            }
         }
     }
 
