@@ -102,6 +102,68 @@ pub enum DeliveryError {
     },
 }
 
+/// T3 transplant (proven as HY4 P2G prewarm vocabulary on m3-north-db,
+/// trimmed to the existing-slot scope: no fresh-S-1 validation, so no
+/// StalePool variant). Every variant is terminal for the request (no
+/// hidden retries); only `Warmed` performs acquisition, and it performs
+/// exactly one bounded attempt through the existing single-flight.
+pub enum PrewarmStatus {
+    /// A usable free capability already exists; zero acquisition.
+    AlreadyWarm,
+    /// One bounded acquisition completed; carries no bytes, holds no
+    /// permit — the cap sits warm/free for later standby reservation.
+    Warmed,
+    /// Slot at target with no free lane (demand or concurrent prewarm
+    /// owns the permits); pool growth is demand's job, never prewarm's.
+    InFlight(String),
+    /// Slot breaker open; explicit request must not hammer it.
+    Unavailable(String),
+    /// Bounded acquire error (breaker recorded, like try_slot).
+    Failed(String),
+    /// No pool slot matches the requested placement coordinates.
+    /// Zero acquisition; nothing created.
+    InvalidSlot(String),
+}
+
+impl PrewarmStatus {
+    /// Wire name for the future Node→Rust prewarm contract (snake_case, stable).
+    pub fn name(&self) -> &'static str {
+        match self {
+            PrewarmStatus::AlreadyWarm => "already_warm",
+            PrewarmStatus::Warmed => "warmed",
+            PrewarmStatus::InFlight(_) => "in_flight",
+            PrewarmStatus::Unavailable(_) => "unavailable",
+            PrewarmStatus::Failed(_) => "failed",
+            PrewarmStatus::InvalidSlot(_) => "invalid_slot",
+        }
+    }
+
+    /// Human-readable detail, if any.
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            PrewarmStatus::AlreadyWarm | PrewarmStatus::Warmed => None,
+            PrewarmStatus::InFlight(s)
+            | PrewarmStatus::Unavailable(s)
+            | PrewarmStatus::Failed(s)
+            | PrewarmStatus::InvalidSlot(s) => Some(s.clone()),
+        }
+    }
+}
+
+/// T3 transplant: one explicit prewarm outcome. Manager-local identity
+/// only (routing UUID + durable key); production caps carry `cap_id`
+/// (not the later HY4 generation), so the warmed cap is reported by id.
+pub struct PrewarmOutcome {
+    pub status: PrewarmStatus,
+    pub torrent_file_id: String,
+    pub tf_durable_key: String,
+    pub provider: String,
+    pub provider_resource_id: String,
+    pub cap_id: Option<String>,
+    pub api_delta: u64,
+    pub elapsed_ms: u64,
+}
+
 pub struct CapabilityManager {
     pub tf: ControlTorrentFile,
     pub slots: Vec<Slot>,
@@ -925,5 +987,127 @@ impl CapabilityManager {
             }
         }
         None
+    }
+
+    /// T3 transplant (proven as HY4 P2G `prewarm_slot` on m3-north-db):
+    /// explicit warm-up for one EXISTING slot of this manager's exact
+    /// TorrentFile. Names an existing `(provider, provider_resource_id)`
+    /// placement; anything else reports `InvalidSlot` with zero
+    /// acquisition and nothing created.
+    ///
+    /// Outcomes: `AlreadyWarm` (usable+free cap exists, zero API),
+    /// `Warmed` (one bounded acquire through the existing single-flight;
+    /// the new cap installs into the normal pool warm/free — no permit
+    /// held, no reader opened, no bytes flow), `InFlight` (slot at
+    /// target with no free lane; pool growth is demand's job, never
+    /// prewarm's), `Unavailable` (slot breaker open), `Failed` (bounded
+    /// acquire error, breaker recorded like try_slot).
+    ///
+    /// Never creates durable truth, never persists anything, never
+    /// chooses another TorrentFile. Production adaptations vs the proven
+    /// source: no fresh-S-1 validation (no StalePool; the manager's own
+    /// TF truth anchors the outcome key), no `slot.note_reserve` (no
+    /// such pool field — pool-growth behavior untouched), warmed cap
+    /// reported by `cap_id` (production caps carry no generation), and
+    /// the pool install mirrors production `try_slot` with the proven
+    /// same-length guard so a concurrent demand install cannot over-fill
+    /// the slot target.
+    pub async fn prewarm_slot(
+        &self,
+        provider: &str,
+        resource_id: &str,
+    ) -> PrewarmOutcome {
+        let t0 = Instant::now();
+        let api_before = self.metrics.api_requests.load(Ordering::SeqCst);
+        let finish = |status: PrewarmStatus, cap_id: Option<String>| PrewarmOutcome {
+            status,
+            torrent_file_id: self.tf.id.clone(),
+            tf_durable_key: crate::cache::TorrentFileId::compute_durable_key(
+                &self.tf.info_hash,
+                self.tf.canonical_internal_path.as_deref().unwrap_or(""),
+                self.tf.size,
+            ),
+            provider: provider.to_string(),
+            provider_resource_id: resource_id.to_string(),
+            cap_id,
+            api_delta: self
+                .metrics
+                .api_requests
+                .load(Ordering::SeqCst)
+                .saturating_sub(api_before),
+            elapsed_ms: t0.elapsed().as_millis() as u64,
+        };
+        // Guard: the named slot must exist in THIS pool.
+        let idx = match self.slots.iter().position(|s| {
+            s.coord.provider == provider && s.coord.provider_resource_id == resource_id
+        }) {
+            Some(i) => i,
+            None => {
+                return finish(
+                    PrewarmStatus::InvalidSlot(
+                        "no pool slot matches the requested placement coordinates".into(),
+                    ),
+                    None,
+                );
+            }
+        };
+        let now = Instant::now();
+        let slot = &self.slots[idx];
+        // Prune dead/expired so a dead cap cannot block warming (mirrors
+        // try_slot step 0; throttled caps are kept — they recover).
+        {
+            let mut caps = slot.caps.lock().unwrap();
+            let before = caps.len();
+            caps.retain(|c| !c.prunable(now));
+            let evicted = before - caps.len();
+            for _ in 0..evicted {
+                self.metrics.record_cap_eviction();
+            }
+        }
+        // Already warm: usable + free, zero API.
+        if let Some(cap) = self.first_usable_free(slot, now) {
+            let id = cap.cap_id.clone();
+            return finish(PrewarmStatus::AlreadyWarm, Some(id));
+        }
+        // Breaker open: do not hammer a broken provider on explicit request.
+        if slot.breaker.is_open(now) {
+            return finish(
+                PrewarmStatus::Unavailable("slot breaker open".into()),
+                None,
+            );
+        }
+        // Slot at target with no free lane: report, never grow the pool.
+        let (caps_len, target) = {
+            let caps = slot.caps.lock().unwrap();
+            (caps.len(), slot.target.load(Ordering::SeqCst))
+        };
+        if caps_len >= target {
+            return finish(
+                PrewarmStatus::InFlight("slot at target, no free lane".into()),
+                None,
+            );
+        }
+        // One bounded acquire through the existing single-flight
+        // (concurrent identical prewarms share it: exactly one API call).
+        // No try_reserve anywhere on this path: the warmed cap lands
+        // warm/free, permit untouched for later standby reservation.
+        match self.resolve_internal(slot, caps_len).await {
+            Ok(cap) => {
+                {
+                    let mut caps = slot.caps.lock().unwrap();
+                    // Proven same-length guard: a concurrent demand install
+                    // may have filled the slot first — never over-fill.
+                    if caps.len() == caps_len {
+                        caps.push(cap.clone());
+                    }
+                }
+                let id = cap.cap_id.clone();
+                finish(PrewarmStatus::Warmed, Some(id))
+            }
+            Err(e) => {
+                slot.breaker.record_failure();
+                finish(PrewarmStatus::Failed(format!("{e}")), None)
+            }
+        }
     }
 }

@@ -46,3 +46,9 @@ mod p2e1_identity;
 // (unit-level, no I/O). Test-only: pins the five standby semantics.
 #[cfg(test)]
 mod t2_standby;
+
+// T3 transplant proof: explicit runtime prewarm primitive (async
+// unit-level, stubbed provider edge). Test-only: pins the four prewarm
+// behaviors plus the prewarm->standby handoff.
+#[cfg(test)]
+mod t3_prewarm;
