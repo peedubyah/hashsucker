@@ -208,6 +208,26 @@ pub fn delivery_error(e: manager::DeliveryError, m: &Metrics) -> Response<Body> 
     }
 }
 
+/// HY4 P2E.1 — the ONE fill/plan TorrentFile identity constructor.
+///
+/// The cache/coalescing/staging namespace MUST be the durable
+/// `(info_hash, canonical_path, size)` tuple. The routing UUID
+/// (`tf_id`/`tf_id_durable`, a mutable SQLite surrogate) is forensic-only
+/// here: it rides along in `tf_id_durable` but MUST NOT enter the
+/// `info_hash` position, or the plan namespace (correct) and the fill
+/// namespace diverge and cross-read cache reuse silently dies while
+/// coalescing keeps working (deterministic wrongness — the failure mode
+/// this helper exists to prevent). Both call sites (plan + fill) go
+/// through here so they cannot drift apart again.
+pub(crate) fn fill_torrent_file_id(
+    tf_id_durable: String,
+    info_hash: String,
+    canonical_path: String,
+    size: u64,
+) -> TorrentFileId {
+    TorrentFileId::new(tf_id_durable, info_hash, canonical_path, size)
+}
+
 pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response<Body> {
     // ---- Slice 4.5 T0: the read request is received. Every later stage is
     // measured relative to this instant. Stamped at handler entry, before range
@@ -282,11 +302,8 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     // upstream-only path — same contract as Slice 4.5.
     let plan: Option<ChunkPlan> = if !is_single {
         if let Some(cache) = state.cache.as_ref() {
-            let tf_id = TorrentFileId::new(
-                // Retained for logging/forensics; the cache key is
-                // (info_hash, canonical_path, size) computed by
-                // TorrentFileId::new. See docs/hy4/CROSS-FILE-KEYING-AUDIT.md
-                // (P3 final identity check, conclusion B).
+            // HY4 P2E.1: single shared constructor with the fill site below.
+            let tf_id = fill_torrent_file_id(
                 state.tf_id_durable.clone(),
                 state.info_hash.clone(),
                 state.canonical_path.clone(),
@@ -382,8 +399,10 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
     let metrics = state.metrics.clone();
     let cache_clone = state.cache.clone();
-    let tf_id_clone = state.tf_id.clone();
     let tf_id_durable_clone = state.tf_id_durable.clone();
+    // HY4 P2E.1: the fill namespace needs the REAL infoHash (not the
+    // routing UUID) — this clone is what the old code was missing.
+    let info_hash_clone = state.info_hash.clone();
     let canonical_clone = state.canonical_path.clone();
     let manager_clone = state.manager.clone();
     let client_clone = state.client.clone();
@@ -481,14 +500,14 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             }
         };
 
-        let tf_id = TorrentFileId::new(
-            // tf_id_durable is the current host PK; the cache key is
-            // (info_hash, canonical_path, size), computed by ::new().
-            // The run-loop previously shadowed this with the URL label;
-            // that is fixed (see P3 correction). See P3 final identity
-            // check for the durable_key contract.
+        // HY4 P2E.1 repair: this previously passed the URL/routing UUID
+        // (`tf_id_clone`) in the info_hash position, forking a UUID-based
+        // fill namespace that could never intersect the plan's durable
+        // namespace — cross-read cache reuse silently died while
+        // coalescing kept working. Now unified via the shared constructor.
+        let tf_id = fill_torrent_file_id(
             tf_id_durable_clone.clone(),
-            tf_id_clone.clone(),
+            info_hash_clone.clone(),
             canonical_clone.clone(),
             size,
         );

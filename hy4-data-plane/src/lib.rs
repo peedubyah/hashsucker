@@ -35,3 +35,9 @@ pub mod playback_intel;
 pub mod provider;
 pub mod serve;
 pub mod transport;
+
+// HY4 P2E.1 deterministic fill-identity repair proof (unit-level).
+// Test-only: pins that plan/fill TorrentFile identity is the durable
+// (infoHash, path, size) tuple, never the routing UUID.
+#[cfg(test)]
+mod p2e1_identity;
