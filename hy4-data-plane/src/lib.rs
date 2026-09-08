@@ -41,3 +41,8 @@ pub mod transport;
 // (infoHash, path, size) tuple, never the routing UUID.
 #[cfg(test)]
 mod p2e1_identity;
+
+// T2 transplant proof: warm same-TorrentFile standby reservation
+// (unit-level, no I/O). Test-only: pins the five standby semantics.
+#[cfg(test)]
+mod t2_standby;

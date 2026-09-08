@@ -834,4 +834,96 @@ impl CapabilityManager {
         }
         out
     }
+
+    /// T2 transplant (proven as HY4 `reserve_standby` on m3-north-db):
+    /// reserve a healthy FREE capability from the SAME slot as the
+    /// primary, ensuring same-provider/account standby with zero
+    /// acquisition overhead. Returns `None` if no usable standby exists.
+    ///
+    /// Phase 2 (`HY4_CROSS_PROVIDER_STANDBY=1`, default OFF): when the
+    /// primary's own slot has no usable standby, other slots are eligible
+    /// under a strict same-exact-TorrentFile bound: the candidate slot's
+    /// `durable_key` (stable `(info_hash, canonical_path, size)` digest,
+    /// provider-independent) must equal the primary slot's. Same-provider
+    /// standby is therefore always preferred (phase 1 runs first);
+    /// cross-provider standby is explicit, warm-only (usable + free, zero
+    /// acquisition API calls), and can never cross TorrentFiles.
+    ///
+    /// Returns the reservation together with the STANDBY SLOT's
+    /// `durable_key` — the slot-authoritative TorrentFile identity both
+    /// ends were checked against. Callers must use THIS for TorrentFile
+    /// correlation, never a fill-local reconstruction.
+    ///
+    /// Additive warm-only selection path: pool growth, first_alive_busy,
+    /// acquire/reacquire ordering, limiter/breaker, and negative cache
+    /// are untouched. Returned reservations hold the normal per-cap
+    /// permit (maxInFlight=1 preserved).
+    pub fn reserve_standby(
+        &self,
+        primary_cap: &Arc<DeliveryCapability>,
+    ) -> Option<(ReservedCapability, String)> {
+        let now = Instant::now();
+        // Identity anchor for phase 2: index of the slot holding primary.
+        let primary_idx = self.slots.iter().position(|slot| {
+            slot.caps
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| Arc::ptr_eq(c, primary_cap))
+        });
+        let idx = match primary_idx {
+            Some(i) => i,
+            None => return None,
+        };
+        // Phase 1: same slot (explicit same-provider-first rule).
+        if let Some(r) = self.reserve_free_in_slot(&self.slots[idx], primary_cap, now) {
+            return Some((r, self.slots[idx].durable_key.clone()));
+        }
+        // Phase 2: cross-provider standby, same exact TorrentFile only.
+        if std::env::var("HY4_CROSS_PROVIDER_STANDBY")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            let anchor = self.slots[idx].durable_key.clone();
+            for (j, slot) in self.slots.iter().enumerate() {
+                if j == idx || slot.durable_key != anchor {
+                    continue;
+                }
+                if let Some(r) = self.reserve_free_in_slot(slot, primary_cap, now) {
+                    return Some((r, slot.durable_key.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// One slot's share of standby selection: a DIFFERENT usable free cap,
+    /// reserved without acquisition. Shared by the same-slot phase and the
+    /// cross-provider phase so the health/free criteria cannot drift apart.
+    fn reserve_free_in_slot(
+        &self,
+        slot: &Slot,
+        primary_cap: &Arc<DeliveryCapability>,
+        now: Instant,
+    ) -> Option<ReservedCapability> {
+        // Clone the Arc so the slot lock is dropped before try_reserve.
+        let candidate = slot
+            .caps
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|c| {
+                !Arc::ptr_eq(c, primary_cap)
+                    && c.usable_now(now)
+                    && c.limiter.available_permits() > 0
+            })
+            .cloned();
+        if let Some(cap) = candidate {
+            if let Some(r) = self.try_reserve(&cap) {
+                self.metrics.record_cap_reuse();
+                return Some(r);
+            }
+        }
+        None
+    }
 }
