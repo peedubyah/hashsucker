@@ -41,7 +41,7 @@ use crate::cache;
 use crate::manager;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -295,7 +295,6 @@ pub(crate) fn fill_torrent_file_id(
 }
 
 /// T11 two-lane disjoint fill (proven as HY4 P2O on m3-north-db).
-///
 /// Experimental, default OFF (`HY4_ACTIVE_ACTIVE_TWO_SPAN=1` arms it).
 /// One qualifying missing run of the same exact TorrentFile is fetched
 /// concurrently by two already-warm capabilities, each owning a disjoint
@@ -304,6 +303,22 @@ pub(crate) fn fill_torrent_file_id(
 /// the second lane exist. Maximum lanes: 2.
 fn striping_armed() -> bool {
     std::env::var("HY4_ACTIVE_ACTIVE_TWO_SPAN")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// T17: bounded same-TorrentFile hedge election (first-valid-wins,
+/// proven as HY4 P2N on m3-north-db).
+///
+/// Experimental, default OFF (`HY4_HEDGE_ENABLED=1` arms it). The election
+/// is duplicate EXECUTION under the fill task's single logical claim: one
+/// primary attempt plus at most one hedge attempt, same exact
+/// TorrentFile, same exact remaining range. Warm-only: the hedge consumes
+/// an already-reserved warm standby, zero acquisition API calls. Trigger
+/// and ordering follow the proven source (low-throughput arming + knob +
+/// one-per-fill bound); no new hedge policy or threshold is invented here.
+fn hedge_enabled() -> bool {
+    std::env::var("HY4_HEDGE_ENABLED")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
@@ -2372,7 +2387,23 @@ pub async fn fill_chunk_run(
     // for every chunk the resilient reader has COMMITTED to delivering, i.e.
     // after internal recovery, with the authoritative offset — so Slice 3.5
     // retries never double-stage, and transport.rs needs no change for 4.75.
-    let cb: Arc<dyn Fn(u64, &[u8]) + Send + Sync> = {
+    //
+    // T17: the stager is SHARED by at most two execution attempts under one
+    // logical claim, so staging goes through per-attempt gates. Each gate
+    // is an Arc<AtomicBool> checked per invocation:
+    //   stage_fn    -- the ungated stager (manual exactly-once staging of an
+    //                  election winner);
+    //   cb          -- primary attempt's callback (gate true except during a
+    //                  hedge race, so a primary chunk that loses the race is
+    //                  never staged even if its future already completed
+    //                  inside the same poll);
+    //   cb_hedge    -- hedge attempt's callback (gate false until a hedge
+    //                  win promotes it to the active producer).
+    // With no hedge in flight both gates read their steady state and every
+    // path behaves exactly as before (one extra atomic load per chunk).
+    let stage_gate_primary = Arc::new(AtomicBool::new(true));
+    let stage_gate_hedge = Arc::new(AtomicBool::new(false));
+    let stage_fn: Arc<dyn Fn(u64, &[u8]) + Send + Sync> = {
         let st = stager.clone();
         let m = metrics.clone();
         Arc::new(move |offset: u64, data: &[u8]| {
@@ -2381,6 +2412,24 @@ pub async fn fill_chunk_run(
                 .fetch_add(data.len() as u64, Ordering::SeqCst);
             if let Err(e) = st.stage(offset, data) {
                 eprintln!("[rust-proxy] stage failed at {offset}: {e}");
+            }
+        })
+    };
+    let cb: Arc<dyn Fn(u64, &[u8]) + Send + Sync> = {
+        let inner = stage_fn.clone();
+        let gate = stage_gate_primary.clone();
+        Arc::new(move |offset: u64, data: &[u8]| {
+            if gate.load(Ordering::SeqCst) {
+                inner(offset, data);
+            }
+        })
+    };
+    let cb_hedge: Arc<dyn Fn(u64, &[u8]) + Send + Sync> = {
+        let inner = stage_fn.clone();
+        let gate = stage_gate_hedge.clone();
+        Arc::new(move |offset: u64, data: &[u8]| {
+            if gate.load(Ordering::SeqCst) {
+                inner(offset, data);
             }
         })
     };
@@ -2421,6 +2470,9 @@ pub async fn fill_chunk_run(
         *metrics.cold_acquire_ms.lock().unwrap() = Some(acquire_ms.as_millis() as u64);
     }
 
+    // Second client handle for a hedge reader (the construction below
+    // moves `client`).
+    let client_hedge = client.clone();
     let mut reader = ResilientRangeReader::new_with_chunk_cb(
         client,
         metrics.clone(),
@@ -2465,6 +2517,12 @@ pub async fn fill_chunk_run(
     // epoch (never per-frame classifications). Promotion may fire at count
     // >= 2. Stays at zero unless the estimator above is active.
     let mut low_policy = LowObservationPolicy::new();
+    // ---- T17 bounded hedge election state (fill-local) ----
+    // One-hedge-per-claim bound, plus the warm cap kept from a failed race
+    // for the promotion attempt below (no drop+re-reserve gap). A later
+    // independent fill starts false/empty again.
+    let mut hedge_consumed = false;
+    let mut kept_warm: Option<(manager::ReservedCapability, String)> = None;
 
     let sub_open = Instant::now();
     if reader.ensure_open().await.is_err() {
@@ -2489,8 +2547,16 @@ pub async fn fill_chunk_run(
     // therefore gives the authoritative offset of every chunk without the
     // transport having to expose one.
     let mut pos = f_start;
+    // T17: an elected hedge winner's Step is processed through the normal
+    // arm below (its bytes were staged manually exactly once during the
+    // election; the arm itself never stages).
+    let mut pending: Option<Step> = None;
     loop {
-        match reader.next_chunk().await {
+        let step = match pending.take() {
+            Some(s) => s,
+            None => reader.next_chunk().await,
+        };
+        match step {
             Step::Chunk(b) => {
                 let n = b.len() as u64;
                 if n == 0 {
@@ -2567,15 +2633,172 @@ pub async fn fill_chunk_run(
                 // structurally (two independent sustained low observations
                 // in one producer epoch), never on a timer. Unarmed
                 // (including detector OFF) behaves exactly as before.
-                // Warm-only: on a standby miss there is no cold-acquire
-                // fallback -- reset the sequence so re-attempt needs a fresh
-                // interval (bounded attempts, never a per-frame hot loop),
-                // and continue serving from the current producer with no
-                // budget spent. This runs only on healthy delivery, so the
-                // existing failure/recovery ordering stays authoritative.
+                // This runs only on healthy delivery, so the existing
+                // failure/recovery ordering stays authoritative.
                 if low_policy.count() >= 2 {
                     let slow_cap = reader.current_cap();
-                    match manager.reserve_standby(&slow_cap) {
+                    // ---- T17 bounded hedge election (first-valid-wins,
+                    // proven as HY4 P2N on m3-north-db) BEFORE promotion.
+                    //
+                    // Single-round race REPLACING abandon-and-promote this
+                    // iteration: the already-reserved warm standby opens the
+                    // same `[pos, f_end]` as a second execution attempt
+                    // under this fill's single logical claim. The first
+                    // producer to return its next body chunk becomes the
+                    // SOLE producer for the remainder. Gates, in order: low
+                    // arming + hedge knob + one-per-fill bound + warm
+                    // standby in hand (a miss falls through to promotion
+                    // below). Maximum two attempts, at most one hedge per
+                    // logical fill, zero cold acquisition.
+                    //
+                    // Staging discipline: the primary gate closes BEFORE
+                    // polling. No primary future is in flight at this point
+                    // (we are inside the arm after a delivered chunk), so
+                    // until the election neither attempt can stage. The
+                    // winner's first chunk is staged manually exactly once
+                    // below; the loser's never. The elected winner's Step is
+                    // processed through the normal arm above (via `pending`).
+                    let mut elected: Option<Step> = None;
+                    if hedge_enabled() && !hedge_consumed && pos <= f_end {
+                        match manager.reserve_standby(&slow_cap) {
+                            Some((hedge_reserved, hedge_slot_key))
+                                if hedge_slot_key == tf.durable_key =>
+                            {
+                                hedge_consumed = true;
+                                let race_pos = pos;
+                                let hedge_provider =
+                                    hedge_reserved.cap.provider.clone();
+                                eprintln!(
+                                    "[t17] hedge_race_started: tf={} span={f_start}-{f_end} race_offset={race_pos} primary={} hedge={hedge_provider}",
+                                    tf.durable_key,
+                                    slow_cap.provider,
+                                );
+                                stage_gate_primary.store(false, Ordering::SeqCst);
+                                let mut hedge_reader =
+                                    ResilientRangeReader::new_with_chunk_cb(
+                                        client_hedge.clone(),
+                                        metrics.clone(),
+                                        manager.clone(),
+                                        hedge_reserved,
+                                        priority,
+                                        pos,
+                                        f_end,
+                                        tf.size,
+                                        false,
+                                        faults,
+                                        Some(cb_hedge.clone()),
+                                    );
+                                // No race deadline on this branch (no
+                                // stall/runway arms exist here): pending
+                                // forever, exactly like the bare await.
+                                // Failure ordering stays authoritative (a
+                                // Terminal still fails the fill).
+                                let (primary_first, hedge_first) = tokio::select! {
+                                    s = reader.next_chunk() => (Some(s), None),
+                                    s = hedge_reader.next_chunk() => (None, Some(s)),
+                                };
+                                if let Some(s) = primary_first {
+                                    // Primary wins: drop the hedge (permit
+                                    // released, connection closed --
+                                    // cancellation, never a provider
+                                    // failure), stage the winning chunk
+                                    // manually exactly once (its gated
+                                    // callback was off during the race),
+                                    // re-open the primary gate. Same
+                                    // producer continues.
+                                    drop(hedge_reader);
+                                    if let Step::Chunk(b) = &s {
+                                        stage_fn(pos, b);
+                                    }
+                                    stage_gate_primary.store(true, Ordering::SeqCst);
+                                    low_policy.reset_sequence();
+                                    eprintln!(
+                                        "[t17] hedge_elected: winner=primary tf={} span={f_start}-{f_end} race_offset={race_pos}",
+                                        tf.durable_key,
+                                    );
+                                    elected = Some(s);
+                                } else if let Some(s) = hedge_first {
+                                    match s {
+                                        Step::Chunk(b) => {
+                                            // Hedge wins: ownership transfer.
+                                            // Manual exactly-once stage, then
+                                            // the hedge gate opens so later
+                                            // hedge chunks stage internally
+                                            // through the same single
+                                            // authoritative stager. The
+                                            // pending primary attempt is
+                                            // dropped (cancellation, never a
+                                            // provider failure) and the hedge
+                                            // reader becomes the active
+                                            // reader for the remainder.
+                                            stage_fn(pos, &b);
+                                            stage_gate_hedge.store(true, Ordering::SeqCst);
+                                            let hcap = hedge_reader.current_cap();
+                                            let old_reader = std::mem::replace(
+                                                &mut reader,
+                                                hedge_reader,
+                                            );
+                                            drop(old_reader);
+                                            if let Some(est) = throughput.as_mut() {
+                                                est.reset_for_producer(
+                                                    hcap.provider.clone(),
+                                                    hcap.cap_id.clone(),
+                                                );
+                                            }
+                                            low_policy.reset_sequence();
+                                            eprintln!(
+                                                "[t17] hedge_elected: winner=hedge tf={} span={f_start}-{f_end} race_offset={race_pos} hedge={}",
+                                                tf.durable_key,
+                                                hcap.provider,
+                                            );
+                                            elected = Some(Step::Chunk(b));
+                                        }
+                                        _ => {
+                                            // Hedge errored/ended before
+                                            // either won: re-open the primary
+                                            // gate (same producer continues)
+                                            // and keep its warm cap for the
+                                            // promotion attempt below (no
+                                            // drop+re-reserve gap).
+                                            stage_gate_primary.store(true, Ordering::SeqCst);
+                                            kept_warm = Some((
+                                                hedge_reader.into_reserved(),
+                                                hedge_slot_key,
+                                            ));
+                                            eprintln!(
+                                                "[t17] hedge_failed: tf={} span={f_start}-{f_end} race_offset={race_pos} (primary continues into promotion)",
+                                                tf.durable_key,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            other => {
+                                drop(other);
+                            }
+                        }
+                    }
+                    if let Some(s) = elected {
+                        pending = Some(s);
+                        continue;
+                    }
+                    // T16 promotion (existing): runs only when no hedge
+                    // election produced a winner this frame. Warm-only: a
+                    // cap kept from a failed race is preferred (no
+                    // drop+re-reserve gap); otherwise reserve fresh. On a
+                    // miss there is no cold-acquire fallback -- reset the
+                    // sequence so re-attempt needs a fresh interval
+                    // (bounded attempts, never a per-frame hot loop), and
+                    // continue serving from the current producer with no
+                    // budget spent.
+                    let standby = match kept_warm.take() {
+                        Some(r) => Some(r),
+                        None => match manager.reserve_standby(&slow_cap) {
+                            Some(r) => Some(r),
+                            None => None,
+                        },
+                    };
+                    match standby {
                         Some((standby, slot_key)) if slot_key == tf.durable_key => {
                             let new_provider = standby.cap.provider.clone();
                             let new_cap_id = standby.cap.cap_id.clone();

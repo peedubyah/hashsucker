@@ -121,3 +121,11 @@ mod t15_throughput;
 // contaminated no-promotion, and no-standby continuation without failure.
 #[cfg(test)]
 mod t16_promotion;
+
+// T17 transplant proof: bounded same-TF first-valid-wins hedge (proven as
+// HY4 P2N on m3-north-db). Test-only: pins hedge-OFF current behavior,
+// standby-wins and primary-wins elections with exact bytes and zero
+// acquisition, clean loser cancellation, and staged-once bytes with
+// no-standby continuation.
+#[cfg(test)]
+mod t17_hedge;

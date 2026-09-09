@@ -73,3 +73,13 @@ pub fn set_min_chunks(n: Option<u64>) {
         None => std::env::remove_var("HY4_ACTIVE_ACTIVE_MIN_CHUNKS"),
     }
 }
+
+/// Set (`true`) or remove (`false`) the T17 bounded same-TF hedge gate
+/// (`HY4_HEDGE_ENABLED`, default OFF).
+pub fn set_hedge(on: bool) {
+    if on {
+        std::env::set_var("HY4_HEDGE_ENABLED", "1");
+    } else {
+        std::env::remove_var("HY4_HEDGE_ENABLED");
+    }
+}
