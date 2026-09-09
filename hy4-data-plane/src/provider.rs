@@ -40,6 +40,47 @@ pub async fn acquire(
     client: &reqwest::Client,
     metrics: &Metrics,
 ) -> Result<Arc<DeliveryCapability>, AcquireError> {
+    // T3 transplant of the proven HY4 P2G deterministic proof seams.
+    // COMPILED OUT of production binaries (#[cfg(test)]): proofs must
+    // drive the REAL acquire/single-flight/pool path without live debrid
+    // APIs. HY4_TEST_ACQUIRE_FAIL=1 forces a bounded failure;
+    // HY4_TEST_ACQUIRE_BASE_URL=http://127.0.0.1:PORT mints a localhost
+    // capability and counts exactly one acquisition. Both default OFF
+    // (unset) and neither exists in production builds.
+    #[cfg(test)]
+    {
+        if std::env::var("HY4_TEST_ACQUIRE_FAIL").map(|v| v == "1").unwrap_or(false) {
+            return Err(AcquireError::Transient("p2g test fault: forced acquire failure".into()));
+        }
+        if let Ok(base) = std::env::var("HY4_TEST_ACQUIRE_BASE_URL") {
+            if !base.is_empty() {
+                use std::sync::atomic::Ordering;
+                // Per-provider URL override (e.g. HY4_TEST_ACQUIRE_URL_REALDEBRID)
+                // lets a proof point the warmed capability at a mock CDN path;
+                // otherwise the capability points at BASE/<provider> (never
+                // dialed unless a fill actually runs against it).
+                let override_var = format!(
+                    "HY4_TEST_ACQUIRE_URL_{}",
+                    coord.provider.to_uppercase().replace('-', "_")
+                );
+                let url = std::env::var(&override_var)
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| format!("{base}/{}", coord.provider));
+                metrics.api_requests.fetch_add(1, Ordering::SeqCst);
+                metrics.capability_acquisitions.fetch_add(1, Ordering::SeqCst);
+                return Ok(DeliveryCapability::new(
+                    url,
+                    coord.provider.clone(),
+                    coord.account_scope.clone(),
+                    tf.id.clone(),
+                    coord.provider_resource_id.clone(),
+                    coord.provider_file_id.clone(),
+                    None,
+                ));
+            }
+        }
+    }
     match coord.provider.as_str() {
         "torbox" => acquire_torbox(coord, tf, keys, client, metrics).await,
         "realdebrid" => acquire_realdebrid(coord, tf, keys, client, metrics).await,

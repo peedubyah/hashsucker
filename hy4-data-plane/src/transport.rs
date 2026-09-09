@@ -26,6 +26,7 @@ use bytes::Bytes;
 use reqwest::header::{RANGE, RETRY_AFTER};
 
 use crate::capability::parse_retry_after;
+use crate::capability::DeliveryCapability;
 use crate::manager::{CapabilityManager, ReservedCapability};
 use crate::metrics::{Metrics, StageClock};
 use crate::provider::host_of;
@@ -124,6 +125,34 @@ impl ResilientRangeReader {
     /// transport instants.
     pub fn set_stage_clock(&mut self, c: StageClock) {
         self.stage = Some(c);
+    }
+
+    /// T12 (proven as HY4 P2P on m3-north-db): hand back the fill's final
+    /// reservation (post any in-fill reacquire replacement) so a stripe
+    /// worker threads the same warm lane across chunk fills with zero
+    /// acquisition. Additive accessor only: limiter/breaker/retry
+    /// semantics are untouched.
+    pub fn into_reserved(self) -> ReservedCapability {
+        self.current
+    }
+
+    /// T16: live producer identity for throughput-epoch attribution
+    /// (proven as HY4 P2M on m3-north-db). Additive accessor only:
+    /// recovery/limiter/breaker policy is untouched.
+    pub fn current_cap(&self) -> Arc<DeliveryCapability> {
+        self.current.cap.clone()
+    }
+
+    /// T16: warm-promotion handoff (proven as HY4 P2M on m3-north-db).
+    /// Replace the live producer with an already-warm same-TF reservation
+    /// and resume at the current offset through the existing reopen path
+    /// (`next_chunk` reopens via `open_at` at `self.pos` whenever no
+    /// response is open). No acquisition and no recovery budget is consumed
+    /// here; the old reservation drops (its permit freed). Call only on
+    /// healthy delivery -- failure/recovery ordering stays authoritative.
+    pub fn promote_to(&mut self, next: ReservedCapability) {
+        self.current = next;
+        self.response = None;
     }
     #[allow(clippy::too_many_arguments)]
     pub fn new(

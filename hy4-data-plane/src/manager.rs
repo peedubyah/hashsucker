@@ -20,7 +20,7 @@
 //    in flight.
 //  - Do NOT infer capability death merely because another capability was minted.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -100,6 +100,119 @@ pub enum DeliveryError {
         last: Option<String>,
         retry_after: Option<Duration>,
     },
+}
+
+/// T3 transplant (proven as HY4 P2G prewarm vocabulary on m3-north-db,
+/// trimmed to the existing-slot scope: no fresh-S-1 validation, so no
+/// StalePool variant). Every variant is terminal for the request (no
+/// hidden retries); only `Warmed` performs acquisition, and it performs
+/// exactly one bounded attempt through the existing single-flight.
+pub enum PrewarmStatus {
+    /// A usable free capability already exists; zero acquisition.
+    AlreadyWarm,
+    /// One bounded acquisition completed; carries no bytes, holds no
+    /// permit — the cap sits warm/free for later standby reservation.
+    Warmed,
+    /// Slot at target with no free lane (demand or concurrent prewarm
+    /// owns the permits); pool growth is demand's job, never prewarm's.
+    InFlight(String),
+    /// Slot breaker open; explicit request must not hammer it.
+    Unavailable(String),
+    /// Bounded acquire error (breaker recorded, like try_slot).
+    Failed(String),
+    /// No pool slot matches the requested placement coordinates.
+    /// Zero acquisition; nothing created.
+    InvalidSlot(String),
+}
+
+impl PrewarmStatus {
+    /// Wire name for the future Node→Rust prewarm contract (snake_case, stable).
+    pub fn name(&self) -> &'static str {
+        match self {
+            PrewarmStatus::AlreadyWarm => "already_warm",
+            PrewarmStatus::Warmed => "warmed",
+            PrewarmStatus::InFlight(_) => "in_flight",
+            PrewarmStatus::Unavailable(_) => "unavailable",
+            PrewarmStatus::Failed(_) => "failed",
+            PrewarmStatus::InvalidSlot(_) => "invalid_slot",
+        }
+    }
+
+    /// Human-readable detail, if any.
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            PrewarmStatus::AlreadyWarm | PrewarmStatus::Warmed => None,
+            PrewarmStatus::InFlight(s)
+            | PrewarmStatus::Unavailable(s)
+            | PrewarmStatus::Failed(s)
+            | PrewarmStatus::InvalidSlot(s) => Some(s.clone()),
+        }
+    }
+}
+
+/// T3 transplant: one explicit prewarm outcome. Manager-local identity
+/// only (routing UUID + durable key); production caps carry `cap_id`
+/// (not the later HY4 generation), so the warmed cap is reported by id.
+pub struct PrewarmOutcome {
+    pub status: PrewarmStatus,
+    pub torrent_file_id: String,
+    pub tf_durable_key: String,
+    pub provider: String,
+    pub provider_resource_id: String,
+    pub cap_id: Option<String>,
+    pub api_delta: u64,
+    pub elapsed_ms: u64,
+}
+
+/// T4 transplant (proven as HY4 P2H slot refresh on m3-north-db, adapted
+/// to whole-inventory form): refresh result vocabulary. Only `Refreshed`
+/// changes runtime state; every other variant returns the input manager
+/// bit-for-bit untouched and performs zero acquisition.
+pub enum RefreshStatus {
+    /// Live inventory already matches fresh truth; input manager reused.
+    AlreadyCurrent,
+    /// Inventory rebuilt from fresh truth; carries the refreshed manager.
+    /// Surviving slots' capabilities migrate by Arc (warmth preserved,
+    /// limiters still globally enforced); old in-flight readers keep the
+    /// old manager Arc, which stays valid.
+    Refreshed,
+    /// Fresh truth is for another TorrentFile (or lists nothing): live
+    /// state kept, zero acquisition.
+    Conflict(String),
+}
+
+impl RefreshStatus {
+    /// Wire name (snake_case, stable).
+    pub fn name(&self) -> &'static str {
+        match self {
+            RefreshStatus::AlreadyCurrent => "already_current",
+            RefreshStatus::Refreshed => "refreshed",
+            RefreshStatus::Conflict(_) => "conflict",
+        }
+    }
+
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            RefreshStatus::AlreadyCurrent | RefreshStatus::Refreshed => None,
+            RefreshStatus::Conflict(s) => Some(s.clone()),
+        }
+    }
+}
+
+/// T4 transplant: one inventory refresh, fully attributed. `manager` is
+/// the live manager to serve from (the input on AlreadyCurrent/Conflict,
+/// a rebuilt one on Refreshed). `api_delta` is always zero by
+/// construction (refresh never acquires); it is reported so proofs can
+/// assert it.
+pub struct RefreshOutcome {
+    pub status: RefreshStatus,
+    pub manager: Arc<CapabilityManager>,
+    pub torrent_file_id: String,
+    pub tf_durable_key: String,
+    pub slots_before: usize,
+    pub slots_after: usize,
+    pub api_delta: u64,
+    pub elapsed_ms: u64,
 }
 
 pub struct CapabilityManager {
@@ -833,5 +946,430 @@ impl CapabilityManager {
             }
         }
         out
+    }
+
+    /// T2 transplant (proven as HY4 `reserve_standby` on m3-north-db):
+    /// reserve a healthy FREE capability from the SAME slot as the
+    /// primary, ensuring same-provider/account standby with zero
+    /// acquisition overhead. Returns `None` if no usable standby exists.
+    ///
+    /// Phase 2 (`HY4_CROSS_PROVIDER_STANDBY=1`, default OFF): when the
+    /// primary's own slot has no usable standby, other slots are eligible
+    /// under a strict same-exact-TorrentFile bound: the candidate slot's
+    /// `durable_key` (stable `(info_hash, canonical_path, size)` digest,
+    /// provider-independent) must equal the primary slot's. Same-provider
+    /// standby is therefore always preferred (phase 1 runs first);
+    /// cross-provider standby is explicit, warm-only (usable + free, zero
+    /// acquisition API calls), and can never cross TorrentFiles.
+    ///
+    /// Returns the reservation together with the STANDBY SLOT's
+    /// `durable_key` — the slot-authoritative TorrentFile identity both
+    /// ends were checked against. Callers must use THIS for TorrentFile
+    /// correlation, never a fill-local reconstruction.
+    ///
+    /// Additive warm-only selection path: pool growth, first_alive_busy,
+    /// acquire/reacquire ordering, limiter/breaker, and negative cache
+    /// are untouched. Returned reservations hold the normal per-cap
+    /// permit (maxInFlight=1 preserved).
+    pub fn reserve_standby(
+        &self,
+        primary_cap: &Arc<DeliveryCapability>,
+    ) -> Option<(ReservedCapability, String)> {
+        let now = Instant::now();
+        // Identity anchor for phase 2: index of the slot holding primary.
+        let primary_idx = self.slots.iter().position(|slot| {
+            slot.caps
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| Arc::ptr_eq(c, primary_cap))
+        });
+        let idx = match primary_idx {
+            Some(i) => i,
+            None => return None,
+        };
+        // Phase 1: same slot (explicit same-provider-first rule).
+        if let Some(r) = self.reserve_free_in_slot(&self.slots[idx], primary_cap, now) {
+            return Some((r, self.slots[idx].durable_key.clone()));
+        }
+        // Phase 2: cross-provider standby, same exact TorrentFile only.
+        if std::env::var("HY4_CROSS_PROVIDER_STANDBY")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            let anchor = self.slots[idx].durable_key.clone();
+            for (j, slot) in self.slots.iter().enumerate() {
+                if j == idx || slot.durable_key != anchor {
+                    continue;
+                }
+                if let Some(r) = self.reserve_free_in_slot(slot, primary_cap, now) {
+                    return Some((r, slot.durable_key.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// One slot's share of standby selection: a DIFFERENT usable free cap,
+    /// reserved without acquisition. Shared by the same-slot phase and the
+    /// cross-provider phase so the health/free criteria cannot drift apart.
+    fn reserve_free_in_slot(
+        &self,
+        slot: &Slot,
+        primary_cap: &Arc<DeliveryCapability>,
+        now: Instant,
+    ) -> Option<ReservedCapability> {
+        self.reserve_free_in_slot_excluding(slot, primary_cap, &[], now)
+    }
+
+    /// T18 transplant (proven as HY4 P2T `reserve_standby_excluding` on
+    /// m3-north-db): warm-only standby with retired-cap exclusion.
+    ///
+    /// Same two phases and same warm-only criteria as `reserve_standby`
+    /// (free permit, usable now, same exact TorrentFile via the slot
+    /// durable_key anchor); additionally refuses any candidate whose
+    /// observability-only `cap_id` appears in `exclude_cap_ids` (retired
+    /// lane caps must never be immediately reselected). No acquisition, no
+    /// scoring, no enumeration API -- one extra predicate on the existing
+    /// search. Returns the reservation plus its slot-authoritative
+    /// durable_key so callers keep the same-TF invariant check.
+    /// `reserve_standby` itself is untouched (it delegates with an empty
+    /// exclusion list).
+    pub fn reserve_standby_excluding(
+        &self,
+        primary_cap: &Arc<DeliveryCapability>,
+        exclude_cap_ids: &[String],
+    ) -> Option<(ReservedCapability, String)> {
+        let now = Instant::now();
+        // Identity anchor for phase 2: index of the slot holding primary.
+        let primary_idx = self.slots.iter().position(|slot| {
+            slot.caps
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| Arc::ptr_eq(c, primary_cap))
+        });
+        let idx = match primary_idx {
+            Some(i) => i,
+            None => return None,
+        };
+        // Phase 1: same slot (explicit same-provider-first rule).
+        if let Some(r) =
+            self.reserve_free_in_slot_excluding(&self.slots[idx], primary_cap, exclude_cap_ids, now)
+        {
+            return Some((r, self.slots[idx].durable_key.clone()));
+        }
+        // Phase 2: cross-provider standby, same exact TorrentFile only.
+        if std::env::var("HY4_CROSS_PROVIDER_STANDBY")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            let anchor = self.slots[idx].durable_key.clone();
+            for (j, slot) in self.slots.iter().enumerate() {
+                if j == idx || slot.durable_key != anchor {
+                    continue;
+                }
+                if let Some(r) =
+                    self.reserve_free_in_slot_excluding(slot, primary_cap, exclude_cap_ids, now)
+                {
+                    return Some((r, slot.durable_key.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// One slot's share of standby selection with a retired-cap exclusion
+    /// list. Identical health/free criteria to `reserve_free_in_slot`.
+    fn reserve_free_in_slot_excluding(
+        &self,
+        slot: &Slot,
+        primary_cap: &Arc<DeliveryCapability>,
+        exclude_cap_ids: &[String],
+        now: Instant,
+    ) -> Option<ReservedCapability> {
+        // Clone the Arc so the slot lock is dropped before try_reserve.
+        let candidate = slot
+            .caps
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|c| {
+                !Arc::ptr_eq(c, primary_cap)
+                    && !exclude_cap_ids.contains(&c.cap_id)
+                    && c.usable_now(now)
+                    && c.limiter.available_permits() > 0
+            })
+            .cloned();
+        if let Some(cap) = candidate {
+            if let Some(r) = self.try_reserve(&cap) {
+                self.metrics.record_cap_reuse();
+                return Some(r);
+            }
+        }
+        None
+    }
+
+    /// T3 transplant (proven as HY4 P2G `prewarm_slot` on m3-north-db):
+    /// explicit warm-up for one EXISTING slot of this manager's exact
+    /// TorrentFile. Names an existing `(provider, provider_resource_id)`
+    /// placement; anything else reports `InvalidSlot` with zero
+    /// acquisition and nothing created.
+    ///
+    /// Outcomes: `AlreadyWarm` (usable+free cap exists, zero API),
+    /// `Warmed` (one bounded acquire through the existing single-flight;
+    /// the new cap installs into the normal pool warm/free — no permit
+    /// held, no reader opened, no bytes flow), `InFlight` (slot at
+    /// target with no free lane; pool growth is demand's job, never
+    /// prewarm's), `Unavailable` (slot breaker open), `Failed` (bounded
+    /// acquire error, breaker recorded like try_slot).
+    ///
+    /// Never creates durable truth, never persists anything, never
+    /// chooses another TorrentFile. Production adaptations vs the proven
+    /// source: no fresh-S-1 validation (no StalePool; the manager's own
+    /// TF truth anchors the outcome key), no `slot.note_reserve` (no
+    /// such pool field — pool-growth behavior untouched), warmed cap
+    /// reported by `cap_id` (production caps carry no generation), and
+    /// the pool install mirrors production `try_slot` with the proven
+    /// same-length guard so a concurrent demand install cannot over-fill
+    /// the slot target.
+    pub async fn prewarm_slot(
+        &self,
+        provider: &str,
+        resource_id: &str,
+    ) -> PrewarmOutcome {
+        let t0 = Instant::now();
+        let api_before = self.metrics.api_requests.load(Ordering::SeqCst);
+        let finish = |status: PrewarmStatus, cap_id: Option<String>| PrewarmOutcome {
+            status,
+            torrent_file_id: self.tf.id.clone(),
+            tf_durable_key: crate::cache::TorrentFileId::compute_durable_key(
+                &self.tf.info_hash,
+                self.tf.canonical_internal_path.as_deref().unwrap_or(""),
+                self.tf.size,
+            ),
+            provider: provider.to_string(),
+            provider_resource_id: resource_id.to_string(),
+            cap_id,
+            api_delta: self
+                .metrics
+                .api_requests
+                .load(Ordering::SeqCst)
+                .saturating_sub(api_before),
+            elapsed_ms: t0.elapsed().as_millis() as u64,
+        };
+        // Guard: the named slot must exist in THIS pool.
+        let idx = match self.slots.iter().position(|s| {
+            s.coord.provider == provider && s.coord.provider_resource_id == resource_id
+        }) {
+            Some(i) => i,
+            None => {
+                return finish(
+                    PrewarmStatus::InvalidSlot(
+                        "no pool slot matches the requested placement coordinates".into(),
+                    ),
+                    None,
+                );
+            }
+        };
+        let now = Instant::now();
+        let slot = &self.slots[idx];
+        // Prune dead/expired so a dead cap cannot block warming (mirrors
+        // try_slot step 0; throttled caps are kept — they recover).
+        {
+            let mut caps = slot.caps.lock().unwrap();
+            let before = caps.len();
+            caps.retain(|c| !c.prunable(now));
+            let evicted = before - caps.len();
+            for _ in 0..evicted {
+                self.metrics.record_cap_eviction();
+            }
+        }
+        // Already warm: usable + free, zero API.
+        if let Some(cap) = self.first_usable_free(slot, now) {
+            let id = cap.cap_id.clone();
+            return finish(PrewarmStatus::AlreadyWarm, Some(id));
+        }
+        // Breaker open: do not hammer a broken provider on explicit request.
+        if slot.breaker.is_open(now) {
+            return finish(
+                PrewarmStatus::Unavailable("slot breaker open".into()),
+                None,
+            );
+        }
+        // Slot at target with no free lane: report, never grow the pool.
+        let (caps_len, target) = {
+            let caps = slot.caps.lock().unwrap();
+            (caps.len(), slot.target.load(Ordering::SeqCst))
+        };
+        if caps_len >= target {
+            return finish(
+                PrewarmStatus::InFlight("slot at target, no free lane".into()),
+                None,
+            );
+        }
+        // One bounded acquire through the existing single-flight
+        // (concurrent identical prewarms share it: exactly one API call).
+        // No try_reserve anywhere on this path: the warmed cap lands
+        // warm/free, permit untouched for later standby reservation.
+        match self.resolve_internal(slot, caps_len).await {
+            Ok(cap) => {
+                {
+                    let mut caps = slot.caps.lock().unwrap();
+                    // Proven same-length guard: a concurrent demand install
+                    // may have filled the slot first — never over-fill.
+                    if caps.len() == caps_len {
+                        caps.push(cap.clone());
+                    }
+                }
+                let id = cap.cap_id.clone();
+                finish(PrewarmStatus::Warmed, Some(id))
+            }
+            Err(e) => {
+                slot.breaker.record_failure();
+                finish(PrewarmStatus::Failed(format!("{e}")), None)
+            }
+        }
+    }
+
+    /// T4 transplant (proven as HY4 P2H `refresh_slot_for` on m3-north-db):
+    /// targeted runtime slot refresh from externally supplied fresh
+    /// TorrentFile/placement truth. Pure constructor: never mutates `old`
+    /// (readers holding it are undisturbed) and never acquires (no
+    /// provider calls, no media bytes, nothing persisted).
+    ///
+    /// Lineage is validated once: the manager's own TF durable identity
+    /// must equal fresh truth — otherwise `Conflict` with live state
+    /// kept. On match, the inventory rebuilds from fresh truth: slots
+    /// fresh truth no longer lists are dropped (the proven P2H removal
+    /// semantic — rebuild-from-truth, never selective deletion);
+    /// surviving slots migrate capabilities BY ARC (warmth preserved,
+    /// limiters still globally enforced) plus pool targets; newly-visible
+    /// slots start empty for T3 prewarm to fill. Identical inventories
+    /// reuse the input manager (`AlreadyCurrent`).
+    ///
+    /// Production adaptations vs the proven source: whole-inventory form
+    /// (no per-placement request tuple, no endpoint/Node caller in this
+    /// slice — hence no UnknownPlacement/per-tuple Conflict branches);
+    /// fresh breakers per slot (as proven — refresh re-arms placement
+    /// liveness explicitly, never implicitly); no `last_reserve` clock
+    /// migration (no such pool field). Callers swap to the returned
+    /// manager iff the outcome is `Refreshed`.
+    pub fn refresh_slots(
+        old: &Arc<CapabilityManager>,
+        fresh_tf: &ControlTorrentFile,
+        fresh_coords: &[ProviderCoord],
+        keys: ApiKeys,
+        client: reqwest::Client,
+        metrics: Arc<Metrics>,
+    ) -> RefreshOutcome {
+        let t0 = Instant::now();
+        let api_before = metrics.api_requests.load(Ordering::SeqCst);
+        // Cloned for the rebuild branch: `finish` below borrows `metrics`
+        // for api_delta reads, so the move into Self::new must use a clone.
+        let metrics_for_build = metrics.clone();
+        let durable_of = |tf: &ControlTorrentFile| {
+            crate::cache::TorrentFileId::compute_durable_key(
+                &tf.info_hash,
+                tf.canonical_internal_path.as_deref().unwrap_or(""),
+                tf.size,
+            )
+        };
+        let finish = |status: RefreshStatus,
+                      manager: Arc<CapabilityManager>,
+                      slots_before: usize,
+                      slots_after: usize| {
+            RefreshOutcome {
+                status,
+                manager,
+                torrent_file_id: old.tf.id.clone(),
+                tf_durable_key: durable_of(&old.tf),
+                slots_before,
+                slots_after,
+                api_delta: metrics
+                    .api_requests
+                    .load(Ordering::SeqCst)
+                    .saturating_sub(api_before),
+                elapsed_ms: t0.elapsed().as_millis() as u64,
+            }
+        };
+        let slots_before = old.slots.len();
+        // Lineage: this manager must be for the same exact TorrentFile as
+        // fresh truth (and fresh truth must list something). Otherwise
+        // live state is kept, untouched.
+        if fresh_coords.is_empty() || durable_of(&old.tf) != durable_of(fresh_tf) {
+            return finish(
+                RefreshStatus::Conflict(
+                    "fresh truth is for another TorrentFile; live state kept".into(),
+                ),
+                old.clone(),
+                slots_before,
+                slots_before,
+            );
+        }
+        // Inventory already current: the live placement-tuple set equals
+        // the fresh set. Reuse the input manager as-is.
+        let tuple_of = |provider: &str, scope: &str, resource: &str, file: &str| {
+            (
+                provider.to_string(),
+                scope.to_string(),
+                resource.to_string(),
+                file.to_string(),
+            )
+        };
+        let live: HashSet<_> = old
+            .slots
+            .iter()
+            .map(|s| {
+                tuple_of(
+                    &s.coord.provider,
+                    &s.coord.account_scope,
+                    &s.coord.provider_resource_id,
+                    &s.target_file_id,
+                )
+            })
+            .collect();
+        let fresh: HashSet<_> = fresh_coords
+            .iter()
+            .map(|c| {
+                tuple_of(
+                    &c.provider,
+                    &c.account_scope,
+                    &c.provider_resource_id,
+                    &c.provider_file_id,
+                )
+            })
+            .collect();
+        if live == fresh {
+            return finish(
+                RefreshStatus::AlreadyCurrent,
+                old.clone(),
+                slots_before,
+                slots_before,
+            );
+        }
+        // Materialize the fresh inventory; migrate surviving slots'
+        // runtime state by Arc (caps + pool targets).
+        let fresh = Arc::new(Self::new(
+            fresh_tf.clone(),
+            fresh_coords.to_vec(),
+            keys,
+            client,
+            metrics_for_build,
+        ));
+        for new_slot in fresh.slots.iter() {
+            if let Some(old_slot) = old.slots.iter().find(|s| {
+                s.coord.provider == new_slot.coord.provider
+                    && s.coord.account_scope == new_slot.coord.account_scope
+                    && s.coord.provider_resource_id == new_slot.coord.provider_resource_id
+            }) {
+                let caps = old_slot.caps.lock().unwrap().clone();
+                let target = old_slot.target.load(Ordering::SeqCst);
+                *new_slot.caps.lock().unwrap() = caps;
+                new_slot.target.store(target, Ordering::SeqCst);
+            }
+        }
+        let slots_after = fresh.slots.len();
+        finish(RefreshStatus::Refreshed, fresh, slots_before, slots_after)
     }
 }

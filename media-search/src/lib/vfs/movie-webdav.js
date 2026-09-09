@@ -265,11 +265,29 @@ export function createMovieWebDav({
   // alternate lifecycle rather than reimplementing discovery/rerank.
   alternateFallback = null,
   terminalEvidenceStore = null,
+  // T10: playback-redundancy activation seam (fire-and-forget, never
+  // awaited). The VFS passes the optional controller through; a missing
+  // controller means T10 is unwired and byte serving is unchanged.
+  playbackRedundancy = null,
   now = () => Date.now(),
   fetchFn = fetch,
   dataPlaneBaseUrl = 'http://hy4-data-plane:3001',
 }) {
   const states = new Map();
+
+  // T8: per-request serving-primary reporter bound to one durable
+  // TorrentFile id. streamFromDataPlane invokes it at header time with
+  // that response's attribution (or null); each response is keyed by its
+  // own TF so consecutive demands never bleed into each other.
+  function reportServingPrimaryFor(torrentFileId) {
+    return (attribution) => {
+      try {
+        playbackRedundancy?.reportServingPrimary({ torrentFileId, ...(attribution ?? {}) });
+      } catch {
+        // Attribution delivery must never break primary playback.
+      }
+    };
+  }
 
   async function getCatalog() {
     for (const handoff of searchCache.listMoviePlaybackHandoffs()) {
@@ -1016,6 +1034,7 @@ export function createMovieWebDav({
 
     // 7. Identity carried EXACTLY: re-forward to Rust with the NEW durable
     // TorrentFile id. Rust owns same-TorrentFile recovery; we only switch TF.
+    // T8: attribution for the NEW TF is reported under its own id.
     try {
       await streamFromDataPlane({
         fetchFn,
@@ -1024,6 +1043,7 @@ export function createMovieWebDav({
         request,
         response,
         contentType: CONTENT_TYPE,
+        onServingAttribution: reportServingPrimaryFor(promotion.handoff.torrentFileId),
       });
       return true;
     } catch (e2) {
@@ -1058,6 +1078,17 @@ export function createMovieWebDav({
     // tfId-present entry (P5 §1). The legacy path below is reachable ONLY for
     // entries without a durable TorrentFile (torrentFileId === null).
     if (state.entry.torrentFileId) {
+      // T10 playback-intent trigger: a validated foreground Range demand
+      // for this exact TorrentFile. Fire-and-forget — never awaited, never
+      // allowed to delay or break byte serving. Full-file GETs (no Range)
+      // and metadata activity never reach here as qualifying demand.
+      if (request?.headers?.range && requestedRange) {
+        try {
+          playbackRedundancy?.notifyForegroundDemand({ torrentFileId: state.entry.torrentFileId });
+        } catch {
+          // Redundancy activation must never break primary playback.
+        }
+      }
       try {
         await streamFromDataPlane({
           fetchFn,
@@ -1066,6 +1097,7 @@ export function createMovieWebDav({
           request,
           response,
           contentType: CONTENT_TYPE,
+          onServingAttribution: reportServingPrimaryFor(state.entry.torrentFileId),
         });
         return;
       } catch (error) {
