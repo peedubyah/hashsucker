@@ -58,3 +58,10 @@ mod t3_prewarm;
 // Test-only: pins add/migrate/reject/then-prewarm.
 #[cfg(test)]
 mod t4_refresh;
+
+// T5 transplant proof: Rust prewarm endpoint with one refresh/retry
+// (async, mock S-1 + stubbed provider edge). Test-only: pins
+// prewarm/refresh+retry/invalid/bounded-cycle through the real
+// orchestration.
+#[cfg(test)]
+mod t5_endpoint;

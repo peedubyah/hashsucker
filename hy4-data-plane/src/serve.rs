@@ -55,6 +55,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::cache::{CacheEngine, ChunkPlan, RunKind, TorrentFileId};
+use crate::capability::ApiKeys;
+use crate::control::fetch_control;
 use crate::metrics::{CacheDecision, Metrics, MetricsExt, StageClock, StageReport, WorkClass};
 use crate::playback_intel::{PlaybackIntelligence, PrefetchMode};
 use crate::transport::{Faults, OpenError, ResilientRangeReader, Step};
@@ -1504,6 +1506,172 @@ pub async fn serve_upstream_only(
             }
         }
     }
+}
+
+/// T5 transplant (proven as the HY4 P2G/P2H prewarm endpoint on
+/// m3-north-db): narrow prewarm operation for one named provider
+/// placement of one exact TorrentFile. No Node caller yet; main.rs
+/// wires this to `POST /files/:tfId/prewarm`.
+///
+/// Runtime: load fresh S-1 truth for the torrentFileId via the existing
+/// production control machinery; validate the requested placement
+/// belongs to that exact TF; call T3 `prewarm_slot`; if the passed
+/// runtime manager lacks that otherwise-valid fresh placement, apply
+/// exactly one T4 `refresh_slots` and retry prewarm exactly once; return
+/// the bounded result. No media bytes are read.
+///
+/// `current` is the cached manager for the tfId, if any. The returned
+/// `store_manager` is the manager the caller must cache under the tfId:
+/// `Some` on first build and on refresh-swap, `None` when the passed-in
+/// manager stays live. `prewarm_slot`'s `InvalidSlot` surfaces as
+/// `invalid` here, matching the endpoint vocabulary
+/// (already_warm|warmed|in_flight|unavailable|invalid|failed).
+pub struct PrewarmRequest {
+    pub torrent_file_id: String,
+    pub provider: String,
+    pub provider_resource_id: String,
+    pub provider_file_id: Option<String>,
+    pub account_scope: Option<String>,
+}
+
+pub struct PrewarmEndpointResult {
+    pub status_code: StatusCode,
+    pub body: serde_json::Value,
+    pub store_manager: Option<Arc<manager::CapabilityManager>>,
+}
+
+pub async fn prewarm_placement(
+    client: &reqwest::Client,
+    control_url: &str,
+    keys: &ApiKeys,
+    metrics: &Arc<Metrics>,
+    current: Option<Arc<manager::CapabilityManager>>,
+    req: PrewarmRequest,
+) -> PrewarmEndpointResult {
+    let fail = |status_code: StatusCode,
+                body: serde_json::Value,
+                store_manager: Option<Arc<manager::CapabilityManager>>| {
+        PrewarmEndpointResult { status_code, body, store_manager }
+    };
+    // PrewarmOutcome -> endpoint payload. `InvalidSlot` maps to the
+    // endpoint `invalid` verdict; every other status keeps its name.
+    let render = |outcome: manager::PrewarmOutcome| {
+        let status_name = match &outcome.status {
+            manager::PrewarmStatus::InvalidSlot(_) => "invalid",
+            s => s.name(),
+        }
+        .to_string();
+        let mut body = serde_json::json!({
+            "status": status_name,
+            "torrentFileId": outcome.torrent_file_id,
+            "tfDurableKey": outcome.tf_durable_key,
+            "provider": outcome.provider,
+            "providerResourceId": outcome.provider_resource_id,
+            "capId": outcome.cap_id,
+            "apiDelta": outcome.api_delta,
+            "elapsedMs": outcome.elapsed_ms,
+        });
+        if let Some(reason) = outcome.status.detail() {
+            body["reason"] = serde_json::Value::String(reason);
+        }
+        body
+    };
+    // 1. Fresh S-1 truth for this exact torrentFileId (existing
+    // production control machinery; classified shape like handle_files).
+    let control = match fetch_control(client, control_url, &req.torrent_file_id, SUPPORTED_SCHEMA_VERSION).await {
+        Ok(c) => c,
+        Err(_) => {
+            return fail(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({
+                    "error": "S1_FETCH_FAILED",
+                    "torrentFileId": req.torrent_file_id,
+                }),
+                None,
+            );
+        }
+    };
+    // 2. The requested placement must belong to fresh exact-TF truth
+    // (optional facets narrow the match when supplied).
+    let fresh_ok = control.providers.iter().any(|c| {
+        c.provider == req.provider
+            && c.provider_resource_id == req.provider_resource_id
+            && req.provider_file_id.as_deref().map_or(true, |f| c.provider_file_id == f)
+            && req.account_scope.as_deref().map_or(true, |a| c.account_scope == a)
+    });
+    if !fresh_ok {
+        let key = TorrentFileId::compute_durable_key(
+            &control.torrent_file.info_hash,
+            control.torrent_file.canonical_internal_path.as_deref().unwrap_or(""),
+            control.torrent_file.size,
+        );
+        return fail(
+            StatusCode::OK,
+            serde_json::json!({
+                "status": "invalid",
+                "torrentFileId": control.torrent_file.id,
+                "tfDurableKey": key,
+                "provider": req.provider,
+                "providerResourceId": req.provider_resource_id,
+                "capId": Option::<String>::None,
+                "apiDelta": 0,
+                "elapsedMs": 0,
+                "reason": "requested placement is not in fresh exact-TF truth",
+            }),
+            None,
+        );
+    }
+    // Runtime manager: cached, or built fresh from this same truth.
+    let manager = match current {
+        Some(m) => (m, false),
+        None => (
+            Arc::new(manager::CapabilityManager::new(
+                control.torrent_file.clone(),
+                control.providers.clone(),
+                keys.clone(),
+                client.clone(),
+                metrics.clone(),
+            )),
+            true,
+        ),
+    };
+    // 3. Prewarm against the runtime manager.
+    let outcome = manager.0.prewarm_slot(&req.provider, &req.provider_resource_id).await;
+    if !matches!(outcome.status, manager::PrewarmStatus::InvalidSlot(_)) {
+        let body = render(outcome);
+        return fail(StatusCode::OK, body, if manager.1 { Some(manager.0) } else { None });
+    }
+    // 4+5. The runtime lacks an otherwise-valid fresh placement: exactly
+    // one T4 refresh, then exactly one prewarm retry. The retry verdict
+    // is returned as-is, even if not warmed.
+    let refreshed = manager::CapabilityManager::refresh_slots(
+        &manager.0,
+        &control.torrent_file,
+        &control.providers,
+        keys.clone(),
+        client.clone(),
+        metrics.clone(),
+    );
+    if !matches!(refreshed.status, manager::RefreshStatus::Refreshed) {
+        return fail(
+            StatusCode::OK,
+            serde_json::json!({
+                "status": "invalid",
+                "torrentFileId": refreshed.torrent_file_id,
+                "tfDurableKey": refreshed.tf_durable_key,
+                "provider": req.provider,
+                "providerResourceId": req.provider_resource_id,
+                "capId": Option::<String>::None,
+                "apiDelta": refreshed.api_delta,
+                "elapsedMs": refreshed.elapsed_ms,
+                "reason": refreshed.status.detail(),
+            }),
+            None,
+        );
+    }
+    let retry = refreshed.manager.prewarm_slot(&req.provider, &req.provider_resource_id).await;
+    let body = render(retry);
+    fail(StatusCode::OK, body, Some(refreshed.manager))
 }
 
 pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Body> {

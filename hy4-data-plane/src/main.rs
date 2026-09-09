@@ -13,6 +13,11 @@
 //   * Routes:
 //       GET /files/:tfId   per-request S-1 fetch -> per-request AppState
 //                          -> get_file (the proven serving core)
+//       POST /files/:tfId/prewarm
+//                          T5 narrow prewarm operation for one named
+//                          provider placement of one exact TF
+//                          (serve::prewarm_placement: fresh S-1 truth ->
+//                          T3 prewarm -> at most one T4 refresh + retry)
 //       GET /metrics       per-process AppState -> metrics_handler
 //
 // What this binary explicitly does NOT do:
@@ -33,10 +38,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
+    body::Bytes,
     extract::{Path, State as AxumState},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use hy4_data_plane::{
@@ -47,7 +53,8 @@ use hy4_data_plane::{
     metrics::Metrics,
     playback_intel::{PfConfig, PlaybackIntelligence},
     serve::{
-        data_plane_error, get_file, metrics_handler, AppState, SUPPORTED_SCHEMA_VERSION,
+        data_plane_error, get_file, metrics_handler, AppState, PrewarmRequest,
+        SUPPORTED_SCHEMA_VERSION,
     },
 };
 
@@ -302,6 +309,83 @@ async fn handle_files(
     get_file(axum::extract::State(state), headers).await
 }
 
+/// T5 transplant (proven as the HY4 P2G/P2H prewarm endpoint on
+/// m3-north-db): narrow prewarm operation for one named provider
+/// placement of one exact TorrentFile. No Node caller yet.
+///
+/// Contract:
+///   POST /files/:tfId/prewarm  {"provider","providerResourceId"[,"providerFileId","accountScope"]}
+///   -> 200 {"status": already_warm|warmed|in_flight|unavailable|invalid|failed,
+///           "torrentFileId","tfDurableKey","provider","providerResourceId",
+///           "capId"|null,"apiDelta","elapsedMs"[,"reason"]}
+///
+/// Malformed JSON body or missing provider/resource -> 400. S-1
+/// unresolvable -> the existing 502 S1_FETCH_FAILED. Every other outcome
+/// is a 200 result state, never an exception. The warmed capability
+/// stays runtime-only inside the existing pool; no media bytes flow.
+async fn handle_prewarm(
+    AxumState(svc): AxumState<Arc<ServiceState>>,
+    Path(tf_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let req_v: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "prewarm body must be JSON").into_response();
+        }
+    };
+    let provider = req_v
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let resource = req_v
+        .get("providerResourceId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if provider.is_empty() || resource.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "prewarm requires provider and providerResourceId",
+        )
+            .into_response();
+    }
+    let req = PrewarmRequest {
+        torrent_file_id: tf_id.clone(),
+        provider,
+        provider_resource_id: resource,
+        provider_file_id: req_v
+            .get("providerFileId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        account_scope: req_v
+            .get("accountScope")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    };
+    let cached = svc.managers.lock().await.get(&tf_id).cloned();
+    let keys = ApiKeys {
+        torbox: svc.cfg.torbox_api_key.clone(),
+        realdebrid: svc.cfg.realdebrid_api_key.clone(),
+    };
+    let result = hy4_data_plane::serve::prewarm_placement(
+        &svc.client,
+        &svc.cfg.control_url,
+        &keys,
+        &svc.metrics,
+        cached,
+        req,
+    )
+    .await;
+    // First build and refresh-swap both arrive here: cache the manager
+    // the operation produced so later demands/prewarms reuse it.
+    if let Some(m) = result.store_manager {
+        svc.managers.lock().await.insert(tf_id, m);
+    }
+    (result.status_code, axum::Json(result.body)).into_response()
+}
+
 async fn handle_metrics(AxumState(svc): AxumState<Arc<ServiceState>>) -> Response {
     // /metrics uses a service-level AppState with empty per-file
     // identity. The metrics payload reports the running counters, not
@@ -356,6 +440,7 @@ async fn main() -> Result<(), String> {
 
     let app = Router::new()
         .route("/files/:tfId", get(handle_files))
+        .route("/files/:tfId/prewarm", post(handle_prewarm))
         .route("/metrics", get(handle_metrics))
         .with_state(svc);
 
