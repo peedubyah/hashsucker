@@ -34,6 +34,7 @@ pub mod metrics;
 pub mod playback_intel;
 pub mod provider;
 pub mod serve;
+pub mod throughput;
 pub mod transport;
 
 // HY4 P2E.1 deterministic fill-identity repair proof (unit-level).
@@ -106,3 +107,10 @@ mod t13_retire;
 // delta 0, and single-warm-cap fallback with zero cold acquisition.
 #[cfg(test)]
 mod t14_auto;
+
+// T15 transplant proof: sustained useful-throughput detector (proven as
+// HY4 P2L on m3-north-db). Test-only, detector-only: pins disabled-inert,
+// sustained-low classification, healthy non-classification, and
+// contamination/producer-change protection against false lows.
+#[cfg(test)]
+mod t15_throughput;
