@@ -883,9 +883,10 @@ impl TwoStripeWork {
         }
     }
 
-    /// T13: which side (if any) has retired. Test/report query only;
-    /// retirement itself is decided inside `observe()`.
-    /// `pub(crate)` so the T13 unit proofs can assert retirement directly.
+    /// T13: which side (if any) has retired. Test query only; retirement
+    /// itself is decided inside `observe()`. Test-only helper, compiled
+    /// under `cfg(test)` so production carries no dead query surface.
+    #[cfg(test)]
     pub(crate) fn retired_side(&self) -> Option<StripeSide> {
         let st = self.state.lock().unwrap();
         for (i, side) in [(0, StripeSide::A), (1, StripeSide::B)] {
