@@ -55,6 +55,7 @@ use crate::manager::CapabilityManager;
 use crate::metrics::Metrics;
 use crate::playback_intel::{PfConfig, PlaybackIntelligence, PrefetchMode};
 use crate::serve::{get_file, AppState};
+use crate::test_env::{env_lock, set_steal, set_two_span};
 
 const FILE: u64 = 1 << 20;
 const CHUNK: u64 = 65536;
@@ -63,11 +64,10 @@ const TF_ID: &str = "tf_t11_det";
 const INFO_HASH: &str = "infohash-t11-deterministic";
 const PATH: &str = "t11-det.bin";
 
-/// Serializes the T11 env-knob tests against each other. No other test
-/// file reads `HY4_ACTIVE_ACTIVE_TWO_SPAN`, so cross-file interference is
-/// impossible; the four tests below run in parallel by default and must
-/// not flip the process-global gate under each other.
-static ENV_SERIAL: Mutex<()> = Mutex::new(());
+/// Serializes the T11/T12 env-knob tests against each other via the shared
+/// process-global gate lock (see `crate::test_env`): the four tests below
+/// run in parallel by default and must not flip the process-global gates
+/// under each other (or under the T12 steal tests in another file).
 
 fn pat(off: u64) -> u8 {
     (off.wrapping_mul(2654435761).wrapping_add(off >> 7) % 251) as u8
@@ -254,14 +254,6 @@ async fn demand(state: &Arc<AppState>, s: u64, e: u64) -> DemandOutcome {
     DemandOutcome { status, bytes }
 }
 
-fn set_striping(on: bool) {
-    if on {
-        std::env::set_var("HY4_ACTIVE_ACTIVE_TWO_SPAN", "1");
-    } else {
-        std::env::remove_var("HY4_ACTIVE_ACTIVE_TWO_SPAN");
-    }
-}
-
 fn sorted_ranges(hits: &[(String, u64, u64)]) -> Vec<(u64, u64)> {
     let mut ranges: Vec<(u64, u64)> = hits.iter().map(|(_, s, e)| (*s, *e)).collect();
     ranges.sort();
@@ -271,8 +263,12 @@ fn sorted_ranges(hits: &[(String, u64, u64)]) -> Vec<(u64, u64)> {
 // ---- Proof 1: gate OFF preserves the existing single-producer path ----
 #[tokio::test]
 async fn t11_gate_off_is_single_fill() {
-    let _guard = ENV_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    set_striping(false);
+    let _guard = env_lock();
+    set_two_span(false);
+    // T12 isolation: this proof pins the fixed-path contract, so the
+    // steal gate is explicitly OFF (shared lock already excludes a
+    // concurrent flip; this covers stale state from a panicked test).
+    set_steal(false);
     // Cross-provider standby state is irrelevant with the gate off, but
     // pin it ON so a parallel T2 unit test flipping the process-global
     // flag cannot change what this proof observes.
@@ -315,14 +311,15 @@ async fn t11_gate_off_is_single_fill() {
         "P1: zero acquisition"
     );
     server.abort();
-    std::env::remove_var("HY4_ACTIVE_ACTIVE_TWO_SPAN");
+    set_two_span(false);
 }
 
 // ---- Proof 2: gate ON + two warm same-provider caps -> disjoint two-way fill ----
 #[tokio::test]
 async fn t11_same_provider_two_lane_disjoint_fill() {
-    let _guard = ENV_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    set_striping(true);
+    let _guard = env_lock();
+    set_two_span(true);
+    set_steal(false);
     std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
     let hits = Arc::new(Mutex::new(Vec::new()));
     let (port, server) = spawn_mock(hits.clone()).await;
@@ -369,14 +366,15 @@ async fn t11_same_provider_two_lane_disjoint_fill() {
         "P2: zero new capability acquisition"
     );
     server.abort();
-    std::env::remove_var("HY4_ACTIVE_ACTIVE_TWO_SPAN");
+    set_two_span(false);
 }
 
 // ---- Proof 3: gate ON + warm cross-provider same-TF caps -> same behavior, zero acquisition ----
 #[tokio::test]
 async fn t11_cross_provider_two_lane_disjoint_fill() {
-    let _guard = ENV_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    set_striping(true);
+    let _guard = env_lock();
+    set_two_span(true);
+    set_steal(false);
     std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
     let hits = Arc::new(Mutex::new(Vec::new()));
     let (port, server) = spawn_mock(hits.clone()).await;
@@ -421,14 +419,15 @@ async fn t11_cross_provider_two_lane_disjoint_fill() {
         "P3: zero new capability acquisition"
     );
     server.abort();
-    std::env::remove_var("HY4_ACTIVE_ACTIVE_TWO_SPAN");
+    set_two_span(false);
 }
 
 // ---- Proof 4: gate ON + no second warm cap -> graceful single-producer fallback ----
 #[tokio::test]
 async fn t11_no_second_warm_falls_back_to_single_fill() {
-    let _guard = ENV_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    set_striping(true);
+    let _guard = env_lock();
+    set_two_span(true);
+    set_steal(false);
     std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
     let hits = Arc::new(Mutex::new(Vec::new()));
     let (port, server) = spawn_mock(hits.clone()).await;
@@ -461,5 +460,5 @@ async fn t11_no_second_warm_falls_back_to_single_fill() {
         "P4: no cold acquisition to engage a second lane"
     );
     server.abort();
-    std::env::remove_var("HY4_ACTIVE_ACTIVE_TWO_SPAN");
+    set_two_span(false);
 }

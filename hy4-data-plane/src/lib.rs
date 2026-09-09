@@ -79,3 +79,16 @@ mod t8_attribution;
 // graceful single-producer fallback.
 #[cfg(test)]
 mod t11_two_lane;
+
+// Test-only process-global env serialiser for the HY4 active-active gate
+// flags, shared by the T11 and T12 proof modules (both flip the same
+// process-global gates and must not observe each other's flags).
+#[cfg(test)]
+mod test_env;
+
+// T12 transplant proof: two-lane work stealing (proven as HY4 P2P on
+// m3-north-db). Test-only: pins steal-OFF fixed ownership, slow-B/slow-A
+// tail steals with exactly-once exact output, and active-chunk
+// non-stealability, all with zero acquisition.
+#[cfg(test)]
+mod t12_steal;

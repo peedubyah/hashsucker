@@ -125,6 +125,15 @@ impl ResilientRangeReader {
     pub fn set_stage_clock(&mut self, c: StageClock) {
         self.stage = Some(c);
     }
+
+    /// T12 (proven as HY4 P2P on m3-north-db): hand back the fill's final
+    /// reservation (post any in-fill reacquire replacement) so a stripe
+    /// worker threads the same warm lane across chunk fills with zero
+    /// acquisition. Additive accessor only: limiter/breaker/retry
+    /// semantics are untouched.
+    pub fn into_reserved(self) -> ReservedCapability {
+        self.current
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: reqwest::Client,

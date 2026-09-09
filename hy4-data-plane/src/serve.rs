@@ -40,7 +40,7 @@
 use crate::cache;
 use crate::manager;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -54,7 +54,7 @@ use axum::{
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::cache::{CacheEngine, ChunkPlan, RunKind, TorrentFileId};
+use crate::cache::{CacheEngine, ChunkGrid, ChunkPlan, RunKind, TorrentFileId};
 use crate::capability::ApiKeys;
 use crate::control::fetch_control;
 use crate::metrics::{CacheDecision, Metrics, MetricsExt, StageClock, StageReport, WorkClass};
@@ -303,6 +303,254 @@ fn striping_armed() -> bool {
     std::env::var("HY4_ACTIVE_ACTIVE_TWO_SPAN")
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+/// T12 two-lane work stealing (proven as HY4 P2P on m3-north-db).
+///
+/// Experimental, default OFF (`HY4_ACTIVE_ACTIVE_STEAL=1` arms it, and
+/// only together with `HY4_ACTIVE_ACTIVE_TWO_SPAN=1`). After the T11
+/// split, the two pinned producers share one runtime-only coordinator
+/// instead of fixed halves: each lane works its own queue front-to-back,
+/// and a lane that exhausts its own queue may steal unstarted chunks from
+/// the far end of the other queue, one at a time. Steal gate OFF leaves
+/// the T11 fixed two-lane ownership unchanged.
+fn stealing_armed() -> bool {
+    striping_armed()
+        && std::env::var("HY4_ACTIVE_ACTIVE_STEAL")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+}
+
+/// T12: shutdown guard for steal-path workers. Held by the demand task;
+/// dropping it (every early return) stops assignment so workers exit
+/// between fills. Permits free on worker/fill drops either way.
+struct StripeShutdownGuard(Option<Arc<TwoStripeWork>>);
+
+impl Drop for StripeShutdownGuard {
+    fn drop(&mut self) {
+        if let Some(c) = self.0.as_ref() {
+            c.shutdown();
+        }
+    }
+}
+
+/// T12: which lane a stripe worker belongs to. Only used for steal
+/// direction; fetch responsibility is per-chunk either way.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StripeSide {
+    A,
+    B,
+}
+
+/// T12: runtime-only work sharing for one striped run.
+///
+/// Two unstarted-chunk queues (the T11 ceil/floor halves), one shutdown
+/// flag, one fail-fast latch. Never persisted; never touches the durable
+/// cache format. The full missing set stays under the demand's single
+/// upfront InFlight claim -- this moves only fetch responsibility,
+/// atomically, one chunk per decision. A chunk leaves its queue exactly
+/// once (Mutex-held pop), so two ordinary producers for one chunk are
+/// structurally impossible.
+struct TwoStripeWork {
+    state: std::sync::Mutex<TwoStripeState>,
+}
+
+struct TwoStripeState {
+    left: VecDeque<u64>,
+    right: VecDeque<u64>,
+    shutdown: bool,
+    continent_failed: bool,
+}
+
+impl TwoStripeWork {
+    fn new(left: Vec<u64>, right: Vec<u64>) -> Self {
+        Self {
+            state: std::sync::Mutex::new(TwoStripeState {
+                left: left.into(),
+                right: right.into(),
+                shutdown: false,
+                continent_failed: false,
+            }),
+        }
+    }
+
+    /// Next unstarted chunk for `side`, or `None` (own queue empty with
+    /// nothing stealable, shutdown, or a sibling chunk already failed).
+    /// Steal policy (dumb, deterministic): own front first; else the far
+    /// end (back) of the donor queue iff it still holds >= 2 unstarted --
+    /// the donor's last unstarted chunk (and always its active chunk, long
+    /// popped) stays theirs. One chunk per decision; no prediction.
+    /// An already-active chunk is never stealable: it left the deque at
+    /// assignment, so a steal can never duplicate an existing producer.
+    fn next(&self, side: StripeSide) -> Option<(u64, bool)> {
+        let mut st = self.state.lock().unwrap();
+        if st.shutdown || st.continent_failed {
+            return None;
+        }
+        let (own_len, donor_len) = {
+            let (o, d) = match side {
+                StripeSide::A => (&st.left, &st.right),
+                StripeSide::B => (&st.right, &st.left),
+            };
+            (o.len(), d.len())
+        };
+        if own_len > 0 {
+            let idx = match side {
+                StripeSide::A => st.left.pop_front().unwrap(),
+                StripeSide::B => st.right.pop_front().unwrap(),
+            };
+            return Some((idx, false));
+        }
+        if donor_len >= 2 {
+            let idx = match side {
+                StripeSide::A => st.right.pop_back().unwrap(),
+                StripeSide::B => st.left.pop_back().unwrap(),
+            };
+            return Some((idx, true));
+        }
+        None
+    }
+
+    /// Record a chunk fill's outcome (cache authority decides `ok`).
+    fn finish(&self, _chunk: u64, ok: bool) {
+        let mut st = self.state.lock().unwrap();
+        if !ok {
+            // Fail fast: no more assignments after a terminal chunk failure.
+            // In-flight fills still complete durably; unstarted chunks stay
+            // unstarted (their records were never driven).
+            st.continent_failed = true;
+        }
+    }
+
+    /// Stop assignment (client cancel / terminal demand failure). In-flight
+    /// fills notice via the existing sink-send failure (channeled fills) or
+    /// run at most to their chunk end (stage-only fills); workers exit
+    /// between fills. Bounded under the same contract as frozen fills.
+    fn shutdown(&self) {
+        self.state.lock().unwrap().shutdown = true;
+    }
+
+    /// True when workers must drain leftovers instead of exiting politely:
+    /// shutdown (cancel) or a sibling chunk already failed. A polite exit
+    /// (other worker still owns active work) must NOT drain.
+    fn should_drain(&self) -> bool {
+        let st = self.state.lock().unwrap();
+        st.shutdown || st.continent_failed
+    }
+
+    /// Pop every still-unstarted chunk, exactly once across workers, for
+    /// terminal resolution by the exiting worker. Called only when
+    /// `should_drain()`; the normal path drains nothing (empty by then).
+    fn drain(&self) -> Vec<u64> {
+        let mut st = self.state.lock().unwrap();
+        let mut out = Vec::with_capacity(st.left.len() + st.right.len());
+        out.extend(st.left.drain(..));
+        out.extend(st.right.drain(..));
+        out
+    }
+}
+
+/// T12: one pinned stripe producer.
+///
+/// Owns exactly one warm reservation for its whole lifetime and fetches
+/// one chunk per loop iteration from the shared coordinator (own queue
+/// first, far-end steals after exhaustion). The reservation threads
+/// through each per-chunk fill via the existing `existing_cap` handoff and
+/// `fill_chunk_run`'s returned final reservation -- zero acquisition, same
+/// lane, never two concurrent uses (maxInFlight=1 holds structurally: one
+/// worker, one cap, one live fill). Per-chunk fills are ordinary fills
+/// (same limiter/breaker/retry/reacquire inside each fill).
+#[allow(clippy::too_many_arguments)]
+async fn stripe_worker(
+    coord: Arc<TwoStripeWork>,
+    side: StripeSide,
+    mut cap: manager::ReservedCapability,
+    cache: Arc<CacheEngine>,
+    metrics: Arc<Metrics>,
+    manager: Arc<manager::CapabilityManager>,
+    client: reqwest::Client,
+    priority: u8,
+    tf: TorrentFileId,
+    grid: ChunkGrid,
+    run_start: u64,
+    run_end: u64,
+    // Per-chunk downstream senders. Only the demand's head chunk has one
+    // (streaming first-byte path); every other chunk is stage-only and the
+    // emitter preads it durably later -- disk, not mpsc, is the reorder
+    // boundary, so a thief can never block behind a future chunk's buffer.
+    chunk_sinks: Arc<HashMap<u64, mpsc::Sender<SpanMsg>>>,
+    stage: StageClock,
+    cold: bool,
+    faults: Faults,
+) {
+    let key = tf.cache_key();
+    loop {
+        let (idx, _stolen) = match coord.next(side) {
+            Some(job) => job,
+            None => break,
+        };
+        let cs = grid.chunk_start(idx);
+        let ce = match grid.chunk_end(idx) {
+            Some(e) => e,
+            None => {
+                coord.finish(idx, false);
+                continue;
+            }
+        };
+        let ws = run_start.max(cs);
+        let we = run_end.min(ce);
+        let sink = chunk_sinks.get(&idx).cloned();
+        let ret = fill_chunk_run(
+            cache.clone(),
+            metrics.clone(),
+            manager.clone(),
+            client.clone(),
+            priority,
+            tf.clone(),
+            vec![idx],
+            cs,
+            ce,
+            ws,
+            we,
+            faults,
+            sink,
+            Some(stage.clone()),
+            cold,
+            Some(cap),
+        )
+        .await;
+        // Cache authority decides the outcome (present == success), exactly
+        // as the fill's own mark() does for its waiters.
+        coord.finish(idx, cache.is_present(&key, idx).unwrap_or(false));
+        match ret {
+            Some(c) => cap = c,
+            // No reservation to continue with (only when the fill had none
+            // to begin with -- workers always pass one). Remaining unstarted
+            // chunks stay queued for the sibling worker.
+            None => break,
+        }
+    }
+    // Terminal exit: fail any still-unstarted claimed chunks so their
+    // records resolve (never leak, never hang a follower). Each chunk is
+    // drained exactly once across workers; a polite exit (sibling still
+    // owns active work) drains nothing. Mirrors the fill's own failed-mark
+    // for one chunk: present == success, else failed + finalize + wake.
+    if coord.should_drain() {
+        for idx in coord.drain() {
+            for rec in cache.inflight().records_for(&key, &[idx]) {
+                if cache.is_present(&key, idx).unwrap_or(false) {
+                    rec.success.store(true, Ordering::SeqCst);
+                } else {
+                    rec.failed.store(true, Ordering::SeqCst);
+                    metrics.cache.chunk_fills_failed.fetch_add(1, Ordering::SeqCst);
+                }
+                cache.inflight().finalize(&key, idx);
+                rec.done.notify_waiters();
+            }
+        }
+    }
+    // `cap` drops here: permit released, lane reusable. No leak by
+    // construction on every exit path above.
 }
 
 pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response<Body> {
@@ -701,7 +949,9 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     // Lowest priority; existing_cap=Some means fill_chunk_run reuses the
                     // pre-acquired capability and never calls the blocking acquire.
                     let pf_stage = StageClock::new(prefetch_start);
-                    fill_chunk_run(
+                    // T12: the returned reservation is intentionally dropped
+                    // here (prefetch holds no lane; the cap frees on drop).
+                    let _ = fill_chunk_run(
                         c.clone(),
                         m.clone(),
                         mg.clone(),
@@ -780,6 +1030,14 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
 
         let mut first_byte = true;
         let mut first_consumed = false;
+        // T12 steal-path worker handles (joined on the normal path before
+        // the stage report) plus a shutdown guard covering EVERY early
+        // return: dropping it stops assignment so workers exit between
+        // fills and in-flight fills settle through the existing
+        // sink/abandon paths. No joining on early exits (client already
+        // gone); permits free on worker/fill drops either way.
+        let mut stripe_workers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        let mut stripe_guard = StripeShutdownGuard(None);
         for run in &runs {
             match run.kind {
                 RunKind::Local => {
@@ -984,6 +1242,144 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                 other => other,
                             };
                             if let Some((bres, _bslot_key)) = stripe_b {
+                                // ---- T12 steal path (proven as HY4 P2P on
+                                // m3-north-db). Per-chunk fills driven by two
+                                // pinned workers over one shared coordinator
+                                // (own halves first, far-end steals after
+                                // exhaustion). Only the demand's head chunk
+                                // streams (today's Owned path); every other
+                                // chunk is stage-only and emitted durably
+                                // later -- disk, never a future chunk's mpsc
+                                // buffer, is the reorder boundary. Takes over
+                                // here and `continue`s; otherwise falls
+                                // through to the exact T11 fixed path below.
+                                if stealing_armed()
+                                    && sub.iter().all(|idx| grid.chunk_end(*idx).is_some())
+                                {
+                                    if let Some(frcap) = fr {
+                                        let half = (sub.len() + 1) / 2;
+                                        // Per-chunk bounds + decisions. t
+                                        // aligns with joins[k+t] (sub ==
+                                        // missing[k..=j]); grid ends were
+                                        // checked by the arming guard above.
+                                        let mut pieces: Vec<(usize, u64)> =
+                                            Vec::with_capacity(sub.len());
+                                        for (t, &idx) in sub.iter().enumerate() {
+                                            let cs = grid.chunk_start(idx);
+                                            // Guarded Some above; the fallback
+                                            // is unreachable but keeps byte
+                                            // identity total.
+                                            let ce = grid.chunk_end(idx).unwrap_or(f_end);
+                                            let ws = run.start.max(cs);
+                                            let we = run.end.min(ce);
+                                            cache.metrics.cache_decisions.push(CacheDecision {
+                                                request: (start, end),
+                                                present_before: present_before.clone(),
+                                                missing: (ws, we),
+                                                chunk_indices: vec![idx],
+                                                fetch_span: Some((cs, ce)),
+                                                joined_inflight: joins[k + t].joined_existing,
+                                                overlap_bytes_avoided: if joins[k + t].joined_existing {
+                                                    grid.chunk_len(idx)
+                                                } else {
+                                                    0
+                                                },
+                                                plan_origin,
+                                                evictions_before: cache
+                                                    .metrics
+                                                    .cache
+                                                    .evictions
+                                                    .load(Ordering::SeqCst),
+                                            });
+                                            pieces.push((t, idx));
+                                        }
+                                        // Head streams; the rest wait durably.
+                                        let head_idx = sub[0];
+                                        let (htx, hrx) = mpsc::channel::<SpanMsg>(32);
+                                        let mut sinks = HashMap::new();
+                                        sinks.insert(head_idx, htx);
+                                        let sinks = Arc::new(sinks);
+                                        ordered.push((head_idx, FetchItem::Owned { rx: hrx }));
+                                        // Initial split remains the T11
+                                        // ceil/floor: the head already has its
+                                        // streaming Owned item above, but it
+                                        // still belongs to the left queue
+                                        // (backs are stolen first, so worker A
+                                        // always pops it first).
+                                        let mut left: Vec<u64> = Vec::new();
+                                        let mut right: Vec<u64> = Vec::new();
+                                        for (t, idx) in &pieces {
+                                            if *idx == head_idx {
+                                                left.push(*idx);
+                                            } else {
+                                                ordered.push((
+                                                    *idx,
+                                                    FetchItem::Staged {
+                                                        index: *idx,
+                                                        record: joins[k + *t].record.clone(),
+                                                    },
+                                                ));
+                                                if left.len() < half {
+                                                    left.push(*idx);
+                                                } else {
+                                                    right.push(*idx);
+                                                }
+                                            }
+                                        }
+                                        // NOTE: ordered gets a final ascending
+                                        // sort below with everything else, so
+                                        // push order here is irrelevant.
+                                        eprintln!(
+                                            "[t12] workshare_spawned: chunks={} left={} right={}",
+                                            sub.len(),
+                                            left.len(),
+                                            right.len(),
+                                        );
+                                        let coord = Arc::new(TwoStripeWork::new(left, right));
+                                        stripe_guard.0 = Some(coord.clone());
+                                        stripe_workers.push(tokio::spawn(stripe_worker(
+                                            coord.clone(),
+                                            StripeSide::A,
+                                            frcap,
+                                            cache.clone(),
+                                            metrics.clone(),
+                                            manager_clone.clone(),
+                                            client_clone.clone(),
+                                            priority,
+                                            tf_id.clone(),
+                                            grid,
+                                            run.start,
+                                            run.end,
+                                            sinks.clone(),
+                                            stage.clone(),
+                                            cold,
+                                            faults,
+                                        )));
+                                        stripe_workers.push(tokio::spawn(stripe_worker(
+                                            coord.clone(),
+                                            StripeSide::B,
+                                            bres,
+                                            cache.clone(),
+                                            metrics.clone(),
+                                            manager_clone.clone(),
+                                            client_clone.clone(),
+                                            priority,
+                                            tf_id.clone(),
+                                            grid,
+                                            run.start,
+                                            run.end,
+                                            sinks,
+                                            stage.clone(),
+                                            cold,
+                                            faults,
+                                        )));
+                                        k = j + 1;
+                                        continue;
+                                    }
+                                    // Unreachable in practice (stripe_b
+                                    // required fr.is_some()): fall through to
+                                    // the exact T11 fixed path with fr == None.
+                                }
                                 let half = (sub.len() + 1) / 2;
                                 let (sub_a, sub_b) =
                                     (sub[..half].to_vec(), sub[half..].to_vec());
@@ -1258,6 +1654,63 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                     return;
                                 }
                             }
+                            FetchItem::Staged { index, record } => {
+                                // T12: this demand owns the fill (a stripe
+                                // worker stages it with no live channel), so
+                                // emission waits on durable completion -- no
+                                // follower accounting, no reorder buffer. The
+                                // cache is the authority, exactly as in the
+                                // Waiter arm above.
+                                // `notify_waiters()` stores NO permit, so a
+                                // `notified().await` registered after the
+                                // notification was delivered blocks forever.
+                                // Check the flags BEFORE awaiting.
+                                let finished = record.success.load(Ordering::SeqCst)
+                                    || record.failed.load(Ordering::SeqCst);
+                                if !finished {
+                                    record.done.notified().await;
+                                }
+                                if record.failed.load(Ordering::SeqCst) {
+                                    // A fill that was abandoned after our
+                                    // chunk had already been promoted leaves
+                                    // the chunk PRESENT; a failed record alone
+                                    // must not fail a demand that can be
+                                    // served from durable bytes.
+                                    match cache.is_present(&key, index) {
+                                        Ok(true) => {}
+                                        _ => return,
+                                    }
+                                }
+                                // The chunk is PRESENT and durable now; read just
+                                // the part of it this request needs.
+                                let cs = grid.chunk_start(index);
+                                let ce = match grid.chunk_end(index) {
+                                    Some(e) => e,
+                                    None => return,
+                                };
+                                let s = run.start.max(cs);
+                                let e = run.end.min(ce);
+                                let bytes = match cache.pread(&tf_id, s, e) {
+                                    Ok(b) => b,
+                                    Err(err) => {
+                                        eprintln!(
+                                            "[rust-proxy] cache pread failed on staged chunk {index}: {err}"
+                                        );
+                                        return;
+                                    }
+                                };
+                                if first_byte {
+                                    first_byte = false;
+                                    stage.set_t5(Instant::now());
+                                    metrics.record_first_byte(
+                                        open_start.elapsed().as_millis() as u64,
+                                    );
+                                }
+                                if tx.send(Ok(bytes::Bytes::from(bytes))).await.is_err() {
+                                    metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
+                                    return;
+                                }
+                            }
                             FetchItem::Local { index } => {
                                 // P11 completed-prefetch handoff: this chunk is
                                 // already durable in the cache (a completed prefetch
@@ -1296,6 +1749,15 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     }
                 }
             }
+        }
+
+        // T12: join steal-path workers on the normal path -- every chunk
+        // channel hit EOF, hence every fill returned, so the joins are
+        // immediate. (Early exits above return without joining; the
+        // shutdown guard stops assignment and permits free on
+        // worker/fill drops either way.)
+        for h in stripe_workers {
+            let _ = h.await;
         }
 
         // ---- Slice 4.5: publish this request's stage waterfall.
@@ -1353,6 +1815,16 @@ enum FetchItem {
     /// A chunk another reader is already filling. Wait for its record, then read
     /// the durable chunk locally.
     Waiter {
+        index: u64,
+        record: Arc<cache::ChunkInFlightRecord>,
+    },
+    /// T12: a chunk THIS demand owns and a stripe worker fills stage-only
+    /// (no live channel -- disk, not mpsc, is the reorder boundary). Wait
+    /// for its record exactly like a waiter, then pread the authoritative
+    /// bytes. Unlike Waiter it never inflates the follower count (nothing
+    /// consults followers for these fills; cancellation travels via the
+    /// coordinator shutdown plus the workers' own exits).
+    Staged {
         index: u64,
         record: Arc<cache::ChunkInFlightRecord>,
     },
@@ -1429,7 +1901,12 @@ pub async fn fill_chunk_run(
     // `Some`, the byte stream reuses it instead of re-acquiring (no double
     // acquire / maxInFlight=1 limiter loss). Later spans get `None`.
     existing_cap: Option<manager::ReservedCapability>,
-) {
+    // T12 (proven as HY4 P2P on m3-north-db): returns the fill's final
+    // reservation (post any in-fill replacement) so a stripe worker can
+    // thread the same warm lane across chunk fills with zero acquisition;
+    // None only when the fill never held one (failed acquire with none
+    // passed in). All pre-existing callers ignore the value.
+) -> Option<manager::ReservedCapability> {
     let key = tf.cache_key();
 
     // ---- Byte accounting, counted ONCE at issue --------------------------
@@ -1493,7 +1970,8 @@ pub async fn fill_chunk_run(
             if let Some(tx) = sink.as_ref() {
                 let _ = tx.send(SpanMsg::Failed).await;
             }
-            return;
+            // T12: hand back the un-consumed reservation, if any.
+            return existing_cap;
         }
     };
 
@@ -1536,7 +2014,8 @@ pub async fn fill_chunk_run(
                 if let Some(tx) = sink.as_ref() {
                     let _ = tx.send(SpanMsg::Failed).await;
                 }
-                return;
+                // T12: no reservation was ever held here.
+                return None;
             }
         },
     };
@@ -1575,7 +2054,8 @@ pub async fn fill_chunk_run(
         if let Some(tx) = sink.as_ref() {
             let _ = tx.send(SpanMsg::Failed).await;
         }
-        return;
+        // T12: hand back the live reservation.
+        return Some(reader.into_reserved());
     }
     if cold {
         *metrics.cold_cdn_first_byte_ms.lock().unwrap() =
@@ -1653,6 +2133,9 @@ pub async fn fill_chunk_run(
     if let Some(tx) = sink.as_ref() {
         let _ = tx.send(if ok { SpanMsg::Eof } else { SpanMsg::Failed }).await;
     }
+    // T12: return the final reservation (post any in-fill replacement) so
+    // a stripe worker threads the same warm lane across chunk fills.
+    Some(reader.into_reserved())
 }
 
 /// Legacy upstream-only serve (used by the 1-byte single path and the no-cache fallback).
