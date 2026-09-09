@@ -2864,7 +2864,7 @@ pub async fn fill_chunk_run(
             let _ = tx.send(SpanMsg::Failed).await;
         }
         // T12: hand back the live reservation.
-        return Some(reader.into_reserved());
+        return Some(reader.into_reserved().expect("T12: reader always owns its reservation"));
     }
     if cold {
         *metrics.cold_cdn_first_byte_ms.lock().unwrap() =
@@ -3094,7 +3094,7 @@ pub async fn fill_chunk_run(
                                             // drop+re-reserve gap).
                                             stage_gate_primary.store(true, Ordering::SeqCst);
                                             kept_warm = Some((
-                                                hedge_reader.into_reserved(),
+                                                hedge_reader.into_reserved().expect("T17: hedge reader owns its reservation"),
                                                 hedge_slot_key,
                                             ));
                                             eprintln!(
@@ -3193,7 +3193,7 @@ pub async fn fill_chunk_run(
     }
     // T12: return the final reservation (post any in-fill replacement) so
     // a stripe worker threads the same warm lane across chunk fills.
-    Some(reader.into_reserved())
+    Some(reader.into_reserved().expect("T12: reader always owns its reservation"))
 }
 
 /// Legacy upstream-only serve (used by the 1-byte single path and the no-cache fallback).

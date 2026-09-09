@@ -156,3 +156,8 @@ mod terminal_lane_replacement;
 // name still works, default unchanged when neither is set).
 #[cfg(test)]
 mod runtime_naming_compat;
+
+// Bounded two-reader capability lease. Test-only: pins one-capability /
+// two-child-reader semantics with real mock CDNs and concurrent execution.
+#[cfg(test)]
+mod capability_lease;

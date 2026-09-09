@@ -95,6 +95,117 @@ pub struct ReservedCapability {
     pub _permit: OwnedSemaphorePermit,
 }
 
+/// Inner state of a capability lease. The single owned reservation (holding the
+/// one maxInFlight=1 permit) lives here; `child_count` tracks how many active
+/// readers currently borrow from the lease. When the last child drops, the
+/// reservation is released (permit freed) and new children are refused.
+///
+/// Protected by a `Mutex` so child creation/removal is race-free. The mutex is
+/// only held for short, non-async critical sections (no `.await` inside).
+struct LeaseInner {
+    /// The owned reservation. `None` once the lease has been released (last
+    /// child dropped); after that, `child_reader()` refuses new children.
+    reserved: Option<ReservedCapability>,
+    /// Active child readers (0, 1, or 2). Capped at 2 by `child_reader()`.
+    child_count: u8,
+}
+
+/// A bounded lease over one `ReservedCapability` that allows up to two concurrent
+/// child readers to share the same signed URL / capability reservation.
+///
+/// Invariants:
+///   - exactly one `OwnedSemaphorePermit` for the lifetime of the lease,
+///   - exactly one `in_flight` reservation on the underlying capability,
+///   - at most two active `ChildReaderHandle`s,
+///   - a third `child_reader()` call returns `None`,
+///   - the permit lives until the last child handle drops,
+///   - new children are refused once the reservation has been released.
+///
+/// Construction: `CapabilityLease::new(reserved)` returns an `Arc<Self>` that the
+/// caller holds until it no longer needs to spawn children. `Arc::clone` of that
+/// handle is passed to `child_reader()`; each returned `ChildReaderHandle` holds
+/// its own `Arc`, so the lease stays alive exactly as long as children exist.
+///
+/// Not part of any scheduler path. Wiring into active-active engagement is a
+/// separate, explicit step.
+pub struct CapabilityLease {
+    inner: Mutex<LeaseInner>,
+}
+
+/// A handle to one borrowed child reader. Holds a clone of the underlying
+/// `Arc<DeliveryCapability>` (so the transport reader can read the signed URL
+/// and traverse the normal breaker/limiter/retry path) plus an `Arc` to the
+/// parent lease (so the last child's drop releases the single permit).
+///
+/// `Drop` is the only mechanism that decrements the lease's child count and
+/// releases the reservation. A handle is `Send` but NOT `Clone` — there is
+/// exactly one handle per spawned reader, so permit accounting stays exact.
+pub struct ChildReaderHandle {
+    pub cap: Arc<DeliveryCapability>,
+    lease: Arc<CapabilityLease>,
+}
+
+impl CapabilityLease {
+    /// Wrap one owned reservation into a lease. The reservation's permit is now
+    /// owned by the lease and will be released only when the last child handle
+    /// drops (or when the lease itself is dropped with no children).
+    pub fn new(reserved: ReservedCapability) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(LeaseInner {
+                reserved: Some(reserved),
+                child_count: 0,
+            }),
+        })
+    }
+
+    /// Try to create one borrowed child reader handle.
+    ///
+    /// Returns `None` if the lease already has two active children or if its
+    /// reservation has already been released. There is no way to create a third
+    /// handle: the cap is structural, not just advisory.
+    pub fn child_reader(lease: &Arc<Self>) -> Option<ChildReaderHandle> {
+        let mut inner = lease.inner.lock().unwrap();
+        if inner.child_count >= 2 || inner.reserved.is_none() {
+            return None;
+        }
+        inner.child_count += 1;
+        let cap = inner
+            .reserved
+            .as_ref()
+            .expect("reserved checked non-None above")
+            .cap
+            .clone();
+        Some(ChildReaderHandle {
+            cap,
+            lease: lease.clone(),
+        })
+    }
+
+    /// Current number of active child readers (observability / proofs only).
+    pub fn child_count(&self) -> u8 {
+        self.inner.lock().unwrap().child_count
+    }
+
+    /// True once the reservation has been released (last child dropped). After
+    /// this, `child_reader()` always returns `None`.
+    pub fn is_released(&self) -> bool {
+        self.inner.lock().unwrap().reserved.is_none()
+    }
+}
+
+impl Drop for ChildReaderHandle {
+    fn drop(&mut self) {
+        let mut inner = self.lease.inner.lock().unwrap();
+        // Decrement first; if we just released the last child, drop the
+        // reservation here so the permit frees even if the lease Arc is still
+        // held by the creator.
+        inner.child_count = inner.child_count.saturating_sub(1);
+        if inner.child_count == 0 {
+            inner.reserved = None;
+        }
+    }
+}
+
 pub enum DeliveryError {
     AllSameTfFailed {
         last: Option<String>,

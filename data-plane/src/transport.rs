@@ -27,7 +27,7 @@ use reqwest::header::{RANGE, RETRY_AFTER};
 
 use crate::capability::parse_retry_after;
 use crate::capability::DeliveryCapability;
-use crate::manager::{CapabilityManager, ReservedCapability};
+use crate::manager::{CapabilityManager, ChildReaderHandle, ReservedCapability};
 use crate::metrics::{Metrics, StageClock};
 use crate::provider::host_of;
 
@@ -89,11 +89,21 @@ struct Recovery {
     attempt: u32,
 }
 
+/// How this reader holds its capability. `Owned` is the normal reservation
+/// carrying the single permit; `Shared` borrows from a `CapabilityLease` and
+/// carries no permit of its own. The shared variant is constructed only by the
+/// `*shared_child*` constructors and cannot promote, reacquire independently, or
+/// hand back a reservation via `into_reserved`.
+enum ReaderCapability {
+    Owned(ReservedCapability),
+    Shared(ChildReaderHandle),
+}
+
 pub struct ResilientRangeReader {
     client: reqwest::Client,
     metrics: Arc<Metrics>,
     manager: Arc<CapabilityManager>,
-    current: ReservedCapability,
+    current: ReaderCapability,
     priority: u8,
     start: u64,
     req_end: u64, // inclusive end requested from the provider
@@ -132,15 +142,24 @@ impl ResilientRangeReader {
     /// worker threads the same warm lane across chunk fills with zero
     /// acquisition. Additive accessor only: limiter/breaker/retry
     /// semantics are untouched.
-    pub fn into_reserved(self) -> ReservedCapability {
-        self.current
+    ///
+    /// Returns `None` for a shared child reader (it holds no reservation of
+    /// its own); the caller must handle the `None` path.
+    pub fn into_reserved(self) -> Option<ReservedCapability> {
+        match self.current {
+            ReaderCapability::Owned(r) => Some(r),
+            ReaderCapability::Shared(_) => None,
+        }
     }
 
     /// T16: live producer identity for throughput-epoch attribution
     /// (proven as HY4 P2M on m3-north-db). Additive accessor only:
     /// recovery/limiter/breaker policy is untouched.
     pub fn current_cap(&self) -> Arc<DeliveryCapability> {
-        self.current.cap.clone()
+        match &self.current {
+            ReaderCapability::Owned(r) => r.cap.clone(),
+            ReaderCapability::Shared(h) => h.cap.clone(),
+        }
     }
 
     /// T16: warm-promotion handoff (proven as HY4 P2M on m3-north-db).
@@ -150,9 +169,94 @@ impl ResilientRangeReader {
     /// response is open). No acquisition and no recovery budget is consumed
     /// here; the old reservation drops (its permit freed). Call only on
     /// healthy delivery -- failure/recovery ordering stays authoritative.
+    ///
+    /// Shared children must not promote (it would bypass the lease's permit
+    /// accounting); the call is a no-op for the shared variant so that a
+    /// mis-ordered handoff cannot silently corrupt ownership.
     pub fn promote_to(&mut self, next: ReservedCapability) {
-        self.current = next;
-        self.response = None;
+        match &mut self.current {
+            ReaderCapability::Owned(r) => {
+                *r = next;
+                self.response = None;
+            }
+            ReaderCapability::Shared(_) => {}
+        }
+    }
+    /// Shared-child construction. The reader borrows from a `CapabilityLease`:
+    /// it holds no permit of its own, so `into_reserved` returns `None` and the
+    /// child must never independently reacquire (a Class C dead-link would race
+    /// the sibling for the single permit). Recovery budgets still apply per-read;
+    /// Class C (dead-link) surfaces as a fatal terminal so the owner can decide
+    /// on a single reacquire without coordinating two children.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_shared_child(
+        client: reqwest::Client,
+        metrics: Arc<Metrics>,
+        manager: Arc<CapabilityManager>,
+        child: ChildReaderHandle,
+        priority: u8,
+        start: u64,
+        req_end: u64,
+        size: u64,
+        is_single: bool,
+        faults: Faults,
+    ) -> Self {
+        Self::new_shared_child_with_chunk_cb(
+            client, metrics, manager, child, priority, start, req_end, size, is_single, faults, None,
+        )
+    }
+
+    /// Access the underlying capability regardless of how this reader holds
+    /// it. Used by the transport's HTTP/recovery paths so they don't branch on
+    /// the reservation model.
+    fn cap_ref(&self) -> &Arc<DeliveryCapability> {
+        match &self.current {
+            ReaderCapability::Owned(r) => &r.cap,
+            ReaderCapability::Shared(h) => &h.cap,
+        }
+    }
+
+    /// Shared-child construction with the Slice 4 cache callback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_shared_child_with_chunk_cb(
+        client: reqwest::Client,
+        metrics: Arc<Metrics>,
+        manager: Arc<CapabilityManager>,
+        child: ChildReaderHandle,
+        priority: u8,
+        start: u64,
+        req_end: u64,
+        size: u64,
+        is_single: bool,
+        faults: Faults,
+        on_chunk: Option<Arc<dyn Fn(u64, &[u8]) + Send + Sync>>,
+    ) -> Self {
+        Self {
+            client,
+            metrics,
+            manager,
+            current: ReaderCapability::Shared(child),
+            priority,
+            start,
+            req_end,
+            size,
+            pos: start,
+            is_single,
+            response: None,
+            recovery: Recovery {
+                same_cap_retries: 0,
+                reacquires: 0,
+                wall_ms: 0,
+                recovery_started_at: None,
+                attempt: 1,
+            },
+            faults,
+            first_attempt: true,
+            midbody_triggered: false,
+            on_chunk,
+            stage: None,
+            last_headers_at: None,
+        }
     }
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -191,7 +295,7 @@ impl ResilientRangeReader {
             client,
             metrics,
             manager,
-            current,
+            current: ReaderCapability::Owned(current),
             priority,
             start,
             req_end,
@@ -248,7 +352,7 @@ impl ResilientRangeReader {
                 status = f;
                 provider_ra = None;
             } else {
-                let url = self.current.cap.runtime_url.clone();
+                let url = self.cap_ref().runtime_url.clone();
                 let cdn_start = Instant::now();
                 // ---- Slice 4.5 T3: the CDN Range request is dispatched.
                 //
@@ -277,7 +381,7 @@ impl ResilientRangeReader {
                         let headers_ms = failed_instant.saturating_duration_since(cdn_start).as_millis() as u64;
                         let attempt = self.recovery.attempt;
                         if let Some(s) = self.stage.as_ref() {
-                            s.record_attempt_headers(attempt, host_of(&url).unwrap_or_default(), 0, cdn_start, headers_ms, None, self.current.cap.provider.clone(), self.current.cap.cap_id.clone(), s.corr_id(), outcome);
+                            s.record_attempt_headers(attempt, host_of(&url).unwrap_or_default(), 0, cdn_start, headers_ms, None, self.cap_ref().provider.clone(), self.cap_ref().cap_id.clone(), s.corr_id(), outcome);
                             s.record_attempt_retry(attempt, cdn_start, failed_instant, true);
                         }
                         self.metrics
@@ -316,7 +420,7 @@ impl ResilientRangeReader {
                 // Per-attempt telemetry: record headers receipt.
                 let attempt = self.recovery.attempt;
                 if let Some(s) = self.stage.as_ref() {
-                    s.record_attempt_headers(attempt, host.clone(), status, cdn_start, cdn_elapsed.as_millis() as u64, None, self.current.cap.provider.clone(), self.current.cap.cap_id.clone(), s.corr_id(), crate::metrics::AttemptOutcome::Pending);
+                    s.record_attempt_headers(attempt, host.clone(), status, cdn_start, cdn_elapsed.as_millis() as u64, None, self.cap_ref().provider.clone(), self.cap_ref().cap_id.clone(), s.corr_id(), crate::metrics::AttemptOutcome::Pending);
                 }
                 provider_ra = parse_retry_after(
                     resp.headers()
@@ -392,12 +496,12 @@ impl ResilientRangeReader {
             ra
         };
         self.enter_recovery();
-        self.current.cap.throttle(Instant::now() + effective);
+        self.cap_ref().throttle(Instant::now() + effective);
         self.metrics.record_recovery_attempt();
         self.recovery.same_cap_retries += 1;
         // Record the enforced wait on the FAILING attempt BEFORE incrementing,
         // so the timeline reads: "attempt N failed -> waited W ms -> attempt N+1".
-        let retry_wait = self.current.cap.throttle_until()
+        let retry_wait = self.cap_ref().throttle_until()
             .saturating_duration_since(Instant::now())
             .as_millis() as u64;
         if let Some(s) = self.stage.as_ref() {
@@ -463,7 +567,7 @@ impl ResilientRangeReader {
     /// acquire. Non-recursive: returns an `Action`; `open_at` owns the loop.
     async fn apply_dead(&mut self) -> Action {
         self.enter_recovery();
-        self.current.cap.mark_dead();
+        self.cap_ref().mark_dead();
         self.metrics
             .upstream_errors
             .fetch_add(1, Ordering::SeqCst);
@@ -477,13 +581,18 @@ impl ResilientRangeReader {
         }
         self.recovery.attempt += 1;
         self.recovery.reacquires += 1;
+        // Shared children cannot independently reacquire: a reacquire would race the sibling
+        // for the single permit. Surface fatal to the lease owner instead.
+        if matches!(self.current, ReaderCapability::Shared(_)) {
+            return Action::Fatal(OpenError::Client502);
+        }
         if self.recovery.reacquires <= MAX_REACQUIRES {
             match self.manager.reacquire_for_read(self.priority).await {
                 Ok(new_reserved) => {
                     self.metrics
                         .capability_reacquisitions
                         .fetch_add(1, Ordering::SeqCst);
-                    self.current = new_reserved;
+                    self.current = ReaderCapability::Owned(new_reserved);
                     Action::Reacquire
                 }
                 Err(_) => Action::Fatal(OpenError::Client502),
