@@ -52,3 +52,9 @@ mod t2_standby;
 // behaviors plus the prewarm->standby handoff.
 #[cfg(test)]
 mod t3_prewarm;
+
+// T4 transplant proof: runtime slot refresh after durable placement
+// change (unit-level, stubbed edge for the prewarm handoff only).
+// Test-only: pins add/migrate/reject/then-prewarm.
+#[cfg(test)]
+mod t4_refresh;
