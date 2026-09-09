@@ -99,3 +99,10 @@ mod t12_steal;
 // transient/contaminated non-retirement, all with zero acquisition.
 #[cfg(test)]
 mod t13_retire;
+
+// T14 transplant proof: bounded automatic two-lane activation (proven as
+// HY4 P2R on m3-north-db). Test-only: pins AUTO-OFF current behavior,
+// below-threshold single, qualifying-run two-lane engagement with api
+// delta 0, and single-warm-cap fallback with zero cold acquisition.
+#[cfg(test)]
+mod t14_auto;

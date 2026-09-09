@@ -315,10 +315,68 @@ fn striping_armed() -> bool {
 /// the far end of the other queue, one at a time. Steal gate OFF leaves
 /// the T11 fixed two-lane ownership unchanged.
 fn stealing_armed() -> bool {
-    striping_armed()
-        && std::env::var("HY4_ACTIVE_ACTIVE_STEAL")
-            .map(|v| v == "1")
-            .unwrap_or(false)
+    striping_armed() && steal_flag()
+}
+
+/// T14: bounded two-lane activation policy (proven as HY4 P2R on
+/// m3-north-db).
+///
+/// Experimental, default OFF (`HY4_ACTIVE_ACTIVE_AUTO=1`). Decides whether
+/// an ordinary missing run uses the existing single-fill path or the
+/// proven two-lane T11-T13 scheduler. No new scheduling mechanism.
+///
+/// Policy inputs only:
+/// - number of missing fixed-grid chunks in this fetch span;
+/// - whether two distinct warm capabilities for the same exact TF are
+///   already available (proven by actually reserving the standby -- the
+///   reservation REMAINS the availability check; no pool peek);
+/// - whether active-active is enabled (explicit TWO_SPAN or AUTO).
+///
+/// Experimental minimum-work threshold `HY4_ACTIVE_ACTIVE_MIN_CHUNKS`
+/// (proven default 4, test-injectable): runs below it stay single-fill
+/// even with two warm caps. No production threshold decision here, and no
+/// cold acquisition is ever performed to satisfy the policy.
+fn auto_armed() -> bool {
+    std::env::var("HY4_ACTIVE_ACTIVE_AUTO")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+fn auto_min_chunks() -> u64 {
+    std::env::var("HY4_ACTIVE_ACTIVE_MIN_CHUNKS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(4)
+}
+
+/// AUTO size gate for a fetch span of `n` missing chunks.
+fn auto_go(n: usize) -> bool {
+    auto_armed() && (n as u64) >= auto_min_chunks()
+}
+
+fn steal_flag() -> bool {
+    std::env::var("HY4_ACTIVE_ACTIVE_STEAL")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+fn retire_flag() -> bool {
+    std::env::var("HY4_ACTIVE_ACTIVE_RETIRE_SLOW_LANE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Coherent runtime entry point: explicit TWO_SPAN (frozen proofs) or AUTO
+/// size gate. The T2 reservation still decides warm availability below.
+fn stripe_wanted(n: usize) -> bool {
+    striping_armed() || auto_go(n)
+}
+
+/// Steal variant selector: explicit steal path or AUTO + STEAL flag.
+/// AUTO alone without STEAL yields the frozen fixed 50/50 path.
+fn steal_wanted(n: usize) -> bool {
+    stealing_armed() || (auto_go(n) && steal_flag())
 }
 
 /// T13: retire a persistently slow lane.
@@ -331,11 +389,13 @@ fn stealing_armed() -> bool {
 /// Active chunks are never stolen or canceled by retirement. Zero new
 /// capability acquisition (both workers keep their pinned warm caps; the
 /// retired cap is released on worker exit).
+///
+/// T14: also arms on the coherent AUTO steal path (explicit steal path OR
+/// AUTO + STEAL flag, size already gated at engagement; `observe()` only
+/// ever runs on live two-lane workers).
 fn retire_armed() -> bool {
-    stealing_armed()
-        && std::env::var("HY4_ACTIVE_ACTIVE_RETIRE_SLOW_LANE")
-            .map(|v| v == "1")
-            .unwrap_or(false)
+    // Frozen explicit path OR coherent AUTO steal path.
+    (stealing_armed() || (auto_armed() && steal_flag())) && retire_flag()
 }
 
 /// T13: experimental slow-lane ratio threshold (test-injectable).
@@ -1532,10 +1592,14 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                             // chunk has exactly one producer; ordered client
                             // output flows through the existing
                             // cache/staging boundary unchanged.
+                            // T14: coherent entry is explicit TWO_SPAN
+                            // (frozen) or AUTO size gate; the reservation
+                            // below REMAINS the warm-availability check (no
+                            // pool peek, no cold acquisition to activate).
                             let stripe_b: Option<(
                                 manager::ReservedCapability,
                                 String,
-                            )> = if striping_armed()
+                            )> = if stripe_wanted(sub.len())
                                 && fr.is_some()
                                 && sub.len() >= 2
                             {
@@ -1576,7 +1640,10 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                 // buffer, is the reorder boundary. Takes over
                                 // here and `continue`s; otherwise falls
                                 // through to the exact T11 fixed path below.
-                                if stealing_armed()
+                                // T14: explicit steal path or AUTO + STEAL
+                                // flag; AUTO alone without STEAL yields the
+                                // frozen fixed 50/50 path.
+                                if steal_wanted(sub.len())
                                     && sub.iter().all(|idx| grid.chunk_end(*idx).is_some())
                                 {
                                     if let Some(frcap) = fr {

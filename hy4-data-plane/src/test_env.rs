@@ -53,3 +53,23 @@ pub fn set_retire_ratio(r: Option<f64>) {
         None => std::env::remove_var("HY4_ACTIVE_ACTIVE_RETIRE_RATIO"),
     }
 }
+
+/// Set (`true`) or remove (`false`) the T14 bounded automatic two-lane
+/// activation gate.
+pub fn set_auto(on: bool) {
+    if on {
+        std::env::set_var("HY4_ACTIVE_ACTIVE_AUTO", "1");
+    } else {
+        std::env::remove_var("HY4_ACTIVE_ACTIVE_AUTO");
+    }
+}
+
+/// Set (`Some`) or remove (`None`) the experimental minimum-work threshold
+/// (`HY4_ACTIVE_ACTIVE_MIN_CHUNKS`). Test-injectable only; the proven
+/// default applies when unset, and no production value is chosen here.
+pub fn set_min_chunks(n: Option<u64>) {
+    match n {
+        Some(v) => std::env::set_var("HY4_ACTIVE_ACTIVE_MIN_CHUNKS", v.to_string()),
+        None => std::env::remove_var("HY4_ACTIVE_ACTIVE_MIN_CHUNKS"),
+    }
+}
