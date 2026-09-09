@@ -136,3 +136,11 @@ mod t17_hedge;
 // no-C survivor drain, and retired-cap non-reselection.
 #[cfg(test)]
 mod t18_replacement;
+
+// T19 transplant proof: terminal-failure vacancy + warm replacement
+// (proven as HY4 P2U on m3-north-db). Test-only: pins recoverable
+// no-vacancy, terminal-B replacement with ordered-prefix exactness,
+// no-C survivor drain, and failed-cap exclusion with never-duplicated
+// failed Range, all with zero acquisition.
+#[cfg(test)]
+mod t19_terminal;

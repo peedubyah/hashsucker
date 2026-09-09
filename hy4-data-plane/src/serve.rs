@@ -495,7 +495,15 @@ struct TwoStripeState {
     shutdown: bool,
     continent_failed: bool,
     /// T13: runtime-only retirement. Index 0 = A, 1 = B.
+    /// Retirement means the lane is alive but not worth assigning new work.
     retired: [bool; 2],
+    /// T19: lane-terminal failure. Index 0 = A, 1 = B. Set when the lane's
+    /// fill failed terminally after existing same-lane recovery ran (or
+    /// correctly declined a hard error) -- the existing failure path
+    /// resolved the active chunk's record, so the lane holds nothing.
+    /// Distinct from `retired` (alive-but-slow): both create the same
+    /// downstream vacancy shape, but their causes must not be conflated.
+    terminal: [bool; 2],
     /// Active chunk per side (chunk idx + assignment instant). Set on
     /// `next()`, cleared on `finish()`. Popped => active => unstealable by
     /// construction, retirement included.
@@ -584,6 +592,7 @@ impl TwoStripeWork {
                 shutdown: false,
                 continent_failed: false,
                 retired: [false, false],
+                terminal: [false, false],
                 active: [None, None],
                 obs: [LaneObs::default(), LaneObs::default()],
                 replaced: [false, false],
@@ -614,6 +623,12 @@ impl TwoStripeWork {
     /// again exactly like a live lane (frozen >= 2 steal gate against it);
     /// only a still-vacant retired side stays closed and drainable. Gate
     /// OFF behaves exactly like T13 (`replaced` never sets).
+    ///
+    /// T19: a lane-terminal side (`terminal`) is vacant exactly like a
+    /// retired one -- no new work, no stealing, remaining unstarted queue
+    /// stealable by the survivor under the same >= 1 gate -- until a
+    /// replacement rebinds it. Gate OFF (or plain `finish`) never sets
+    /// `terminal`, so frozen failure behavior is untouched.
     /// `pub(crate)` so the unit proofs can drive the coordinator directly.
     pub(crate) fn next(
         &self,
@@ -626,7 +641,7 @@ impl TwoStripeWork {
             return None;
         }
         let i = lane_idx(side);
-        if st.retired[i] && !st.replaced[i] {
+        if (st.retired[i] || st.terminal[i]) && !st.replaced[i] {
             return None;
         }
         let (own_len, donor_len, donor_vacant) = {
@@ -639,7 +654,11 @@ impl TwoStripeWork {
                 StripeSide::B => StripeSide::A,
             };
             let di = lane_idx(donor_side);
-            (o.len(), d.len(), st.retired[di] && !st.replaced[di])
+            (
+                o.len(),
+                d.len(),
+                (st.retired[di] || st.terminal[di]) && !st.replaced[di],
+            )
         };
         if own_len > 0 {
             let idx = match side {
@@ -713,6 +732,12 @@ impl TwoStripeWork {
         let ratio = retire_ratio();
         let mut st = self.state.lock().unwrap();
         if st.retired[0] || st.retired[1] {
+            return;
+        }
+        // T19: freeze retirement once any lane terminally failed -- the
+        // survivor's post-failure samples must never retire anyone on stale
+        // pre-failure history. Terminal vacancy is handled by replacement.
+        if st.terminal[0] || st.terminal[1] {
             return;
         }
         let idx = lane_idx(side);
@@ -855,10 +880,16 @@ impl TwoStripeWork {
     ///
     /// Bounded: one attempt per side (`replace_tried`); a later independent
     /// vacancy on the other side gets its own attempt. No-ops (None) when
-    /// the gate is off, the side was never retired, an attempt already ran,
+    /// the gate is off, the side was never vacant, an attempt already ran,
     /// the run is shutting down/failed, the old active still owns work, or
     /// no unstarted work remains (rebinding an idle lane is pointless; the
     /// survivor's drain is the T13-identical path).
+    ///
+    /// T19: the same entry covers terminal-failure vacancy (`terminal`):
+    /// the failed lane's worker calls after the existing failure path
+    /// resolved its active chunk. Causes stay distinct (`retired` vs
+    /// `terminal`); the downstream vacancy -- and its one bounded
+    /// warm-replacement attempt -- is shared.
     /// Reservation is warm-only via `reserve_standby_excluding` (the
     /// survivor's held permit excludes it structurally; the retired id list
     /// additionally excludes every retired cap), then same-TF-checked
@@ -882,7 +913,7 @@ impl TwoStripeWork {
         }
         let mut st = self.state.lock().unwrap();
         let i = lane_idx(side);
-        if !st.retired[i] || st.replaced[i] || st.replace_tried[i] {
+        if (!st.retired[i] && !st.terminal[i]) || st.replaced[i] || st.replace_tried[i] {
             return None;
         }
         if st.shutdown || st.continent_failed {
@@ -945,6 +976,55 @@ impl TwoStripeWork {
             // Fail fast: no more assignments after a terminal chunk failure.
             // In-flight fills still complete durably; unstarted chunks stay
             // unstarted (their records were never driven).
+            st.continent_failed = true;
+        }
+    }
+
+    /// T19: record a lane-terminal chunk-fill failure.
+    ///
+    /// The fill's own existing failure path ran first (recovery had first
+    /// refusal: retries, same-cap resume, reacquire, or a correctly-declined
+    /// hard error; the chunk record resolved failed through `mark`, so the
+    /// failed chunk is never refetched and in-order delivery truncates at it
+    /// exactly as before). This records the same per-chunk facts as
+    /// `finish(idx, false)` -- active cleared -- and additionally:
+    /// - marks this side `terminal` (lane vacancy, distinct from T13
+    ///   `retired`: unusable-after-exhaustion vs alive-but-slow);
+    /// - bans the failed cap id from immediate reselection;
+    /// - does NOT set `continent_failed` while the sibling lane is still
+    ///   viable, so the survivor (and a warm replacement) keeps draining
+    ///   remaining unstarted work durably instead of abandoning it;
+    /// - sets `continent_failed` when BOTH lanes are terminal (second
+    ///   terminal failure with the sibling already terminal), restoring the
+    ///   frozen drain-and-truncate path so no unstarted record can leak.
+    ///
+    /// Gate OFF delegates to frozen `finish(idx, false)` bit-for-bit
+    /// (continent set immediately): frozen failure behavior unchanged.
+    /// `pub(crate)` so the T19 unit proof can drive the coordinator directly.
+    pub(crate) fn finish_terminal(&self, side: StripeSide, chunk: u64, failed_cap_id: &str) {
+        if !replace_armed() {
+            self.finish(chunk, false);
+            return;
+        }
+        let mut st = self.state.lock().unwrap();
+        for slot in st.active.iter_mut() {
+            if matches!(slot, Some((c, _)) if *c == chunk) {
+                *slot = None;
+            }
+        }
+        if !st.dead_cap_ids.contains(&failed_cap_id.to_string()) {
+            st.dead_cap_ids.push(failed_cap_id.to_string());
+        }
+        let i = lane_idx(side);
+        st.terminal[i] = true;
+        let other = lane_idx(match side {
+            StripeSide::A => StripeSide::B,
+            StripeSide::B => StripeSide::A,
+        });
+        if st.terminal[other] {
+            // Both lanes terminally exhausted: no worker remains to drain,
+            // so fail fast exactly like the frozen path (leftovers resolve
+            // through `drain()`, delivery truncates at the first failure).
             st.continent_failed = true;
         }
     }
@@ -1077,7 +1157,7 @@ async fn stripe_worker(
         .await;
         // Cache authority decides the outcome (present == success), exactly
         // as the fill's own mark() does for its waiters.
-        coord.finish(idx, cache.is_present(&key, idx).unwrap_or(false));
+        let present = cache.is_present(&key, idx).unwrap_or(false);
         // T13 cross-fill observation: useful bytes (whole-chunk body length)
         // over monotonic fill time. Stage-only fills are clean by
         // construction (no downstream channel); the head fill is clean in
@@ -1086,21 +1166,39 @@ async fn stripe_worker(
         // Producer identity is post-fill so a mid-fill change resets.
         match ret {
             Some(c) => {
-                let elapsed = fill_start.elapsed();
-                coord.observe(
-                    side,
-                    span_bytes,
-                    elapsed,
-                    false,
-                    &c.cap.provider,
-                    &c.cap.cap_id,
-                );
-                cap = c;
+                if present {
+                    coord.finish(idx, true);
+                    let elapsed = fill_start.elapsed();
+                    coord.observe(
+                        side,
+                        span_bytes,
+                        elapsed,
+                        false,
+                        &c.cap.provider,
+                        &c.cap.cap_id,
+                    );
+                    cap = c;
+                } else {
+                    // T19: terminal lane failure. The fill's existing
+                    // failure path already ran (recovery had first refusal;
+                    // the chunk record resolved failed, so the failed chunk
+                    // is never duplicated and delivery truncates at it).
+                    // Record the lane-terminal vacancy (never continent here:
+                    // the survivor keeps draining) and loop on: next()
+                    // yields None for the vacant lane and the exit point
+                    // tries one bounded warm replacement. Failed fills
+                    // carry no useful throughput signal, so no sample.
+                    coord.finish_terminal(side, idx, &c.cap.cap_id);
+                    cap = c;
+                }
             }
             // No reservation to continue with (only when the fill had none
             // to begin with -- workers always pass one). Remaining unstarted
             // chunks stay queued for the sibling worker.
-            None => break,
+            None => {
+                coord.finish(idx, present);
+                break;
+            }
         }
     }
     // Terminal exit: fail any still-unstarted claimed chunks so their
@@ -2160,7 +2258,27 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                         }
                                     }
                                     Some(SpanMsg::Eof) => break,
-                                    Some(SpanMsg::Failed) | None => return,
+                                    // T19: terminal span failure -- join
+                                    // stripe workers (no-op for non-striped
+                                    // demands, whose fills are detached
+                                    // tasks) so the survivor (and a warm
+                                    // replacement) still drains durably;
+                                    // delivery already truncated at this
+                                    // chunk per the existing in-order
+                                    // contract. Terminal fills never come
+                                    // from cancel paths (abandon sends Eof),
+                                    // and the join is bounded (workers exit
+                                    // at queue exhaustion), but a gone
+                                    // client still returns at once.
+                                    Some(SpanMsg::Failed) => {
+                                        if !tx.is_closed() {
+                                            for h in stripe_workers.drain(..) {
+                                                let _ = h.await;
+                                            }
+                                        }
+                                        return;
+                                    }
+                                    None => return,
                                 }
                             },
                             FetchItem::Waiter { index, record } => {
@@ -2202,6 +2320,16 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                     record.done.notified().await;
                                 }
                                 if record.failed.load(Ordering::SeqCst) {
+                                    // T19: terminal-chunk truncation joins
+                                    // stripe workers so the survivor (and a
+                                    // warm replacement) drains the remainder
+                                    // durably. Cancel paths (client gone)
+                                    // return at once exactly as before.
+                                    if !tx.is_closed() {
+                                        for h in stripe_workers.drain(..) {
+                                            let _ = h.await;
+                                        }
+                                    }
                                     return;
                                 }
                                 // The chunk is PRESENT and durable now; read just
@@ -2258,7 +2386,19 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                     // served from durable bytes.
                                     match cache.is_present(&key, index) {
                                         Ok(true) => {}
-                                        _ => return,
+                                        _ => {
+                                            // T19: same join-on-terminal rule
+                                            // as the Waiter arm above
+                                            // (failed record, client
+                                            // present); cancel paths return
+                                            // at once exactly as before.
+                                            if !tx.is_closed() {
+                                                for h in stripe_workers.drain(..) {
+                                                    let _ = h.await;
+                                                }
+                                            }
+                                            return;
+                                        }
                                     }
                                 }
                                 // The chunk is PRESENT and durable now; read just
