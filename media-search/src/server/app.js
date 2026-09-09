@@ -82,6 +82,10 @@ import { attemptRdResolution, getRdPlaybackUrl } from '../lib/providers/realdebr
 import { getRdResolutionCache } from '../lib/providers/realdebrid/rd-resolution-cache.js';
 import { createMovieWebDav } from '../lib/vfs/movie-webdav.js';
 import { createTvWebDav } from '../lib/vfs/tv-webdav.js';
+import { PROVIDER_CAPABILITIES } from '../lib/providers/capabilities.js';
+import { createSecondPlacementEnsurer } from '../lib/control-plane/second-placement.js';
+import { createPrewarmCaller } from '../lib/control-plane/prewarm.js';
+import { createPlaybackRedundancy, isPlaybackRedundancyEnabled } from '../lib/control-plane/playback-redundancy.js';
 
 const CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -1551,6 +1555,59 @@ export function createRequestHandler(dependencies = {}) {
     })
     : null);
 
+  // T10: playback-intent-triggered redundancy activation. Default OFF:
+  // HY4_PLAYBACK_REDUNDANCY=1 enables it. With the flag OFF the
+  // controller is null and the VFS Range path is byte-identical to the
+  // pre-T10 baseline (zero redundancy calls). With the flag ON, the first
+  // qualifying foreground Range demand per TF schedules one bounded
+  // T7 -> T6 chain (refresh/retry runs server-side inside the T5 Rust
+  // prewarm endpoint); the Range request itself never awaits it.
+  // Injectable via dependencies for deterministic tests.
+  const playbackRedundancy = dependencies.playbackRedundancy !== undefined
+    ? dependencies.playbackRedundancy
+    : (() => {
+      if (!isPlaybackRedundancyEnabled(env)) return null;
+      if (!controlPlaneStore) return null;
+      // T7 TorBox surface adapted from the existing provider stack
+      // (cached-only creation semantics preserved; no new TorBox logic).
+      const t7Torbox = (torBoxProvider && torBoxInventoryProvider) ? {
+        createPlacement: (input) => torBoxProvider
+          .require(PROVIDER_CAPABILITIES.PLACEMENT_CREATE).createPlacement(input),
+        checkCached: (hashes) => checkTorBoxCached(hashes, { apiKey: env.TORBOX_API_KEY }),
+        lookupPlacement: (input, ctx) => torBoxInventoryProvider
+          .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP).lookupPlacement(input, ctx),
+        getFileInventory: (resource, ctx) => torBoxInventoryProvider
+          .require(PROVIDER_CAPABILITIES.FILE_INVENTORY).getFileInventory(resource, ctx),
+      } : null;
+      // T7 Real-Debrid surface is the existing rdClient verbatim
+      // (listTorrents/getTorrentInfo/addMagnet/selectFiles).
+      const t7RealDebrid = rdClient ? {
+        listTorrents: (args) => rdClient.listTorrents(args),
+        getTorrentInfo: (id, opts) => rdClient.getTorrentInfo(id, opts),
+        addMagnet: (magnet, opts) => rdClient.addMagnet(magnet, opts),
+        selectFiles: (id, ids, opts) => rdClient.selectFiles(id, ids, opts),
+      } : null;
+      if (!t7Torbox && !t7RealDebrid) return null;
+      const ensurer = createSecondPlacementEnsurer({
+        store: controlPlaneStore,
+        torbox: t7Torbox,
+        realdebrid: t7RealDebrid,
+        now: clock,
+      });
+      const prewarmCaller = createPrewarmCaller({
+        store: controlPlaneStore,
+        dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://hy4-data-plane:3001',
+      });
+      return createPlaybackRedundancy({
+        store: controlPlaneStore,
+        ensurer,
+        prewarmCaller,
+        now: clock,
+        logger: (...args) => console.log(...args),
+        enabled: true,
+      });
+    })();
+
   const handleMovieWebDav = createMovieWebDav({
     searchCache,
     controlPlaneStore,
@@ -1562,6 +1619,10 @@ export function createRequestHandler(dependencies = {}) {
     // (tfId-present class-D exhaustion → alternate TorrentFile → re-forward to Rust).
     alternateFallback,
     terminalEvidenceStore,
+    // T10: playback-intent-triggered redundancy activation. Default OFF
+    // (HY4_PLAYBACK_REDUNDANCY=1 to enable); OFF means the controller is
+    // null and byte serving is byte-identical to the pre-T10 baseline.
+    playbackRedundancy,
     now: clock,
     // P4: forward VFS byte reads to the Rust data plane. Default is the
     // compose-network service name; override via DATA_PLANE_URL. No hardcoded
@@ -1579,6 +1640,8 @@ export function createRequestHandler(dependencies = {}) {
     // (tfId-present class-D exhaustion → alternate TorrentFile → re-forward to Rust).
     alternateFallback,
     terminalEvidenceStore,
+    // T10: same controller instance as movies (per-TF flight map is shared).
+    playbackRedundancy,
     now: clock,
     dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://hy4-data-plane:3001',
   });
