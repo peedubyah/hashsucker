@@ -136,7 +136,7 @@ export function extractServingAttribution(upstreamHeaders) {
  *
  * @param {object} args
  * @param {(input: string, init?: object) => Promise<import('undici').Response>} args.fetchFn
- * @param {string} args.baseUrl  Data-plane base URL, e.g. http://hy4-data-plane:3001
+ * @param {string} args.baseUrl  Data-plane base URL, e.g. http://data-plane:3001
  * @param {string} args.tfId     Durable TorrentFile surrogate id (state.entry.torrentFileId)
  * @param {import('http').IncomingMessage} args.request
  * @param {import('http').ServerResponse} args.response

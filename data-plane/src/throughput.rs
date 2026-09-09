@@ -58,18 +58,22 @@
 //!   double-counted here). Otherwise `Healthy`.
 //!
 //! CONFIGURATION (all experimental, detector default OFF)
-//!   `HY4_LOW_THROUGHPUT_BPS` -- sustained-useful-bytes floor. Unset,
+//!   `DATA_PLANE_LOW_THROUGHPUT_BPS` -- sustained-useful-bytes floor. Unset,
 //!   unparseable, or zero disables the detector entirely (inert).
-//!   `HY4_LOW_THROUGHPUT_WINDOW_MS` -- bounded observation window.
+//!   `DATA_PLANE_LOW_THROUGHPUT_WINDOW_MS` -- bounded observation window.
 //!   Experimental default 10_000 ms when the floor is set but the window
 //!   is not; documented as a measurement default, never a production
 //!   threshold.
-//!   `HY4_LOW_THROUGHPUT_BLOCKED_MS` -- send-blocked hygiene threshold.
+//!   `DATA_PLANE_LOW_THROUGHPUT_BLOCKED_MS` -- send-blocked hygiene threshold.
 //!   Experimental default 50 ms; measurement hygiene, not provider policy.
+//!
+//! Compatibility: each `DATA_PLANE_LOW_THROUGHPUT_*` variable has a
+//! deprecated `HY4_LOW_THROUGHPUT_*` fallback. Canonical name wins when
+//! both are set.
 //!
 //! Production adaptation vs the proven source: producer identity is
 //! `(provider, cap_id)` -- transplant capabilities carry the
-//! observability-only `cap_id`, not the later HY4 generation counter.
+//! observability-only `cap_id`, not the later generation counter.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -223,19 +227,19 @@ pub struct ThroughputConfig {
 /// Read the experimental detector configuration. `None` (detector inert)
 /// unless a positive floor is set. Window/blocked thresholds fall back to
 /// experimental measurement defaults.
+///
+/// Canonical DATA_PLANE_LOW_THROUGHPUT_* names with deprecated
+/// HY4_LOW_THROUGHPUT_* fallback.
 pub fn config_from_env() -> Option<ThroughputConfig> {
-    let floor_bps = std::env::var("HY4_LOW_THROUGHPUT_BPS")
-        .ok()
+    let floor_bps = crate::env_canonical("DATA_PLANE_LOW_THROUGHPUT_BPS", "HY4_LOW_THROUGHPUT_BPS")
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|bps| *bps > 0)?;
-    let window = std::env::var("HY4_LOW_THROUGHPUT_WINDOW_MS")
-        .ok()
+    let window = crate::env_canonical("DATA_PLANE_LOW_THROUGHPUT_WINDOW_MS", "HY4_LOW_THROUGHPUT_WINDOW_MS")
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|ms| *ms > 0)
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_millis(DEFAULT_WINDOW_MS));
-    let blocked_threshold = std::env::var("HY4_LOW_THROUGHPUT_BLOCKED_MS")
-        .ok()
+    let blocked_threshold = crate::env_canonical("DATA_PLANE_LOW_THROUGHPUT_BLOCKED_MS", "HY4_LOW_THROUGHPUT_BLOCKED_MS")
         .and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_millis(DEFAULT_BLOCKED_MS));

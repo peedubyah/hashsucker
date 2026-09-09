@@ -213,14 +213,14 @@ async fn handle_files(
     };
 
     // ---- P13-A: per-provider coord filter (test fault, mirrors
-    // HY4_FORCE_EXHAUST_TFID in serve.rs) ----
-    // Format: HY4_FORCE_PROVIDER="tfId1:providerA,providerB;tfId2:providerA"
+    // DATA_PLANE_FORCE_EXHAUST_TFID in serve.rs) ----
+    // Format: DATA_PLANE_FORCE_PROVIDER="tfId1:providerA,providerB;tfId2:providerA"
     // Empty env var = disabled. Semicolon separates tfIds; comma separates
     // the allowlist per tfId. NEVER set in production.
     // Applied to the S-1 coord list BEFORE CapabilityManager construction
     // (manager.rs:127), so the per-tfId manager sees only the allowed
     // providers. No durable state is touched. Restart required to invert.
-    if let Ok(spec) = std::env::var("HY4_FORCE_PROVIDER") {
+    if let Some(spec) = data_plane::env_canonical("DATA_PLANE_FORCE_PROVIDER", "HY4_FORCE_PROVIDER") {
         for entry in spec.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
             let mut parts = entry.splitn(2, ':');
             if let (Some(t), Some(p)) = (parts.next(), parts.next()) {
@@ -231,7 +231,7 @@ async fn handle_files(
                     resp.providers.retain(|c| allowed.iter().any(|a| *a == c.provider));
                     let after = resp.providers.len();
                     eprintln!(
-                        "[p13] HY4_FORCE_PROVIDER: tfId={} allowed={:?} providers {}->{}",
+                        "[p13] DATA_PLANE_FORCE_PROVIDER: tfId={} allowed={:?} providers {}->{}",
                         tf_id, allowed, before, after
                     );
                 }
@@ -240,7 +240,7 @@ async fn handle_files(
     }
 
     // ---- P14-B: per-provider slot fault (deny a single provider) ----
-    // Format: HY4_FORCE_FAIL_PROVIDER="tfId1:providerA;tfId2:providerB"
+    // Format: DATA_PLANE_FORCE_FAIL_PROVIDER="tfId1:providerA;tfId2:providerB"
     // Empty env var = disabled. Operates AFTER S-1 coord discovery and
     // AFTER the allowlist above; BEFORE CapabilityManager construction.
     // The denied provider's coord is removed from the list, so the
@@ -249,7 +249,7 @@ async fn handle_files(
     // normally. This is the surgical fault used to prove TB->RD / RD->TB
     // shielding while the OTHER provider is healthy. NEVER set in
     // production.
-    if let Ok(spec) = std::env::var("HY4_FORCE_FAIL_PROVIDER") {
+    if let Some(spec) = data_plane::env_canonical("DATA_PLANE_FORCE_FAIL_PROVIDER", "HY4_FORCE_FAIL_PROVIDER") {
         for entry in spec.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
             let mut parts = entry.splitn(2, ':');
             if let (Some(t), Some(p)) = (parts.next(), parts.next()) {
@@ -260,7 +260,7 @@ async fn handle_files(
                     resp.providers.retain(|c| !denied.iter().any(|d| *d == c.provider));
                     let after = resp.providers.len();
                     eprintln!(
-                        "[p14] HY4_FORCE_FAIL_PROVIDER: tfId={} denied={:?} providers {}->{}",
+                        "[p14] DATA_PLANE_FORCE_FAIL_PROVIDER: tfId={} denied={:?} providers {}->{}",
                         tf_id, denied, before, after
                     );
                 }
@@ -428,13 +428,13 @@ async fn handle_metrics(AxumState(svc): AxumState<Arc<ServiceState>>) -> Respons
 async fn main() -> Result<(), String> {
     let cfg = ServiceConfig::from_env().map_err(|e| format!("config: {e}"))?;
     eprintln!(
-        "[hy4-data-plane] booting: control_url={} listen={} cache_root={:?}",
+        "[data-plane] booting: control_url={} listen={} cache_root={:?}",
         cfg.control_url, cfg.listen, cfg.cache_root
     );
 
     let svc = ServiceState::new(cfg.clone()).await?;
     eprintln!(
-        "[hy4-data-plane] S-1 reachable test skipped -- the service is allowed to \
+        "[data-plane] S-1 reachable test skipped -- the service is allowed to \
          start with zero requested TorrentFiles. S-1 is fetched per request."
     );
 
@@ -447,7 +447,7 @@ async fn main() -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(&cfg.listen)
         .await
         .map_err(|e| format!("bind {}: {e}", cfg.listen))?;
-    eprintln!("[hy4-data-plane] listening on http://{}", cfg.listen);
+    eprintln!("[data-plane] listening on http://{}", cfg.listen);
     axum::serve(listener, app)
         .await
         .map_err(|e| format!("serve: {e}"))?;

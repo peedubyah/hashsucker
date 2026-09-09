@@ -36,6 +36,27 @@ pub mod serve;
 pub mod throughput;
 pub mod transport;
 
+/// Read a runtime configuration variable with canonical `DATA_PLANE_*`
+/// naming and deprecated `HY4_*` fallback.
+///
+/// Precedence:
+///   1. `DATA_PLANE_FOO` (canonical) — returned if set and non-empty.
+///   2. `HY4_FOO` (deprecated) — returned if set and non-empty.
+///   3. Otherwise `None`.
+///
+/// Empty values are treated as unset so that `DATA_PLANE_FOO=` falls
+/// through to a deprecated `HY4_FOO=bar` rather than silently shadowing
+/// it.
+pub fn env_canonical(canonical: &str, deprecated: &str) -> Option<String> {
+    // Treat empty values as unset so that `DATA_PLANE_FOO=` falls through
+    // to a deprecated `HY4_FOO=bar` rather than silently shadowing it.
+    std::env::var(canonical)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var(deprecated).ok())
+        .filter(|v| !v.is_empty())
+}
+
 // Deterministic fill-identity repair proof (unit-level).
 // Test-only: pins that plan/fill TorrentFile identity is the durable
 // (infoHash, path, size) tuple, never the routing UUID.
@@ -129,3 +150,9 @@ mod retired_lane_replacement;
 // failed Range, all with zero acquisition.
 #[cfg(test)]
 mod terminal_lane_replacement;
+
+// Runtime naming compatibility proof. Test-only: pins the DATA_PLANE_*
+// canonical / HY4_* deprecated fallback contract (canonical wins, old
+// name still works, default unchanged when neither is set).
+#[cfg(test)]
+mod runtime_naming_compat;

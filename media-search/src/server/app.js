@@ -1556,7 +1556,8 @@ export function createRequestHandler(dependencies = {}) {
     : null);
 
   // T10: playback-intent-triggered redundancy activation. Default OFF:
-  // HY4_PLAYBACK_REDUNDANCY=1 enables it. With the flag OFF the
+  // DATA_PLANE_PLAYBACK_REDUNDANCY=1 enables it (deprecated
+  // HY4_PLAYBACK_REDUNDANCY also accepted). With the flag OFF the
   // controller is null and the VFS Range path is byte-identical to the
   // pre-T10 baseline (zero redundancy calls). With the flag ON, the first
   // qualifying foreground Range demand per TF schedules one bounded
@@ -1596,7 +1597,7 @@ export function createRequestHandler(dependencies = {}) {
       });
       const prewarmCaller = createPrewarmCaller({
         store: controlPlaneStore,
-        dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://hy4-data-plane:3001',
+        dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://data-plane:3001',
       });
       return createPlaybackRedundancy({
         store: controlPlaneStore,
@@ -1620,14 +1621,15 @@ export function createRequestHandler(dependencies = {}) {
     alternateFallback,
     terminalEvidenceStore,
     // T10: playback-intent-triggered redundancy activation. Default OFF
-    // (HY4_PLAYBACK_REDUNDANCY=1 to enable); OFF means the controller is
+    // (DATA_PLANE_PLAYBACK_REDUNDANCY=1 to enable; deprecated
+    // HY4_PLAYBACK_REDUNDANCY also accepted); OFF means the controller is
     // null and byte serving is byte-identical to the pre-T10 baseline.
     playbackRedundancy,
     now: clock,
     // P4: forward VFS byte reads to the Rust data plane. Default is the
     // compose-network service name; override via DATA_PLANE_URL. No hardcoded
     // host IPs (P4 §9).
-    dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://hy4-data-plane:3001',
+    dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://data-plane:3001',
   });
   const handleTvWebDav = createTvWebDav({
     searchCache,
@@ -1643,7 +1645,7 @@ export function createRequestHandler(dependencies = {}) {
     // T10: same controller instance as movies (per-TF flight map is shared).
     playbackRedundancy,
     now: clock,
-    dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://hy4-data-plane:3001',
+    dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://data-plane:3001',
   });
 
   // Eager VFS metadata hydrators used by the request completion path so

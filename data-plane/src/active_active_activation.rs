@@ -6,8 +6,8 @@
 //! scheduler behavior.<longcat_arg_value>
 
 //!
-//! Behind `HY4_ACTIVE_ACTIVE_AUTO=1` (default OFF), with the experimental
-//! minimum-work threshold `HY4_ACTIVE_ACTIVE_MIN_CHUNKS` (proven default 4,
+//! Behind `DATA_PLANE_ACTIVE_ACTIVE_AUTO=1` (default OFF; deprecated `HY4_ACTIVE_ACTIVE_AUTO` also accepted), with the experimental
+//! minimum-work threshold `DATA_PLANE_ACTIVE_ACTIVE_MIN_CHUNKS` (proven default 4,
 //! test-injectable), the scheduler engages only when ALL hold:
 //! AUTO enabled, the consecutive missing run has >= min chunks, and the
 //! standby reservation returns a second warm same-TF cap. The reservation

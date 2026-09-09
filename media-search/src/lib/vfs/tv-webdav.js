@@ -279,7 +279,7 @@ export function createTvWebDav({
   playbackRedundancy = null,
   now = () => Date.now(),
   fetchFn = fetch,
-  dataPlaneBaseUrl = 'http://hy4-data-plane:3001',
+  dataPlaneBaseUrl = 'http://data-plane:3001',
 }) {
   const states = new Map();
 

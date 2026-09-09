@@ -250,7 +250,7 @@ impl CapabilityManager {
         // produces, which is what the existing system has always done
         // (and is what other code paths and tests rely on). S-1 order
         // is NOT modified here. P15's bench uses an EXPLICIT,
-        // opt-in, reversible env-var gate (HY4_FORCE_SLOT_ORDER) below
+        // opt-in, reversible env-var gate (DATA_PLANE_FORCE_SLOT_ORDER) below
         // to deterministically target a specific provider as the first
         // slot; the default is unchanged.
         let mut groups: HashMap<(String, String, String), Vec<ProviderCoord>> = HashMap::new();
@@ -300,12 +300,12 @@ impl CapabilityManager {
         // pre-P15 system (HashMap iteration; not deterministic). When
         // set, moves the named provider to the FRONT of its tfId's slot
         // list so the bench can deterministically force a specific
-        // provider as the first-tried slot and HY4_FORCE_SLOT_FAILURE
+        // provider as the first-tried slot and DATA_PLANE_FORCE_SLOT_FAILURE
         // can target it. Relative order among non-named providers is
         // preserved.
-        // Format: HY4_FORCE_SLOT_ORDER="tfId:provider;tfId2:provider"
+        // Format: DATA_PLANE_FORCE_SLOT_ORDER="tfId:provider;tfId2:provider"
         // Empty env var = disabled (DEFAULT). NEVER set in production.
-        if let Ok(spec) = std::env::var("HY4_FORCE_SLOT_ORDER") {
+        if let Some(spec) = crate::env_canonical("DATA_PLANE_FORCE_SLOT_ORDER", "HY4_FORCE_SLOT_ORDER") {
             for entry in spec.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
                 let mut parts = entry.splitn(2, ':');
                 if let (Some(t), Some(p)) = (parts.next(), parts.next()) {
@@ -428,9 +428,9 @@ impl CapabilityManager {
                 // requestdl, no RD /torrents + /torrents/info/{id} +
                 // /unrestrict/link). Zero DB writes. Zero DeliveryCapability
                 // persisted. Other slots remain healthy.
-                // Format: HY4_FORCE_SLOT_FAILURE="tfId:provider;tfId2:provider"
+                // Format: DATA_PLANE_FORCE_SLOT_FAILURE="tfId:provider;tfId2:provider"
                 // Empty = disabled. NEVER set in production.
-                if let Ok(spec) = std::env::var("HY4_FORCE_SLOT_FAILURE") {
+                if let Some(spec) = crate::env_canonical("DATA_PLANE_FORCE_SLOT_FAILURE", "HY4_FORCE_SLOT_FAILURE") {
                     let mut denied = false;
                     for entry in spec.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
                         let mut parts = entry.splitn(2, ':');
@@ -443,7 +443,7 @@ impl CapabilityManager {
                     }
                     if denied {
                         eprintln!(
-                            "[p15] HY4_FORCE_SLOT_FAILURE: tfId={} provider={} slot_attempted=1 slot_failed=1 reason=runtime_injected",
+                            "[p15] DATA_PLANE_FORCE_SLOT_FAILURE: tfId={} provider={} slot_attempted=1 slot_failed=1 reason=runtime_injected",
                             tf.id, coord.provider
                         );
                         let res: Result<Arc<DeliveryCapability>, AcquireError> = Err(
@@ -952,7 +952,7 @@ impl CapabilityManager {
     /// primary, ensuring same-provider/account standby with zero
     /// acquisition overhead. Returns `None` if no usable standby exists.
     ///
-    /// Phase 2 (`HY4_CROSS_PROVIDER_STANDBY=1`, default OFF): when the
+    /// Phase 2 (`DATA_PLANE_CROSS_PROVIDER_STANDBY=1`, default OFF): when the
     /// primary's own slot has no usable standby, other slots are eligible
     /// under a strict same-exact-TorrentFile bound: the candidate slot's
     /// `durable_key` (stable `(info_hash, canonical_path, size)` digest,
@@ -992,7 +992,7 @@ impl CapabilityManager {
             return Some((r, self.slots[idx].durable_key.clone()));
         }
         // Phase 2: cross-provider standby, same exact TorrentFile only.
-        if std::env::var("HY4_CROSS_PROVIDER_STANDBY")
+        if crate::env_canonical("DATA_PLANE_CROSS_PROVIDER_STANDBY", "HY4_CROSS_PROVIDER_STANDBY")
             .map(|v| v == "1")
             .unwrap_or(false)
         {
@@ -1059,7 +1059,7 @@ impl CapabilityManager {
             return Some((r, self.slots[idx].durable_key.clone()));
         }
         // Phase 2: cross-provider standby, same exact TorrentFile only.
-        if std::env::var("HY4_CROSS_PROVIDER_STANDBY")
+        if crate::env_canonical("DATA_PLANE_CROSS_PROVIDER_STANDBY", "HY4_CROSS_PROVIDER_STANDBY")
             .map(|v| v == "1")
             .unwrap_or(false)
         {

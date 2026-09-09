@@ -17,7 +17,7 @@
 //!   staged/emitted exactly once; the loser is dropped/cancelled, and that
 //!   cancellation records no breaker/provider failure;
 //! - after selection only the winner continues; zero cold acquisition.
-//! Gate/trigger semantics follow the proven source (`HY4_HEDGE_ENABLED=1`,
+//! Gate/trigger semantics follow the proven source (`DATA_PLANE_HEDGE_ENABLED=1`,
 //! default OFF, armed by the consecutive-low policy); no new hedge policy
 //! or threshold is invented. There are no stall/runway arms on this
 //! branch, so the race pends like the bare await and real failures keep

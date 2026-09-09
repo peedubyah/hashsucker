@@ -21,9 +21,9 @@
 //! lane's epoch, and latches taint; silence never classifies; a producer
 //! (provider + cap id) change resets that lane's history.
 //!
-//! Gate: `HY4_ACTIVE_ACTIVE_RETIRE_SLOW_LANE=1`, default OFF, requiring the
+//! Gate: `DATA_PLANE_ACTIVE_ACTIVE_RETIRE_SLOW_LANE=1`, default OFF, requiring the
 //! stealing path. The experimental ratio knob
-//! (`HY4_ACTIVE_ACTIVE_RETIRE_RATIO`, proven default 4.0) is preserved
+//! (`DATA_PLANE_ACTIVE_ACTIVE_RETIRE_RATIO`, proven default 4.0) is preserved
 //! test-injectable; no production value is chosen here.
 //!
 //! Four proofs (localhost mock CDNs only, except the coordinator-rule

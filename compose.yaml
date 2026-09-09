@@ -94,20 +94,26 @@ services:
   #   GET /files/:tfId  per-request S-1 fetch -> per-request AppState
   #   GET /metrics      process-aggregate counters
   #
-  # The Slice 4 cache lives on a named volume (hy4-cache) so docker compose
-  # restart/recreate preserves durable bytes -- proof C in the P3 ladder
-  # is that a fresh container reuses the same on-disk cache path without
-  # any manual code injection.
+  # The Slice 4 cache lives on a named volume (data-plane-cache) so docker
+  # compose restart/recreate preserves durable bytes -- proof C in the P3
+  # ladder is that a fresh container reuses the same on-disk cache path
+  # without any manual code injection.
   #
   # S-1 reachability: CONTROL_URL is the in-network hostname of the north
   # service. Port 3000 is the internal port; no auth, matching the rest
   # of /api/control-plane/* (see S1-CONTROL-CONTRACT.md).
-  hy4-data-plane:
+  #
+  # Compatibility: the service is also reachable as the legacy hostname
+  # `hy4-data-plane` via the compose network alias below, so existing
+  # operator workflows and scripts that reference the old name continue
+  # to resolve.
+  data-plane:
     build:
       context: ./data-plane
       dockerfile: Dockerfile
-    image: hy4-data-plane:local
+    image: data-plane:local
     restart: unless-stopped
+    hostname: data-plane
     environment:
       LISTEN: "0.0.0.0:3001"
       CONTROL_URL: "http://media-search:3000/api"
@@ -119,10 +125,14 @@ services:
     depends_on:
       - media-search
     volumes:
-      - hy4-cache:/data
+      - data-plane-cache:/data
+    networks:
+      default:
+        aliases:
+          - hy4-data-plane
     security_opt:
       - no-new-privileges:true
 
 volumes:
   discovery-data:
-  hy4-cache:
+  data-plane-cache:

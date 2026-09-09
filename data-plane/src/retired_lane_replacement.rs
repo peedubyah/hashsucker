@@ -16,7 +16,7 @@
 //!   (never three concurrent lanes); otherwise the survivor drains alone
 //!   exactly as in T13;
 //! - maximum active lanes stays 2; zero cold acquisition.
-//! Gate: `HY4_ACTIVE_ACTIVE_REPLACE_LANE=1`, default OFF, requiring the
+//! Gate: `DATA_PLANE_ACTIVE_ACTIVE_REPLACE_LANE=1`, default OFF, requiring the
 //! T12 steal path (retirement can only happen there).
 //!
 //! Four proofs (coordinator unit + real `get_file` demand path against

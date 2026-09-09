@@ -66,7 +66,10 @@
  * endpoint vocabulary.
  */
 
-export const PLAYBACK_REDUNDANCY_FLAG = 'HY4_PLAYBACK_REDUNDANCY';
+// Canonical DATA_PLANE_PLAYBACK_REDUNDANCY with deprecated
+// HY4_PLAYBACK_REDUNDANCY fallback. Canonical name wins.
+export const PLAYBACK_REDUNDANCY_FLAG = 'DATA_PLANE_PLAYBACK_REDUNDANCY';
+export const PLAYBACK_REDUNDANCY_FLAG_DEPRECATED = 'HY4_PLAYBACK_REDUNDANCY';
 
 export const DEFAULT_COOLDOWN_MS = 30 * 60 * 1000;
 
@@ -88,7 +91,12 @@ const KNOWN_PROVIDERS = Object.freeze(['torbox', 'realdebrid']);
 
 export function isPlaybackRedundancyEnabled(env = process.env) {
   try {
-    return env?.[PLAYBACK_REDUNDANCY_FLAG] === '1';
+    // Canonical DATA_PLANE_PLAYBACK_REDUNDANCY wins over deprecated
+    // HY4_PLAYBACK_REDUNDANCY.
+    if (env?.[PLAYBACK_REDUNDANCY_FLAG] !== undefined) {
+      return env[PLAYBACK_REDUNDANCY_FLAG] === '1';
+    }
+    return env?.[PLAYBACK_REDUNDANCY_FLAG_DEPRECATED] === '1';
   } catch {
     return false;
   }
@@ -107,7 +115,8 @@ export function isPlaybackRedundancyEnabled(env = process.env) {
  *   waiting for a provider-backed demand (default
  *   DEFAULT_PENDING_TTL_MS). Expiry returns the TF to inactive with zero
  *   selection and zero prewarm. Injectable for deterministic tests.
- * @param {boolean} [options.enabled] - HY4_PLAYBACK_REDUNDANCY gate.
+ * @param {boolean} [options.enabled] - DATA_PLANE_PLAYBACK_REDUNDANCY gate
+ *   (deprecated HY4_PLAYBACK_REDUNDANCY also accepted).
  */
 export function createPlaybackRedundancy({
   store = null,

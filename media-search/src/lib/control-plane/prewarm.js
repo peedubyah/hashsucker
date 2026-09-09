@@ -38,7 +38,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  * @param {Object} options
  * @param {Object} options.store - Control-plane store (getTorrentFile,
  *   findPlacementByInfoHash, listProviderRefsForTorrentFile).
- * @param {string} options.dataPlaneBaseUrl - e.g. http://hy4-data-plane:3001
+ * @param {string} options.dataPlaneBaseUrl - e.g. http://data-plane:3001
  * @param {Function} [options.fetchFn] - Fetch implementation.
  * @param {number} [options.timeoutMs]
  * @param {Function} [options.logger]

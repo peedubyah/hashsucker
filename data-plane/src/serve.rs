@@ -295,14 +295,14 @@ pub(crate) fn fill_torrent_file_id(
 }
 
 /// Two-lane disjoint fill.
-/// Experimental, default OFF (`HY4_ACTIVE_ACTIVE_TWO_SPAN=1` arms it).
+/// Experimental, default OFF (`DATA_PLANE_ACTIVE_ACTIVE_TWO_SPAN=1` arms it; deprecated `HY4_ACTIVE_ACTIVE_TWO_SPAN` also accepted).
 /// One qualifying missing run of the same exact TorrentFile is fetched
 /// concurrently by two already-warm capabilities, each owning a disjoint
 /// half of the run. Warm-only: both reservations must be in hand before
 /// either lane spawns, and no cold acquisition is ever performed to make
 /// the second lane exist. Maximum lanes: 2.
 fn striping_armed() -> bool {
-    std::env::var("HY4_ACTIVE_ACTIVE_TWO_SPAN")
+    crate::env_canonical("DATA_PLANE_ACTIVE_ACTIVE_TWO_SPAN", "HY4_ACTIVE_ACTIVE_TWO_SPAN")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
@@ -310,7 +310,7 @@ fn striping_armed() -> bool {
 /// Bounded same-TorrentFile hedge election (first-valid-wins,
 /// 
 ///
-/// Experimental, default OFF (`HY4_HEDGE_ENABLED=1` arms it). The election
+/// Experimental, default OFF (`DATA_PLANE_HEDGE_ENABLED=1` arms it; deprecated `HY4_HEDGE_ENABLED` also accepted). The election
 /// is duplicate EXECUTION under the fill task's single logical claim: one
 /// primary attempt plus at most one hedge attempt, same exact
 /// TorrentFile, same exact remaining range. Warm-only: the hedge consumes
@@ -318,15 +318,15 @@ fn striping_armed() -> bool {
 /// and ordering follow the proven source (low-throughput arming + knob +
 /// one-per-fill bound); no new hedge policy or threshold is invented here.
 fn hedge_enabled() -> bool {
-    std::env::var("HY4_HEDGE_ENABLED")
+    crate::env_canonical("DATA_PLANE_HEDGE_ENABLED", "HY4_HEDGE_ENABLED")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 /// Two-lane work stealing.
 ///
-/// Experimental, default OFF (`HY4_ACTIVE_ACTIVE_STEAL=1` arms it, and
-/// only together with `HY4_ACTIVE_ACTIVE_TWO_SPAN=1`). After the T11
+/// Experimental, default OFF (`DATA_PLANE_ACTIVE_ACTIVE_STEAL=1` arms it, and
+/// only together with `DATA_PLANE_ACTIVE_ACTIVE_TWO_SPAN=1`). After the T11
 /// split, the two pinned producers share one runtime-only coordinator
 /// instead of fixed halves: each lane works its own queue front-to-back,
 /// and a lane that exhausts its own queue may steal unstarted chunks from
@@ -339,7 +339,7 @@ fn stealing_armed() -> bool {
 /// Bounded two-lane activation policy
 /// m3-north-db).
 ///
-/// Experimental, default OFF (`HY4_ACTIVE_ACTIVE_AUTO=1`). Decides whether
+/// Experimental, default OFF (`DATA_PLANE_ACTIVE_ACTIVE_AUTO=1`; deprecated `HY4_ACTIVE_ACTIVE_AUTO` also accepted). Decides whether
 /// an ordinary missing run uses the existing single-fill path or the
 /// proven two-lane scheduler. No new scheduling mechanism.
 ///
@@ -350,19 +350,18 @@ fn stealing_armed() -> bool {
 ///   reservation REMAINS the availability check; no pool peek);
 /// - whether active-active is enabled (explicit TWO_SPAN or AUTO).
 ///
-/// Experimental minimum-work threshold `HY4_ACTIVE_ACTIVE_MIN_CHUNKS`
+/// Experimental minimum-work threshold `DATA_PLANE_ACTIVE_ACTIVE_MIN_CHUNKS` (deprecated `HY4_ACTIVE_ACTIVE_MIN_CHUNKS` also accepted)
 /// (proven default 4, test-injectable): runs below it stay single-fill
 /// even with two warm caps. No production threshold decision here, and no
 /// cold acquisition is ever performed to satisfy the policy.
 fn auto_armed() -> bool {
-    std::env::var("HY4_ACTIVE_ACTIVE_AUTO")
+    crate::env_canonical("DATA_PLANE_ACTIVE_ACTIVE_AUTO", "HY4_ACTIVE_ACTIVE_AUTO")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 fn auto_min_chunks() -> u64 {
-    std::env::var("HY4_ACTIVE_ACTIVE_MIN_CHUNKS")
-        .ok()
+    crate::env_canonical("DATA_PLANE_ACTIVE_ACTIVE_MIN_CHUNKS", "HY4_ACTIVE_ACTIVE_MIN_CHUNKS")
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|n| *n >= 1)
         .unwrap_or(4)
@@ -374,13 +373,13 @@ fn auto_go(n: usize) -> bool {
 }
 
 fn steal_flag() -> bool {
-    std::env::var("HY4_ACTIVE_ACTIVE_STEAL")
+    crate::env_canonical("DATA_PLANE_ACTIVE_ACTIVE_STEAL", "HY4_ACTIVE_ACTIVE_STEAL")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 fn retire_flag() -> bool {
-    std::env::var("HY4_ACTIVE_ACTIVE_RETIRE_SLOW_LANE")
+    crate::env_canonical("DATA_PLANE_ACTIVE_ACTIVE_RETIRE_SLOW_LANE", "HY4_ACTIVE_ACTIVE_RETIRE_SLOW_LANE")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
@@ -399,7 +398,7 @@ fn steal_wanted(n: usize) -> bool {
 
 /// T13: retire a persistently slow lane.
 ///
-/// Experimental, default OFF (`HY4_ACTIVE_ACTIVE_RETIRE_SLOW_LANE=1` arms
+/// Experimental, default OFF (`DATA_PLANE_ACTIVE_ACTIVE_RETIRE_SLOW_LANE=1` arms
 /// it, only together with the T12 steal path). When armed, per-worker
 /// useful-throughput observations across chunk fills may retire one lane:
 /// the retired side gets no new chunks after its active chunk finishes,
@@ -422,8 +421,7 @@ fn retire_armed() -> bool {
 /// unparseable falls back to the proven experimental measurement default,
 /// and the whole mechanism stays OFF unless `retire_armed()`.
 fn retire_ratio() -> f64 {
-    std::env::var("HY4_ACTIVE_ACTIVE_RETIRE_RATIO")
-        .ok()
+    crate::env_canonical("DATA_PLANE_ACTIVE_ACTIVE_RETIRE_RATIO", "HY4_ACTIVE_ACTIVE_RETIRE_RATIO")
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|r| r.is_finite() && *r > 1.0)
         .unwrap_or(4.0)
@@ -432,7 +430,7 @@ fn retire_ratio() -> f64 {
 /// T18: replace a retired lane with another already-warm same-TF cap
 /// (proven as HY4 P2T on m3-north-db).
 ///
-/// Experimental, default OFF (`HY4_ACTIVE_ACTIVE_REPLACE_LANE=1`, and only
+/// Experimental, default OFF (`DATA_PLANE_ACTIVE_ACTIVE_REPLACE_LANE=1`, and only
 /// on the active two-lane steal path). While a two-lane run is active, if
 /// lane A or B retires under T13, then after its current active chunk is
 /// finished the vacant lane tries EXACTLY ONCE to reserve another warm
@@ -444,7 +442,7 @@ fn retire_ratio() -> f64 {
 /// only (no terminal-failure vacancy).
 fn replace_armed() -> bool {
     retire_armed()
-        && std::env::var("HY4_ACTIVE_ACTIVE_REPLACE_LANE")
+        && crate::env_canonical("DATA_PLANE_ACTIVE_ACTIVE_REPLACE_LANE", "HY4_ACTIVE_ACTIVE_REPLACE_LANE")
             .map(|v| v == "1")
             .unwrap_or(false)
 }
@@ -1254,10 +1252,10 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     let size = state.authoritative_size;
     // P5 TEST-ONLY fault gate: force provider-exhaustion for specific tfIds so
     // the persisted-candidate fallback path can be exercised in a bounded,
-    // reversible way (set HY4_FORCE_EXHAUST_TFID=tf_xxx on the container, unset
+    // reversible way (set DATA_PLANE_FORCE_EXHAUST_TFID=tf_xxx on the container, unset
     // to disable). Never set in production. Returns the classified 502 BEFORE
     // any 206 is committed, exactly as a real AllSameTfFailed would.
-    if let Ok(list) = std::env::var("HY4_FORCE_EXHAUST_TFID") {
+    if let Some(list) = crate::env_canonical("DATA_PLANE_FORCE_EXHAUST_TFID", "HY4_FORCE_EXHAUST_TFID") {
         let forced: Vec<&str> = list.split(',').map(|s| s.trim()).collect();
         if forced.iter().any(|t| *t == state.tf_id) {
             return data_plane_error(
@@ -1891,7 +1889,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                             // one second already-warm same-TF capability via
                             // the existing T2 standby path (same-slot first,
                             // then same-TF cross-provider when
-                            // HY4_CROSS_PROVIDER_STANDBY=1 -- never an
+                            // DATA_PLANE_CROSS_PROVIDER_STANDBY=1 -- never an
                             // acquisition). Both in hand or no striping: the
                             // fallback below is the exact existing path.
                             // The one consecutive OWNED run splits
