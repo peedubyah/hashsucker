@@ -321,6 +321,36 @@ fn stealing_armed() -> bool {
             .unwrap_or(false)
 }
 
+/// T13: retire a persistently slow lane.
+///
+/// Experimental, default OFF (`HY4_ACTIVE_ACTIVE_RETIRE_SLOW_LANE=1` arms
+/// it, only together with the T12 steal path). When armed, per-worker
+/// useful-throughput observations across chunk fills may retire one lane:
+/// the retired side gets no new chunks after its active chunk finishes,
+/// and the healthy side steals/drains its remaining unstarted queue.
+/// Active chunks are never stolen or canceled by retirement. Zero new
+/// capability acquisition (both workers keep their pinned warm caps; the
+/// retired cap is released on worker exit).
+fn retire_armed() -> bool {
+    stealing_armed()
+        && std::env::var("HY4_ACTIVE_ACTIVE_RETIRE_SLOW_LANE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+}
+
+/// T13: experimental slow-lane ratio threshold (test-injectable).
+/// A lane retires only when the sibling's clean useful throughput exceeds
+/// `ratio * slow`. No production threshold decision here: unset or
+/// unparseable falls back to the proven experimental measurement default,
+/// and the whole mechanism stays OFF unless `retire_armed()`.
+fn retire_ratio() -> f64 {
+    std::env::var("HY4_ACTIVE_ACTIVE_RETIRE_RATIO")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|r| r.is_finite() && *r > 1.0)
+        .unwrap_or(4.0)
+}
+
 /// T12: shutdown guard for steal-path workers. Held by the demand task;
 /// dropping it (every early return) stops assignment so workers exit
 /// between fills. Permits free on worker/fill drops either way.
@@ -336,8 +366,9 @@ impl Drop for StripeShutdownGuard {
 
 /// T12: which lane a stripe worker belongs to. Only used for steal
 /// direction; fetch responsibility is per-chunk either way.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StripeSide {
+/// `pub(crate)` so the T13 unit proofs can drive the coordinator directly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum StripeSide {
     A,
     B,
 }
@@ -351,7 +382,12 @@ enum StripeSide {
 /// atomically, one chunk per decision. A chunk leaves its queue exactly
 /// once (Mutex-held pop), so two ordinary producers for one chunk are
 /// structurally impossible.
-struct TwoStripeWork {
+///
+/// T13 adds runtime-only retirement state (retired flags, active-chunk
+/// tracking, per-lane observation history). Retirement moves no bytes and
+/// persists nothing.
+/// `pub(crate)` so the T13 unit proofs can drive the coordinator directly.
+pub(crate) struct TwoStripeWork {
     state: std::sync::Mutex<TwoStripeState>,
 }
 
@@ -360,60 +396,316 @@ struct TwoStripeState {
     right: VecDeque<u64>,
     shutdown: bool,
     continent_failed: bool,
+    /// T13: runtime-only retirement. Index 0 = A, 1 = B.
+    retired: [bool; 2],
+    /// Active chunk per side (chunk idx + assignment instant). Set on
+    /// `next()`, cleared on `finish()`. Popped => active => unstealable by
+    /// construction, retirement included.
+    active: [Option<(u64, Instant)>; 2],
+    /// Per-lane useful-throughput history across chunk fills.
+    obs: [LaneObs; 2],
+}
+
+/// T13: one lane's cross-fill useful-throughput history.
+///
+/// One sample per completed chunk fill: useful upstream bytes over
+/// monotonic time. Measurement rules:
+/// - useful upstream bytes only (chunk body length; headers/retries never enter);
+/// - monotonic `Instant` durations;
+/// - downstream-contaminated samples are invalid (dropped, never counted);
+/// - producer (provider + cap id) change resets history.
+#[derive(Clone, Default)]
+struct LaneObs {
+    provider: Option<String>,
+    cap_id: Option<String>,
+    /// Clean samples only, oldest first. Each is (bytes, elapsed, bps).
+    samples: Vec<(u64, Duration, u64)>,
+    /// Latch after a downstream-contaminated drop. Blocks early
+    /// active-overrun retirement until a fresh clean epoch rebuilds.
+    tainted: bool,
+}
+
+impl LaneObs {
+    fn avg_bps(&self) -> Option<f64> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        // Average of the last two clean samples when present (two
+        // independent observations); else the single sample. Using the
+        // recent window keeps a transient single dip from retiring.
+        let n = self.samples.len().min(2);
+        let sum: u128 = self.samples[self.samples.len() - n..]
+            .iter()
+            .map(|(_, _, b)| *b as u128)
+            .sum();
+        Some(sum as f64 / n as f64)
+    }
+
+    fn avg_duration(&self) -> Option<Duration> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let n = self.samples.len().min(2);
+        let sum = self.samples[self.samples.len() - n..]
+            .iter()
+            .map(|(_, d, _)| d.as_nanos())
+            .sum::<u128>()
+            / n as u128;
+        Some(Duration::from_nanos(sum as u64))
+    }
+}
+
+fn lane_idx(side: StripeSide) -> usize {
+    match side {
+        StripeSide::A => 0,
+        StripeSide::B => 1,
+    }
 }
 
 impl TwoStripeWork {
-    fn new(left: Vec<u64>, right: Vec<u64>) -> Self {
+    /// `pub(crate)` so the T13 unit proofs can construct a coordinator directly.
+    pub(crate) fn new(left: Vec<u64>, right: Vec<u64>) -> Self {
         Self {
             state: std::sync::Mutex::new(TwoStripeState {
                 left: left.into(),
                 right: right.into(),
                 shutdown: false,
                 continent_failed: false,
+                retired: [false, false],
+                active: [None, None],
+                obs: [LaneObs::default(), LaneObs::default()],
             }),
         }
     }
 
     /// Next unstarted chunk for `side`, or `None` (own queue empty with
-    /// nothing stealable, shutdown, or a sibling chunk already failed).
+    /// nothing stealable, shutdown, retired, or a sibling chunk already failed).
     /// Steal policy (dumb, deterministic): own front first; else the far
     /// end (back) of the donor queue iff it still holds >= 2 unstarted --
     /// the donor's last unstarted chunk (and always its active chunk, long
     /// popped) stays theirs. One chunk per decision; no prediction.
     /// An already-active chunk is never stealable: it left the deque at
     /// assignment, so a steal can never duplicate an existing producer.
-    fn next(&self, side: StripeSide) -> Option<(u64, bool)> {
+    ///
+    /// T13: a retired side gets no new work and does not steal (returns
+    /// None even with own queue non-empty; its remaining unstarted queue
+    /// stays for the healthy side). A healthy side stealing from a retired
+    /// donor may take the donor's last unstarted chunk (>= 1 gate) so the
+    /// retired queue fully drains; against a live donor the frozen >= 2
+    /// gate holds. Active chunks remain unstealable as today (popped).
+    /// `pub(crate)` so the T13 unit proofs can drive the coordinator directly.
+    pub(crate) fn next(&self, side: StripeSide) -> Option<(u64, bool)> {
         let mut st = self.state.lock().unwrap();
         if st.shutdown || st.continent_failed {
             return None;
         }
-        let (own_len, donor_len) = {
+        if st.retired[lane_idx(side)] {
+            return None;
+        }
+        let (own_len, donor_len, donor_retired) = {
             let (o, d) = match side {
                 StripeSide::A => (&st.left, &st.right),
                 StripeSide::B => (&st.right, &st.left),
             };
-            (o.len(), d.len())
+            let donor_side = match side {
+                StripeSide::A => StripeSide::B,
+                StripeSide::B => StripeSide::A,
+            };
+            (o.len(), d.len(), st.retired[lane_idx(donor_side)])
         };
         if own_len > 0 {
             let idx = match side {
                 StripeSide::A => st.left.pop_front().unwrap(),
                 StripeSide::B => st.right.pop_front().unwrap(),
             };
+            st.active[lane_idx(side)] = Some((idx, Instant::now()));
             return Some((idx, false));
         }
-        if donor_len >= 2 {
+        let gate = if donor_retired { 1 } else { 2 };
+        if donor_len >= gate {
             let idx = match side {
                 StripeSide::A => st.right.pop_back().unwrap(),
                 StripeSide::B => st.left.pop_back().unwrap(),
             };
+            st.active[lane_idx(side)] = Some((idx, Instant::now()));
             return Some((idx, true));
         }
         None
     }
 
-    /// Record a chunk fill's outcome (cache authority decides `ok`).
-    fn finish(&self, _chunk: u64, ok: bool) {
+    /// T13: worker-level useful-throughput observation across chunk fills.
+    ///
+    /// One call per completed chunk fill (bytes = chunk body length, elapsed
+    /// = monotonic fill wall time). Rules:
+    /// - `contaminated` (downstream-blocked) samples are dropped, clear the
+    ///   lane's epoch, and latch taint so an overrun active cannot retire on
+    ///   contaminated time; fresh clean samples rebuild afterwards;
+    /// - zero bytes / zero time (silence) never classifies;
+    /// - producer (provider + cap id) change resets that lane's history and
+    ///   drops the mixed sample.
+    /// Retirement needs two independent clean observations showing one lane
+    /// materially slower (sibling avg > ratio * slow avg, or a slow active
+    /// chunk running longer than ratio * fast avg chunk time once the fast
+    /// lane owns two clean samples). One-way, first slow lane wins. No-op
+    /// unless the retire gate is armed, so T12 behavior is unchanged when
+    /// retirement is OFF.
+    /// `pub(crate)` so the T13 unit proofs can drive the coordinator directly.
+    pub(crate) fn observe(
+        &self,
+        side: StripeSide,
+        bytes: u64,
+        elapsed: Duration,
+        contaminated: bool,
+        provider: &str,
+        cap_id: &str,
+    ) {
+        if !retire_armed() {
+            return;
+        }
+        if contaminated {
+            // Downstream-contaminated: invalid, never counts. Clear the
+            // epoch and latch taint so an overrun active cannot retire on
+            // contaminated time. Fresh cleans rebuild afterwards.
+            if let Ok(mut st) = self.state.try_lock() {
+                let idx = lane_idx(side);
+                st.obs[idx].samples.clear();
+                st.obs[idx].tainted = true;
+            }
+            return;
+        }
+        if bytes == 0 || elapsed.is_zero() {
+            return;
+        }
+        let bps = (bytes as f64 / elapsed.as_secs_f64()).round() as u64;
+        if bps == 0 {
+            return;
+        }
+        let ratio = retire_ratio();
         let mut st = self.state.lock().unwrap();
+        if st.retired[0] || st.retired[1] {
+            return;
+        }
+        let idx = lane_idx(side);
+        // Producer change resets history (old samples never contaminate).
+        match (&st.obs[idx].provider, &st.obs[idx].cap_id) {
+            (Some(p), Some(g)) if p == provider && g == cap_id => {}
+            (None, None) => {
+                st.obs[idx].provider = Some(provider.to_string());
+                st.obs[idx].cap_id = Some(cap_id.to_string());
+            }
+            _ => {
+                st.obs[idx].provider = Some(provider.to_string());
+                st.obs[idx].cap_id = Some(cap_id.to_string());
+                st.obs[idx].samples.clear();
+                return;
+            }
+        }
+        // Init producer on first sample (None case above already set).
+        if st.obs[idx].provider.is_none() {
+            st.obs[idx].provider = Some(provider.to_string());
+            st.obs[idx].cap_id = Some(cap_id.to_string());
+        }
+        st.obs[idx].samples.push((bytes, elapsed, bps));
+        if st.obs[idx].samples.len() > 16 {
+            st.obs[idx].samples.remove(0);
+        }
+        let now = Instant::now();
+        // Case 1: both lanes own >= 2 clean samples -- compare recent avgs.
+        if st.obs[0].samples.len() >= 2 && st.obs[1].samples.len() >= 2 {
+            if let (Some(a), Some(b)) = (st.obs[0].avg_bps(), st.obs[1].avg_bps()) {
+                if a > 0.0 && b > 0.0 {
+                    if b * ratio < a {
+                        st.retired[1] = true;
+                        eprintln!(
+                            "[t13] lane_retired: slow=B fast=A avg_bps_a={:.0} avg_bps_b={:.0} ratio={}",
+                            a, b, ratio,
+                        );
+                        return;
+                    }
+                    if a * ratio < b {
+                        st.retired[0] = true;
+                        eprintln!(
+                            "[t13] lane_retired: slow=A fast=B avg_bps_a={:.0} avg_bps_b={:.0} ratio={}",
+                            a, b, ratio,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        // Case 2 (early): fast lane owns >= 2 clean samples while the slow
+        // lane is still on an active chunk -- compare the slow active's
+        // elapsed against the fast avg chunk time. This retires before the
+        // slow lane completes its second chunk, so the healthy lane is still
+        // alive to drain. Silence alone never retires: needs two fast
+        // clean samples plus a materially overrun active. A tainted
+        // (recently downstream-contaminated) slow never retires here.
+        for (fast, slow) in [(0usize, 1usize), (1usize, 0usize)] {
+            if st.retired[slow] {
+                continue;
+            }
+            if st.obs[fast].samples.len() < 2 {
+                continue;
+            }
+            // Don't early-retire on a slow lane that already proved itself
+            // with >= 2 samples unless Case 1 above fired (avgs close).
+            // Early path is for slow with under 2 samples.
+            if st.obs[slow].samples.len() >= 2 {
+                continue;
+            }
+            if st.obs[slow].tainted {
+                continue;
+            }
+            let Some(fast_avg_dur) = st.obs[fast].avg_duration() else {
+                continue;
+            };
+            if fast_avg_dur.is_zero() {
+                continue;
+            }
+            let Some((_, t_assign)) = st.active[slow] else {
+                continue;
+            };
+            let elapsed_active = now.duration_since(t_assign);
+            let threshold = fast_avg_dur.mul_f64(ratio);
+            if elapsed_active >= threshold {
+                st.retired[slow] = true;
+                let slow_name = if slow == 0 { "A" } else { "B" };
+                let fast_name = if fast == 0 { "A" } else { "B" };
+                eprintln!(
+                    "[t13] lane_retired: slow={slow_name} fast={fast_name} fast_avg_ms={} active_ms={} ratio={}",
+                    fast_avg_dur.as_millis(),
+                    elapsed_active.as_millis(),
+                    ratio,
+                );
+                return;
+            }
+        }
+    }
+
+    /// T13: which side (if any) has retired. Test/report query only;
+    /// retirement itself is decided inside `observe()`.
+    /// `pub(crate)` so the T13 unit proofs can assert retirement directly.
+    pub(crate) fn retired_side(&self) -> Option<StripeSide> {
+        let st = self.state.lock().unwrap();
+        for (i, side) in [(0, StripeSide::A), (1, StripeSide::B)] {
+            if st.retired[i] {
+                return Some(side);
+            }
+        }
+        None
+    }
+
+    /// Record a chunk fill's outcome (cache authority decides `ok`).
+    /// `pub(crate)` so the T13 unit proofs can drive the coordinator directly.
+    pub(crate) fn finish(&self, chunk: u64, ok: bool) {
+        let mut st = self.state.lock().unwrap();
+        // Active chunk resolved (completed or terminal): clear whichever
+        // side owned it. Retirement never clears another side's active.
+        for slot in st.active.iter_mut() {
+            if matches!(slot, Some((c, _)) if *c == chunk) {
+                *slot = None;
+            }
+        }
         if !ok {
             // Fail fast: no more assignments after a terminal chunk failure.
             // In-flight fills still complete durably; unstarted chunks stay
@@ -460,6 +752,16 @@ impl TwoStripeWork {
 /// lane, never two concurrent uses (maxInFlight=1 holds structurally: one
 /// worker, one cap, one live fill). Per-chunk fills are ordinary fills
 /// (same limiter/breaker/retry/reacquire inside each fill).
+///
+/// T13: after each chunk fill the worker reports one cross-fill
+/// useful-throughput observation (chunk body bytes over monotonic fill
+/// wall time) to the coordinator. Stage-only fills are never downstream-
+/// contaminated; the head streaming fill runs against the normal demand
+/// emitter (fast in every deterministic proof) and is treated as clean.
+/// Producer identity is post-fill so a mid-fill change resets that lane's
+/// history via `observe()`. A retired side exits after its active chunk
+/// (`next()` returns None); its cap drops here (permit released, lane
+/// reusable).
 #[allow(clippy::too_many_arguments)]
 async fn stripe_worker(
     coord: Arc<TwoStripeWork>,
@@ -487,6 +789,8 @@ async fn stripe_worker(
     loop {
         let (idx, _stolen) = match coord.next(side) {
             Some(job) => job,
+            // Retired (or exhausted/shutdown): exit after the active chunk.
+            // Remaining unstarted work stays queued for the healthy side.
             None => break,
         };
         let cs = grid.chunk_start(idx);
@@ -500,6 +804,8 @@ async fn stripe_worker(
         let ws = run_start.max(cs);
         let we = run_end.min(ce);
         let sink = chunk_sinks.get(&idx).cloned();
+        let fill_start = Instant::now();
+        let span_bytes = ce.saturating_sub(cs).saturating_add(1);
         let ret = fill_chunk_run(
             cache.clone(),
             metrics.clone(),
@@ -522,8 +828,25 @@ async fn stripe_worker(
         // Cache authority decides the outcome (present == success), exactly
         // as the fill's own mark() does for its waiters.
         coord.finish(idx, cache.is_present(&key, idx).unwrap_or(false));
+        // T13 cross-fill observation: useful bytes (whole-chunk body length)
+        // over monotonic fill time. Stage-only fills are clean by
+        // construction (no downstream channel); the head fill is clean in
+        // every deterministic proof (fast emitter). Contaminated samples are
+        // dropped inside observe(); silence (zero) never classifies.
+        // Producer identity is post-fill so a mid-fill change resets.
         match ret {
-            Some(c) => cap = c,
+            Some(c) => {
+                let elapsed = fill_start.elapsed();
+                coord.observe(
+                    side,
+                    span_bytes,
+                    elapsed,
+                    false,
+                    &c.cap.provider,
+                    &c.cap.cap_id,
+                );
+                cap = c;
+            }
             // No reservation to continue with (only when the fill had none
             // to begin with -- workers always pass one). Remaining unstarted
             // chunks stay queued for the sibling worker.

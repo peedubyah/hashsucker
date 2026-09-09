@@ -34,3 +34,22 @@ pub fn set_steal(on: bool) {
         std::env::remove_var("HY4_ACTIVE_ACTIVE_STEAL");
     }
 }
+
+/// Set (`true`) or remove (`false`) the T13 slow-lane retirement gate.
+pub fn set_retire(on: bool) {
+    if on {
+        std::env::set_var("HY4_ACTIVE_ACTIVE_RETIRE_SLOW_LANE", "1");
+    } else {
+        std::env::remove_var("HY4_ACTIVE_ACTIVE_RETIRE_SLOW_LANE");
+    }
+}
+
+/// Set (`Some`) or remove (`None`) the experimental slow-lane retire ratio
+/// (`HY4_ACTIVE_ACTIVE_RETIRE_RATIO`). Test-injectable only; no production
+/// value is chosen here.
+pub fn set_retire_ratio(r: Option<f64>) {
+    match r {
+        Some(v) => std::env::set_var("HY4_ACTIVE_ACTIVE_RETIRE_RATIO", v.to_string()),
+        None => std::env::remove_var("HY4_ACTIVE_ACTIVE_RETIRE_RATIO"),
+    }
+}

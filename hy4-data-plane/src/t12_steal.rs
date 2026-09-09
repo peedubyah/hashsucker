@@ -55,7 +55,7 @@ use crate::manager::CapabilityManager;
 use crate::metrics::Metrics;
 use crate::playback_intel::{PfConfig, PlaybackIntelligence, PrefetchMode};
 use crate::serve::{get_file, AppState};
-use crate::test_env::{env_lock, set_steal, set_two_span};
+use crate::test_env::{env_lock, set_retire, set_steal, set_two_span};
 
 const FILE: u64 = 1 << 20;
 const CHUNK: u64 = 65536;
@@ -357,6 +357,10 @@ async fn t12_steal_off_is_fixed_two_lane() {
     let _guard = env_lock();
     set_two_span(true);
     set_steal(false);
+    // T13 isolation: these proofs pin T12 stealing behavior, so the
+    // retirement gate is explicitly OFF (shared lock already excludes a
+    // concurrent flip; this covers stale state from a panicked test).
+    set_retire(false);
     std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
     pin_a_torbox();
     let hits = Arc::new(Mutex::new(Vec::new()));
@@ -381,6 +385,7 @@ async fn t12_steal_off_is_fixed_two_lane() {
     server.abort();
     set_two_span(false);
     set_steal(false);
+    set_retire(false);
     unpin_slot_order();
 }
 
@@ -390,6 +395,7 @@ async fn t12_slow_b_fast_a_steals_tail() {
     let _guard = env_lock();
     set_two_span(true);
     set_steal(true);
+    set_retire(false);
     std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
     pin_a_torbox();
     let hits = Arc::new(Mutex::new(Vec::new()));
@@ -422,6 +428,7 @@ async fn t12_slow_b_fast_a_steals_tail() {
     server.abort();
     set_two_span(false);
     set_steal(false);
+    set_retire(false);
     unpin_slot_order();
 }
 
@@ -431,6 +438,7 @@ async fn t12_slow_a_fast_b_steals_tail() {
     let _guard = env_lock();
     set_two_span(true);
     set_steal(true);
+    set_retire(false);
     std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
     pin_a_torbox();
     let hits = Arc::new(Mutex::new(Vec::new()));
@@ -460,6 +468,7 @@ async fn t12_slow_a_fast_b_steals_tail() {
     server.abort();
     set_two_span(false);
     set_steal(false);
+    set_retire(false);
     unpin_slot_order();
 }
 
@@ -469,6 +478,7 @@ async fn t12_active_donor_chunk_never_stolen() {
     let _guard = env_lock();
     set_two_span(true);
     set_steal(true);
+    set_retire(false);
     std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
     pin_a_torbox();
     // Four chunks: A owns {0,1}, B owns {2,3}. B pops active chunk 2 at
@@ -503,5 +513,6 @@ async fn t12_active_donor_chunk_never_stolen() {
     server.abort();
     set_two_span(false);
     set_steal(false);
+    set_retire(false);
     unpin_slot_order();
 }

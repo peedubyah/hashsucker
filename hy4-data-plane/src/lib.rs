@@ -92,3 +92,10 @@ mod test_env;
 // non-stealability, all with zero acquisition.
 #[cfg(test)]
 mod t12_steal;
+
+// T13 transplant proof: slow-lane retirement (proven as HY4 P2Q on
+// m3-north-db). Test-only: pins retire-OFF T12 behavior, slow-B/slow-A
+// retirement with healthy-lane drain and exactly-once exact output, and
+// transient/contaminated non-retirement, all with zero acquisition.
+#[cfg(test)]
+mod t13_retire;
