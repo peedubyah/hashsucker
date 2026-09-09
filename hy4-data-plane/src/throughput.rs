@@ -126,6 +126,93 @@ pub struct ThroughputSnapshot {
 /// (future production wiring passes None).
 pub type ThroughputHook = Arc<dyn Fn(ThroughputSnapshot) + Send + Sync>;
 
+/// T16 window-cadenced consecutive-low policy state (proven as HY4 P2M on
+/// m3-north-db). Fill-local (lives beside the estimator in the fill loop,
+/// never shared).
+///
+/// A single `LowThroughput` classification is one observation window's
+/// opinion, and `classify()` runs at body-frame cadence: two adjacent
+/// Low verdicts 3 ms apart may describe the SAME rolling window. This
+/// policy advances its count only for temporally INDEPENDENT sustained
+/// observations, all within one producer epoch:
+/// - the first qualifying clean Low completes observation #1;
+/// - the count advances again only after at least one full observation
+///   interval (`window`) has elapsed since the previous observation;
+/// - any Healthy verdict, estimator reset (contamination or producer
+///   change, observed via the resets counter / capability id), or
+///   capability-id mismatch restarts the sequence;
+/// - `InsufficientSample` (silence, sparse windows) neither manufactures
+///   nor destroys.
+/// A consumer arms a low-throughput response only at count >= 2, i.e.
+/// never on the first complete window after producer start/reset.
+///
+/// Production adaptation vs the proven source: producer identity is the
+/// transplant `cap_id` string, not the later HY4 generation counter.
+#[derive(Debug, Clone)]
+pub struct LowObservationPolicy {
+    count: u32,
+    cap_id: Option<String>,
+    last_observation_at: Option<Instant>,
+    tracked_resets: u64,
+}
+
+impl LowObservationPolicy {
+    pub fn new() -> Self {
+        Self {
+            count: 0,
+            cap_id: None,
+            last_observation_at: None,
+            tracked_resets: 0,
+        }
+    }
+
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// Explicit sequence restart (warm-standby miss at dispatch): the
+    /// next Low rebuilds from observation #1, so another attempt cannot
+    /// occur on the next couple of body frames.
+    pub fn reset_sequence(&mut self) {
+        self.count = 0;
+        self.last_observation_at = None;
+    }
+
+    /// Feed one estimator evaluation. Returns true exactly when a NEW
+    /// independent low observation completes. `window` is the configured
+    /// observation interval (no second knob); `now` is the evaluation
+    /// instant.
+    pub fn note_verdict(
+        &mut self,
+        snap: &ThroughputSnapshot,
+        window: Duration,
+        now: Instant,
+    ) -> bool {
+        if snap.resets != self.tracked_resets || self.cap_id.as_deref() != Some(snap.cap_id.as_str()) {
+            self.count = 0;
+            self.cap_id = Some(snap.cap_id.clone());
+            self.last_observation_at = None;
+            self.tracked_resets = snap.resets;
+        }
+        match snap.verdict {
+            ThroughputVerdict::LowThroughput => match self.last_observation_at {
+                Some(t) if now.duration_since(t) < window => false,
+                _ => {
+                    self.count += 1;
+                    self.last_observation_at = Some(now);
+                    true
+                }
+            },
+            ThroughputVerdict::Healthy => {
+                self.count = 0;
+                self.last_observation_at = None;
+                false
+            }
+            ThroughputVerdict::InsufficientSample => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ThroughputConfig {
     pub floor_bps: u64,

@@ -59,6 +59,9 @@ use crate::capability::ApiKeys;
 use crate::control::fetch_control;
 use crate::metrics::{CacheDecision, Metrics, MetricsExt, StageClock, StageReport, WorkClass};
 use crate::playback_intel::{PlaybackIntelligence, PrefetchMode};
+use crate::throughput::{
+    config_from_env as low_throughput_config, LowObservationPolicy, ThroughputEstimator,
+};
 use crate::transport::{Faults, OpenError, ResilientRangeReader, Step};
 
 pub const SUPPORTED_SCHEMA_VERSION: u64 = 1;
@@ -2436,6 +2439,32 @@ pub async fn fill_chunk_run(
     if let Some(s) = stage.as_ref() {
         reader.set_stage_clock(s.clone());
     }
+    // ---- T16 sustained-low-throughput warm promotion (proven as HY4 P2M
+    // on m3-north-db). Loop-local estimator beside the read loop: same
+    // committed Step::Chunk feed, no shared state, no locks. Constructed
+    // only for demand fills (sink.is_some()); prefetch and stage-only
+    // fills (sink None) never threaten playback and are excluded
+    // structurally. Unset/zero floor => None => the fill behaves exactly
+    // as before (zero overhead, zero verdicts, zero promotions).
+    let mut throughput: Option<ThroughputEstimator> = if sink.is_some() {
+        low_throughput_config().map(|cfg| {
+            let live = reader.current_cap();
+            ThroughputEstimator::new(
+                cfg.floor_bps,
+                cfg.window,
+                cfg.blocked_threshold,
+                live.provider.clone(),
+                live.cap_id.clone(),
+            )
+        })
+    } else {
+        None
+    };
+    // ---- T16 window-cadenced consecutive-low policy (fill-local) ----
+    // Counts INDEPENDENT sustained low observations within one producer
+    // epoch (never per-frame classifications). Promotion may fire at count
+    // >= 2. Stays at zero unless the estimator above is active.
+    let mut low_policy = LowObservationPolicy::new();
 
     let sub_open = Instant::now();
     if reader.ensure_open().await.is_err() {
@@ -2470,6 +2499,29 @@ pub async fn fill_chunk_run(
                 let cs = pos;
                 let ce = pos + n - 1;
                 pos = ce + 1;
+                let chunk_at = Instant::now();
+                // T16: feed the same committed body bytes to the throughput
+                // estimator. A transport-internal producer swap (dead-link
+                // reacquire without fill-level promotion) resets the epoch
+                // via the live identity check -- same producer (reopen /
+                // retry) stays in the epoch.
+                if let Some(est) = throughput.as_mut() {
+                    let live = reader.current_cap();
+                    if live.provider != est.provider() || live.cap_id != est.cap_id() {
+                        est.reset_for_producer(live.provider.clone(), live.cap_id.clone());
+                    }
+                    est.observe(chunk_at, n);
+                    let snap = est.classify(chunk_at);
+                    // T16 window-cadenced consecutive-low policy. The
+                    // estimator window is the cadence (no second knob):
+                    // only temporally independent sustained observations
+                    // advance the count, never adjacent frame verdicts.
+                    let _ = low_policy.note_verdict(
+                        &snap,
+                        Duration::from_millis(snap.window_ms),
+                        chunk_at,
+                    );
+                }
                 // Forward ONLY the part of this chunk inside the client window.
                 // Bytes outside it are still staged — that is the whole point of
                 // whole-chunk fetching — but they are never DELIVERED. The chunk
@@ -2482,13 +2534,74 @@ pub async fn fill_chunk_run(
                             // but a transport that ever handed back more bytes
                             // than it announced must not take the process down.
                             let z = z.min(b.len().saturating_sub(a));
-                            if tx.send(SpanMsg::Chunk(b.slice(a..a + z))).await.is_err() {
+                            // T16 contamination boundary: a downstream send
+                            // issued with zero channel capacity WILL block,
+                            // so latch a taint BEFORE awaiting (a stalled
+                            // consumer can hold the send indefinitely, and
+                            // post-await recording would never execute). A
+                            // fast completion clears a momentary-fullness
+                            // false alarm with samples intact, while a slow
+                            // completion confirms real downstream pacing and
+                            // discards the epoch (never read as provider
+                            // degradation).
+                            if let Some(est) = throughput.as_mut() {
+                                est.note_presend(tx.capacity() == 0);
+                            }
+                            let send_start = Instant::now();
+                            let send_ok =
+                                tx.send(SpanMsg::Chunk(b.slice(a..a + z))).await.is_ok();
+                            if let Some(est) = throughput.as_mut() {
+                                est.note_send(send_start.elapsed());
+                            }
+                            if !send_ok {
                                 // Client hung up. Keep filling: the chunk is
                                 // still worth having, and waiters depend on
                                 // these records being resolved.
                                 client_gone = true;
                                 metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
                             }
+                        }
+                    }
+                }
+                // T16: low-throughput promotion fire. The policy arms
+                // structurally (two independent sustained low observations
+                // in one producer epoch), never on a timer. Unarmed
+                // (including detector OFF) behaves exactly as before.
+                // Warm-only: on a standby miss there is no cold-acquire
+                // fallback -- reset the sequence so re-attempt needs a fresh
+                // interval (bounded attempts, never a per-frame hot loop),
+                // and continue serving from the current producer with no
+                // budget spent. This runs only on healthy delivery, so the
+                // existing failure/recovery ordering stays authoritative.
+                if low_policy.count() >= 2 {
+                    let slow_cap = reader.current_cap();
+                    match manager.reserve_standby(&slow_cap) {
+                        Some((standby, slot_key)) if slot_key == tf.durable_key => {
+                            let new_provider = standby.cap.provider.clone();
+                            let new_cap_id = standby.cap.cap_id.clone();
+                            reader.promote_to(standby);
+                            if let Some(est) = throughput.as_mut() {
+                                est.reset_for_producer(new_provider.clone(), new_cap_id);
+                            }
+                            // Fresh producer must prove itself slow again:
+                            // re-arm needs two new independent windows.
+                            low_policy.reset_sequence();
+                            eprintln!(
+                                "[t16] promoted: tf={} span={f_start}-{f_end} slow={} new={new_provider} at_pos={pos}",
+                                tf.durable_key,
+                                slow_cap.provider,
+                            );
+                        }
+                        other => {
+                            // No warm standby (or cross-TF, never): drop any
+                            // reservation, serve the current producer, spend
+                            // no budget.
+                            drop(other);
+                            low_policy.reset_sequence();
+                            eprintln!(
+                                "[t16] standby_miss: tf={} span={f_start}-{f_end} (no warm standby; serving current producer, no budget spent)",
+                                tf.durable_key,
+                            );
                         }
                     }
                 }

@@ -114,3 +114,10 @@ mod t14_auto;
 // contamination/producer-change protection against false lows.
 #[cfg(test)]
 mod t15_throughput;
+
+// T16 transplant proof: sustained-low-throughput warm promotion (proven as
+// HY4 P2M on m3-north-db). Test-only: pins single-low no-arm, two-low
+// warm promotion with exact bytes and zero acquisition, healthy/
+// contaminated no-promotion, and no-standby continuation without failure.
+#[cfg(test)]
+mod t16_promotion;
