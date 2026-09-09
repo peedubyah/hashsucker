@@ -65,3 +65,10 @@ mod t4_refresh;
 // orchestration.
 #[cfg(test)]
 mod t5_endpoint;
+
+// T8 transplant proof: request-scoped serving-primary attribution
+// (async end-to-end through get_file against localhost mock CDNs).
+// Test-only: pins provider-backed reporting, cache-hit silence, and
+// per-request independence.
+#[cfg(test)]
+mod t8_attribution;

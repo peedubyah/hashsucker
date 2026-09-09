@@ -86,6 +86,51 @@ export function classifyDataPlaneError(code, status) {
 }
 
 /**
+ * T8 request-scoped serving-primary attribution header names. Set by Rust
+ * on the 206 response when the demand actually uses a provider; absent on
+ * pure cache hits (truthful absence). Deliberately NOT in PROXIED_HEADERS:
+ * attribution is runtime execution metadata for later playback-activation
+ * use, not byte identity, and must not leak to players. Production caps
+ * carry cap-id (not the later HY4 generation), hence the fourth header.
+ */
+export const SERVING_ATTRIBUTION_HEADERS = Object.freeze({
+  provider: 'x-hashsucker-serving-provider',
+  providerResourceId: 'x-hashsucker-serving-resource-id',
+  providerFileId: 'x-hashsucker-serving-file-id',
+  capId: 'x-hashsucker-serving-cap-id',
+});
+
+/**
+ * Extract request-scoped serving attribution from an upstream 200/206
+ * response. Returns null when Rust carried no attribution (pure cache
+ * hit) or when the values are malformed — never a guess. Pure function
+ * so the mapping is unit-testable without HTTP.
+ */
+export function extractServingAttribution(upstreamHeaders) {
+  try {
+    const get = (name) => upstreamHeaders?.get?.(name) ?? null;
+    const provider = get(SERVING_ATTRIBUTION_HEADERS.provider);
+    const providerResourceId = get(SERVING_ATTRIBUTION_HEADERS.providerResourceId);
+    if (typeof provider !== 'string' || provider.trim() === ''
+      || typeof providerResourceId !== 'string' || providerResourceId.trim() === '') {
+      return null;
+    }
+    const providerFileId = get(SERVING_ATTRIBUTION_HEADERS.providerFileId);
+    const capId = get(SERVING_ATTRIBUTION_HEADERS.capId);
+    return {
+      provider: provider.trim().toLowerCase(),
+      providerResourceId: providerResourceId.trim(),
+      providerFileId: typeof providerFileId === 'string' && providerFileId.trim() !== ''
+        ? providerFileId.trim()
+        : null,
+      capId: typeof capId === 'string' && capId.trim() !== '' ? capId.trim() : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Forward a single VFS GET/Range read to the Rust data plane and proxy its
  * response to the client verbatim.
  *
@@ -96,6 +141,15 @@ export function classifyDataPlaneError(code, status) {
  * @param {import('http').IncomingMessage} args.request
  * @param {import('http').ServerResponse} args.response
  * @param {string} [args.contentType]  Fallback content-type when the data plane omits one.
+ * @param {Function|null} [args.onServingAttribution]  T8: invoked once with
+ *   the request-scoped serving attribution (or null) right after the client
+ *   headers commit — i.e. at header time, not body end. Never throws into
+ *   the byte path. Attribution headers are stripped from the player
+ *   response either way.
+ * @returns {Promise<{attribution} | undefined>} The extracted attribution
+ *   (or null) once the body completes; undefined is never returned — the
+ *   function always resolves to an object on success paths. Rejects with
+ *   DataPlaneError exactly as before on non-2xx/classified failures.
  */
 export async function streamFromDataPlane({
   fetchFn,
@@ -104,6 +158,7 @@ export async function streamFromDataPlane({
   request,
   response,
   contentType,
+  onServingAttribution = null,
 }) {
   const upstreamUrl = `${String(baseUrl).replace(/\/+$/, '')}/files/${encodeURIComponent(tfId)}`;
   const upstreamHeaders = {};
@@ -149,14 +204,32 @@ export async function streamFromDataPlane({
     }
     outHeaders['cache-control'] = 'no-store';
 
+    // T8: capture request-scoped serving attribution from the upstream
+    // headers (available now, before any body byte — no buffering, no
+    // delay). The attribution headers are deliberately NOT copied into
+    // outHeaders: the player response stays byte/header-identical to the
+    // pre-T8 contract.
+    const attribution = extractServingAttribution(upstream.headers);
+
     // Proxy status + headers verbatim. This automatically preserves 206/416,
     // streaming, Content-Range, Accept-Ranges, and the data plane's Retry-After
     // (carried outside PROXIED_HEADERS only if needed — see note in P4 §2).
     response.writeHead(status, outHeaders);
 
+    // Report attribution at header time (not body end) so later
+    // playback-activation use sees the real primary while still useful.
+    // A throwing listener must never break byte serving.
+    if (typeof onServingAttribution === 'function') {
+      try {
+        onServingAttribution(attribution);
+      } catch {
+        // Attribution delivery must never break primary playback.
+      }
+    }
+
     if (!upstream.body) {
       response.end();
-      return;
+      return { attribution };
     }
 
     const stream = Readable.fromWeb(upstream.body);
@@ -174,7 +247,7 @@ export async function streamFromDataPlane({
       request.removeListener('aborted', abort);
       response.removeListener('close', abort);
     }
-    return;
+    return { attribution };
   }
 
   // Non-success: read the body (Rust emits structured JSON on 5xx) and classify.

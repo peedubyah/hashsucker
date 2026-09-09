@@ -63,6 +63,67 @@ use crate::transport::{Faults, OpenError, ResilientRangeReader, Step};
 
 pub const SUPPORTED_SCHEMA_VERSION: u64 = 1;
 
+/// T8 transplant (proven as HY4 P2J on m3-north-db): request-scoped
+/// serving-primary attribution.
+///
+/// The initially selected upstream provider for ONE /files/:tfId
+/// demand's fetch work, snapshotted from the pre-acquire reservation
+/// (`first_reserved`) before the 206 commits. Runtime execution metadata
+/// only: never byte identity, never cache identity, never durable, and
+/// never the delivery URL (which stays private). Production caps carry
+/// `cap_id` (not the later HY4 generation), so the fourth header is
+/// `x-hashsucker-serving-cap-id`.
+///
+/// Scope and honesty rules:
+/// - Request-scoped: a handler-local Option, no global state. Consecutive
+///   demands attribute independently; a later demand never sees an
+///   earlier demand's provider.
+/// - Emitted only when the demand actually needs a provider. Pure cache
+///   hits acquire nothing and carry NO attribution headers (truthful
+///   absence, never a guess).
+/// - Pins the INITIAL selection. Owned strings snapshotted before the
+///   reservation moves into the producer task: later promotion/reacquire
+///   cannot rewrite what this demand initially selected.
+#[derive(Clone)]
+pub struct ServingAttribution {
+    pub provider: String,
+    pub provider_resource_id: String,
+    pub provider_file_id: String,
+    pub cap_id: String,
+}
+
+impl ServingAttribution {
+    pub const HDR_PROVIDER: &'static str = "x-hashsucker-serving-provider";
+    pub const HDR_RESOURCE_ID: &'static str = "x-hashsucker-serving-resource-id";
+    pub const HDR_FILE_ID: &'static str = "x-hashsucker-serving-file-id";
+    pub const HDR_CAP_ID: &'static str = "x-hashsucker-serving-cap-id";
+
+    /// Snapshot the initially selected capability's execution identity.
+    /// Owned strings: later promotion/reacquire cannot mutate this.
+    pub fn from_reserved(r: &manager::ReservedCapability) -> Self {
+        Self {
+            provider: r.cap.provider.clone(),
+            provider_resource_id: r.cap.provider_resource_id.clone(),
+            provider_file_id: r.cap.provider_file_id.clone(),
+            cap_id: r.cap.cap_id.clone(),
+        }
+    }
+
+    /// Header pairs for the 206 response. Empty when the demand needs no
+    /// provider (pure cache hit). Values are validated at apply time.
+    pub fn header_pairs_for(opt: Option<&ServingAttribution>) -> Vec<(&'static str, String)> {
+        match opt {
+            None => Vec::new(),
+            Some(a) => vec![
+                (Self::HDR_PROVIDER, a.provider.clone()),
+                (Self::HDR_RESOURCE_ID, a.provider_resource_id.clone()),
+                (Self::HDR_FILE_ID, a.provider_file_id.clone()),
+                (Self::HDR_CAP_ID, a.cap_id.clone()),
+            ],
+        }
+    }
+}
+
 /// Bytes of one chunk-fill span, forwarded from the fetch task to the client
 /// emitter. The emitter consumes spans in ascending chunk order, so the client
 /// still sees one ordered byte stream even when several spans fill concurrently.
@@ -394,6 +455,14 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             r.cap.account_scope.clone(),
         )
     });
+    // T8: snapshot the initially selected serving provider for
+    // request-scoped attribution headers. Cloned here because
+    // `first_reserved` moves into the producer task below; the snapshot
+    // is immutable from this point, so later promotion/reacquire can
+    // never rewrite what this demand initially selected.
+    let serving_attribution: Option<ServingAttribution> = first_reserved
+        .as_ref()
+        .map(ServingAttribution::from_reserved);
     // Observability-only: runtime correlation id. Same id will appear on the
     // StageReport and every CdnAttempt for this demand/fill.
     let corr_id = stage.corr_id();
@@ -1077,16 +1146,25 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     });
 
     let body = Body::from_stream(ReceiverStream::new(rx));
-    Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::PARTIAL_CONTENT)
         .header(
             header::CONTENT_RANGE,
             format!("bytes {start}-{end}/{size}"),
         )
         .header(header::CONTENT_LENGTH, client_content_len.to_string())
-        .header(header::ACCEPT_RANGES, "bytes")
-        .body(body)
-        .unwrap()
+        .header(header::ACCEPT_RANGES, "bytes");
+    // T8: request-scoped serving-primary attribution headers. Set only
+    // from the pre-commit snapshot above: no buffering, no media delay,
+    // no global state. Absent on pure cache hits (truthful: no provider
+    // served this demand). Invalid values are skipped, never fabricated —
+    // a demand with unusable attribution simply carries none.
+    for (name, value) in ServingAttribution::header_pairs_for(serving_attribution.as_ref()) {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&value) {
+            builder = builder.header(name, v);
+        }
+    }
+    builder.body(body).unwrap()
 }
 
 /// One item of a fetch run, in ascending chunk order.
