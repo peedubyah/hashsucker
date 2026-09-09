@@ -94,7 +94,7 @@ services:
   #   GET /files/:tfId  per-request S-1 fetch -> per-request AppState
   #   GET /metrics      process-aggregate counters
   #
-  # The Slice 4 cache lives on a named volume (data-plane-cache) so docker
+  # The Slice 4 cache lives on a named volume (hy4-cache) so docker
   # compose restart/recreate preserves durable bytes -- proof C in the P3
   # ladder is that a fresh container reuses the same on-disk cache path
   # without any manual code injection.
@@ -125,7 +125,7 @@ services:
     depends_on:
       - media-search
     volumes:
-      - data-plane-cache:/data
+      - hy4-cache:/data
     networks:
       default:
         aliases:
@@ -135,4 +135,4 @@ services:
 
 volumes:
   discovery-data:
-  data-plane-cache:
+  hy4-cache:

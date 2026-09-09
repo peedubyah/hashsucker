@@ -7,7 +7,7 @@
 # .env to the preserved Windows state ./hy4-data/discovery, which holds the real
 # discovery-cache.db + control-plane.db with their -wal/-shm), and explicitly
 # points the VFS forwarder at the Rust data plane. The Rust data plane
-# (data-plane) uses a named volume (data-plane-cache) and needs no host bind,
+# (data-plane) uses a named volume (hy4-cache) and needs no host bind,
 # so it is untouched.
 #
 # DATA_PLANE_URL points at the compose-network service name. The service is
