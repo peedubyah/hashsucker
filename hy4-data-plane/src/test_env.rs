@@ -83,3 +83,13 @@ pub fn set_hedge(on: bool) {
         std::env::remove_var("HY4_HEDGE_ENABLED");
     }
 }
+
+/// Set (`true`) or remove (`false`) the T18 retired-lane replacement gate
+/// (`HY4_ACTIVE_ACTIVE_REPLACE_LANE`, default OFF).
+pub fn set_replace(on: bool) {
+    if on {
+        std::env::set_var("HY4_ACTIVE_ACTIVE_REPLACE_LANE", "1");
+    } else {
+        std::env::remove_var("HY4_ACTIVE_ACTIVE_REPLACE_LANE");
+    }
+}

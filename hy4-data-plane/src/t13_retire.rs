@@ -525,8 +525,8 @@ async fn t13_transient_and_contaminated_never_retire() {
     {
         let w = TwoStripeWork::new(vec![0, 1, 2, 3], vec![4, 5, 6, 7]);
         // Pop actives so early-overrun evaluation has assignment times.
-        let _ = w.next(StripeSide::A);
-        let _ = w.next(StripeSide::B);
+        let _ = w.next(StripeSide::A, "torbox", "cap-a");
+        let _ = w.next(StripeSide::B, "realdebrid", "cap-b");
         // A: one fast clean observation.
         w.observe(StripeSide::A, CHUNK, Duration::from_millis(64), false, "torbox", "cap-a");
         // B: one transient slow observation, then immediate recovery on a
@@ -538,7 +538,7 @@ async fn t13_transient_and_contaminated_never_retire() {
         w.observe(StripeSide::B, CHUNK, Duration::from_millis(64), false, "realdebrid", "cap-b2");
         assert!(w.retired_side().is_none(), "P4a: recovered lane must not retire");
         // A healthy lane still works its own queue after the episode.
-        assert!(w.next(StripeSide::A).is_some(), "P4a: healthy lane unaffected");
+        assert!(w.next(StripeSide::A, "torbox", "cap-a").is_some(), "P4a: healthy lane unaffected");
     }
 
     // (b) Downstream contamination: two materially slow samples, both
@@ -547,8 +547,8 @@ async fn t13_transient_and_contaminated_never_retire() {
     {
         set_retire_ratio(Some(2.0));
         let w = TwoStripeWork::new(vec![0, 1, 2, 3], vec![4, 5, 6, 7]);
-        let _ = w.next(StripeSide::A);
-        let _ = w.next(StripeSide::B);
+        let _ = w.next(StripeSide::A, "torbox", "cap-a");
+        let _ = w.next(StripeSide::B, "realdebrid", "cap-b");
         // A: two fast clean observations (~1 MiB/s).
         w.observe(StripeSide::A, CHUNK, Duration::from_millis(64), false, "torbox", "cap-a");
         w.observe(StripeSide::A, CHUNK, Duration::from_millis(64), false, "torbox", "cap-a");

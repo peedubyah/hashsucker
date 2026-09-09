@@ -129,3 +129,10 @@ mod t16_promotion;
 // no-standby continuation.
 #[cfg(test)]
 mod t17_hedge;
+
+// T18 transplant proof: warm replacement of a retired lane (proven as
+// HY4 P2T on m3-north-db). Test-only: pins replace-OFF T13 drain,
+// retired-B rebound by warm C with exact bytes and zero acquisition,
+// no-C survivor drain, and retired-cap non-reselection.
+#[cfg(test)]
+mod t18_replacement;

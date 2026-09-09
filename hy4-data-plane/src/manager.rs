@@ -1019,6 +1019,75 @@ impl CapabilityManager {
         primary_cap: &Arc<DeliveryCapability>,
         now: Instant,
     ) -> Option<ReservedCapability> {
+        self.reserve_free_in_slot_excluding(slot, primary_cap, &[], now)
+    }
+
+    /// T18 transplant (proven as HY4 P2T `reserve_standby_excluding` on
+    /// m3-north-db): warm-only standby with retired-cap exclusion.
+    ///
+    /// Same two phases and same warm-only criteria as `reserve_standby`
+    /// (free permit, usable now, same exact TorrentFile via the slot
+    /// durable_key anchor); additionally refuses any candidate whose
+    /// observability-only `cap_id` appears in `exclude_cap_ids` (retired
+    /// lane caps must never be immediately reselected). No acquisition, no
+    /// scoring, no enumeration API -- one extra predicate on the existing
+    /// search. Returns the reservation plus its slot-authoritative
+    /// durable_key so callers keep the same-TF invariant check.
+    /// `reserve_standby` itself is untouched (it delegates with an empty
+    /// exclusion list).
+    pub fn reserve_standby_excluding(
+        &self,
+        primary_cap: &Arc<DeliveryCapability>,
+        exclude_cap_ids: &[String],
+    ) -> Option<(ReservedCapability, String)> {
+        let now = Instant::now();
+        // Identity anchor for phase 2: index of the slot holding primary.
+        let primary_idx = self.slots.iter().position(|slot| {
+            slot.caps
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| Arc::ptr_eq(c, primary_cap))
+        });
+        let idx = match primary_idx {
+            Some(i) => i,
+            None => return None,
+        };
+        // Phase 1: same slot (explicit same-provider-first rule).
+        if let Some(r) =
+            self.reserve_free_in_slot_excluding(&self.slots[idx], primary_cap, exclude_cap_ids, now)
+        {
+            return Some((r, self.slots[idx].durable_key.clone()));
+        }
+        // Phase 2: cross-provider standby, same exact TorrentFile only.
+        if std::env::var("HY4_CROSS_PROVIDER_STANDBY")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            let anchor = self.slots[idx].durable_key.clone();
+            for (j, slot) in self.slots.iter().enumerate() {
+                if j == idx || slot.durable_key != anchor {
+                    continue;
+                }
+                if let Some(r) =
+                    self.reserve_free_in_slot_excluding(slot, primary_cap, exclude_cap_ids, now)
+                {
+                    return Some((r, slot.durable_key.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// One slot's share of standby selection with a retired-cap exclusion
+    /// list. Identical health/free criteria to `reserve_free_in_slot`.
+    fn reserve_free_in_slot_excluding(
+        &self,
+        slot: &Slot,
+        primary_cap: &Arc<DeliveryCapability>,
+        exclude_cap_ids: &[String],
+        now: Instant,
+    ) -> Option<ReservedCapability> {
         // Clone the Arc so the slot lock is dropped before try_reserve.
         let candidate = slot
             .caps
@@ -1027,6 +1096,7 @@ impl CapabilityManager {
             .iter()
             .find(|c| {
                 !Arc::ptr_eq(c, primary_cap)
+                    && !exclude_cap_ids.contains(&c.cap_id)
                     && c.usable_now(now)
                     && c.limiter.available_permits() > 0
             })

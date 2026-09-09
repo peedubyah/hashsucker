@@ -429,6 +429,26 @@ fn retire_ratio() -> f64 {
         .unwrap_or(4.0)
 }
 
+/// T18: replace a retired lane with another already-warm same-TF cap
+/// (proven as HY4 P2T on m3-north-db).
+///
+/// Experimental, default OFF (`HY4_ACTIVE_ACTIVE_REPLACE_LANE=1`, and only
+/// on the active two-lane steal path). While a two-lane run is active, if
+/// lane A or B retires under T13, then after its current active chunk is
+/// finished the vacant lane tries EXACTLY ONCE to reserve another warm
+/// same-TF capability excluding the survivor's current cap and every
+/// retired cap id. On success the same worker task rebinds to the fresh
+/// cap and resumes taking unstarted work -- never three concurrent lanes
+/// (the retired task continues; nothing new spawns), no cold acquisition,
+/// same exact TorrentFile only. This slice handles retirement vacancy
+/// only (no terminal-failure vacancy).
+fn replace_armed() -> bool {
+    retire_armed()
+        && std::env::var("HY4_ACTIVE_ACTIVE_REPLACE_LANE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+}
+
 /// T12: shutdown guard for steal-path workers. Held by the demand task;
 /// dropping it (every early return) stops assignment so workers exit
 /// between fills. Permits free on worker/fill drops either way.
@@ -482,6 +502,20 @@ struct TwoStripeState {
     active: [Option<(u64, Instant)>; 2],
     /// Per-lane useful-throughput history across chunk fills.
     obs: [LaneObs; 2],
+    /// T18: lane rebound to a fresh warm cap after vacancy (re-enables
+    /// assignment for that side). Index 0 = A, 1 = B.
+    replaced: [bool; 2],
+    /// T18: one bounded replacement attempt per vacancy event. Set when the
+    /// attempt runs (hit or miss); a later independent vacancy on the other
+    /// side gets its own attempt.
+    replace_tried: [bool; 2],
+    /// T18: `cap_id`s of retired lane caps. A retired cap must never be
+    /// immediately reselected by a replacement attempt.
+    dead_cap_ids: Vec<String>,
+    /// Last-known (provider, cap_id) per lane, refreshed on every `next()`
+    /// assignment. Sources the dead-cap record at retirement time (the
+    /// throughput history may hold no sample for a still-active slow lane).
+    lane_cap: [Option<(String, String)>; 2],
 }
 
 /// T13: one lane's cross-fill useful-throughput history.
@@ -552,6 +586,10 @@ impl TwoStripeWork {
                 retired: [false, false],
                 active: [None, None],
                 obs: [LaneObs::default(), LaneObs::default()],
+                replaced: [false, false],
+                replace_tried: [false, false],
+                dead_cap_ids: Vec::new(),
+                lane_cap: [None, None],
             }),
         }
     }
@@ -571,16 +609,27 @@ impl TwoStripeWork {
     /// donor may take the donor's last unstarted chunk (>= 1 gate) so the
     /// retired queue fully drains; against a live donor the frozen >= 2
     /// gate holds. Active chunks remain unstealable as today (popped).
-    /// `pub(crate)` so the T13 unit proofs can drive the coordinator directly.
-    pub(crate) fn next(&self, side: StripeSide) -> Option<(u64, bool)> {
+    ///
+    /// T18: a side rebound by lane replacement (`replaced`) takes work
+    /// again exactly like a live lane (frozen >= 2 steal gate against it);
+    /// only a still-vacant retired side stays closed and drainable. Gate
+    /// OFF behaves exactly like T13 (`replaced` never sets).
+    /// `pub(crate)` so the unit proofs can drive the coordinator directly.
+    pub(crate) fn next(
+        &self,
+        side: StripeSide,
+        provider: &str,
+        cap_id: &str,
+    ) -> Option<(u64, bool)> {
         let mut st = self.state.lock().unwrap();
         if st.shutdown || st.continent_failed {
             return None;
         }
-        if st.retired[lane_idx(side)] {
+        let i = lane_idx(side);
+        if st.retired[i] && !st.replaced[i] {
             return None;
         }
-        let (own_len, donor_len, donor_retired) = {
+        let (own_len, donor_len, donor_vacant) = {
             let (o, d) = match side {
                 StripeSide::A => (&st.left, &st.right),
                 StripeSide::B => (&st.right, &st.left),
@@ -589,23 +638,26 @@ impl TwoStripeWork {
                 StripeSide::A => StripeSide::B,
                 StripeSide::B => StripeSide::A,
             };
-            (o.len(), d.len(), st.retired[lane_idx(donor_side)])
+            let di = lane_idx(donor_side);
+            (o.len(), d.len(), st.retired[di] && !st.replaced[di])
         };
         if own_len > 0 {
             let idx = match side {
                 StripeSide::A => st.left.pop_front().unwrap(),
                 StripeSide::B => st.right.pop_front().unwrap(),
             };
-            st.active[lane_idx(side)] = Some((idx, Instant::now()));
+            st.active[i] = Some((idx, Instant::now()));
+            st.lane_cap[i] = Some((provider.to_string(), cap_id.to_string()));
             return Some((idx, false));
         }
-        let gate = if donor_retired { 1 } else { 2 };
+        let gate = if donor_vacant { 1 } else { 2 };
         if donor_len >= gate {
             let idx = match side {
                 StripeSide::A => st.right.pop_back().unwrap(),
                 StripeSide::B => st.left.pop_back().unwrap(),
             };
-            st.active[lane_idx(side)] = Some((idx, Instant::now()));
+            st.active[i] = Some((idx, Instant::now()));
+            st.lane_cap[i] = Some((provider.to_string(), cap_id.to_string()));
             return Some((idx, true));
         }
         None
@@ -694,6 +746,13 @@ impl TwoStripeWork {
                 if a > 0.0 && b > 0.0 {
                     if b * ratio < a {
                         st.retired[1] = true;
+                        // T18: the retired lane's cap must never be
+                        // immediately reselected by a replacement attempt.
+                        if let Some((_, g)) = st.lane_cap[1].clone() {
+                            if !st.dead_cap_ids.contains(&g) {
+                                st.dead_cap_ids.push(g);
+                            }
+                        }
                         eprintln!(
                             "[t13] lane_retired: slow=B fast=A avg_bps_a={:.0} avg_bps_b={:.0} ratio={}",
                             a, b, ratio,
@@ -702,6 +761,12 @@ impl TwoStripeWork {
                     }
                     if a * ratio < b {
                         st.retired[0] = true;
+                        // T18: see above.
+                        if let Some((_, g)) = st.lane_cap[0].clone() {
+                            if !st.dead_cap_ids.contains(&g) {
+                                st.dead_cap_ids.push(g);
+                            }
+                        }
                         eprintln!(
                             "[t13] lane_retired: slow=A fast=B avg_bps_a={:.0} avg_bps_b={:.0} ratio={}",
                             a, b, ratio,
@@ -747,6 +812,14 @@ impl TwoStripeWork {
             let threshold = fast_avg_dur.mul_f64(ratio);
             if elapsed_active >= threshold {
                 st.retired[slow] = true;
+                // T18: retired cap excluded from later replacement
+                // selection (the slow lane may hold no sample yet, so the
+                // assignment-time identity in lane_cap is authoritative).
+                if let Some((_, g)) = st.lane_cap[slow].clone() {
+                    if !st.dead_cap_ids.contains(&g) {
+                        st.dead_cap_ids.push(g);
+                    }
+                }
                 let slow_name = if slow == 0 { "A" } else { "B" };
                 let fast_name = if fast == 0 { "A" } else { "B" };
                 eprintln!(
@@ -771,6 +844,90 @@ impl TwoStripeWork {
             }
         }
         None
+    }
+
+    /// T18: bind a fresh warm cap to a vacant retired lane.
+    ///
+    /// Called exactly once per vacancy event, by the retired side's own
+    /// worker after its active chunk resolved (`finish()` already ran, so
+    /// the old active owns nothing) and before it would otherwise exit.
+    /// The survivor keeps running throughout -- untouched, unblocked.
+    ///
+    /// Bounded: one attempt per side (`replace_tried`); a later independent
+    /// vacancy on the other side gets its own attempt. No-ops (None) when
+    /// the gate is off, the side was never retired, an attempt already ran,
+    /// the run is shutting down/failed, the old active still owns work, or
+    /// no unstarted work remains (rebinding an idle lane is pointless; the
+    /// survivor's drain is the T13-identical path).
+    /// Reservation is warm-only via `reserve_standby_excluding` (the
+    /// survivor's held permit excludes it structurally; the retired id list
+    /// additionally excludes every retired cap), then same-TF-checked
+    /// against `tf_durable_key` exactly like the spawn path. Zero
+    /// acquisition by construction.
+    ///
+    /// On success the lane reopens (`replaced`, fresh observation epoch)
+    /// and the caller continues its loop with the new cap -- the same
+    /// worker task, so concurrent lanes never exceed 2. The old cap drops
+    /// at the caller's reassignment (permit released, lane reusable).
+    /// `pub(crate)` so the T18 unit proof can drive the coordinator directly.
+    pub(crate) fn claim_replacement(
+        &self,
+        side: StripeSide,
+        old_cap: &manager::ReservedCapability,
+        manager: &manager::CapabilityManager,
+        tf_durable_key: &str,
+    ) -> Option<manager::ReservedCapability> {
+        if !replace_armed() {
+            return None;
+        }
+        let mut st = self.state.lock().unwrap();
+        let i = lane_idx(side);
+        if !st.retired[i] || st.replaced[i] || st.replace_tried[i] {
+            return None;
+        }
+        if st.shutdown || st.continent_failed {
+            return None;
+        }
+        if st.active[i].is_some() {
+            // Old active still owns work -- never replace under it.
+            return None;
+        }
+        if st.left.is_empty() && st.right.is_empty() {
+            // No unstarted work remains; rebinding would idle-exit
+            // immediately. Stay on the T13 drain path (and don't consume
+            // the one bounded attempt on a no-op).
+            return None;
+        }
+        st.replace_tried[i] = true;
+        let (new_cap, slot_key) =
+            manager.reserve_standby_excluding(&old_cap.cap, &st.dead_cap_ids)?;
+        if slot_key != tf_durable_key {
+            eprintln!("[t18] replacement_refused: standby TF mismatch (same-TF invariant)");
+            drop(new_cap);
+            return None;
+        }
+        let (old_provider, old_id) = st.lane_cap[i]
+            .clone()
+            .unwrap_or((old_cap.cap.provider.clone(), old_cap.cap.cap_id.clone()));
+        eprintln!(
+            "[t18] lane_replaced: side={} old={}/{} new={}/{}",
+            match side {
+                StripeSide::A => "A",
+                StripeSide::B => "B",
+            },
+            old_provider,
+            old_id,
+            new_cap.cap.provider,
+            new_cap.cap.cap_id,
+        );
+        st.replaced[i] = true;
+        // Fresh observation epoch for the new producer (mirrors the
+        // producer-change rule in observe(); post-retirement observations
+        // are inert anyway -- first retirement wins, once).
+        st.obs[i] = LaneObs::default();
+        st.obs[i].provider = Some(new_cap.cap.provider.clone());
+        st.obs[i].cap_id = Some(new_cap.cap.cap_id.clone());
+        Some(new_cap)
     }
 
     /// Record a chunk fill's outcome (cache authority decides `ok`).
@@ -865,11 +1022,26 @@ async fn stripe_worker(
 ) {
     let key = tf.cache_key();
     loop {
-        let (idx, _stolen) = match coord.next(side) {
+        let (idx, _stolen) = match coord.next(side, &cap.cap.provider, &cap.cap.cap_id) {
             Some(job) => job,
             // Retired (or exhausted/shutdown): exit after the active chunk.
             // Remaining unstarted work stays queued for the healthy side.
-            None => break,
+            //
+            // T18: that same exit point first tries one bounded warm
+            // replacement (`claim_replacement`): on success this task
+            // rebinds to the fresh cap and keeps draining unstarted work
+            // as the same lane -- no third task, no active-chunk
+            // cancellation, survivor untouched. Otherwise exit and let the
+            // healthy side drain the remainder through existing stealing.
+            None => {
+                if let Some(new_cap) =
+                    coord.claim_replacement(side, &cap, &manager, &tf.durable_key)
+                {
+                    cap = new_cap;
+                    continue;
+                }
+                break;
+            }
         };
         let cs = grid.chunk_start(idx);
         let ce = match grid.chunk_end(idx) {
