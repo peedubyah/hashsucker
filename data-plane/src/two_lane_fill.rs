@@ -60,6 +60,7 @@ use crate::test_env::{env_lock, set_steal, set_two_span};
 const FILE: u64 = 1 << 20;
 const CHUNK: u64 = 65536;
 const SPAN_END: u64 = 2 * CHUNK - 1;
+const SPAN3_END: u64 = 3 * CHUNK - 1;
 const TF_ID: &str = "tf_t11_det";
 const INFO_HASH: &str = "infohash-t11-deterministic";
 const PATH: &str = "t11-det.bin";
@@ -458,6 +459,91 @@ async fn t11_no_second_warm_falls_back_to_single_fill() {
         stack.metrics.api_requests.load(Ordering::SeqCst),
         api0,
         "P4: no cold acquisition to engage a second lane"
+    );
+    server.abort();
+    set_two_span(false);
+}
+
+// ---- Proof 5: odd-count (3 chunks) two-lane split stays chunk-aligned ----
+//
+// The 2-chunk proofs above cannot distinguish a whole-chunk split from a
+// raw-byte-midpoint split: with 2 chunks the byte midpoint (CHUNK-1|CHUNK)
+// coincides exactly with the chunk boundary. With 3 chunks it does not:
+// the byte midpoint would fall at byte 98304 (inside chunk 1), which is
+// forbidden. The only valid ceil/floor whole-chunk division is:
+//   lane A -> chunks 0,1  (ceil(3/2) = 2 chunks)
+//   lane B -> chunk 2     (floor(3/2) = 1 chunk)
+// This proof pins that the split operates on whole chunk indices, not
+// raw bytes, by recording the exact upstream Range for each lane.
+#[tokio::test]
+async fn t11_three_chunks_chunk_aligned_split() {
+    let _guard = env_lock();
+    set_two_span(true);
+    set_steal(false);
+    std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let (port, server) = spawn_mock(hits.clone()).await;
+    let stack = build_stack(
+        port,
+        vec![
+            WarmCap {
+                provider: "torbox",
+                resource: "res-a",
+                path: "/la",
+            },
+            WarmCap {
+                provider: "realdebrid",
+                resource: "res-b",
+                path: "/lb",
+            },
+        ],
+    );
+    let api0 = stack.metrics.api_requests.load(Ordering::SeqCst);
+    // Demand exactly 3 whole chunks: bytes 0..=3*CHUNK-1.
+    let out = demand(&stack.state, 0, SPAN3_END).await;
+    assert_eq!(out.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(out.bytes, expected_range(0, SPAN3_END), "P5: exact output");
+    {
+        let h = hits.lock().unwrap();
+        // Exactly two upstream Ranges (one per lane).
+        assert_eq!(h.len(), 2, "P5: two concurrent Ranges, got {h:?}");
+        let ranges = sorted_ranges(&h);
+        // Invariant 1: every Range boundary is on a chunk boundary.
+        for (s, e) in &ranges {
+            assert_eq!(*s % CHUNK, 0, "P5: lane start {s} not on chunk boundary");
+            // End must be the last byte of a chunk (CHUNK-1 mod CHUNK) or
+            // the natural request end (SPAN3_END = 3*CHUNK-1).
+            assert!(
+                *e == SPAN3_END || *e % CHUNK == CHUNK - 1,
+                "P5: lane end {e} not on chunk boundary"
+            );
+        }
+        // Invariant 2: the union covers all 3 chunks exactly once.
+        // Expected whole-chunk division: lane A = chunks 0,1; lane B = chunk 2.
+        assert_eq!(
+            ranges,
+            vec![(0, 2 * CHUNK - 1), (2 * CHUNK, SPAN3_END)],
+            "P5: expected ceil/floor whole-chunk split (chunks 0,1 | chunk 2)"
+        );
+        // Invariant 3: no overlap — the two Ranges are disjoint and adjacent.
+        assert_eq!(
+            ranges[0].1 + 1,
+            ranges[1].0,
+            "P5: lanes must be disjoint and adjacent (no gap, no overlap)"
+        );
+        // Invariant 4: both lanes served (one cap per lane).
+        let mut paths: Vec<String> = h.iter().map(|(p, _, _)| p.clone()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["/la".to_string(), "/lb".to_string()],
+            "P5: both warm cross-provider lanes served"
+        );
+    }
+    assert_eq!(
+        stack.metrics.api_requests.load(Ordering::SeqCst),
+        api0,
+        "P5: zero new capability acquisition"
     );
     server.abort();
     set_two_span(false);
