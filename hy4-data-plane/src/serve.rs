@@ -582,6 +582,52 @@ fn lane_idx(side: StripeSide) -> usize {
     }
 }
 
+/// T20: why a lane went vacant. Retirement (alive-but-slow, T13) and
+/// terminal failure (unusable-after-exhaustion, T19) stay distinct causes;
+/// the vacancy mechanics -- mark, dead-cap exclusion, one bounded warm
+/// replacement attempt, same-lane rebind -- are shared through
+/// `declare_vacancy` + `claim_replacement`. No N-way abstraction: exactly
+/// these two causes exist.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VacancyCause {
+    Retired,
+    Terminal,
+}
+
+impl TwoStripeWork {
+    /// T20: the single vacancy state transition. Marks the cause
+    /// (retirement vs terminal stay distinct flags) and preserves the
+    /// dead-cap exclusion feeding the one bounded replacement attempt.
+    /// Bit-for-bit the former per-cause blocks in `observe()` /
+    /// `finish_terminal()`; callers already hold the lock.
+    fn declare_vacancy(
+        st: &mut TwoStripeState,
+        side: StripeSide,
+        cause: VacancyCause,
+        dead_cap_id: Option<String>,
+    ) {
+        let i = lane_idx(side);
+        match cause {
+            VacancyCause::Retired => {
+                st.retired[i] = true;
+            }
+            VacancyCause::Terminal => {
+                st.terminal[i] = true;
+            }
+        }
+        if let Some(g) = dead_cap_id {
+            if !st.dead_cap_ids.contains(&g) {
+                st.dead_cap_ids.push(g);
+            }
+        }
+    }
+
+    /// A side is vacant when retired or terminal and not yet rebound.
+    fn is_vacant(st: &TwoStripeState, idx: usize) -> bool {
+        (st.retired[idx] || st.terminal[idx]) && !st.replaced[idx]
+    }
+}
+
 impl TwoStripeWork {
     /// `pub(crate)` so the T13 unit proofs can construct a coordinator directly.
     pub(crate) fn new(left: Vec<u64>, right: Vec<u64>) -> Self {
@@ -641,7 +687,7 @@ impl TwoStripeWork {
             return None;
         }
         let i = lane_idx(side);
-        if (st.retired[i] || st.terminal[i]) && !st.replaced[i] {
+        if Self::is_vacant(&st, i) {
             return None;
         }
         let (own_len, donor_len, donor_vacant) = {
@@ -654,11 +700,7 @@ impl TwoStripeWork {
                 StripeSide::B => StripeSide::A,
             };
             let di = lane_idx(donor_side);
-            (
-                o.len(),
-                d.len(),
-                (st.retired[di] || st.terminal[di]) && !st.replaced[di],
-            )
+            (o.len(), d.len(), Self::is_vacant(&st, di))
         };
         if own_len > 0 {
             let idx = match side {
@@ -770,14 +812,8 @@ impl TwoStripeWork {
             if let (Some(a), Some(b)) = (st.obs[0].avg_bps(), st.obs[1].avg_bps()) {
                 if a > 0.0 && b > 0.0 {
                     if b * ratio < a {
-                        st.retired[1] = true;
-                        // T18: the retired lane's cap must never be
-                        // immediately reselected by a replacement attempt.
-                        if let Some((_, g)) = st.lane_cap[1].clone() {
-                            if !st.dead_cap_ids.contains(&g) {
-                                st.dead_cap_ids.push(g);
-                            }
-                        }
+                        let dead_cap_id = st.lane_cap[1].clone().map(|(_, g)| g);
+                        Self::declare_vacancy(&mut *st, StripeSide::B, VacancyCause::Retired, dead_cap_id);
                         eprintln!(
                             "[t13] lane_retired: slow=B fast=A avg_bps_a={:.0} avg_bps_b={:.0} ratio={}",
                             a, b, ratio,
@@ -785,13 +821,8 @@ impl TwoStripeWork {
                         return;
                     }
                     if a * ratio < b {
-                        st.retired[0] = true;
-                        // T18: see above.
-                        if let Some((_, g)) = st.lane_cap[0].clone() {
-                            if !st.dead_cap_ids.contains(&g) {
-                                st.dead_cap_ids.push(g);
-                            }
-                        }
+                        let dead_cap_id = st.lane_cap[0].clone().map(|(_, g)| g);
+                        Self::declare_vacancy(&mut *st, StripeSide::A, VacancyCause::Retired, dead_cap_id);
                         eprintln!(
                             "[t13] lane_retired: slow=A fast=B avg_bps_a={:.0} avg_bps_b={:.0} ratio={}",
                             a, b, ratio,
@@ -836,15 +867,9 @@ impl TwoStripeWork {
             let elapsed_active = now.duration_since(t_assign);
             let threshold = fast_avg_dur.mul_f64(ratio);
             if elapsed_active >= threshold {
-                st.retired[slow] = true;
-                // T18: retired cap excluded from later replacement
-                // selection (the slow lane may hold no sample yet, so the
-                // assignment-time identity in lane_cap is authoritative).
-                if let Some((_, g)) = st.lane_cap[slow].clone() {
-                    if !st.dead_cap_ids.contains(&g) {
-                        st.dead_cap_ids.push(g);
-                    }
-                }
+                let dead_cap_id = st.lane_cap[slow].clone().map(|(_, g)| g);
+                let slow_side = if slow == 0 { StripeSide::A } else { StripeSide::B };
+                Self::declare_vacancy(&mut *st, slow_side, VacancyCause::Retired, dead_cap_id);
                 let slow_name = if slow == 0 { "A" } else { "B" };
                 let fast_name = if fast == 0 { "A" } else { "B" };
                 eprintln!(
@@ -913,7 +938,7 @@ impl TwoStripeWork {
         }
         let mut st = self.state.lock().unwrap();
         let i = lane_idx(side);
-        if (!st.retired[i] && !st.terminal[i]) || st.replaced[i] || st.replace_tried[i] {
+        if !Self::is_vacant(&st, i) || st.replaced[i] || st.replace_tried[i] {
             return None;
         }
         if st.shutdown || st.continent_failed {
@@ -1012,11 +1037,7 @@ impl TwoStripeWork {
                 *slot = None;
             }
         }
-        if !st.dead_cap_ids.contains(&failed_cap_id.to_string()) {
-            st.dead_cap_ids.push(failed_cap_id.to_string());
-        }
-        let i = lane_idx(side);
-        st.terminal[i] = true;
+        Self::declare_vacancy(&mut *st, side, VacancyCause::Terminal, Some(failed_cap_id.to_string()));
         let other = lane_idx(match side {
             StripeSide::A => StripeSide::B,
             StripeSide::B => StripeSide::A,
