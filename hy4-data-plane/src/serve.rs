@@ -291,6 +291,20 @@ pub(crate) fn fill_torrent_file_id(
     TorrentFileId::new(tf_id_durable, info_hash, canonical_path, size)
 }
 
+/// T11 two-lane disjoint fill (proven as HY4 P2O on m3-north-db).
+///
+/// Experimental, default OFF (`HY4_ACTIVE_ACTIVE_TWO_SPAN=1` arms it).
+/// One qualifying missing run of the same exact TorrentFile is fetched
+/// concurrently by two already-warm capabilities, each owning a disjoint
+/// half of the run. Warm-only: both reservations must be in hand before
+/// either lane spawns, and no cold acquisition is ever performed to make
+/// the second lane exist. Maximum lanes: 2.
+fn striping_armed() -> bool {
+    std::env::var("HY4_ACTIVE_ACTIVE_TWO_SPAN")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
 pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response<Body> {
     // ---- Slice 4.5 T0: the read request is received. Every later stage is
     // measured relative to this instant. Stamped at handler entry, before range
@@ -910,8 +924,178 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                             let w_start = run.start.max(f_start);
                             let w_end = run.end.min(f_end);
 
+                            // Reuse the pre-acquired capability for the FIRST fetch
+                            // span only (first_consumed guards a single take).
+                            let fr = if !first_consumed {
+                                first_consumed = true;
+                                first_reserved.take()
+                            } else {
+                                None
+                            };
+                            // ---- T11 two-lane disjoint fill (proven as HY4 P2O
+                            // on m3-north-db). Behind the existing/default-OFF
+                            // experimental active-active gate: the normal
+                            // first capability (fr, first span only so it is
+                            // pinnable without serializing acquisition) plus
+                            // one second already-warm same-TF capability via
+                            // the existing T2 standby path (same-slot first,
+                            // then same-TF cross-provider when
+                            // HY4_CROSS_PROVIDER_STANDBY=1 -- never an
+                            // acquisition). Both in hand or no striping: the
+                            // fallback below is the exact existing path.
+                            // The one consecutive OWNED run splits
+                            // deterministically into two disjoint halves
+                            // (ceil/floor); each half recomputes its
+                            // fetch/window bounds with the same clamping as
+                            // the single path. Maximum lanes: 2. Each logical
+                            // chunk has exactly one producer; ordered client
+                            // output flows through the existing
+                            // cache/staging boundary unchanged.
+                            let stripe_b: Option<(
+                                manager::ReservedCapability,
+                                String,
+                            )> = if striping_armed()
+                                && fr.is_some()
+                                && sub.len() >= 2
+                            {
+                                manager_clone.reserve_standby(&fr.as_ref().unwrap().cap)
+                            } else {
+                                None
+                            };
+                            // Defense in depth: the standby slot's durable
+                            // key must equal this fill's TorrentFile identity
+                            // (the manager already enforces it cross-slot;
+                            // same-slot is trivially equal). On mismatch drop
+                            // the reservation (permit freed, reusable) and
+                            // take the single-fill path -- never stripe
+                            // across TorrentFiles. Provider is execution
+                            // metadata only; both capabilities represent the
+                            // exact same TorrentFile.
+                            let stripe_b = match stripe_b {
+                                Some((bres, bslot_key))
+                                    if bslot_key != tf_id.durable_key =>
+                                {
+                                    eprintln!(
+                                        "[t11] stripe_refused: standby TF mismatch (same-TF invariant)"
+                                    );
+                                    drop(bres);
+                                    None
+                                }
+                                other => other,
+                            };
+                            if let Some((bres, _bslot_key)) = stripe_b {
+                                let half = (sub.len() + 1) / 2;
+                                let (sub_a, sub_b) =
+                                    (sub[..half].to_vec(), sub[half..].to_vec());
+                                let fa_start = grid.chunk_start(sub_a[0]);
+                                let fa_end = match grid
+                                    .chunk_end(*sub_a.last().unwrap())
+                                {
+                                    Some(e) => e,
+                                    None => f_end,
+                                };
+                                let fb_start = grid.chunk_start(sub_b[0]);
+                                let fb_end = match grid
+                                    .chunk_end(*sub_b.last().unwrap())
+                                {
+                                    Some(e) => e,
+                                    None => f_end,
+                                };
+                                let wa_start = run.start.max(fa_start);
+                                let wa_end = run.end.min(fa_end);
+                                let wb_start = run.start.max(fb_start);
+                                let wb_end = run.end.min(fb_end);
+                                // Two CacheDecisions (one per disjoint half)
+                                // so the §15 decision log stays truthful
+                                // about the two provider Ranges issued.
+                                for (half_sub, hf_start, hf_end, hw_start, hw_end, hjoins) in [
+                                    (&sub_a, fa_start, fa_end, wa_start, wa_end, &joins[k..k + half]),
+                                    (&sub_b, fb_start, fb_end, wb_start, wb_end, &joins[k + half..=j]),
+                                ] {
+                                    cache.metrics.cache_decisions.push(CacheDecision {
+                                        request: (start, end),
+                                        present_before: present_before.clone(),
+                                        missing: (hw_start, hw_end),
+                                        chunk_indices: half_sub.clone(),
+                                        fetch_span: Some((hf_start, hf_end)),
+                                        joined_inflight: hjoins
+                                            .iter()
+                                            .any(|x| x.joined_existing),
+                                        overlap_bytes_avoided: hjoins
+                                            .iter()
+                                            .filter(|x| x.joined_existing)
+                                            .map(|x| grid.chunk_len(x.index))
+                                            .sum(),
+                                        plan_origin,
+                                        evictions_before: cache
+                                            .metrics
+                                            .cache
+                                            .evictions
+                                            .load(Ordering::SeqCst),
+                                    });
+                                }
+                                let (atx, arx) = mpsc::channel::<SpanMsg>(32);
+                                let (btx, brx) = mpsc::channel::<SpanMsg>(32);
+                                // sub_b[0] sorts after every sub_a index:
+                                // capture it before the spawns move the vecs.
+                                let sub_b0 = sub_b[0];
+                                // Stripe A reuses the pre-acquired cap
+                                // through the existing handoff; stripe B the
+                                // pinned warm standby. No new acquisition
+                                // mode: fill_chunk_run sees two ordinary
+                                // owned fills (same limiter/breaker/retry
+                                // behavior inside each fill).
+                                tokio::spawn(fill_chunk_run(
+                                    cache.clone(),
+                                    metrics.clone(),
+                                    manager_clone.clone(),
+                                    client_clone.clone(),
+                                    priority,
+                                    tf_id.clone(),
+                                    sub_a,
+                                    fa_start,
+                                    fa_end,
+                                    wa_start,
+                                    wa_end,
+                                    faults,
+                                    Some(atx),
+                                    Some(stage.clone()),
+                                    cold,
+                                    fr,
+                                ));
+                                tokio::spawn(fill_chunk_run(
+                                    cache.clone(),
+                                    metrics.clone(),
+                                    manager_clone.clone(),
+                                    client_clone.clone(),
+                                    priority,
+                                    tf_id.clone(),
+                                    sub_b,
+                                    fb_start,
+                                    fb_end,
+                                    wb_start,
+                                    wb_end,
+                                    faults,
+                                    Some(btx),
+                                    Some(stage.clone()),
+                                    cold,
+                                    Some(bres),
+                                ));
+                                ordered.push((sub_start, FetchItem::Owned { rx: arx }));
+                                // The existing ascending emitter needs no
+                                // change to keep A||B delivery order.
+                                ordered.push((
+                                    sub_b0,
+                                    FetchItem::Owned { rx: brx },
+                                ));
+                                k = j + 1;
+                                continue;
+                            }
+
                             // ---- Slice 4.5 G: record WHY this fetch happens,
                             // including the grid's effect on the Range we issue.
+                            // Exact existing single-fill path (gate OFF, or
+                            // gate ON without a second warm cap).
                             cache.metrics.cache_decisions.push(CacheDecision {
                                 request: (start, end),
                                 present_before: present_before.clone(),
@@ -929,14 +1113,6 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                             });
 
                             let (stx, srx) = mpsc::channel::<SpanMsg>(32);
-                            // Reuse the pre-acquired capability for the FIRST fetch
-                            // span only (first_consumed guards a single take).
-                            let fr = if !first_consumed {
-                                first_consumed = true;
-                                first_reserved.take()
-                            } else {
-                                None
-                            };
                             // Fill CONCURRENTLY with the other spans in this run.
                             // Sequential driving would deadlock whenever a run
                             // is split between two readers (see above).

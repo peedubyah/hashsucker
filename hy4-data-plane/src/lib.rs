@@ -72,3 +72,10 @@ mod t5_endpoint;
 // per-request independence.
 #[cfg(test)]
 mod t8_attribution;
+
+// T11 transplant proof: fixed two-lane disjoint fill (proven as HY4 P2O
+// on m3-north-db). Test-only: pins gate-OFF single path, same-provider
+// and cross-provider two-way disjoint fills with zero acquisition, and
+// graceful single-producer fallback.
+#[cfg(test)]
+mod t11_two_lane;
