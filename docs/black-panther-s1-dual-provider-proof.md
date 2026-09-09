@@ -146,5 +146,5 @@ unchanged. Provider attribution in live metrics is the remaining open instrument
 - `handoff/MAIN-REAL-PLAYBACK-TRACE.md` — raw metrics snapshot + byte path trace
 - `handoff/MAIN-PLEX-FUNCTIONAL.md` — end-to-end functional proof summary
 - `docs/seam-audit.md` — concurrency observability vocabulary audit
-- `hy4-data-plane/src/manager.rs` — `CapabilityManager::pool_summary()`
-- `hy4-data-plane/src/provider.rs` — TorBox + RD provider implementations
+- `data-plane/src/manager.rs` — `CapabilityManager::pool_summary()`
+- `data-plane/src/provider.rs` — TorBox + RD provider implementations

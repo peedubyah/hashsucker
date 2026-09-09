@@ -10,7 +10,7 @@ PORT="3015"
 # FRESH volume per run (timestamp) so cache state is not carried over.
 VOL="p15-vol-rd-to-tb-$(date -u +%s)"
 DP_URL="http://127.0.0.1:${PORT}"
-LOGDIR="/c/src/hashsucker/hy4-data-plane/bench/p15"
+LOGDIR="/c/src/hashsucker/data-plane/bench/p15"
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
 
 mkdir -p "${LOGDIR}"
@@ -30,7 +30,7 @@ for i in 1 2 3 4 5 6 7 8 9 10 12 14 16 18 20; do
 done
 
 echo "[p15-3] ==== STEP 3: bench (3 uncached ranges, RD attempt+fail, TB serve) ===="
-cd /c/src/hashsucker/hy4-data-plane/bench/p15
+cd /c/src/hashsucker/data-plane/bench/p15
 DP_URL="${DP_URL}" TFID="${TFID}" LABEL="p15-3-rd-to-tb-phase1" \
   node p15-3-rd-to-tb.mjs 2>&1 | tee "${LOGDIR}/p15-3-phase1-${TIMESTAMP}.log"
 PHASE1_RC=${PIPESTATUS[0]}

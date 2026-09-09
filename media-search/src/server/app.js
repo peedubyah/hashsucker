@@ -2282,7 +2282,7 @@ export function createRequestHandler(dependencies = {}) {
       // It reads this payload and selects the coordinate whose size matches
       // the authoritative TorrentFile size (ControlResponse::target_file_id).
       //
-      // Wire contract -- see hy4-data-plane/src/control.rs:
+      // Wire contract -- see data-plane/src/control.rs:
       //   { schemaVersion,
       //     torrentFile { id, infoHash, canonicalInternalPath, size },
       //     providers[] { provider, accountScope, providerResourceId,

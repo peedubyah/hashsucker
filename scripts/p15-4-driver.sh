@@ -10,7 +10,7 @@ PORT="3016"
 # FRESH volume per run (timestamp) so cache state is not carried over.
 VOL="p15-vol-both-fail-$(date -u +%s)"
 DP_URL="http://127.0.0.1:${PORT}"
-LOGDIR="/c/src/hashsucker/hy4-data-plane/bench/p15"
+LOGDIR="/c/src/hashsucker/data-plane/bench/p15"
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
 
 mkdir -p "${LOGDIR}"
@@ -30,7 +30,7 @@ for i in 1 2 3 4 5 6 7 8 9 10 12 14 16 18 20; do
 done
 
 echo "[p15-4] ==== STEP 3: bench (2 ranges must return 502 PROVIDER_EXHAUSTED) ===="
-cd /c/src/hashsucker/hy4-data-plane/bench/p15
+cd /c/src/hashsucker/data-plane/bench/p15
 DP_URL="${DP_URL}" TFID="${TFID}" LABEL="p15-4-both-runtime-fail-phase1" \
   node p15-4-both-runtime-fail.mjs 2>&1 | tee "${LOGDIR}/p15-4-phase1-${TIMESTAMP}.log"
 PHASE1_RC=${PIPESTATUS[0]}

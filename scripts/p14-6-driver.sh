@@ -9,7 +9,7 @@ NAME="p14-dp-both-dead"
 PORT="3016"
 VOL="p14-vol-both-dead"
 DP_URL="http://127.0.0.1:${PORT}"
-LOGDIR="/c/src/hashsucker/hy4-data-plane/bench/p14"
+LOGDIR="/c/src/hashsucker/data-plane/bench/p14"
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
 
 mkdir -p "${LOGDIR}"
@@ -29,7 +29,7 @@ for i in 1 2 3 4 5 6 7 8 9 10 12 14 16 18 20; do
 done
 
 echo "[p14-6] ==== STEP 3: bench - both ranges must return 502 PROVIDER_EXHAUSTED ===="
-cd /c/src/hashsucker/hy4-data-plane/bench/p14
+cd /c/src/hashsucker/data-plane/bench/p14
 DP_URL="${DP_URL}" TFID="${TFID}" LABEL="p14-6-both-dead-phase1" \
   node p14-6-both-dead.mjs 2>&1 | tee "${LOGDIR}/p14-6-phase1-${TIMESTAMP}.log"
 PHASE1_RC=${PIPESTATUS[0]}

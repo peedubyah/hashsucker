@@ -11,7 +11,7 @@ NAME="p13-dp-dual"
 PORT="3013"
 VOL="p13-dp-dual-vol"
 DP_URL="http://127.0.0.1:${PORT}"
-LOGDIR="/c/src/hashsucker/hy4-data-plane/bench/p13"
+LOGDIR="/c/src/hashsucker/data-plane/bench/p13"
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
 
 mkdir -p "${LOGDIR}"
@@ -29,7 +29,7 @@ cycle() {
     fi
     sleep 1
   done
-  cd /c/src/hashsucker/hy4-data-plane/bench/p13
+  cd /c/src/hashsucker/data-plane/bench/p13
   DP="${DP_URL}" TFID="${TFID}" PHASE="${PHASE}" \
     node p13-9-mixed-restart.mjs 2>&1 | tee "${LOGDIR}/p13-9-${PHASE}-${TIMESTAMP}.log" || true
 }

@@ -1,6 +1,6 @@
 # Seam Audit — Concurrency Observability Vocabulary
 
-**File:** `hy4-data-plane/src/metrics.rs`
+**File:** `data-plane/src/metrics.rs`
 **Context:** §15 Phase 2 GAP 2–3 — add minimal concurrency observability without behavior changes.
 **Audit:** 2026-09-06
 
@@ -184,6 +184,6 @@ $ curl http://localhost:3001/metrics | jq '.concurrent_demand, .pool_aggregate'
 
 ## References
 
-- `hy4-data-plane/src/metrics.rs` — metrics struct, `DemandGuard`, `MetricsExt`
-- `hy4-data-plane/src/serve.rs` — guard instantiation, `/metrics` handler
-- `hy4-data-plane/src/manager.rs` — `CapabilityManager::pool_summary()`
+- `data-plane/src/metrics.rs` — metrics struct, `DemandGuard`, `MetricsExt`
+- `data-plane/src/serve.rs` — guard instantiation, `/metrics` handler
+- `data-plane/src/manager.rs` — `CapabilityManager::pool_summary()`

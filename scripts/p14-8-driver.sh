@@ -10,7 +10,7 @@ NAME="p14-dp-api-sanity"
 PORT="3018"
 VOL="p14-vol-api-sanity"
 DP_URL="http://127.0.0.1:${PORT}"
-LOGDIR="/c/src/hashsucker/hy4-data-plane/bench/p14"
+LOGDIR="/c/src/hashsucker/data-plane/bench/p14"
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
 
 mkdir -p "${LOGDIR}"
@@ -48,7 +48,7 @@ for i in 1 2 3 4 5 6 7 8 9 10 12 14 16 18 20; do
 done
 
 echo "[p14-8] ==== STEP 3: bench (5 reads of front-1MiB, check API counts) ===="
-cd /c/src/hashsucker/hy4-data-plane/bench/p14
+cd /c/src/hashsucker/data-plane/bench/p14
 DP_URL="${DP_URL}" TFID="${TFID}" LABEL="p14-8-api-sanity-phase1" \
   node p14-8-api-sanity.mjs 2>&1 | tee "${LOGDIR}/p14-8-phase1-${TIMESTAMP}.log"
 PHASE1_RC=${PIPESTATUS[0]}

@@ -9,7 +9,7 @@ NAME="p13-dp-dual"
 PORT="3013"
 VOL="p13-dp-dual-vol"
 DP_URL="http://127.0.0.1:${PORT}"
-LOGDIR="/c/src/hashsucker/hy4-data-plane/bench/p13"
+LOGDIR="/c/src/hashsucker/data-plane/bench/p13"
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
 
 mkdir -p "${LOGDIR}"
@@ -29,7 +29,7 @@ if ! curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:${PORT}/metrics" 2>/d
 fi
 
 echo "[p13-8] ==== STEP 1: phase 1 bench (pre-restart) ===="
-cd /c/src/hashsucker/hy4-data-plane/bench/p13
+cd /c/src/hashsucker/data-plane/bench/p13
 DUAL_DP="${DP_URL}" TFID="${TFID}" LABEL="p13-8-pre" \
   node p13-8-stale-repair.mjs 2>&1 | tee "${LOGDIR}/p13-8-pre-${TIMESTAMP}.log" || true
 # Note: this bench internally waits for an external restart. We do the restart below.

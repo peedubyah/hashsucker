@@ -245,7 +245,7 @@ have to touch. Each seam is classified:
 - **POSSIBLE TRANSPLANT POINT** — a seam the scheduler could legitimately hook.
 - **MUST NOT CROSS** — a boundary the scheduler may not violate.
 
-The inventory is derived from source inspection of `hy4-data-plane/src/`. It does
+The inventory is derived from source inspection of `data-plane/src/`. It does
 NOT infer Windows scheduler behavior and does NOT invent transplant logic.
 
 ### 13.1 Demand scheduling

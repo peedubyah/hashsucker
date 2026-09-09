@@ -49,7 +49,7 @@ def run_phase1():
     env = os.environ.copy()
     env["DP_URL"] = f"http://127.0.0.1:{port}"
     env["LABEL"] = "p12-D"
-    cmd = "cd C:/src/hashsucker && node hy4-data-plane/bench/p12-soak-D-phase1.mjs"
+    cmd = "cd C:/src/hashsucker && node data-plane/bench/p12-soak-D-phase1.mjs"
     rc, out, err = sh(cmd, timeout=120, env=env)
     with open(log, "a", encoding="utf-8") as f:
         f.write(out)
@@ -62,7 +62,7 @@ def run_phase3():
     env = os.environ.copy()
     env["DP_URL"] = f"http://127.0.0.1:{port}"
     env["LABEL"] = "p12-D"
-    cmd = "cd C:/src/hashsucker && node hy4-data-plane/bench/p12-soak-D-phase3.mjs"
+    cmd = "cd C:/src/hashsucker && node data-plane/bench/p12-soak-D-phase3.mjs"
     rc, out, err = sh(cmd, timeout=120, env=env)
     with open(log, "a", encoding="utf-8") as f:
         f.write(out)

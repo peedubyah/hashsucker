@@ -19,7 +19,7 @@ PORT="3011"
 VOL="p13-dp-vol"
 DP_URL="http://127.0.0.1:${PORT}"
 S1_URL="http://127.0.0.1:3300"
-LOGDIR="/c/src/hashsucker/hy4-data-plane/bench/p13"
+LOGDIR="/c/src/hashsucker/data-plane/bench/p13"
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
 
 mkdir -p "${LOGDIR}"
@@ -41,7 +41,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
 done
 
 echo "[p13-2] ==== STEP 3: phase 1 bench (range + seek, NO restart yet) ===="
-cd /c/src/hashsucker/hy4-data-plane/bench/p13
+cd /c/src/hashsucker/data-plane/bench/p13
 DP_URL="${DP_URL}" TFID="${TFID}" LABEL="p13-2-tbonly-phase1" \
   node p13-2-tb-only.mjs 2>&1 | tee "${LOGDIR}/p13-2-phase1-${TIMESTAMP}.log"
 PHASE1_RC=${PIPESTATUS[0]}

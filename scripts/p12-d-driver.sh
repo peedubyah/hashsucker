@@ -25,12 +25,12 @@ restart_container() {
 
 run_phase1() {
   echo "[D-driver] PHASE 1: pre-restart sequential 0..7" | tee -a "$LOG"
-  DP_URL="http://127.0.0.1:${PORT}" LABEL="p12-D" node hy4-data-plane/bench/p12-soak-D-phase1.mjs 2>>"$LOG"
+  DP_URL="http://127.0.0.1:${PORT}" LABEL="p12-D" node data-plane/bench/p12-soak-D-phase1.mjs 2>>"$LOG"
 }
 
 run_phase3() {
   echo "[D-driver] PHASE 3: post-restart reads" | tee -a "$LOG"
-  DP_URL="http://127.0.0.1:${PORT}" LABEL="p12-D" node hy4-data-plane/bench/p12-soak-D-phase3.mjs 2>>"$LOG"
+  DP_URL="http://127.0.0.1:${PORT}" LABEL="p12-D" node data-plane/bench/p12-soak-D-phase3.mjs 2>>"$LOG"
 }
 
 restart_container

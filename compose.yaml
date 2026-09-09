@@ -104,7 +104,7 @@ services:
   # of /api/control-plane/* (see S1-CONTROL-CONTRACT.md).
   hy4-data-plane:
     build:
-      context: ./hy4-data-plane
+      context: ./data-plane
       dockerfile: Dockerfile
     image: hy4-data-plane:local
     restart: unless-stopped
