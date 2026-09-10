@@ -626,3 +626,197 @@ async fn t8_shared_cap_env_precedence() {
     std::env::remove_var("DATA_PLANE_ACTIVE_ACTIVE_SHARED_CAP");
     std::env::remove_var("HY4_ACTIVE_ACTIVE_SHARED_CAP");
 }
+
+// ---- T9: one lane task aborted ----
+#[tokio::test]
+async fn t9_one_lane_aborted() {
+    let _guard = crate::test_env::env_lock();
+    let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+    let (mgr, _metrics) = build_manager_warm(port);
+
+    let reserved = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("acquire_for_read failed"),
+    };
+    let lease = CapabilityLease::new(reserved);
+
+    let child_a = CapabilityLease::child_reader(&lease).expect("A");
+    let child_b = CapabilityLease::child_reader(&lease).expect("B");
+    assert_eq!(lease.child_count(), 2, "two logical children");
+
+    // Abort A: drop all handles for A
+    drop(child_a);
+    assert_eq!(lease.child_count(), 1, "A aborted -> count 1");
+    assert!(!lease.is_released(), "permit still held");
+
+    // B remains valid: can still clone and use
+    {
+        let _clone_b = child_b.clone();
+        assert_eq!(lease.child_count(), 1, "B clone doesn't change count");
+    }
+    assert_eq!(lease.child_count(), 1, "after clone scope, count still 1");
+
+    // Abort B: drop all handles for B
+    drop(child_b);
+    assert_eq!(lease.child_count(), 0, "B dropped -> count 0");
+    assert!(lease.is_released(), "permit released");
+}
+
+// ---- T10: both lane tasks aborted ----
+#[tokio::test]
+async fn t10_both_lanes_aborted() {
+    let _guard = crate::test_env::env_lock();
+    let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+    let (mgr, _metrics) = build_manager_warm(port);
+
+    let reserved = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("acquire_for_read failed"),
+    };
+    let lease = CapabilityLease::new(reserved);
+
+    let child_a = CapabilityLease::child_reader(&lease).expect("A");
+    let child_b = CapabilityLease::child_reader(&lease).expect("B");
+    assert_eq!(lease.child_count(), 2);
+
+    drop(child_a);
+    drop(child_b);
+    assert_eq!(lease.child_count(), 0, "both aborted -> count 0");
+    assert!(lease.is_released(), "permit released exactly once");
+
+    let _reserved2 = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("acquire should succeed after release"),
+    };
+}
+
+// ---- T11: cancellation during per-fill temporary clone ----
+#[tokio::test]
+async fn t11_temp_clone_cancellation() {
+    let _guard = crate::test_env::env_lock();
+    let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+    let (mgr, _metrics) = build_manager_warm(port);
+
+    let reserved = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("acquire_for_read failed"),
+    };
+    let lease = CapabilityLease::new(reserved);
+
+    let child_a = CapabilityLease::child_reader(&lease).expect("A");
+    assert_eq!(lease.child_count(), 1);
+
+    {
+        let temp_clone = child_a.clone();
+        assert_eq!(lease.child_count(), 1, "temp clone doesn't increment");
+        drop(temp_clone);
+        assert_eq!(lease.child_count(), 1, "temp clone drop doesn't decrement");
+    }
+
+    assert_eq!(lease.child_count(), 1, "original still alive");
+
+    drop(child_a);
+    assert_eq!(lease.child_count(), 0, "original dropped -> count 0");
+    assert!(lease.is_released(), "permit released");
+}
+
+// ---- T12: parent handle disappears first ----
+#[tokio::test]
+async fn t12_parent_drop_order() {
+    let _guard = crate::test_env::env_lock();
+    let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+    let (mgr, _metrics) = build_manager_warm(port);
+
+    let reserved = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("acquire_for_read failed"),
+    };
+    let lease = CapabilityLease::new(reserved);
+
+    let child_a = CapabilityLease::child_reader(&lease).expect("A");
+    let child_b = CapabilityLease::child_reader(&lease).expect("B");
+    assert_eq!(lease.child_count(), 2);
+
+    drop(lease);
+
+    drop(child_a);
+
+    drop(child_b);
+
+    let _reserved2 = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("permit should be released after all children drop"),
+    };
+}
+
+// ---- T13: third logical child rejection ----
+#[tokio::test]
+async fn t13_third_child_rejected() {
+    let _guard = crate::test_env::env_lock();
+    let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+    let (mgr, _metrics) = build_manager_warm(port);
+
+    let reserved = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("acquire_for_read failed"),
+    };
+    let lease = CapabilityLease::new(reserved);
+
+    let _child_a = CapabilityLease::child_reader(&lease).expect("A");
+    let _child_b = CapabilityLease::child_reader(&lease).expect("B");
+    assert_eq!(lease.child_count(), 2);
+
+    assert!(CapabilityLease::child_reader(&lease).is_none(), "third child rejected");
+    assert_eq!(lease.child_count(), 2, "count unchanged after rejection");
+}
+
+// ---- T14: no orphaned inflight records on cancellation ----
+#[tokio::test]
+async fn t14_no_orphaned_inflight_on_cancel() {
+    let _guard = crate::test_env::env_lock();
+    let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+    let (mgr, _metrics) = build_manager_warm(port);
+
+    let reserved = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("acquire_for_read failed"),
+    };
+    let lease = CapabilityLease::new(reserved);
+
+    let child_a = CapabilityLease::child_reader(&lease).expect("A");
+    assert_eq!(lease.child_count(), 1);
+
+    let tmp_dir = std::env::temp_dir().join("hashsucker_test_cancel");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let cache = Arc::new(crate::cache::CacheEngine::open(
+        crate::cache::CacheConfig {
+            root: tmp_dir,
+            max_bytes: 64 << 20,
+            chunk_size: CHUNK,
+        },
+        _metrics.clone(),
+    ).unwrap());
+
+    let tf_id = crate::cache::TorrentFileId::new(
+        TF_ID.to_string(),
+        INFO_HASH.to_string(),
+        PATH.to_string(),
+        FILE,
+    );
+
+    let joins = cache.inflight().join_or_claim_many(&tf_id.cache_key(), &[0]);
+    let join = &joins[0];
+    assert!(join.owned, "we own the fill");
+
+    join.record.failed.store(true, Ordering::SeqCst);
+    cache.inflight().finalize(&tf_id.cache_key(), 0);
+    join.record.done.notify_waiters();
+
+    assert!(!cache.inflight().has(&tf_id.cache_key(), 0), "inflight record finalized");
+
+    drop(child_a);
+    assert_eq!(lease.child_count(), 0, "child dropped -> count 0");
+    assert!(lease.is_released(), "permit released");
+}
+
+
