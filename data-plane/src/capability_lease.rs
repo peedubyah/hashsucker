@@ -1493,3 +1493,96 @@ mod shared_cap_recovery {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }
+
+// ---- T18: dead capability replacement lifecycle ----
+#[cfg(test)]
+mod dead_cap_replacement {
+    use super::*;
+
+    fn build_dead_cap_stack(port: u16) -> (Arc<CapabilityManager>, Arc<Metrics>) {
+        let metrics = Arc::new(Metrics::default());
+        let coord = ProviderCoord {
+            provider: "torbox".into(),
+            account_scope: "test".into(),
+            provider_resource_id: "res-dead".into(),
+            provider_file_id: "file-res-ded".into(),
+            state: "ready".into(),
+            canonical_internal_path: Some(PATH.into()),
+            size: FILE,
+        };
+        let control_tf = ControlTorrentFile {
+            id: TF_ID.into(),
+            info_hash: INFO_HASH.into(),
+            canonical_internal_path: Some(PATH.into()),
+            size: FILE,
+        };
+        let mgr = Arc::new(CapabilityManager::new(
+            control_tf,
+            vec![coord],
+            ApiKeys { torbox: String::new(), realdebrid: String::new() },
+            reqwest::Client::new(),
+            metrics.clone(),
+        ));
+        let slot = mgr.slots.first().expect("slot exists");
+        let cap = DeliveryCapability::new(
+            format!("http://127.0.0.1:{port}/original"),
+            "torbox".into(),
+            "test".into(),
+            TF_ID.into(),
+            "res-dead".into(),
+            "file-res-dead".into(),
+            None,
+        );
+        slot.caps.lock().unwrap().push(cap);
+        (mgr, metrics)
+    }
+
+    /// T18: dead cap does not come back; manager-owned replacement succeeds.
+    #[tokio::test]
+    async fn t18_dead_cap_replacement() {
+        let _guard = crate::test_env::env_lock();
+        let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+        let (mgr, _metrics) = build_dead_cap_stack(port);
+
+        // Acquire the original warm cap
+        let reserved1 = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("first acquire_for_read failed"),
+        };
+        let original_cap_id = reserved1.cap.cap_id.clone();
+
+        // Verify the cap is alive
+        assert!(matches!(reserved1.cap.status(), crate::capability::CapabilityStatus::Alive));
+
+        // Mark it dead
+        reserved1.cap.mark_dead();
+        assert!(matches!(reserved1.cap.status(), crate::capability::CapabilityStatus::Dead));
+
+        // Release the lease
+        drop(reserved1);
+
+        // Set up the acquire stub to return a new capability
+        std::env::set_var("HY4_TEST_ACQUIRE_BASE_URL", format!("http://127.0.0.1:{port}"));
+        std::env::set_var("HY4_TEST_ACQUIRE_URL_TORBOX", format!("http://127.0.0.1:{port}/replacement"));
+
+        // Acquire again - should get a NEW healthy cap, not the dead one
+        let reserved2 = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("second acquire_for_read should succeed with replacement"),
+        };
+
+        // Verify: old dead cap_id is NOT returned
+        assert_ne!(reserved2.cap.cap_id, original_cap_id, "dead cap not reused");
+
+        // Verify: new cap is alive
+        assert!(matches!(reserved2.cap.status(), crate::capability::CapabilityStatus::Alive));
+
+        // Verify: replacement URL is the new one
+        assert!(reserved2.cap.runtime_url.contains("replacement"), "replacement uses new URL");
+
+        // Cleanup
+        drop(reserved2);
+        std::env::remove_var("HY4_TEST_ACQUIRE_BASE_URL");
+        std::env::remove_var("HY4_TEST_ACQUIRE_URL_TORBOX");
+    }
+}
