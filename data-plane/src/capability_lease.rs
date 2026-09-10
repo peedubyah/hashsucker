@@ -1498,6 +1498,99 @@ mod shared_cap_recovery {
 #[cfg(test)]
 mod dead_cap_replacement {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::Notify;
+
+    #[derive(Clone)]
+    struct BarrierState {
+        hits: Arc<Mutex<Vec<(String, u64, u64)>>>,
+        request_entered: Arc<AtomicBool>,
+        entered_notify: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    async fn barrier_handler(
+        State(st): State<BarrierState>,
+        headers: HeaderMap,
+        uri: axum::http::Uri,
+    ) -> Response {
+        let v = headers.get("range").expect("mock: missing Range").to_str().unwrap();
+        let inner = v.strip_prefix("bytes=").expect("mock: bad Range");
+        let mut it = inner.split('-');
+        let s: u64 = it.next().unwrap().parse().unwrap();
+        let e: u64 = it.next().unwrap().parse().unwrap();
+        let path = uri.path().to_string();
+        st.hits.lock().unwrap().push((path, s, e));
+        st.request_entered.store(true, Ordering::SeqCst);
+        st.entered_notify.notify_one();
+        st.release.notified().await;
+        let body = Body::from(Bytes::from(expected_range(s, e)));
+        Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header("content-range", format!("bytes {s}-{e}/{FILE}"))
+            .header("accept-ranges", "bytes")
+            .body(body)
+            .unwrap()
+            .into_response()
+    }
+
+    async fn spawn_barrier_mock(
+        hits: Arc<Mutex<Vec<(String, u64, u64)>>>,
+    ) -> (u16, tokio::task::JoinHandle<()>, BarrierState) {
+        let st = BarrierState {
+            hits,
+            request_entered: Arc::new(AtomicBool::new(false)),
+            entered_notify: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        };
+        let app = axum::Router::new()
+            .route("/shared", get(barrier_handler))
+            .with_state(st.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (port, handle, st)
+    }
+
+    fn build_shared_stack(port: u16) -> (Arc<CapabilityManager>, Arc<Metrics>) {
+        let metrics = Arc::new(Metrics::default());
+        let coord = ProviderCoord {
+            provider: "torbox".into(),
+            account_scope: "test".into(),
+            provider_resource_id: "res-shared".into(),
+            provider_file_id: "file-res-shared".into(),
+            state: "ready".into(),
+            canonical_internal_path: Some(PATH.into()),
+            size: FILE,
+        };
+        let control_tf = ControlTorrentFile {
+            id: TF_ID.into(),
+            info_hash: INFO_HASH.into(),
+            canonical_internal_path: Some(PATH.into()),
+            size: FILE,
+        };
+        let mgr = Arc::new(CapabilityManager::new(
+            control_tf,
+            vec![coord],
+            ApiKeys { torbox: String::new(), realdebrid: String::new() },
+            reqwest::Client::new(),
+            metrics.clone(),
+        ));
+        let slot = mgr.slots.first().expect("slot exists");
+        let cap = DeliveryCapability::new(
+            format!("http://127.0.0.1:{port}/shared"),
+            "torbox".into(),
+            "test".into(),
+            TF_ID.into(),
+            "res-shared".into(),
+            "file-res-shared".into(),
+            None,
+        );
+        slot.caps.lock().unwrap().push(cap);
+        (mgr, metrics)
+    }
 
     fn build_dead_cap_stack(port: u16) -> (Arc<CapabilityManager>, Arc<Metrics>) {
         let metrics = Arc::new(Metrics::default());
@@ -1582,6 +1675,209 @@ mod dead_cap_replacement {
 
         // Cleanup
         drop(reserved2);
+        std::env::remove_var("HY4_TEST_ACQUIRE_BASE_URL");
+        std::env::remove_var("HY4_TEST_ACQUIRE_URL_TORBOX");
+    }
+
+    /// T19: surviving Arc after pool pruning + exact replacement acquisition count.
+    #[tokio::test]
+    async fn t19_surviving_arc_and_acquisition_count() {
+        let _guard = crate::test_env::env_lock();
+        let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+        let (mgr, metrics) = build_dead_cap_stack(port);
+
+        let reserved1 = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("first acquire_for_read failed"),
+        };
+        let original_cap_id = reserved1.cap.cap_id.clone();
+        let acq_before = metrics.capability_acquisitions.load(Ordering::SeqCst);
+
+        reserved1.cap.mark_dead();
+        drop(reserved1);
+
+        std::env::set_var("HY4_TEST_ACQUIRE_BASE_URL", format!("http://127.0.0.1:{port}"));
+        std::env::set_var("HY4_TEST_ACQUIRE_URL_TORBOX", format!("http://127.0.0.1:{port}/replacement"));
+
+        let reserved2 = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("second acquire_for_read should succeed"),
+        };
+
+        let acq_after = metrics.capability_acquisitions.load(Ordering::SeqCst);
+        assert_eq!(acq_after - acq_before, 1, "exactly one replacement acquisition");
+        assert_ne!(reserved2.cap.cap_id, original_cap_id, "dead cap not reused");
+        assert!(matches!(reserved2.cap.status(), crate::capability::CapabilityStatus::Alive));
+
+        drop(reserved2);
+        std::env::remove_var("HY4_TEST_ACQUIRE_BASE_URL");
+        std::env::remove_var("HY4_TEST_ACQUIRE_URL_TORBOX");
+    }
+
+    /// T20: real NEW-work stop after dead mark via stripe_worker_shared_child.
+    #[tokio::test]
+    async fn t20_real_new_work_stop() {
+        let _guard = crate::test_env::env_lock();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let (port, _handle, barrier) = spawn_barrier_mock(hits.clone()).await;
+        let (mgr, metrics) = build_shared_stack(port);
+
+        let reserved = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("acquire_for_read failed"),
+        };
+        let lease = CapabilityLease::new(reserved);
+        let child_a = CapabilityLease::child_reader(&lease).expect("A");
+        let child_b = CapabilityLease::child_reader(&lease).expect("B");
+
+        let tmp_dir = std::env::temp_dir().join(format!("hashsucker_test_t20_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let cache = crate::cache::CacheEngine::open(
+            crate::cache::CacheConfig {
+                root: tmp_dir.clone(),
+                max_bytes: 64 << 20,
+                chunk_size: CHUNK,
+            },
+            metrics.clone(),
+        ).unwrap();
+
+        let tf_id = crate::cache::TorrentFileId::new(
+            TF_ID.to_string(),
+            INFO_HASH.to_string(),
+            PATH.to_string(),
+            FILE,
+        );
+
+        let joins_b = cache.inflight().join_or_claim_many(&tf_id.cache_key(), &[0]);
+        assert!(joins_b[0].owned, "B owns chunk 0");
+
+        let child_b_clone = child_b.clone();
+        let cache_for_b = cache.clone();
+        let mgr_for_b = mgr.clone();
+        let metrics_for_b = metrics.clone();
+        let tf_id_for_b = tf_id.clone();
+        let b_handle = tokio::spawn(async move {
+            crate::serve::fill_chunk_run_shared_child(
+                cache_for_b, metrics_for_b, mgr_for_b, reqwest::Client::new(),
+                0, tf_id_for_b, vec![0], 0, CHUNK - 1, 0, CHUNK - 1,
+                Faults {
+                    fault_429_always: false, fault_429_once: false,
+                    fault_dead_once: false, fault_midbody_once: false,
+                },
+                None, None, false, child_b_clone,
+            ).await;
+        });
+
+        barrier.entered_notify.notified().await;
+        child_a.cap.mark_dead();
+        barrier.release.notify_one();
+        let _ = b_handle.await;
+
+        assert!(cache.is_present(&tf_id.cache_key(), 0).unwrap_or(false), "B's chunk 0 present");
+
+        let guard = hits.lock().unwrap();
+        let chunk0_count = guard.iter().filter(|(p, s, _)| p == "/shared" && *s == 0).count();
+        let chunk1_count = guard.iter().filter(|(p, s, _)| p == "/shared" && *s == CHUNK).count();
+        assert_eq!(chunk0_count, 1, "exactly one fetch for chunk 0");
+        assert_eq!(chunk1_count, 0, "B did not fetch chunk 1 after dead mark");
+
+        drop(child_a);
+        drop(child_b);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// T21: simultaneous dead detection by both children.
+    /// Both A and B detect the cap is dead and stop claiming new work.
+    #[tokio::test]
+    async fn t21_simultaneous_dead_detection() {
+        let _guard = crate::test_env::env_lock();
+        let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+        let (mgr, _metrics) = build_dead_cap_stack(port);
+
+        let reserved = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("acquire_for_read failed"),
+        };
+        let lease = CapabilityLease::new(reserved);
+        let child_a = CapabilityLease::child_reader(&lease).expect("A");
+        let child_b = CapabilityLease::child_reader(&lease).expect("B");
+
+        // Verify both children share the same capability
+        assert_eq!(child_a.cap.cap_id, child_b.cap.cap_id);
+
+        // Verify capability is alive
+        assert!(matches!(child_a.cap.status(), crate::capability::CapabilityStatus::Alive));
+
+        // Both mark dead simultaneously
+        child_a.cap.mark_dead();
+        child_b.cap.mark_dead();
+
+        // Verify both see the dead status
+        assert!(matches!(child_a.cap.status(), crate::capability::CapabilityStatus::Dead));
+        assert!(matches!(child_b.cap.status(), crate::capability::CapabilityStatus::Dead));
+
+        // Drop both children
+        drop(child_a);
+        drop(child_b);
+        assert!(lease.is_released(), "lease released after both children dropped");
+
+        // Verify manager can acquire a replacement
+        std::env::set_var("HY4_TEST_ACQUIRE_BASE_URL", format!("http://127.0.0.1:{port}"));
+        std::env::set_var("HY4_TEST_ACQUIRE_URL_TORBOX", format!("http://127.0.0.1:{port}/replacement"));
+
+        let reserved2 = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("replacement acquire_for_read should succeed"),
+        };
+
+        assert!(matches!(reserved2.cap.status(), crate::capability::CapabilityStatus::Alive));
+
+        drop(reserved2);
+        drop(lease);
+        std::env::remove_var("HY4_TEST_ACQUIRE_BASE_URL");
+        std::env::remove_var("HY4_TEST_ACQUIRE_URL_TORBOX");
+    }
+
+    /// T22: manager recovery count after dual failure (exactly one replacement).
+    #[tokio::test]
+    async fn t22_manager_recovery_after_dual_failure() {
+        let _guard = crate::test_env::env_lock();
+        let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+        let (mgr, metrics) = build_dead_cap_stack(port);
+
+        let reserved = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("first acquire_for_read failed"),
+        };
+        let original_cap_id = reserved.cap.cap_id.clone();
+        let acq_before = metrics.capability_acquisitions.load(Ordering::SeqCst);
+
+        let lease = CapabilityLease::new(reserved);
+        let child_a = CapabilityLease::child_reader(&lease).expect("A");
+        let child_b = CapabilityLease::child_reader(&lease).expect("B");
+
+        child_a.cap.mark_dead();
+        child_b.cap.mark_dead();
+
+        drop(child_a);
+        drop(child_b);
+        assert_eq!(lease.child_count(), 0, "all children dropped");
+
+        std::env::set_var("HY4_TEST_ACQUIRE_BASE_URL", format!("http://127.0.0.1:{port}"));
+        std::env::set_var("HY4_TEST_ACQUIRE_URL_TORBOX", format!("http://127.0.0.1:{port}/replacement"));
+
+        let reserved2 = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("replacement acquire_for_read should succeed"),
+        };
+
+        let acq_after = metrics.capability_acquisitions.load(Ordering::SeqCst);
+        assert_eq!(acq_after - acq_before, 1, "exactly one replacement after dual failure");
+        assert_ne!(reserved2.cap.cap_id, original_cap_id, "dead cap not reused");
+        assert!(matches!(reserved2.cap.status(), crate::capability::CapabilityStatus::Alive));
+
+        drop(reserved2);
+        drop(lease);
         std::env::remove_var("HY4_TEST_ACQUIRE_BASE_URL");
         std::env::remove_var("HY4_TEST_ACQUIRE_URL_TORBOX");
     }
