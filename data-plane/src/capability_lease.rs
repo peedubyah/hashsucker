@@ -820,3 +820,196 @@ async fn t14_no_orphaned_inflight_on_cancel() {
 }
 
 
+
+// ---- T15: deterministic async fill cancellation via production path ----
+#[cfg(test)]
+mod cancel {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::Notify;
+
+    #[derive(Clone)]
+    struct BarrierState {
+        hits: Arc<Mutex<Vec<(String, u64, u64)>>>,
+        request_entered: Arc<AtomicBool>,
+        entered_notify: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    async fn barrier_handler(
+        State(st): State<BarrierState>,
+        headers: HeaderMap,
+        uri: axum::http::Uri,
+    ) -> Response {
+        let v = headers.get("range").expect("mock: missing Range").to_str().unwrap();
+        let inner = v.strip_prefix("bytes=").expect("mock: bad Range");
+        let mut it = inner.split('-');
+        let s: u64 = it.next().unwrap().parse().unwrap();
+        let e: u64 = it.next().unwrap().parse().unwrap();
+        let path = uri.path().to_string();
+        st.hits.lock().unwrap().push((path, s, e));
+        st.request_entered.store(true, Ordering::SeqCst);
+        st.entered_notify.notify_one();
+        st.release.notified().await;
+        let body = Body::from(Bytes::from(expected_range(s, e)));
+        Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header("content-range", format!("bytes {s}-{e}/{FILE}"))
+            .header("accept-ranges", "bytes")
+            .body(body)
+            .unwrap()
+            .into_response()
+    }
+
+    async fn spawn_barrier_mock(
+        hits: Arc<Mutex<Vec<(String, u64, u64)>>>,
+    ) -> (u16, tokio::task::JoinHandle<()>, BarrierState) {
+        let st = BarrierState {
+            hits,
+            request_entered: Arc::new(AtomicBool::new(false)),
+            entered_notify: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        };
+        let app = axum::Router::new()
+            .route("/cancel", get(barrier_handler))
+            .with_state(st.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (port, handle, st)
+    }
+
+    fn build_cancel_stack(port: u16) -> (Arc<CapabilityManager>, Arc<Metrics>) {
+        let metrics = Arc::new(Metrics::default());
+        let coord = ProviderCoord {
+            provider: "torbox".into(),
+            account_scope: "test".into(),
+            provider_resource_id: "res-cancel".into(),
+            provider_file_id: "file-res-cancel".into(),
+            state: "ready".into(),
+            canonical_internal_path: Some(PATH.into()),
+            size: FILE,
+        };
+        let control_tf = ControlTorrentFile {
+            id: TF_ID.into(),
+            info_hash: INFO_HASH.into(),
+            canonical_internal_path: Some(PATH.into()),
+            size: FILE,
+        };
+        let mgr = Arc::new(CapabilityManager::new(
+            control_tf,
+            vec![coord],
+            ApiKeys { torbox: String::new(), realdebrid: String::new() },
+            reqwest::Client::new(),
+            metrics.clone(),
+        ));
+        let slot = mgr.slots.first().expect("slot exists");
+        let cap = DeliveryCapability::new(
+            format!("http://127.0.0.1:{port}/cancel"),
+            "torbox".into(),
+            "test".into(),
+            TF_ID.into(),
+            "res-cancel".into(),
+            "file-res-cancel".into(),
+            None,
+        );
+        slot.caps.lock().unwrap().push(cap);
+        (mgr, metrics)
+    }
+
+    #[tokio::test]
+    async fn t15_abort_during_blocked_http() {
+        let _guard = crate::test_env::env_lock();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let (port, _handle, barrier) = spawn_barrier_mock(hits.clone()).await;
+        let (mgr, metrics) = build_cancel_stack(port);
+
+        let reserved = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("acquire_for_read failed"),
+        };
+        let lease = CapabilityLease::new(reserved);
+
+        let child_a = CapabilityLease::child_reader(&lease).expect("A");
+        let child_b = CapabilityLease::child_reader(&lease).expect("B");
+        assert_eq!(lease.child_count(), 2);
+
+        // CacheEngine::open returns Arc<CacheEngine> directly
+        let cache = crate::cache::CacheEngine::open(
+            crate::cache::CacheConfig {
+                root: std::env::temp_dir().join("hashsucker_test_t15"),
+                max_bytes: 64 << 20,
+                chunk_size: CHUNK,
+            },
+            metrics.clone(),
+        ).unwrap();
+
+        let tf_id = crate::cache::TorrentFileId::new(
+            TF_ID.to_string(),
+            INFO_HASH.to_string(),
+            PATH.to_string(),
+            FILE,
+        );
+
+        let joins = cache.inflight().join_or_claim_many(&tf_id.cache_key(), &[0]);
+        let join = &joins[0];
+        assert!(join.owned, "we own chunk 0");
+
+        let child_a_clone = child_a.clone();
+        let cache_for_spawn = cache.clone();
+        let mgr_for_spawn = mgr.clone();
+        let metrics_for_spawn = metrics.clone();
+        let tf_id_for_spawn = tf_id.clone();
+        let fill_handle = tokio::spawn(async move {
+            crate::serve::fill_chunk_run_shared_child(
+                cache_for_spawn,
+                metrics_for_spawn,
+                mgr_for_spawn,
+                reqwest::Client::new(),
+                0,
+                tf_id_for_spawn,
+                vec![0],
+                0,
+                CHUNK - 1,
+                0,
+                CHUNK - 1,
+                Faults {
+                    fault_429_always: false,
+                    fault_429_once: false,
+                    fault_dead_once: false,
+                    fault_midbody_once: false,
+                },
+                None,
+                None,
+                false,
+                child_a_clone,
+            )
+            .await;
+        });
+
+        barrier.entered_notify.notified().await;
+        assert!(barrier.request_entered.load(Ordering::SeqCst), "request entered");
+
+        fill_handle.abort();
+        let _ = fill_handle.await;
+
+        barrier.release.notify_one();
+
+        assert!(!cache.inflight().has(&tf_id.cache_key(), 0), "inflight finalized after abort");
+        assert!(!cache.is_present(&tf_id.cache_key(), 0).unwrap_or(false), "chunk not present after abort");
+
+        assert_eq!(lease.child_count(), 2, "logical children unchanged");
+
+        drop(child_a);
+        drop(child_b);
+        assert_eq!(lease.child_count(), 0, "all children dropped");
+        assert!(lease.is_released(), "permit released");
+
+        let _reserved2 = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("permit should be released"),
+        };
+    }
+}

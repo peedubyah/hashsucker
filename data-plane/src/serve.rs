@@ -2963,6 +2963,82 @@ pub fn window_slice(cs: u64, n: u64, w_start: u64, w_end: u64) -> Option<(usize,
     Some((a, z))
 }
 
+/// RAII guard for owned inflight chunk responsibility. When a fill task
+/// becomes the owner of one or more inflight records (via
+/// `join_or_claim_many`), those records MUST be resolved — success or failure
+/// — or every waiter on `done.notified().await` blocks forever and the
+/// inflight map leaks the entry.
+///
+/// The guard resolves them on Drop with `failed` semantics. Normal completion
+/// calls `finish_success` / `finish_failure` to record the real outcome and
+/// disarm the guard. If the future is cancelled at any `.await` after the
+/// guard is created, Drop performs the existing failure/reclaim cleanup:
+/// mark failed, finalize inflight ownership, notify waiters.
+///
+/// Synchronous bookkeeping only — no blocking, no async.
+struct OwnedFillGuard {
+    cache: Arc<CacheEngine>,
+    metrics: Arc<Metrics>,
+    key: String,
+    indices: Vec<u64>,
+    records: Vec<Arc<cache::ChunkInFlightRecord>>,
+    armed: bool,
+}
+
+impl OwnedFillGuard {
+    fn new(
+        cache: Arc<CacheEngine>,
+        metrics: Arc<Metrics>,
+        key: &str,
+        indices: Vec<u64>,
+    ) -> Self {
+        let records = cache.inflight().records_for(&key, &indices);
+        Self {
+            cache,
+            metrics,
+            key: key.to_string(),
+            indices,
+            records,
+            armed: true,
+        }
+    }
+
+    fn finish_success(mut self, published: &[u64]) {
+        self.mark(true, published);
+        self.armed = false;
+    }
+
+    fn finish_failure(mut self) {
+        self.mark(false, &[]);
+        self.armed = false;
+    }
+
+    fn mark(&self, ok: bool, published: &[u64]) {
+        for idx in &self.indices {
+            let rec = match self.records.iter().find(|r| r.chunk_index == *idx) {
+                Some(r) => r,
+                None => continue,
+            };
+            if ok && published.contains(idx) {
+                rec.success.store(true, Ordering::SeqCst);
+            } else {
+                rec.failed.store(true, Ordering::SeqCst);
+                self.metrics.cache.chunk_fills_failed.fetch_add(1, Ordering::SeqCst);
+            }
+            self.cache.inflight().finalize(&self.key, *idx);
+            rec.done.notify_waiters();
+        }
+    }
+}
+
+impl Drop for OwnedFillGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.mark(false, &[]);
+        }
+    }
+}
+
 pub async fn fill_chunk_run(
     cache: Arc<CacheEngine>,
     metrics: Arc<Metrics>,
@@ -3113,33 +3189,16 @@ async fn fill_chunk_run_inner(
             .fetch_add(span_bytes - window_bytes, Ordering::SeqCst);
     }
 
-    let records = cache.inflight().records_for(&key, &indices);
-
-    // Resolve EVERY owned record, successful or not. Abandoning a fill without
-    // this deadlocks every reader waiting on the chunk: their `notified().await`
-    // would never be woken.
-    let mark = |ok: bool, published: &[u64]| {
-        for idx in &indices {
-            let rec = match records.iter().find(|r| r.chunk_index == *idx) {
-                Some(r) => r,
-                None => continue,
-            };
-            if ok && published.contains(idx) {
-                rec.success.store(true, Ordering::SeqCst);
-            } else {
-                rec.failed.store(true, Ordering::SeqCst);
-                metrics.cache.chunk_fills_failed.fetch_add(1, Ordering::SeqCst);
-            }
-            cache.inflight().finalize(&key, *idx);
-            rec.done.notify_waiters();
-        }
-    };
+    // Own inflight guard: resolves owned records on Drop if the future is
+    // cancelled at any `.await` after this point. Normal completion disarms
+    // the guard via finish_success/finish_failure.
+    let guard = OwnedFillGuard::new(cache.clone(), metrics.clone(), &key, indices.clone());
 
     let stager = match cache.begin_stage(tf.clone()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[rust-proxy] begin_stage failed: {e}");
-            mark(false, &[]);
+            guard.finish_failure();
             if let Some(tx) = sink.as_ref() {
                 let _ = tx.send(SpanMsg::Failed).await;
             }
@@ -3264,7 +3323,7 @@ async fn fill_chunk_run_inner(
                 Ok(r) => r,
                 Err(_) => {
                     stager.abort();
-                    mark(false, &[]);
+                    guard.finish_failure();
                     if let Some(tx) = sink.as_ref() {
                         let _ = tx.send(SpanMsg::Failed).await;
                     }
@@ -3335,7 +3394,7 @@ async fn fill_chunk_run_inner(
     let sub_open = Instant::now();
     if reader.ensure_open().await.is_err() {
         stager.abort();
-        mark(false, &[]);
+        guard.finish_failure();
         if let Some(tx) = sink.as_ref() {
             let _ = tx.send(SpanMsg::Failed).await;
         }
@@ -3659,12 +3718,13 @@ async fn fill_chunk_run_inner(
         // chunk with a live fill is skipped. Our own just-published chunks are
         // still in the in-flight map here, so they cannot evict themselves.
         let _ = cache.maybe_evict();
+        guard.finish_success(&p);
         p
     } else {
         stager.abort();
+        guard.finish_failure();
         Vec::new()
     };
-    mark(ok, &published);
     if let Some(tx) = sink.as_ref() {
         let _ = tx.send(if ok { SpanMsg::Eof } else { SpanMsg::Failed }).await;
     }
