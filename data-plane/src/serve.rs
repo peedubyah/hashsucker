@@ -1256,6 +1256,95 @@ async fn stripe_worker(
     // construction on every exit path above.
 }
 
+/// T22: shared-cap work-stealing worker. Same coordinator semantics as
+/// `stripe_worker` (own queue first, steal from donor tail when empty),
+/// but the worker holds a `ChildReaderHandle` instead of a `ReservedCapability`.
+/// The handle is cloned per fill so the lease permit stays valid across
+/// multiple chunk fills. Retirement/replacement are intentionally NOT extended
+/// to shared-cap mode: those mechanisms assume two independent capabilities,
+/// and a shared-cap lease has only one. A dead-link on one child surfaces as
+/// a terminal error (no independent reacquire); the sibling keeps draining.
+async fn stripe_worker_shared_child(
+    coord: Arc<TwoStripeWork>,
+    side: StripeSide,
+    child: manager::ChildReaderHandle,
+    cache: Arc<CacheEngine>,
+    metrics: Arc<Metrics>,
+    manager: Arc<manager::CapabilityManager>,
+    client: reqwest::Client,
+    priority: u8,
+    tf: TorrentFileId,
+    grid: ChunkGrid,
+    run_start: u64,
+    run_end: u64,
+    chunk_sinks: Arc<HashMap<u64, mpsc::Sender<SpanMsg>>>,
+    stage: StageClock,
+    cold: bool,
+    faults: Faults,
+) {
+    let key = tf.cache_key();
+    let provider = child.cap.provider.clone();
+    let cap_id = child.cap.cap_id.clone();
+    loop {
+        let (idx, _stolen) = match coord.next(side, &provider, &cap_id) {
+            Some(job) => job,
+            None => break,
+        };
+        let cs = grid.chunk_start(idx);
+        let ce = match grid.chunk_end(idx) {
+            Some(e) => e,
+            None => {
+                coord.finish(idx, false);
+                continue;
+            }
+        };
+        let ws = run_start.max(cs);
+        let we = run_end.min(ce);
+        let sink = chunk_sinks.get(&idx).cloned();
+        let child_clone = child.clone();
+        fill_chunk_run_shared_child(
+            cache.clone(),
+            metrics.clone(),
+            manager.clone(),
+            client.clone(),
+            priority,
+            tf.clone(),
+            vec![idx],
+            cs,
+            ce,
+            ws,
+            we,
+            faults,
+            sink,
+            Some(stage.clone()),
+            cold,
+            child_clone,
+        )
+        .await;
+        let present = cache.is_present(&key, idx).unwrap_or(false);
+        if present {
+            coord.finish(idx, true);
+        } else {
+            coord.finish(idx, false);
+            break;
+        }
+    }
+    if coord.should_drain() {
+        for idx in coord.drain() {
+            for rec in cache.inflight().records_for(&key, &[idx]) {
+                if cache.is_present(&key, idx).unwrap_or(false) {
+                    rec.success.store(true, Ordering::SeqCst);
+                } else {
+                    rec.failed.store(true, Ordering::SeqCst);
+                    metrics.cache.chunk_fills_failed.fetch_add(1, Ordering::SeqCst);
+                }
+                cache.inflight().finalize(&key, idx);
+                rec.done.notify_waiters();
+            }
+        }
+    }
+}
+
 pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response<Body> {
     // ---- Slice 4.5 T0: the read request is received. Every later stage is
     // measured relative to this instant. Stamped at handler entry, before range
@@ -2207,7 +2296,128 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                             // Preference: distinct warm standby > shared-cap lease
                             // > single-lane. Engages only behind the existing
                             // active-active gates (never by default).
-                            else if auto_go(sub.len())
+                                                        // ---- T22 shared-cap work-stealing path (proven on m3-north-db).
+                            // Same shared-cap lease as the T22 fallback, but the
+                            // two child readers use the existing two-lane
+                            // work-stealing coordinator rather than fixed 50/50.
+                            // One reservation, zero new acquisition.
+                            // Retirement/replacement are NOT extended to shared-cap
+                            // mode (they assume two independent capabilities).
+                            else if steal_wanted(sub.len())
+                                && shared_cap_fallback()
+                                && fr.is_some()
+                                && sub.iter().all(|idx| grid.chunk_end(*idx).is_some())
+                            {
+                                let half = (sub.len() + 1) / 2;
+                                let mut pieces: Vec<(usize, u64)> =
+                                    Vec::with_capacity(sub.len());
+                                for (t, &idx) in sub.iter().enumerate() {
+                                    let cs = grid.chunk_start(idx);
+                                    let ce = grid.chunk_end(idx).unwrap_or(f_end);
+                                    let ws = run.start.max(cs);
+                                    let we = run.end.min(ce);
+                                    cache.metrics.cache_decisions.push(CacheDecision {
+                                        request: (start, end),
+                                        present_before: present_before.clone(),
+                                        missing: (ws, we),
+                                        chunk_indices: vec![idx],
+                                        fetch_span: Some((cs, ce)),
+                                        joined_inflight: joins[k + t].joined_existing,
+                                        overlap_bytes_avoided: if joins[k + t].joined_existing {
+                                            grid.chunk_len(idx)
+                                        } else {
+                                            0
+                                        },
+                                        plan_origin,
+                                        evictions_before: cache
+                                            .metrics
+                                            .cache
+                                            .evictions
+                                            .load(Ordering::SeqCst),
+                                    });
+                                    pieces.push((t, idx));
+                                }
+                                let head_idx = sub[0];
+                                let (htx, hrx) = mpsc::channel::<SpanMsg>(32);
+                                let mut sinks = HashMap::new();
+                                sinks.insert(head_idx, htx);
+                                let sinks = Arc::new(sinks);
+                                ordered.push((head_idx, FetchItem::Owned { rx: hrx }));
+                                let mut left: Vec<u64> = Vec::new();
+                                let mut right: Vec<u64> = Vec::new();
+                                for (t, idx) in &pieces {
+                                    if *idx == head_idx {
+                                        left.push(*idx);
+                                    } else {
+                                        ordered.push((
+                                            *idx,
+                                            FetchItem::Staged {
+                                                index: *idx,
+                                                record: joins[k + *t].record.clone(),
+                                            },
+                                        ));
+                                        if left.len() < half {
+                                            left.push(*idx);
+                                        } else {
+                                            right.push(*idx);
+                                        }
+                                    }
+                                }
+                                eprintln!(
+                                    "[t22] shared_cap_steal_spawned: chunks={} left={} right={}",
+                                    sub.len(),
+                                    left.len(),
+                                    right.len(),
+                                );
+                                let lease =
+                                    CapabilityLease::new(fr.unwrap());
+                                let child_a =
+                                    CapabilityLease::child_reader(&lease).expect("T22: child A");
+                                let child_b =
+                                    CapabilityLease::child_reader(&lease).expect("T22: child B");
+                                let coord = Arc::new(TwoStripeWork::new(left, right));
+                                stripe_guard.0 = Some(coord.clone());
+                                stripe_workers.push(tokio::spawn(stripe_worker_shared_child(
+                                    coord.clone(),
+                                    StripeSide::A,
+                                    child_a,
+                                    cache.clone(),
+                                    metrics.clone(),
+                                    manager_clone.clone(),
+                                    client_clone.clone(),
+                                    priority,
+                                    tf_id.clone(),
+                                    grid,
+                                    run.start,
+                                    run.end,
+                                    sinks.clone(),
+                                    stage.clone(),
+                                    cold,
+                                    faults,
+                                )));
+                                stripe_workers.push(tokio::spawn(stripe_worker_shared_child(
+                                    coord.clone(),
+                                    StripeSide::B,
+                                    child_b,
+                                    cache.clone(),
+                                    metrics.clone(),
+                                    manager_clone.clone(),
+                                    client_clone.clone(),
+                                    priority,
+                                    tf_id.clone(),
+                                    grid,
+                                    run.start,
+                                    run.end,
+                                    sinks,
+                                    stage.clone(),
+                                    cold,
+                                    faults,
+                                )));
+                                k = j + 1;
+                                continue;
+                            }
+
+else if auto_go(sub.len())
                                 && shared_cap_fallback()
                                 && fr.is_some()
                                 && sub.len() >= 2
@@ -3440,7 +3650,7 @@ async fn fill_chunk_run_inner(
     }
     // T12: return the final reservation (post any in-fill replacement) so
     // a stripe worker threads the same warm lane across chunk fills.
-    Some(reader.into_reserved().expect("T12: reader always owns its reservation"))
+    reader.into_reserved()
 
 }
 

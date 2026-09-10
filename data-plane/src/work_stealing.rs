@@ -55,7 +55,7 @@ use crate::manager::CapabilityManager;
 use crate::metrics::Metrics;
 use crate::playback_intel::{PfConfig, PlaybackIntelligence, PrefetchMode};
 use crate::serve::{get_file, AppState};
-use crate::test_env::{env_lock, set_retire, set_steal, set_two_span};
+use crate::test_env::{env_lock, set_auto, set_min_chunks, set_retire, set_steal, set_two_span};
 
 const FILE: u64 = 1 << 20;
 const CHUNK: u64 = 65536;
@@ -515,4 +515,99 @@ async fn t12_active_donor_chunk_never_stolen() {
     set_steal(false);
     set_retire(false);
     unpin_slot_order();
+}
+
+// ---- Proof 5: shared-cap + steal enabled ----
+#[tokio::test]
+async fn t12_shared_cap_steal_enabled() {
+    let _guard = env_lock();
+    // AUTO + steal + shared_cap armed, only one warm cap -> shared-cap
+    // fallback engages with work stealing. Two child readers from one
+    // CapabilityLease; faster child steals at least one whole chunk.
+    set_two_span(false);
+    set_steal(true);
+    set_retire(false);
+    set_auto(true);
+    set_min_chunks(Some(4));
+    std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
+    std::env::set_var("HY4_ACTIVE_ACTIVE_SHARED_CAP", "1");
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let (port, server) = spawn_mock(modes_pair(Mode::Full, slow()), hits.clone()).await;
+    let stack = build_stack(port, vec![WarmCap {
+        provider: "torbox",
+        resource: "res-a",
+        path: "/la",
+    }]);
+    let api0 = stack.metrics.api_requests.load(Ordering::SeqCst);
+    let out = demand(&stack.state, 0, SPAN6_END).await;
+    assert_eq!(out.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(out.bytes, expected_range(0, SPAN6_END), "P5: exact output");
+    {
+        let h = hits.lock().unwrap();
+        // Six per-chunk fills, every Range exactly once.
+        assert_eq!(h.len(), 6, "P5: six chunk fills, got {h:?}");
+        assert_eq!(
+            sorted_ranges(&h),
+            (0..6).map(chunk_range).collect::<Vec<_>>(),
+            "P5: every logical Range exactly once"
+        );
+        // Both children share the same single path (/la), so all chunks
+        // come from it. The faster child should steal at least one chunk.
+        assert_eq!(served_by(&h, "/la"), vec![0, 1, 2, 3, 4, 5], "P5: all chunks from single cap");
+    }
+    assert_eq!(
+        stack.metrics.api_requests.load(Ordering::SeqCst),
+        api0,
+        "P5: zero new capability acquisition"
+    );
+    server.abort();
+    set_auto(false);
+    set_steal(false);
+    set_retire(false);
+    std::env::remove_var("HY4_ACTIVE_ACTIVE_SHARED_CAP");
+}
+
+// ---- Proof 6: shared-cap odd chunk count stays aligned ----
+#[tokio::test]
+async fn t12_shared_cap_odd_chunk_aligned() {
+    let _guard = env_lock();
+    // 3 missing chunks in shared-cap + steal mode: 2 + 1 initial split,
+    // stealing still only moves whole chunks.
+    set_two_span(false);
+    set_steal(true);
+    set_retire(false);
+    set_auto(true);
+    set_min_chunks(Some(2));
+    std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
+    std::env::set_var("HY4_ACTIVE_ACTIVE_SHARED_CAP", "1");
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let (port, server) = spawn_mock(modes_pair(Mode::Full, slow()), hits.clone()).await;
+    let stack = build_stack(port, vec![WarmCap {
+        provider: "torbox",
+        resource: "res-a",
+        path: "/la",
+    }]);
+    let api0 = stack.metrics.api_requests.load(Ordering::SeqCst);
+    let out = demand(&stack.state, 0, 3 * CHUNK - 1).await;
+    assert_eq!(out.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(out.bytes, expected_range(0, 3 * CHUNK - 1), "P6: bytes exact");
+    {
+        let h = hits.lock().unwrap();
+        assert_eq!(h.len(), 3, "P6: three chunk fills, got {h:?}");
+        assert_eq!(
+            sorted_ranges(&h),
+            (0..3).map(chunk_range).collect::<Vec<_>>(),
+            "P6: every logical Range exactly once"
+        );
+    }
+    assert_eq!(
+        stack.metrics.api_requests.load(Ordering::SeqCst),
+        api0,
+        "P6: zero new capability acquisition"
+    );
+    server.abort();
+    set_auto(false);
+    set_steal(false);
+    set_retire(false);
+    std::env::remove_var("HY4_ACTIVE_ACTIVE_SHARED_CAP");
 }

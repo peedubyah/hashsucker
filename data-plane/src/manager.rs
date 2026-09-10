@@ -145,6 +145,23 @@ pub struct ChildReaderHandle {
     lease: Arc<CapabilityLease>,
 }
 
+impl Clone for ChildReaderHandle {
+    fn clone(&self) -> Self {
+        let mut inner = self.lease.inner.lock().unwrap();
+        if inner.child_count >= 2 || inner.reserved.is_none() {
+            return Self {
+                cap: self.cap.clone(),
+                lease: self.lease.clone(),
+            };
+        }
+        inner.child_count += 1;
+        Self {
+            cap: self.cap.clone(),
+            lease: self.lease.clone(),
+        }
+    }
+}
+
 impl CapabilityLease {
     /// Wrap one owned reservation into a lease. The reservation's permit is now
     /// owned by the lease and will be released only when the last child handle
