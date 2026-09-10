@@ -533,54 +533,67 @@ async fn t7_child_handle_clone_lifecycle() {
     };
     let lease = CapabilityLease::new(reserved);
     
-    // Create two real child handles (the logical lanes).
+    // 1. Create A: child_count = 1
     let child_a = CapabilityLease::child_reader(&lease).expect("A");
+    assert_eq!(lease.child_count(), 1, "one logical child");
+    
+    // 2. Clone A ten times: child_count remains 1
+    let mut a_clones = Vec::new();
+    for _ in 0..10 {
+        a_clones.push(child_a.clone());
+    }
+    assert_eq!(lease.child_count(), 1, "clones don't increase count");
+    drop(a_clones);
+    assert_eq!(lease.child_count(), 1, "dropping clones doesn't decrement");
+    
+    // 3. Create B: child_count = 2
     let child_b = CapabilityLease::child_reader(&lease).expect("B");
-    assert_eq!(lease.child_count(), 2, "two real children");
+    assert_eq!(lease.child_count(), 2, "two logical children");
     
-    // Temporary per-fill clones (like stripe_worker_shared_child makes).
-    // These should NOT increase the logical child count beyond 2.
+    // 4. Clone A and B repeatedly: child_count remains 2
     {
-        let clone_a = child_a.clone();
-        let clone_b = child_b.clone();
-        // Clones of real handles when count >= 2 get is_real: false,
-        // so the count stays at 2.
-        assert_eq!(lease.child_count(), 2, "temporary clones don't increase count");
-        drop(clone_a);
-        drop(clone_b);
-        // Dropping temporary clones doesn't decrement the count.
-        assert_eq!(lease.child_count(), 2, "dropping temp clones doesn't decrement");
+        let mut clones = Vec::new();
+        for _ in 0..10 {
+            clones.push(child_a.clone());
+            clones.push(child_b.clone());
+        }
+        assert_eq!(lease.child_count(), 2, "repeated clones don't increase count");
     }
+    assert_eq!(lease.child_count(), 2, "dropping clones doesn't decrement");
     
-    // Original worker child handles keep the permit alive across multiple chunks.
-    // (Simulating what stripe_worker_shared_child does: clone per fill, drop clone, repeat.)
-    for _ in 0..3 {
-        let _clone = child_a.clone();
-        let _clone = child_b.clone();
-        // Clones drop at end of scope, count stays at 2.
-        assert_eq!(lease.child_count(), 2, "count stable across per-fill clones");
-    }
-    
-    // Dropping the first real child: count decrements to 1.
-    drop(child_a);
-    assert_eq!(lease.child_count(), 1, "one real child remains");
-    
-    // The remaining child keeps the permit alive.
-    // New clones can still be made (count < 2).
-    let clone_b = child_b.clone();
-    assert_eq!(lease.child_count(), 2, "clone of remaining child succeeds");
-    drop(clone_b);
-    assert_eq!(lease.child_count(), 1, "temp clone drop doesn't decrement");
-    
-    // Final original child drop releases normally.
+    // 5. Drop original B while one B clone remains: child_count remains 2
+    let b_clone = child_b.clone();
     drop(child_b);
-    assert_eq!(lease.child_count(), 0, "all real children dropped");
+    assert_eq!(lease.child_count(), 2, "logical B still alive via clone");
     
-    // Lease is released: new acquire succeeds.
+    // 6. Drop final B handle: child_count becomes 1
+    drop(b_clone);
+    assert_eq!(lease.child_count(), 1, "logical B fully dropped");
+    
+    // 7. Clone A again after B is gone: child_count remains 1
+    {
+        let _clone = child_a.clone();
+        assert_eq!(lease.child_count(), 1, "clone of A doesn't increase count");
+    }
+    
+    // 8. While only A exists, create a new logical B
+    let _child_b = CapabilityLease::child_reader(&lease).expect("new B");
+    assert_eq!(lease.child_count(), 2, "new logical B created");
+    
+    // 9. Third logical child creation is rejected
+    assert!(CapabilityLease::child_reader(&lease).is_none(), "third child rejected");
+    
+    // 10. Final logical-child lifetime ending releases the permit exactly once
+    drop(child_a);
+    assert_eq!(lease.child_count(), 1);
+    drop(_child_b);
+    assert_eq!(lease.child_count(), 0, "all logical children dropped");
+    
+    // Lease is released: new acquire succeeds
     drop(lease);
     let _reserved2 = match mgr.acquire_for_read(0).await {
         Ok(r) => r,
-        Err(_) => panic!("permit should be released after all children drop"),
+        Err(_) => panic!("permit should be released"),
     };
 }
 

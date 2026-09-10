@@ -132,53 +132,44 @@ pub struct CapabilityLease {
     inner: Mutex<LeaseInner>,
 }
 
-/// A handle to one borrowed child reader. Holds a clone of the underlying
-/// `Arc<DeliveryCapability>` (so the transport reader can read the signed URL
-/// and traverse the normal breaker/limiter/retry path) plus an `Arc` to the
-/// parent lease (so the last child's drop releases the single permit).
-///
-/// `Drop` is the only mechanism that decrements the lease's child count and
-/// releases the reservation. A handle is `Send` but NOT `Clone` — there is
-/// exactly one handle per spawned reader, so permit accounting stays exact.
-pub struct ChildReaderHandle {
-    pub cap: Arc<DeliveryCapability>,
+/// An ownership token for one logical child lane. Each `LogicalChild`
+/// represents one of the at-most-two concurrent readers the lease allows.
+/// `ChildReaderHandle::clone()` returns another handle to the SAME logical
+/// child; the lease's `child_count` is decremented only when the last handle
+/// for a logical child drops (taking the `LogicalChild` with it).
+struct LogicalChild {
     lease: Arc<CapabilityLease>,
-    /// Whether this handle contributes to the child count. A clone made when
-    /// the lease is full or already released is a no-op: it doesn't increment
-    /// the count, and its Drop doesn't decrement. This prevents the
-    /// reservation from being released prematurely when a no-op clone drops
-    /// before the real handles.
-    is_real: bool,
 }
 
-impl Clone for ChildReaderHandle {
-    fn clone(&self) -> Self {
-        let mut inner = self.lease.inner.lock().unwrap();
-        if inner.child_count >= 2 || inner.reserved.is_none() {
-            return Self {
-                cap: self.cap.clone(),
-                lease: self.lease.clone(),
-                is_real: false,
-            };
-        }
-        inner.child_count += 1;
-        Self {
-            cap: self.cap.clone(),
-            lease: self.lease.clone(),
-            is_real: true,
-        }
-    }
-}
-
-impl Drop for ChildReaderHandle {
+impl Drop for LogicalChild {
     fn drop(&mut self) {
-        if !self.is_real {
-            return;
-        }
         let mut inner = self.lease.inner.lock().unwrap();
         inner.child_count = inner.child_count.saturating_sub(1);
         if inner.child_count == 0 {
             inner.reserved = None;
+        }
+    }
+}
+
+/// A handle to one borrowed child reader. Holds a clone of the underlying
+/// `Arc<DeliveryCapability>` (so the transport reader can read the signed URL
+/// and traverse the normal breaker/limiter/retry path) plus an `Arc` to a
+/// `LogicalChild` (so the lease's child_count is decremented only when the
+/// last handle for that logical child drops).
+///
+/// `Clone` clones the handle (cheap Arc bump) — it does NOT create a new
+/// logical child and does NOT increment child_count. Only
+/// `CapabilityLease::child_reader()` creates new logical children.
+pub struct ChildReaderHandle {
+    pub cap: Arc<DeliveryCapability>,
+    logical: Arc<LogicalChild>,
+}
+
+impl Clone for ChildReaderHandle {
+    fn clone(&self) -> Self {
+        Self {
+            cap: self.cap.clone(),
+            logical: self.logical.clone(),
         }
     }
 }
@@ -215,8 +206,7 @@ impl CapabilityLease {
             .clone();
         Some(ChildReaderHandle {
             cap,
-            lease: lease.clone(),
-            is_real: true,
+            logical: Arc::new(LogicalChild { lease: lease.clone() }),
         })
     }
 
