@@ -95,8 +95,20 @@ pub fn set_replace(on: bool) {
 }
 
 /// Set (`true`) or remove (`false`) the T22 shared-cap two-reader lease
-/// fallback gate (`HY4_ACTIVE_ACTIVE_SHARED_CAP`, default OFF).
+/// fallback gate. Canonical `DATA_PLANE_ACTIVE_ACTIVE_SHARED_CAP`, deprecated
+/// `HY4_ACTIVE_ACTIVE_SHARED_CAP` accepted as fallback. Both default OFF.
 pub fn set_shared_cap(on: bool) {
+    if on {
+        std::env::set_var("DATA_PLANE_ACTIVE_ACTIVE_SHARED_CAP", "1");
+    } else {
+        std::env::remove_var("DATA_PLANE_ACTIVE_ACTIVE_SHARED_CAP");
+        std::env::remove_var("HY4_ACTIVE_ACTIVE_SHARED_CAP");
+    }
+}
+
+/// Set only the deprecated `HY4_ACTIVE_ACTIVE_SHARED_CAP` gate (for the
+/// compatibility proof). Leave the canonical var untouched.
+pub fn set_shared_cap_deprecated(on: bool) {
     if on {
         std::env::set_var("HY4_ACTIVE_ACTIVE_SHARED_CAP", "1");
     } else {

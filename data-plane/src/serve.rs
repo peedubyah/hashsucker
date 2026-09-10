@@ -384,7 +384,7 @@ fn steal_flag() -> bool {
 /// use one CapabilityLease over the already-held primary capability instead
 /// of falling back to single-fill. Default OFF: existing single-lane
 /// fallback is preserved unless explicitly opted in.
-fn shared_cap_fallback() -> bool {
+pub(crate) fn shared_cap_fallback() -> bool {
     crate::env_canonical("DATA_PLANE_ACTIVE_ACTIVE_SHARED_CAP", "HY4_ACTIVE_ACTIVE_SHARED_CAP")
         .map(|v| v == "1")
         .unwrap_or(false)
@@ -495,6 +495,14 @@ pub(crate) enum StripeSide {
 /// tracking, per-lane observation history). Retirement moves no bytes and
 /// persists nothing.
 /// `pub(crate)` so the T13 unit proofs can drive the coordinator directly.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) struct ClaimRecord {
+    pub(crate) side: StripeSide,
+    pub(crate) chunk: u64,
+    pub(crate) stolen: bool,
+}
+
 pub(crate) struct TwoStripeWork {
     state: std::sync::Mutex<TwoStripeState>,
 }
@@ -534,6 +542,10 @@ struct TwoStripeState {
     /// assignment. Sources the dead-cap record at retirement time (the
     /// throughput history may hold no sample for a still-active slow lane).
     lane_cap: [Option<(String, String)>; 2],
+    /// T22: test-only claim history. Records each (side, chunk, stolen) triple
+    /// from `next()` so shared-cap work-stealing proofs can verify which lane
+    /// claimed which chunk and whether it was stolen. Not used by production.
+    claims: Vec<ClaimRecord>,
 }
 
 /// T13: one lane's cross-fill useful-throughput history.
@@ -655,6 +667,7 @@ impl TwoStripeWork {
                 replace_tried: [false, false],
                 dead_cap_ids: Vec::new(),
                 lane_cap: [None, None],
+                claims: Vec::new(),
             }),
         }
     }
@@ -719,6 +732,7 @@ impl TwoStripeWork {
             };
             st.active[i] = Some((idx, Instant::now()));
             st.lane_cap[i] = Some((provider.to_string(), cap_id.to_string()));
+            st.claims.push(ClaimRecord { side, chunk: idx, stolen: false });
             return Some((idx, false));
         }
         let gate = if donor_vacant { 1 } else { 2 };
@@ -729,9 +743,15 @@ impl TwoStripeWork {
             };
             st.active[i] = Some((idx, Instant::now()));
             st.lane_cap[i] = Some((provider.to_string(), cap_id.to_string()));
+            st.claims.push(ClaimRecord { side, chunk: idx, stolen: true });
             return Some((idx, true));
         }
         None
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn claim_history(&self) -> Vec<ClaimRecord> {
+        self.state.lock().unwrap().claims.clone()
     }
 
     /// T13: worker-level useful-throughput observation across chunk fills.

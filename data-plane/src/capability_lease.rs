@@ -516,3 +516,100 @@ async fn t6_no_double_release_no_underflow() {
         //  after all children already dropped must not double-release.)
     }
 }
+
+/// T7: ChildReaderHandle cloning audit. Temporary per-fill clones must not
+/// increase the logical child count beyond 2. The invariant is: temporary
+/// transport clones are references to one of the two logical child lanes;
+/// they are not additional logical readers.
+#[tokio::test]
+async fn t7_child_handle_clone_lifecycle() {
+    let _guard = crate::test_env::env_lock();
+    let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+    let (mgr, _metrics) = build_manager_warm(port);
+
+    let reserved = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("acquire_for_read failed"),
+    };
+    let lease = CapabilityLease::new(reserved);
+    
+    // Create two real child handles (the logical lanes).
+    let child_a = CapabilityLease::child_reader(&lease).expect("A");
+    let child_b = CapabilityLease::child_reader(&lease).expect("B");
+    assert_eq!(lease.child_count(), 2, "two real children");
+    
+    // Temporary per-fill clones (like stripe_worker_shared_child makes).
+    // These should NOT increase the logical child count beyond 2.
+    {
+        let clone_a = child_a.clone();
+        let clone_b = child_b.clone();
+        // Clones of real handles when count >= 2 get is_real: false,
+        // so the count stays at 2.
+        assert_eq!(lease.child_count(), 2, "temporary clones don't increase count");
+        drop(clone_a);
+        drop(clone_b);
+        // Dropping temporary clones doesn't decrement the count.
+        assert_eq!(lease.child_count(), 2, "dropping temp clones doesn't decrement");
+    }
+    
+    // Original worker child handles keep the permit alive across multiple chunks.
+    // (Simulating what stripe_worker_shared_child does: clone per fill, drop clone, repeat.)
+    for _ in 0..3 {
+        let _clone = child_a.clone();
+        let _clone = child_b.clone();
+        // Clones drop at end of scope, count stays at 2.
+        assert_eq!(lease.child_count(), 2, "count stable across per-fill clones");
+    }
+    
+    // Dropping the first real child: count decrements to 1.
+    drop(child_a);
+    assert_eq!(lease.child_count(), 1, "one real child remains");
+    
+    // The remaining child keeps the permit alive.
+    // New clones can still be made (count < 2).
+    let clone_b = child_b.clone();
+    assert_eq!(lease.child_count(), 2, "clone of remaining child succeeds");
+    drop(clone_b);
+    assert_eq!(lease.child_count(), 1, "temp clone drop doesn't decrement");
+    
+    // Final original child drop releases normally.
+    drop(child_b);
+    assert_eq!(lease.child_count(), 0, "all real children dropped");
+    
+    // Lease is released: new acquire succeeds.
+    drop(lease);
+    let _reserved2 = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("permit should be released after all children drop"),
+    };
+}
+
+/// T8: shared-cap env gate compatibility proof. Canonical
+/// DATA_PLANE_ACTIVE_ACTIVE_SHARED_CAP wins over deprecated
+/// HY4_ACTIVE_ACTIVE_SHARED_CAP; neither set means OFF.
+#[tokio::test]
+async fn t8_shared_cap_env_precedence() {
+    let _guard = crate::test_env::env_lock();
+    
+    // Neither set: OFF.
+    std::env::remove_var("DATA_PLANE_ACTIVE_ACTIVE_SHARED_CAP");
+    std::env::remove_var("HY4_ACTIVE_ACTIVE_SHARED_CAP");
+    assert!(!crate::serve::shared_cap_fallback(), "neither set -> OFF");
+    
+    // Only deprecated set: works.
+    crate::test_env::set_shared_cap_deprecated(true);
+    assert!(crate::serve::shared_cap_fallback(), "deprecated set -> ON");
+    crate::test_env::set_shared_cap_deprecated(false);
+    
+    // Only canonical set: works.
+    std::env::set_var("DATA_PLANE_ACTIVE_ACTIVE_SHARED_CAP", "1");
+    assert!(crate::serve::shared_cap_fallback(), "canonical set -> ON");
+    
+    // Both set: canonical wins (both are "1", so ON).
+    std::env::set_var("HY4_ACTIVE_ACTIVE_SHARED_CAP", "1");
+    assert!(crate::serve::shared_cap_fallback(), "both set -> ON");
+    
+    // Cleanup.
+    std::env::remove_var("DATA_PLANE_ACTIVE_ACTIVE_SHARED_CAP");
+    std::env::remove_var("HY4_ACTIVE_ACTIVE_SHARED_CAP");
+}

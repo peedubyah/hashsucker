@@ -143,6 +143,12 @@ pub struct CapabilityLease {
 pub struct ChildReaderHandle {
     pub cap: Arc<DeliveryCapability>,
     lease: Arc<CapabilityLease>,
+    /// Whether this handle contributes to the child count. A clone made when
+    /// the lease is full or already released is a no-op: it doesn't increment
+    /// the count, and its Drop doesn't decrement. This prevents the
+    /// reservation from being released prematurely when a no-op clone drops
+    /// before the real handles.
+    is_real: bool,
 }
 
 impl Clone for ChildReaderHandle {
@@ -152,12 +158,27 @@ impl Clone for ChildReaderHandle {
             return Self {
                 cap: self.cap.clone(),
                 lease: self.lease.clone(),
+                is_real: false,
             };
         }
         inner.child_count += 1;
         Self {
             cap: self.cap.clone(),
             lease: self.lease.clone(),
+            is_real: true,
+        }
+    }
+}
+
+impl Drop for ChildReaderHandle {
+    fn drop(&mut self) {
+        if !self.is_real {
+            return;
+        }
+        let mut inner = self.lease.inner.lock().unwrap();
+        inner.child_count = inner.child_count.saturating_sub(1);
+        if inner.child_count == 0 {
+            inner.reserved = None;
         }
     }
 }
@@ -195,6 +216,7 @@ impl CapabilityLease {
         Some(ChildReaderHandle {
             cap,
             lease: lease.clone(),
+            is_real: true,
         })
     }
 
@@ -207,19 +229,6 @@ impl CapabilityLease {
     /// this, `child_reader()` always returns `None`.
     pub fn is_released(&self) -> bool {
         self.inner.lock().unwrap().reserved.is_none()
-    }
-}
-
-impl Drop for ChildReaderHandle {
-    fn drop(&mut self) {
-        let mut inner = self.lease.inner.lock().unwrap();
-        // Decrement first; if we just released the last child, drop the
-        // reservation here so the permit frees even if the lease Arc is still
-        // held by the creator.
-        inner.child_count = inner.child_count.saturating_sub(1);
-        if inner.child_count == 0 {
-            inner.reserved = None;
-        }
     }
 }
 
