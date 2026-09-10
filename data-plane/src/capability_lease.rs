@@ -1680,6 +1680,7 @@ mod dead_cap_replacement {
     }
 
     /// T19: surviving Arc after pool pruning + exact replacement acquisition count.
+    /// Pool membership lifetime != object Arc lifetime.
     #[tokio::test]
     async fn t19_surviving_arc_and_acquisition_count() {
         let _guard = crate::test_env::env_lock();
@@ -1691,10 +1692,16 @@ mod dead_cap_replacement {
             Err(_) => panic!("first acquire_for_read failed"),
         };
         let original_cap_id = reserved1.cap.cap_id.clone();
+        let dead_arc = reserved1.cap.clone();
         let acq_before = metrics.capability_acquisitions.load(Ordering::SeqCst);
 
+        // Mark dead and drop the reservation (pool membership ends)
         reserved1.cap.mark_dead();
         drop(reserved1);
+
+        // Keep dead_arc alive - proves Arc lifetime > pool membership lifetime
+        assert!(matches!(dead_arc.status(), crate::capability::CapabilityStatus::Dead));
+        assert_eq!(dead_arc.cap_id, original_cap_id);
 
         std::env::set_var("HY4_TEST_ACQUIRE_BASE_URL", format!("http://127.0.0.1:{port}"));
         std::env::set_var("HY4_TEST_ACQUIRE_URL_TORBOX", format!("http://127.0.0.1:{port}/replacement"));
@@ -1709,12 +1716,19 @@ mod dead_cap_replacement {
         assert_ne!(reserved2.cap.cap_id, original_cap_id, "dead cap not reused");
         assert!(matches!(reserved2.cap.status(), crate::capability::CapabilityStatus::Alive));
 
+        // dead_arc still valid after manager returns fresh cap
+        assert!(matches!(dead_arc.status(), crate::capability::CapabilityStatus::Dead));
+        assert_eq!(dead_arc.cap_id, original_cap_id);
+
         drop(reserved2);
+        drop(dead_arc);
         std::env::remove_var("HY4_TEST_ACQUIRE_BASE_URL");
         std::env::remove_var("HY4_TEST_ACQUIRE_URL_TORBOX");
     }
 
     /// T20: real NEW-work stop after dead mark via stripe_worker_shared_child.
+    /// B processes 2+ queued chunks. A marks shared cap dead after first chunk.
+    /// Worker loop Dead check must prevent B from claiming the second chunk.
     #[tokio::test]
     async fn t20_real_new_work_stop() {
         let _guard = crate::test_env::env_lock();
@@ -1748,9 +1762,11 @@ mod dead_cap_replacement {
             FILE,
         );
 
+        // B claims chunk 0
         let joins_b = cache.inflight().join_or_claim_many(&tf_id.cache_key(), &[0]);
         assert!(joins_b[0].owned, "B owns chunk 0");
 
+        // Spawn B's fill task (blocks on barrier)
         let child_b_clone = child_b.clone();
         let cache_for_b = cache.clone();
         let mgr_for_b = mgr.clone();
@@ -1768,26 +1784,50 @@ mod dead_cap_replacement {
             ).await;
         });
 
+        // Wait for B's HTTP request to enter
         barrier.entered_notify.notified().await;
+
+        // A marks the shared capability dead
         child_a.cap.mark_dead();
+
+        // Release B's barrier so B can complete its current chunk
         barrier.release.notify_one();
+
+        // Wait for B to complete
         let _ = b_handle.await;
 
+        // Verify: B's chunk 0 is present
         assert!(cache.is_present(&tf_id.cache_key(), 0).unwrap_or(false), "B's chunk 0 present");
 
+        // Verify: B did NOT fetch chunk 1 (worker loop stops after dead mark)
         let guard = hits.lock().unwrap();
         let chunk0_count = guard.iter().filter(|(p, s, _)| p == "/shared" && *s == 0).count();
         let chunk1_count = guard.iter().filter(|(p, s, _)| p == "/shared" && *s == CHUNK).count();
         assert_eq!(chunk0_count, 1, "exactly one fetch for chunk 0");
         assert_eq!(chunk1_count, 0, "B did not fetch chunk 1 after dead mark");
+        drop(guard);
+
+        // Verify: chunk 1 is NOT present and NOT in-flight (reclaimable)
+        assert!(!cache.is_present(&tf_id.cache_key(), 1).unwrap_or(false), "chunk 1 not present");
+        assert!(!cache.inflight().has(&tf_id.cache_key(), 1), "chunk 1 not in-flight (reclaimable)");
+
+        // Verify: no inflight leak for chunk 0
+        assert!(!cache.inflight().has(&tf_id.cache_key(), 0), "chunk 0 inflight finalized");
+
+        // Verify: permit lifecycle correct
+        assert_eq!(lease.child_count(), 2, "both children still alive");
+        assert!(!lease.is_released(), "lease not released while children alive");
 
         drop(child_a);
         drop(child_b);
+        assert_eq!(lease.child_count(), 0, "all children dropped");
+        assert!(lease.is_released(), "lease released after children dropped");
+
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
-    /// T21: simultaneous dead detection by both children.
-    /// Both A and B detect the cap is dead and stop claiming new work.
+    /// T21: two logical children share one DeliveryCapability.
+    /// Repeated mark_dead is safe/idempotent. Both observe Dead.
     #[tokio::test]
     async fn t21_simultaneous_dead_detection() {
         let _guard = crate::test_env::env_lock();
@@ -1802,40 +1842,27 @@ mod dead_cap_replacement {
         let child_a = CapabilityLease::child_reader(&lease).expect("A");
         let child_b = CapabilityLease::child_reader(&lease).expect("B");
 
-        // Verify both children share the same capability
+        // Both children share the same capability
         assert_eq!(child_a.cap.cap_id, child_b.cap.cap_id);
 
-        // Verify capability is alive
+        // Capability is alive
         assert!(matches!(child_a.cap.status(), crate::capability::CapabilityStatus::Alive));
 
-        // Both mark dead simultaneously
+        // Repeated mark_dead is idempotent/safe
+        child_a.cap.mark_dead();
         child_a.cap.mark_dead();
         child_b.cap.mark_dead();
+        child_b.cap.mark_dead();
 
-        // Verify both see the dead status
+        // Both observe Dead
         assert!(matches!(child_a.cap.status(), crate::capability::CapabilityStatus::Dead));
         assert!(matches!(child_b.cap.status(), crate::capability::CapabilityStatus::Dead));
 
         // Drop both children
         drop(child_a);
         drop(child_b);
+        assert_eq!(lease.child_count(), 0, "all children dropped");
         assert!(lease.is_released(), "lease released after both children dropped");
-
-        // Verify manager can acquire a replacement
-        std::env::set_var("HY4_TEST_ACQUIRE_BASE_URL", format!("http://127.0.0.1:{port}"));
-        std::env::set_var("HY4_TEST_ACQUIRE_URL_TORBOX", format!("http://127.0.0.1:{port}/replacement"));
-
-        let reserved2 = match mgr.acquire_for_read(0).await {
-            Ok(r) => r,
-            Err(_) => panic!("replacement acquire_for_read should succeed"),
-        };
-
-        assert!(matches!(reserved2.cap.status(), crate::capability::CapabilityStatus::Alive));
-
-        drop(reserved2);
-        drop(lease);
-        std::env::remove_var("HY4_TEST_ACQUIRE_BASE_URL");
-        std::env::remove_var("HY4_TEST_ACQUIRE_URL_TORBOX");
     }
 
     /// T22: manager recovery count after dual failure (exactly one replacement).
