@@ -56,7 +56,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::cache::{CacheEngine, ChunkGrid, ChunkPlan, RunKind, TorrentFileId};
-use crate::capability::ApiKeys;
+use crate::capability::{ApiKeys, CapabilityStatus};
 use crate::control::fetch_control;
 use crate::metrics::{CacheDecision, Metrics, MetricsExt, StageClock, StageReport, WorkClass};
 use crate::playback_intel::{PlaybackIntelligence, PrefetchMode};
@@ -1306,6 +1306,12 @@ async fn stripe_worker_shared_child(
     let provider = child.cap.provider.clone();
     let cap_id = child.cap.cap_id.clone();
     loop {
+        // T23: stop assigning new work when the shared capability is dead.
+        // A dead-link on one child marks the shared DeliveryCapability dead;
+        // the sibling must not start arbitrary new work on a known-dead cap.
+        if matches!(child.cap.status(), CapabilityStatus::Dead) {
+            break;
+        }
         let (idx, _stolen) = match coord.next(side, &provider, &cap_id) {
             Some(job) => job,
             None => break,
