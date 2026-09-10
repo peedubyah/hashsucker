@@ -39,6 +39,7 @@
 
 use crate::cache;
 use crate::manager;
+use crate::manager::CapabilityLease;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,7 +63,7 @@ use crate::playback_intel::{PlaybackIntelligence, PrefetchMode};
 use crate::throughput::{
     config_from_env as low_throughput_config, LowObservationPolicy, ThroughputEstimator,
 };
-use crate::transport::{Faults, OpenError, ResilientRangeReader, Step};
+use crate::transport::{Faults, OpenError, ReaderCapability, ResilientRangeReader, Step};
 
 pub const SUPPORTED_SCHEMA_VERSION: u64 = 1;
 
@@ -374,6 +375,17 @@ fn auto_go(n: usize) -> bool {
 
 fn steal_flag() -> bool {
     crate::env_canonical("DATA_PLANE_ACTIVE_ACTIVE_STEAL", "HY4_ACTIVE_ACTIVE_STEAL")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// T22: shared-cap two-reader lease fallback. When AUTO engagement wants two
+/// lanes but no distinct warm standby capability exists, the scheduler can
+/// use one CapabilityLease over the already-held primary capability instead
+/// of falling back to single-fill. Default OFF: existing single-lane
+/// fallback is preserved unless explicitly opted in.
+fn shared_cap_fallback() -> bool {
+    crate::env_canonical("DATA_PLANE_ACTIVE_ACTIVE_SHARED_CAP", "HY4_ACTIVE_ACTIVE_SHARED_CAP")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
@@ -2186,6 +2198,106 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                 continue;
                             }
 
+                            // ---- T22 shared-cap fallback (proven on m3-north-db).
+                            // When active-arm engagement wants two lanes but no
+                            // distinct warm standby capability exists, use one
+                            // CapabilityLease over the already-held primary
+                            // capability. Two child readers serve disjoint
+                            // halves; one reservation, zero new acquisition.
+                            // Preference: distinct warm standby > shared-cap lease
+                            // > single-lane. Engages only behind the existing
+                            // active-active gates (never by default).
+                            else if auto_go(sub.len())
+                                && shared_cap_fallback()
+                                && fr.is_some()
+                                && sub.len() >= 2
+                            {
+                                let half = (sub.len() + 1) / 2;
+                                let (sub_a, sub_b) =
+                                    (sub[..half].to_vec(), sub[half..].to_vec());
+                                let lease =
+                                    CapabilityLease::new(fr.unwrap());
+                                let child_a =
+                                    CapabilityLease::child_reader(&lease).expect("T22: child A");
+                                let child_b =
+                                    CapabilityLease::child_reader(&lease).expect("T22: child B");
+                                let fa_start = grid.chunk_start(sub_a[0]);
+                                let fa_end =
+                                    grid.chunk_end(*sub_a.last().unwrap()).unwrap_or(f_end);
+                                let fb_start = grid.chunk_start(sub_b[0]);
+                                let fb_end =
+                                    grid.chunk_end(*sub_b.last().unwrap()).unwrap_or(f_end);
+                                let wa_start = run.start.max(fa_start);
+                                let wa_end = run.end.min(fa_end);
+                                let wb_start = run.start.max(fb_start);
+                                let wb_end = run.end.min(fb_end);
+                                for (half_sub, hf_start, hf_end, hw_start, hw_end) in [
+                                    (&sub_a, fa_start, fa_end, wa_start, wa_end),
+                                    (&sub_b, fb_start, fb_end, wb_start, wb_end),
+                                ] {
+                                    cache.metrics.cache_decisions.push(CacheDecision {
+                                        request: (start, end),
+                                        present_before: present_before.clone(),
+                                        missing: (hw_start, hw_end),
+                                        chunk_indices: half_sub.clone(),
+                                        fetch_span: Some((hf_start, hf_end)),
+                                        joined_inflight: half_sub
+                                            .iter()
+                                            .any(|idx| joins[k..=j].iter().any(|x| x.index == *idx && x.joined_existing)),
+                                        overlap_bytes_avoided: half_sub
+                                            .iter()
+                                            .filter(|idx| joins[k..=j].iter().any(|x| x.index == **idx && x.joined_existing))
+                                            .map(|x| grid.chunk_len(*x))
+                                            .sum(),
+                                        plan_origin,
+                                        evictions_before: cache.metrics.cache.evictions.load(Ordering::SeqCst),
+                                    });
+                                }
+                                let (atx, arx) = mpsc::channel::<SpanMsg>(32);
+                                let (btx, brx) = mpsc::channel::<SpanMsg>(32);
+                                let sub_b0 = sub_b[0];
+                                tokio::spawn(fill_chunk_run_shared_child(
+                                    cache.clone(),
+                                    metrics.clone(),
+                                    manager_clone.clone(),
+                                    client_clone.clone(),
+                                    priority,
+                                    tf_id.clone(),
+                                    sub_a,
+                                    fa_start,
+                                    fa_end,
+                                    wa_start,
+                                    wa_end,
+                                    faults,
+                                    Some(atx),
+                                    Some(stage.clone()),
+                                    cold,
+                                    child_a,
+                                ));
+                                tokio::spawn(fill_chunk_run_shared_child(
+                                    cache.clone(),
+                                    metrics.clone(),
+                                    manager_clone.clone(),
+                                    client_clone.clone(),
+                                    priority,
+                                    tf_id.clone(),
+                                    sub_b,
+                                    fb_start,
+                                    fb_end,
+                                    wb_start,
+                                    wb_end,
+                                    faults,
+                                    Some(btx),
+                                    Some(stage.clone()),
+                                    cold,
+                                    child_b,
+                                ));
+                                ordered.push((sub_start, FetchItem::Owned { rx: arx }));
+                                ordered.push((sub_b0, FetchItem::Owned { rx: brx }));
+                                k = j + 1;
+                                continue;
+                            }
+
                             // ---- Slice 4.5 G: record WHY this fetch happens,
                             // including the grid's effect on the Range we issue.
                             // Exact existing single-fill path (gate OFF, or
@@ -2647,6 +2759,97 @@ pub async fn fill_chunk_run(
     // None only when the fill never held one (failed acquire with none
     // passed in). All pre-existing callers ignore the value.
 ) -> Option<manager::ReservedCapability> {
+    fill_chunk_run_inner(
+        cache,
+        metrics,
+        manager,
+        client,
+        priority,
+        tf,
+        indices,
+        f_start,
+        f_end,
+        w_start,
+        w_end,
+        faults,
+        sink,
+        stage,
+        cold,
+        existing_cap.map(ReaderCapability::Owned),
+    )
+    .await
+}
+
+/// T22: fill span driven by a shared child reader from a `CapabilityLease`.
+/// The shared child holds no reservation of its own, so `into_reserved`
+/// returns `None` and the outer scheduler must not treat this fill as a
+/// reusable warm lane. Recovery that requires capability reacquisition
+/// surfaces as a terminal error — shared children must not independently
+/// race the sibling for the single permit.
+pub async fn fill_chunk_run_shared_child(
+    cache: Arc<CacheEngine>,
+    metrics: Arc<Metrics>,
+    manager: Arc<manager::CapabilityManager>,
+    client: reqwest::Client,
+    priority: u8,
+    tf: TorrentFileId,
+    indices: Vec<u64>,
+    f_start: u64,
+    f_end: u64,
+    w_start: u64,
+    w_end: u64,
+    faults: Faults,
+    sink: Option<mpsc::Sender<SpanMsg>>,
+    stage: Option<StageClock>,
+    cold: bool,
+    child: manager::ChildReaderHandle,
+) {
+    fill_chunk_run_inner(
+        cache,
+        metrics,
+        manager,
+        client,
+        priority,
+        tf,
+        indices,
+        f_start,
+        f_end,
+        w_start,
+        w_end,
+        faults,
+        sink,
+        stage,
+        cold,
+        Some(ReaderCapability::Shared(child)),
+    )
+    .await;
+}
+
+/// Inner shared by the owned-reader and shared-child variants. The `cap`
+/// parameter selects how the transport reader is constructed: `Owned` carries
+/// the single permit and may hand back a reservation; `Shared` borrows from a
+/// `CapabilityLease` and returns `None` (no reservation, no independent
+/// reacquisition). All post-reader logic (recovery, staging, hedge, promotion,
+/// throughput detection) is identical.
+async fn fill_chunk_run_inner(
+    cache: Arc<CacheEngine>,
+    metrics: Arc<Metrics>,
+    manager: Arc<manager::CapabilityManager>,
+    client: reqwest::Client,
+    priority: u8,
+    tf: TorrentFileId,
+    indices: Vec<u64>,
+    f_start: u64,
+    f_end: u64,
+    w_start: u64,
+    w_end: u64,
+    faults: Faults,
+    sink: Option<mpsc::Sender<SpanMsg>>,
+    stage: Option<StageClock>,
+    cold: bool,
+    cap: Option<ReaderCapability>,
+) -> Option<manager::ReservedCapability> {
+
     let key = tf.cache_key();
 
     // ---- Byte accounting, counted ONCE at issue --------------------------
@@ -2711,7 +2914,11 @@ pub async fn fill_chunk_run(
                 let _ = tx.send(SpanMsg::Failed).await;
             }
             // T12: hand back the un-consumed reservation, if any.
-            return existing_cap;
+            // For shared children, into_reserved() returns None — no reservation to hand back.
+            return match cap {
+                Some(ReaderCapability::Owned(r)) => Some(r),
+                _ => None,
+            };
         }
     };
 
@@ -2774,50 +2981,89 @@ pub async fn fill_chunk_run(
     if let Some(s) = stage.as_ref() {
         s.set_t1(acquire_start);
     }
-    // P5: reuse the capability pre-acquired in `get_file` for the FIRST fetch
-    // span (`existing_cap`). This hands the already-opened reader to the byte
-    // stream (no double acquire / maxInFlight=1 limiter loss). Later spans get
-    // `existing_cap == None` and acquire normally.
-    let reserved = match existing_cap {
-        Some(cap) => cap,
-        None => match manager.acquire_for_read(priority).await {
-            Ok(r) => r,
-            Err(_) => {
-                stager.abort();
-                mark(false, &[]);
-                if let Some(tx) = sink.as_ref() {
-                    let _ = tx.send(SpanMsg::Failed).await;
-                }
-                // T12: no reservation was ever held here.
-                return None;
-            }
-        },
-    };
-    let acquire_ms = acquire_start.elapsed();
-    // ---- Slice 4.5 T2: a DeliveryCapability is ready. ----
-    if let Some(s) = stage.as_ref() {
-        s.set_t2(Instant::now());
-    }
-    if cold {
-        *metrics.cold_acquire_ms.lock().unwrap() = Some(acquire_ms.as_millis() as u64);
-    }
-
+    // P5/T22: the `cap` parameter selects how the transport reader is
+    // constructed. `Owned` carries the single permit and reuses the
+    // pre-acquired reservation; `Shared` borrows from a `CapabilityLease`
+    // (no permit, no acquisition); `None` acquires a fresh reservation.
     // Second client handle for a hedge reader (the construction below
     // moves `client`).
     let client_hedge = client.clone();
-    let mut reader = ResilientRangeReader::new_with_chunk_cb(
-        client,
-        metrics.clone(),
-        manager.clone(),
-        reserved,
-        priority,
-        f_start,
-        f_end,
-        tf.size,
-        false,
-        faults,
-        Some(cb),
-    );
+    let mut reader = match cap {
+        Some(ReaderCapability::Owned(reserved)) => {
+            let acquire_ms = acquire_start.elapsed();
+            if let Some(s) = stage.as_ref() {
+                s.set_t2(Instant::now());
+            }
+            if cold {
+                *metrics.cold_acquire_ms.lock().unwrap() = Some(acquire_ms.as_millis() as u64);
+            }
+            ResilientRangeReader::new_with_chunk_cb(
+                client,
+                metrics.clone(),
+                manager.clone(),
+                reserved,
+                priority,
+                f_start,
+                f_end,
+                tf.size,
+                false,
+                faults,
+                Some(cb),
+            )
+        }
+        Some(ReaderCapability::Shared(child)) => {
+            if let Some(s) = stage.as_ref() {
+                s.set_t2(Instant::now());
+            }
+            ResilientRangeReader::new_shared_child_with_chunk_cb(
+                client,
+                metrics.clone(),
+                manager.clone(),
+                child,
+                priority,
+                f_start,
+                f_end,
+                tf.size,
+                false,
+                faults,
+                Some(cb),
+            )
+        }
+        None => {
+            let reserved = match manager.acquire_for_read(priority).await {
+                Ok(r) => r,
+                Err(_) => {
+                    stager.abort();
+                    mark(false, &[]);
+                    if let Some(tx) = sink.as_ref() {
+                        let _ = tx.send(SpanMsg::Failed).await;
+                    }
+                    // T12: no reservation was ever held here.
+                    return None;
+                }
+            };
+            let acquire_ms = acquire_start.elapsed();
+            if let Some(s) = stage.as_ref() {
+                s.set_t2(Instant::now());
+            }
+            if cold {
+                *metrics.cold_acquire_ms.lock().unwrap() = Some(acquire_ms.as_millis() as u64);
+            }
+            ResilientRangeReader::new_with_chunk_cb(
+                client,
+                metrics.clone(),
+                manager.clone(),
+                reserved,
+                priority,
+                f_start,
+                f_end,
+                tf.size,
+                false,
+                faults,
+                Some(cb),
+            )
+        }
+    };
     // Hand the stage clock to the transport so T3/T4 are stamped at the real
     // dispatch / first-body-byte instants.
     if let Some(s) = stage.as_ref() {
@@ -2863,8 +3109,9 @@ pub async fn fill_chunk_run(
         if let Some(tx) = sink.as_ref() {
             let _ = tx.send(SpanMsg::Failed).await;
         }
-        // T12: hand back the live reservation.
-        return Some(reader.into_reserved().expect("T12: reader always owns its reservation"));
+        // T12: hand back the live reservation. Shared children hold none,
+        // so into_reserved() returns None for them.
+        return reader.into_reserved();
     }
     if cold {
         *metrics.cold_cdn_first_byte_ms.lock().unwrap() =
@@ -3194,7 +3441,9 @@ pub async fn fill_chunk_run(
     // T12: return the final reservation (post any in-fill replacement) so
     // a stripe worker threads the same warm lane across chunk fills.
     Some(reader.into_reserved().expect("T12: reader always owns its reservation"))
+
 }
+
 
 /// Legacy upstream-only serve (used by the 1-byte single path and the no-cache fallback).
 /// Returns true on clean EOF, false on terminal failure.

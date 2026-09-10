@@ -94,7 +94,7 @@ struct Recovery {
 /// carries no permit of its own. The shared variant is constructed only by the
 /// `*shared_child*` constructors and cannot promote, reacquire independently, or
 /// hand back a reservation via `into_reserved`.
-enum ReaderCapability {
+pub(crate) enum ReaderCapability {
     Owned(ReservedCapability),
     Shared(ChildReaderHandle),
 }

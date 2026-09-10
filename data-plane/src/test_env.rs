@@ -93,3 +93,13 @@ pub fn set_replace(on: bool) {
         std::env::remove_var("HY4_ACTIVE_ACTIVE_REPLACE_LANE");
     }
 }
+
+/// Set (`true`) or remove (`false`) the T22 shared-cap two-reader lease
+/// fallback gate (`HY4_ACTIVE_ACTIVE_SHARED_CAP`, default OFF).
+pub fn set_shared_cap(on: bool) {
+    if on {
+        std::env::set_var("HY4_ACTIVE_ACTIVE_SHARED_CAP", "1");
+    } else {
+        std::env::remove_var("HY4_ACTIVE_ACTIVE_SHARED_CAP");
+    }
+}

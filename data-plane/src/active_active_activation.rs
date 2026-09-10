@@ -509,3 +509,159 @@ async fn t14_single_warm_cap_falls_back_single() {
     server.abort();
     cleanup_gates();
 }
+
+// ---- Proof 5: distinct warm standby still wins over shared-cap fallback ----
+#[tokio::test]
+async fn t14_distinct_standby_wins_over_shared_cap() {
+    let _guard = env_lock();
+    // AUTO + shared_cap armed, but two warm caps exist -> the existing
+    // two-capability path engages (distinct warm standby wins).
+    set_two_span(false);
+    set_steal(false);
+    set_retire(false);
+    set_auto(true);
+    set_min_chunks(Some(4));
+    std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
+    std::env::set_var("HY4_ACTIVE_ACTIVE_SHARED_CAP", "1");
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let (port, server) = spawn_mock(modes_pair(Mode::Full, Mode::Full), hits.clone()).await;
+    let stack = build_stack(port, cross_caps());
+    let api0 = stack.metrics.api_requests.load(Ordering::SeqCst);
+    let out = demand(&stack.state, 0, SPAN6_END).await;
+    assert_eq!(out.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(out.bytes, expected_range(0, SPAN6_END), "P5: bytes exact");
+    {
+        let h = hits.lock().unwrap();
+        // Two-capability path: two distinct lanes fetch disjoint halves.
+        assert_eq!(h.len(), 2, "P5: two concurrent Ranges (distinct caps), got {h:?}");
+    }
+    assert_eq!(
+        stack.metrics.api_requests.load(Ordering::SeqCst),
+        api0,
+        "P5: zero new capability acquisition"
+    );
+    server.abort();
+    cleanup_gates();
+    std::env::remove_var("HY4_ACTIVE_ACTIVE_SHARED_CAP");
+}
+
+// ---- Proof 6: shared-cap fallback engages with one warm cap ----
+#[tokio::test]
+async fn t14_shared_cap_fallback_engages() {
+    let _guard = env_lock();
+    // AUTO + shared_cap armed, only one warm cap -> shared-cap fallback
+    // creates one CapabilityLease with two child readers on disjoint halves.
+    set_two_span(false);
+    set_steal(false);
+    set_retire(false);
+    set_auto(true);
+    set_min_chunks(Some(4));
+    std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
+    std::env::set_var("HY4_ACTIVE_ACTIVE_SHARED_CAP", "1");
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let (port, server) = spawn_mock(Arc::new(Mutex::new(HashMap::from([
+        ("/la".to_string(), Mode::Full),
+    ]))), hits.clone()).await;
+    let stack = build_stack(port, vec![WarmCap {
+        provider: "torbox",
+        resource: "res-a",
+        path: "/la",
+    }]);
+    let api0 = stack.metrics.api_requests.load(Ordering::SeqCst);
+    let out = demand(&stack.state, 0, SPAN6_END).await;
+    assert_eq!(out.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(out.bytes, expected_range(0, SPAN6_END), "P6: bytes exact");
+    {
+        let h = hits.lock().unwrap();
+        // Shared-cap fallback: two child readers fetch disjoint halves.
+        assert_eq!(h.len(), 2, "P6: two concurrent Ranges (shared-cap), got {h:?}");
+        let ranges = sorted_ranges(&h);
+        // Disjoint halves: first half [0, 3*CHUNK-1], second half [3*CHUNK, SPAN6_END].
+        assert_eq!(ranges, vec![(0, 3 * CHUNK - 1), (3 * CHUNK, SPAN6_END)], "P6: disjoint halves");
+    }
+    assert_eq!(
+        stack.metrics.api_requests.load(Ordering::SeqCst),
+        api0,
+        "P6: zero new capability acquisition"
+    );
+    server.abort();
+    cleanup_gates();
+    std::env::remove_var("HY4_ACTIVE_ACTIVE_SHARED_CAP");
+}
+
+// ---- Proof 7: shared-cap odd chunk count stays aligned ----
+#[tokio::test]
+async fn t14_shared_cap_odd_chunk_aligned() {
+    let _guard = env_lock();
+    // 3 missing chunks in shared-cap mode: 2 + 1 split, no partial chunk.
+    set_two_span(false);
+    set_steal(false);
+    set_retire(false);
+    set_auto(true);
+    set_min_chunks(Some(2));
+    std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
+    std::env::set_var("HY4_ACTIVE_ACTIVE_SHARED_CAP", "1");
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let (port, server) = spawn_mock(Arc::new(Mutex::new(HashMap::from([
+        ("/la".to_string(), Mode::Full),
+    ]))), hits.clone()).await;
+    let stack = build_stack(port, vec![WarmCap {
+        provider: "torbox",
+        resource: "res-a",
+        path: "/la",
+    }]);
+    // Request exactly 3 chunks.
+    let out = demand(&stack.state, 0, 3 * CHUNK - 1).await;
+    assert_eq!(out.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(out.bytes, expected_range(0, 3 * CHUNK - 1), "P7: bytes exact");
+    {
+        let h = hits.lock().unwrap();
+        assert_eq!(h.len(), 2, "P7: two concurrent Ranges, got {h:?}");
+        let ranges = sorted_ranges(&h);
+        // Ceil/floor split: 2 chunks + 1 chunk.
+        assert_eq!(ranges, vec![(0, 2 * CHUNK - 1), (2 * CHUNK, 3 * CHUNK - 1)], "P7: 2+1 split");
+    }
+    server.abort();
+    cleanup_gates();
+    std::env::remove_var("HY4_ACTIVE_ACTIVE_SHARED_CAP");
+}
+
+// ---- Proof 8: single-lane fallback when shared_cap gate is off ----
+#[tokio::test]
+async fn t14_single_lane_when_shared_cap_off() {
+    let _guard = env_lock();
+    // AUTO armed but shared_cap OFF -> existing single-lane fallback.
+    set_two_span(false);
+    set_steal(false);
+    set_retire(false);
+    set_auto(true);
+    set_min_chunks(Some(4));
+    std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
+    // shared_cap NOT set.
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let (port, server) = spawn_mock(Arc::new(Mutex::new(HashMap::from([
+        ("/la".to_string(), Mode::Full),
+    ]))), hits.clone()).await;
+    let stack = build_stack(port, vec![WarmCap {
+        provider: "torbox",
+        resource: "res-a",
+        path: "/la",
+    }]);
+    let api0 = stack.metrics.api_requests.load(Ordering::SeqCst);
+    let out = demand(&stack.state, 0, SPAN6_END).await;
+    assert_eq!(out.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(out.bytes, expected_range(0, SPAN6_END), "P8: bytes exact");
+    assert_eq!(
+        hits.lock().unwrap().len(),
+        1,
+        "P8: single fetch span, got {:?}",
+        hits.lock().unwrap()
+    );
+    assert_eq!(
+        stack.metrics.api_requests.load(Ordering::SeqCst),
+        api0,
+        "P8: zero new capability acquisition"
+    );
+    server.abort();
+    cleanup_gates();
+}
