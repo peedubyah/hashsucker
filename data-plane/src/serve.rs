@@ -1284,7 +1284,7 @@ async fn stripe_worker(
 /// to shared-cap mode: those mechanisms assume two independent capabilities,
 /// and a shared-cap lease has only one. A dead-link on one child surfaces as
 /// a terminal error (no independent reacquire); the sibling keeps draining.
-async fn stripe_worker_shared_child(
+pub(crate) async fn stripe_worker_shared_child(
     coord: Arc<TwoStripeWork>,
     side: StripeSide,
     child: manager::ChildReaderHandle,

@@ -8,6 +8,7 @@
 //! `env_lock()` because `build_manager_acquire` sets the process-global
 //! `HY4_TEST_ACQUIRE_BASE_URL` and `fault_dead_once` is a process-global gate.
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -1766,21 +1767,36 @@ mod dead_cap_replacement {
         let joins_b = cache.inflight().join_or_claim_many(&tf_id.cache_key(), &[0]);
         assert!(joins_b[0].owned, "B owns chunk 0");
 
-        // Spawn B's fill task (blocks on barrier)
+        // Create a TwoStripeWork coordinator with B's queue having [0, 1]
+        let coord = Arc::new(crate::serve::TwoStripeWork::new(vec![], vec![0, 1]));
+
+        // Spawn B's stripe_worker task (blocks on barrier)
         let child_b_clone = child_b.clone();
         let cache_for_b = cache.clone();
         let mgr_for_b = mgr.clone();
         let metrics_for_b = metrics.clone();
         let tf_id_for_b = tf_id.clone();
         let b_handle = tokio::spawn(async move {
-            crate::serve::fill_chunk_run_shared_child(
-                cache_for_b, metrics_for_b, mgr_for_b, reqwest::Client::new(),
-                0, tf_id_for_b, vec![0], 0, CHUNK - 1, 0, CHUNK - 1,
+            crate::serve::stripe_worker_shared_child(
+                coord,
+                crate::serve::StripeSide::B,
+                child_b_clone,
+                cache_for_b,
+                metrics_for_b,
+                mgr_for_b,
+                reqwest::Client::new(),
+                0,
+                tf_id_for_b,
+                crate::cache::ChunkGrid::new(CHUNK, FILE),
+                0,
+                FILE - 1,
+                Arc::new(HashMap::new()),
+                crate::metrics::StageClock::default(),
+                false,
                 Faults {
                     fault_429_always: false, fault_429_once: false,
                     fault_dead_once: false, fault_midbody_once: false,
                 },
-                None, None, false, child_b_clone,
             ).await;
         });
 
