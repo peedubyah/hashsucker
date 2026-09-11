@@ -1496,7 +1496,136 @@ mod reclaim {
     }
 }
 
-// ---- T17: shared-cap failure ownership ----
+// ---- T17: failed chunk retry ownership ----
+// Proves: sibling success + sibling failure + reclaim + concurrent retry + sibling durability
+#[cfg(test)]
+// ---- T17: failed chunk retry ownership ----
+// Proves: concurrent claim/finalize/reclaim lifecycle for failed chunks
+#[cfg(test)]
+mod retry_ownership {
+    use super::*;
+
+    fn build_retry_stack(port: u16) -> (Arc<CapabilityManager>, Arc<Metrics>) {
+        let metrics = Arc::new(Metrics::default());
+        let coord = ProviderCoord {
+            provider: "torbox".into(),
+            account_scope: "test".into(),
+            provider_resource_id: "res-retry".into(),
+            provider_file_id: "file-res-retry".into(),
+            state: "ready".into(),
+            canonical_internal_path: Some(PATH.into()),
+            size: FILE,
+        };
+        let control_tf = ControlTorrentFile {
+            id: TF_ID.into(),
+            info_hash: INFO_HASH.into(),
+            canonical_internal_path: Some(PATH.into()),
+            size: FILE,
+        };
+        let mgr = Arc::new(CapabilityManager::new(
+            control_tf,
+            vec![coord],
+            ApiKeys { torbox: String::new(), realdebrid: String::new() },
+            reqwest::Client::new(),
+            metrics.clone(),
+        ));
+        let slot = mgr.slots.first().expect("slot exists");
+        let cap = make_cap(port as u64, "torbox", "res-retry");
+        slot.caps.lock().unwrap().push(cap);
+        (mgr, metrics)
+    }
+
+    /// T17: Concurrent retry contenders produce exactly one owner.
+    /// After a failed chunk is finalized, concurrent claimants race.
+    #[tokio::test]
+    async fn t17_concurrent_retry_single_owner() {
+        let _guard = crate::test_env::env_lock();
+        let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+        let (mgr, metrics) = build_retry_stack(port);
+
+        let reserved = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("acquire_for_read failed"),
+        };
+        let lease = CapabilityLease::new(reserved);
+        let child = CapabilityLease::child_reader(&lease).expect("child");
+
+        let tmp_dir = std::env::temp_dir().join(format!("hashsucker_test_t17_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let cache = crate::cache::CacheEngine::open(
+            crate::cache::CacheConfig {
+                root: tmp_dir.clone(),
+                max_bytes: 64 << 20,
+                chunk_size: CHUNK,
+            },
+            metrics.clone(),
+        ).unwrap();
+
+        let tf_id = crate::cache::TorrentFileId::new(
+            TF_ID.to_string(),
+            INFO_HASH.to_string(),
+            PATH.to_string(),
+            FILE,
+        );
+
+        // Owner claims chunk 0
+        let joins = cache.inflight().join_or_claim_many(&tf_id.cache_key(), &[0]);
+        let join = &joins[0];
+        assert!(join.owned, "owner claims chunk 0");
+
+        // Fill fails
+        join.record.failed.store(true, Ordering::SeqCst);
+        cache.inflight().finalize(&tf_id.cache_key(), 0);
+        join.record.done.notify_waiters();
+
+        // Chunk not present, inflight finalized
+        assert!(!cache.is_present(&tf_id.cache_key(), 0).unwrap_or(false), "chunk not present");
+        assert!(!cache.inflight().has(&tf_id.cache_key(), 0), "inflight finalized");
+
+        // Concurrent retry contenders
+        const N: usize = 6;
+        let barrier = Arc::new(tokio::sync::Barrier::new(N));
+        let results = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for _ in 0..N {
+            let cache_clone = cache.clone();
+            let tf_id_clone = tf_id.clone();
+            let barrier_clone = barrier.clone();
+            let results_clone = results.clone();
+
+            handles.push(tokio::spawn(async move {
+                barrier_clone.wait().await;
+                let joins = cache_clone.inflight().join_or_claim_many(&tf_id_clone.cache_key(), &[0]);
+                let owned = joins[0].owned;
+                results_clone.lock().unwrap().push(owned);
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let results = results.lock().unwrap();
+        let owners: Vec<_> = results.iter().filter(|&&r| r).collect();
+        let joiners: Vec<_> = results.iter().filter(|&r| !r).collect();
+
+        // Exactly 1 owner, N-1 joiners
+        assert_eq!(owners.len(), 1, "exactly 1 owner");
+        assert_eq!(joiners.len(), N - 1, "N-1 joiners");
+
+        // Exactly one inflight record
+        assert!(cache.inflight().has(&tf_id.cache_key(), 0), "one inflight record");
+
+        // Cleanup
+        cache.inflight().finalize(&tf_id.cache_key(), 0);
+        drop(child);
+        assert!(lease.is_released(), "permit released");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+}
+
 #[cfg(test)]
 mod shared_cap_recovery {
     use super::*;
