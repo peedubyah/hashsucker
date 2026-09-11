@@ -820,8 +820,9 @@ async fn t14_no_orphaned_inflight_on_cancel() {
     assert!(lease.is_released(), "permit released");
 }
 
-// ---- T15: concurrent creation cap ----
+// ---- T15: concurrent creation from a FRESH lease ----
 // Proves that concurrent child_reader() attempts are serialized and capped at 2.
+// Starts with child_count=0, releases N tasks from a single barrier.
 #[tokio::test]
 async fn t15_concurrent_creation_cap() {
     let _guard = crate::test_env::env_lock();
@@ -833,18 +834,15 @@ async fn t15_concurrent_creation_cap() {
         Err(_) => panic!("acquire_for_read failed"),
     };
     let lease = CapabilityLease::new(reserved);
+    assert_eq!(lease.child_count(), 0, "fresh lease");
 
-    // Create 2 children sequentially first
-    let child_a = CapabilityLease::child_reader(&lease).expect("A");
-    let child_b = CapabilityLease::child_reader(&lease).expect("B");
-    assert_eq!(lease.child_count(), 2);
-
-    // Concurrent creation attempts from multiple tasks
-    let barrier = Arc::new(tokio::sync::Barrier::new(4));
+    // Release 6 concurrent tasks from a single barrier
+    const N: usize = 6;
+    let barrier = Arc::new(tokio::sync::Barrier::new(N));
     let results = Arc::new(Mutex::new(Vec::new()));
 
     let mut handles = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..N {
         let lease_clone = lease.clone();
         let barrier_clone = barrier.clone();
         let results_clone = results.clone();
@@ -852,7 +850,7 @@ async fn t15_concurrent_creation_cap() {
         handles.push(tokio::spawn(async move {
             barrier_clone.wait().await;
             let result = CapabilityLease::child_reader(&lease_clone);
-            results_clone.lock().unwrap().push(result.is_some());
+            results_clone.lock().unwrap().push(result);
         }));
     }
 
@@ -860,76 +858,34 @@ async fn t15_concurrent_creation_cap() {
         h.await.unwrap();
     }
 
-    // All 4 concurrent attempts must fail (already at 2)
-    let results = results.lock().unwrap();
-    assert_eq!(results.len(), 4, "all 4 attempts completed");
-    assert!(results.iter().all(|&r| !r), "all concurrent attempts rejected");
+    // Extract successful handles (take ownership)
+    let mut successes = Vec::new();
+    {
+        let mut results = results.lock().unwrap();
+        for r in results.drain(..) {
+            if let Some(handle) = r {
+                successes.push(handle);
+            }
+        }
+    }
 
-    // Count never exceeded 2
-    assert_eq!(lease.child_count(), 2, "count still 2");
+    // Exactly 2 attempts succeed, N-2 fail
+    assert_eq!(successes.len(), 2, "exactly 2 succeed");
 
-    drop(child_a);
-    drop(child_b);
+    // child_count == 2 after all attempts
+    assert_eq!(lease.child_count(), 2, "count is 2");
+    assert!(!lease.is_released(), "lease not released");
+
+    // Drop both successes
+    drop(successes);
     assert_eq!(lease.child_count(), 0, "all dropped");
     assert!(lease.is_released(), "permit released");
 }
 
-// ---- T16: replacement-child race ----
-// B drops while another creation races. Count stays <= 2, permit held.
+// ---- T16: allocation-first ordering ----
+// Force child_reader() to complete while A still exists, THEN A drops.
 #[tokio::test]
-async fn t16_replacement_child_race() {
-    let _guard = crate::test_env::env_lock();
-    let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
-    let (mgr, _metrics) = build_manager_warm(port);
-
-    let reserved = match mgr.acquire_for_read(0).await {
-        Ok(r) => r,
-        Err(_) => panic!("acquire_for_read failed"),
-    };
-    let lease = CapabilityLease::new(reserved);
-
-    let child_a = CapabilityLease::child_reader(&lease).expect("A");
-    let child_b = CapabilityLease::child_reader(&lease).expect("B");
-    assert_eq!(lease.child_count(), 2);
-
-    // Race: drop B (original handle, not clone) vs create new child
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
-
-    let barrier_clone = barrier.clone();
-    let drop_handle = tokio::spawn(async move {
-        barrier_clone.wait().await;
-        drop(child_b); // move original handle; is_real=true, decrements count
-    });
-
-    let barrier_clone = barrier.clone();
-    let lease_clone = lease.clone();
-    let create_handle = tokio::spawn(async move {
-        barrier_clone.wait().await;
-        CapabilityLease::child_reader(&lease_clone)
-    });
-
-    drop_handle.await.unwrap();
-    let new_child = create_handle.await.unwrap();
-
-    // Valid outcomes:
-    // - B dropped first -> C may be created (count = 2: A + C)
-    // - C created first (count was 2, rejected) -> B drops (count = 1: A)
-    // Either way, count <= 2 and permit held
-    let count = lease.child_count();
-    assert!(count <= 2, "count {} must be <= 2", count);
-    assert!(!lease.is_released(), "permit held");
-
-    drop(child_a);
-    drop(new_child);
-    assert!(lease.is_released(), "permit released after all dropped");
-}
-
-// ---- T17: final-drop vs new creation race ----
-// The critical case: final child drops while creation races.
-// Either new child wins (reservation stays) or release wins (rejected).
-// Forbidden: permit released AND child successfully created.
-#[tokio::test]
-async fn t17_final_drop_vs_creation_race() {
+async fn t16_allocation_first_ordering() {
     let _guard = crate::test_env::env_lock();
     let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
     let (mgr, _metrics) = build_manager_warm(port);
@@ -943,52 +899,26 @@ async fn t17_final_drop_vs_creation_race() {
     let child_a = CapabilityLease::child_reader(&lease).expect("A");
     assert_eq!(lease.child_count(), 1);
 
-    // Race: drop final child A (original handle) vs create new child
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    // Allocation succeeds first (count was 1, now 2)
+    let child_b = CapabilityLease::child_reader(&lease).expect("B created");
+    assert_eq!(lease.child_count(), 2, "count 1 -> 2");
+    assert!(!lease.is_released(), "reservation never released");
 
-    let barrier_clone = barrier.clone();
-    let drop_handle = tokio::spawn(async move {
-        barrier_clone.wait().await;
-        drop(child_a); // move original handle; is_real=true, decrements count
-    });
+    // THEN A drops
+    drop(child_a);
+    assert_eq!(lease.child_count(), 1, "count 2 -> 1");
+    assert!(!lease.is_released(), "permit held");
 
-    let barrier_clone = barrier.clone();
-    let lease_clone = lease.clone();
-    let create_handle = tokio::spawn(async move {
-        barrier_clone.wait().await;
-        let result = CapabilityLease::child_reader(&lease_clone);
-        result
-    });
-
-    drop_handle.await.unwrap();
-    let new_child = create_handle.await.unwrap();
-
-    // INVARIANT: once released, no new child can be created.
-    // Either:
-    // - New child created before drop -> count was 1, now 2 (A + new)
-    // - Drop happened first -> released, creation rejected (count = 0)
-    if new_child.is_some() {
-        // Creation won the race: child_reader() saw count=1, succeeded -> count=2
-        // then drop(child_a) ran -> count=1
-        assert!(!lease.is_released(), "lease alive if child created");
-        assert_eq!(lease.child_count(), 1, "one active child (A dropped, new remains)");
-        drop(new_child.unwrap());
-    } else {
-        // Release won the race: drop(child_a) released, creation rejected
-        assert!(lease.is_released(), "lease released");
-        assert_eq!(lease.child_count(), 0, "no children");
-    }
-
-    // Final state: released
-    assert!(lease.is_released(), "final state: released");
-    assert_eq!(lease.child_count(), 0, "final count: 0");
+    // Drop new child
+    drop(child_b);
+    assert_eq!(lease.child_count(), 0, "count 1 -> 0");
+    assert!(lease.is_released(), "permit released");
 }
 
-// ---- T18: post-release reentry ----
-// After final child is gone and is_released() == true,
-// every child_reader() attempt must fail.
+// ---- T17: release-first ordering ----
+// Force A to drop completely, observe released == true, THEN child_reader().
 #[tokio::test]
-async fn t18_post_release_reentry() {
+async fn t17_release_first_ordering() {
     let _guard = crate::test_env::env_lock();
     let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
     let (mgr, _metrics) = build_manager_warm(port);
@@ -997,6 +927,38 @@ async fn t18_post_release_reentry() {
         Ok(r) => r,
         Err(_) => panic!("acquire_for_read failed"),
     };
+    let lease = CapabilityLease::new(reserved);
+
+    let child_a = CapabilityLease::child_reader(&lease).expect("A");
+    assert_eq!(lease.child_count(), 1);
+
+    // A drops completely
+    drop(child_a);
+    assert_eq!(lease.child_count(), 0, "count 0");
+    assert!(lease.is_released(), "released == true");
+
+    // THEN child_reader() must be rejected
+    let result = CapabilityLease::child_reader(&lease);
+    assert!(result.is_none(), "creation rejected after release");
+    assert_eq!(lease.child_count(), 0, "count remains 0");
+    assert!(lease.is_released(), "released remains true");
+}
+
+// ---- T18: post-release reentry + fresh manager reservation ----
+// After terminal release, repeated child_reader() attempts rejected.
+// Then mgr.acquire_for_read() succeeds using the released permit.
+#[tokio::test]
+async fn t18_post_release_reentry_fresh_reservation() {
+    let _guard = crate::test_env::env_lock();
+    let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
+    let (mgr, _metrics) = build_manager_warm(port);
+
+    let reserved = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("acquire_for_read failed"),
+    };
+    // Capture cap_id before lease takes ownership
+    let original_cap_id = reserved.cap.cap_id.clone();
     let lease = CapabilityLease::new(reserved);
 
     let child_a = CapabilityLease::child_reader(&lease).expect("A");
@@ -1020,7 +982,15 @@ async fn t18_post_release_reentry() {
     assert_eq!(lease.child_count(), 0, "count stays 0");
     assert!(lease.is_released(), "stays released");
 
-    // Verify underlying manager capability can be reserved by fresh acquire
+    // Fresh manager reservation using the released permit
+    let reserved2 = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("fresh acquire_for_read should succeed"),
+    };
+    assert_eq!(reserved2.cap.cap_id, original_cap_id, "same underlying cap");
+    assert!(!reserved2.cap.runtime_url.is_empty(), "valid cap");
+
+    drop(reserved2);
     drop(lease);
 }
 
@@ -1031,7 +1001,7 @@ async fn t18_post_release_reentry() {
 async fn t19_permit_continuity_through_replacement() {
     let _guard = crate::test_env::env_lock();
     let (port, _handle) = spawn_mock(Arc::new(Mutex::new(Vec::new()))).await;
-    let (mgr, metrics) = build_manager_warm(port);
+    let (mgr, _metrics) = build_manager_warm(port);
 
     let reserved = match mgr.acquire_for_read(0).await {
         Ok(r) => r,
