@@ -1504,6 +1504,7 @@ mod reclaim {
 #[cfg(test)]
 mod retry_ownership {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     fn build_retry_stack(port: u16) -> (Arc<CapabilityManager>, Arc<Metrics>) {
         let metrics = Arc::new(Metrics::default());
@@ -1530,7 +1531,15 @@ mod retry_ownership {
             metrics.clone(),
         ));
         let slot = mgr.slots.first().expect("slot exists");
-        let cap = make_cap(port as u64, "torbox", "res-retry");
+        let cap = DeliveryCapability::new(
+            format!("http://127.0.0.1:{port}/retry"),
+            "torbox".into(),
+            "test".into(),
+            TF_ID.into(),
+            "res-retry".into(),
+            "file-res-retry".into(),
+            None,
+        );
         slot.caps.lock().unwrap().push(cap);
         (mgr, metrics)
     }
@@ -1623,6 +1632,258 @@ mod retry_ownership {
         assert!(lease.is_released(), "permit released");
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// T18: Full production retry lifecycle with real failed fill → concurrent reclaim → waiters → retry.
+    #[tokio::test]
+    async fn t18_production_retry_lifecycle() {
+        let _guard = crate::test_env::env_lock();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let fail_chunk_1 = Arc::new(AtomicBool::new(true));
+        let (port, _handle) = spawn_retry_mock(hits.clone(), fail_chunk_1.clone()).await;
+        let (mgr, metrics) = build_retry_stack(port);
+
+        let reserved = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("acquire_for_read failed"),
+        };
+        let lease = CapabilityLease::new(reserved);
+        let child_a = CapabilityLease::child_reader(&lease).expect("A");
+        let child_b = CapabilityLease::child_reader(&lease).expect("B");
+
+        let tmp_dir = std::env::temp_dir().join(format!("hashsucker_test_t18_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let cache = crate::cache::CacheEngine::open(
+            crate::cache::CacheConfig {
+                root: tmp_dir.clone(),
+                max_bytes: 64 << 20,
+                chunk_size: CHUNK,
+            },
+            metrics.clone(),
+        ).unwrap();
+
+        let tf_id = crate::cache::TorrentFileId::new(
+            TF_ID.to_string(),
+            INFO_HASH.to_string(),
+            PATH.to_string(),
+            FILE,
+        );
+
+        // PHASE A: Sibling success + sibling failure
+        let joins_a = cache.inflight().join_or_claim_many(&tf_id.cache_key(), &[0]);
+        let join_a = &joins_a[0];
+        assert!(join_a.owned, "A owns chunk 0");
+
+        let joins_b = cache.inflight().join_or_claim_many(&tf_id.cache_key(), &[1]);
+        let join_b = &joins_b[0];
+        assert!(join_b.owned, "B owns chunk 1");
+
+        // Spawn A fill (chunk 0 - succeeds)
+        let child_a_clone = child_a.clone();
+        let cache_for_a = cache.clone();
+        let mgr_for_a = mgr.clone();
+        let metrics_for_a = metrics.clone();
+        let tf_id_for_a = tf_id.clone();
+        let a_handle = tokio::spawn(async move {
+            crate::serve::fill_chunk_run_shared_child(
+                cache_for_a, metrics_for_a, mgr_for_a, reqwest::Client::new(),
+                0, tf_id_for_a, vec![0], 0, CHUNK - 1, 0, CHUNK - 1,
+                Faults {
+                    fault_429_always: false, fault_429_once: false,
+                    fault_dead_once: false, fault_midbody_once: false,
+                },
+                None, None, false, child_a_clone,
+            ).await;
+        });
+
+        // Spawn B fill (chunk 1 - fails because mock returns 403 when fail_chunk_1 is set)
+        let child_b_clone = child_b.clone();
+        let cache_for_b = cache.clone();
+        let mgr_for_b = mgr.clone();
+        let metrics_for_b = metrics.clone();
+        let tf_id_for_b = tf_id.clone();
+        let b_handle = tokio::spawn(async move {
+            crate::serve::fill_chunk_run_shared_child(
+                cache_for_b, metrics_for_b, mgr_for_b, reqwest::Client::new(),
+                1, tf_id_for_b, vec![1], CHUNK, 2 * CHUNK - 1, CHUNK, 2 * CHUNK - 1,
+                Faults {
+                    fault_429_always: false, fault_429_once: false,
+                    fault_dead_once: false, fault_midbody_once: false,
+                },
+                None, None, false, child_b_clone,
+            ).await;
+        });
+
+        let _ = a_handle.await;
+        let _ = b_handle.await;
+
+        // SIBLING SUCCESS: chunk 0 present
+        assert!(cache.is_present(&tf_id.cache_key(), 0).unwrap_or(false), "chunk 0 present");
+        // FAILED CHUNK: chunk 1 not present
+        assert!(!cache.is_present(&tf_id.cache_key(), 1).unwrap_or(false), "chunk 1 not present");
+        // INFLIGHT FINALIZATION: both finalized
+        assert!(!cache.inflight().has(&tf_id.cache_key(), 0), "chunk 0 inflight finalized");
+        assert!(!cache.inflight().has(&tf_id.cache_key(), 1), "chunk 1 inflight finalized");
+
+        // PHASE B: Concurrent reclaim
+        const N: usize = 6;
+        let claim_barrier = Arc::new(tokio::sync::Barrier::new(N));
+        let claim_results = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for _ in 0..N {
+            let cache_clone = cache.clone();
+            let tf_id_clone = tf_id.clone();
+            let barrier_clone = claim_barrier.clone();
+            let results_clone = claim_results.clone();
+
+            handles.push(tokio::spawn(async move {
+                barrier_clone.wait().await;
+                let joins = cache_clone.inflight().join_or_claim_many(&tf_id_clone.cache_key(), &[1]);
+                let owned = joins[0].owned;
+                let record = joins[0].record.clone();
+                results_clone.lock().unwrap().push((owned, record));
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let claim_results = claim_results.lock().unwrap();
+        let owners: Vec<_> = claim_results.iter().filter(|(o, _)| *o).collect();
+        let joiners: Vec<_> = claim_results.iter().filter(|(o, _)| !*o).collect();
+
+        assert_eq!(owners.len(), 1, "exactly 1 owner");
+        assert_eq!(joiners.len(), N - 1, "N-1 joiners");
+
+        let owner_record = &owners[0].1;
+        for (_, record) in joiners.iter() {
+            assert!(Arc::ptr_eq(owner_record, record), "all joiners reference same record");
+        }
+
+        // PHASE C: Waiters block on retry record
+        let waiter_barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut waiter_handles = Vec::new();
+        for i in 0..2 {
+            let record = joiners[i].1.clone();
+            let barrier_clone = waiter_barrier.clone();
+            waiter_handles.push(tokio::spawn(async move {
+                barrier_clone.wait().await;
+                record.done.notified().await;
+                (record.success.load(Ordering::SeqCst), record.failed.load(Ordering::SeqCst))
+            }));
+        }
+
+        // PHASE D: Real retry fill (disable failure for retry)
+        fail_chunk_1.store(false, Ordering::SeqCst);
+
+        let cache_for_retry = cache.clone();
+        let mgr_for_retry = mgr.clone();
+        let metrics_for_retry = metrics.clone();
+        let tf_id_for_retry = tf_id.clone();
+        let child_b_for_retry = child_b.clone();
+
+        let retry_handle = tokio::spawn(async move {
+            crate::serve::fill_chunk_run_shared_child(
+                cache_for_retry, metrics_for_retry, mgr_for_retry, reqwest::Client::new(),
+                1, tf_id_for_retry, vec![1], CHUNK, 2 * CHUNK - 1, CHUNK, 2 * CHUNK - 1,
+                Faults {
+                    fault_429_always: false, fault_429_once: false,
+                    fault_dead_once: false, fault_midbody_once: false,
+                },
+                None, None, false, child_b_for_retry,
+            ).await;
+        });
+
+        let _ = retry_handle.await;
+
+        // RETRY DURABILITY: chunk 1 present
+        assert!(cache.is_present(&tf_id.cache_key(), 1).unwrap_or(false), "chunk 1 present after retry");
+        assert!(!cache.inflight().has(&tf_id.cache_key(), 1), "chunk 1 inflight finalized after retry");
+
+        // WAITERS WOKEN
+        for handle in waiter_handles {
+            let (success, failed) = handle.await.unwrap();
+            assert!(success, "waiter saw success");
+            assert!(!failed, "waiter saw no failure");
+        }
+
+        // RETRY HTTP COUNT: initial failed request + retry = 2 total for chunk 1
+        let guard = hits.lock().unwrap();
+        let chunk1_requests: Vec<_> = guard.iter().filter(|(_, s, _)| *s == CHUNK).collect();
+        assert_eq!(chunk1_requests.len(), 2, "initial failed + retry = 2 HTTP requests for chunk 1");
+        let chunk0_requests: Vec<_> = guard.iter().filter(|(_, s, _)| *s == 0).collect();
+        assert_eq!(chunk0_requests.len(), 1, "exactly 1 HTTP request for chunk 0");
+        drop(guard);
+
+        // PHASE E: Sibling durability
+        assert!(cache.is_present(&tf_id.cache_key(), 0).unwrap_or(false), "chunk 0 still present");
+
+        assert_eq!(lease.child_count(), 2, "both children alive");
+        assert!(!lease.is_released(), "lease not released");
+
+        drop(child_a);
+        drop(child_b);
+        assert_eq!(lease.child_count(), 0, "all children dropped");
+        assert!(lease.is_released(), "permit released");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    // State for retry mock
+    #[derive(Clone)]
+    struct RetryMockState {
+        hits: Arc<Mutex<Vec<(String, u64, u64)>>>,
+        fail_chunk_1: Arc<AtomicBool>,
+    }
+
+    // Mock that fails chunk 1 when fail flag is set
+    async fn retry_cdn_handler(
+        axum::extract::State(state): axum::extract::State<RetryMockState>,
+        headers: axum::http::HeaderMap,
+        uri: axum::http::Uri,
+    ) -> axum::response::Response {
+        let RetryMockState { hits, fail_chunk_1 } = state;
+        let v = headers.get("range").expect("mock: missing Range").to_str().unwrap();
+        let inner = v.strip_prefix("bytes=").expect("mock: bad Range");
+        let mut it = inner.split('-');
+        let s: u64 = it.next().unwrap().parse().unwrap();
+        let e: u64 = it.next().unwrap().parse().unwrap();
+        let path = uri.path().to_string();
+        hits.lock().unwrap().push((path, s, e));
+
+        // Chunk 1 fails when flag is set
+        if s == CHUNK && fail_chunk_1.load(Ordering::SeqCst) {
+            axum::response::Response::builder()
+                .status(axum::http::StatusCode::FORBIDDEN)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        } else {
+            let body = axum::body::Body::from(expected_range(s, e));
+            axum::response::Response::builder()
+                .status(axum::http::StatusCode::PARTIAL_CONTENT)
+                .header("content-range", format!("bytes {s}-{e}/{FILE}"))
+                .header("accept-ranges", "bytes")
+                .body(body)
+                .unwrap()
+        }
+    }
+
+    async fn spawn_retry_mock(
+        hits: Arc<Mutex<Vec<(String, u64, u64)>>>,
+        fail_chunk_1: Arc<AtomicBool>,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        let state = RetryMockState { hits, fail_chunk_1 };
+        let app = axum::Router::new()
+            .route("/retry", get(retry_cdn_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (port, handle)
     }
 }
 
