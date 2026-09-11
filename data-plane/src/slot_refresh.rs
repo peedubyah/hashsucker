@@ -716,3 +716,176 @@ async fn t10_refresh_preserves_byte_identity() {
 
     drop(reserved);
 }
+
+/// T11: In-flight read survives slot refresh, then post-refresh acquisition uses refreshed placement.
+///
+/// This is the closing proof: an actual fill_chunk_run_shared_child() against a warm cap A from P1
+/// is blocked at an HTTP barrier while manager refresh replaces P1 with P2. The in-flight read
+/// must complete with A's original identity, and the refreshed manager must select P2 for the
+/// next acquisition.
+#[tokio::test]
+async fn t11_in_flight_read_survives_refresh_post_acquire_uses_p2() {
+    let _guard = crate::test_env::env_lock();
+    let hits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (port, _handle, barrier) = spawn_refresh_barrier_mock(hits.clone()).await;
+    let (mgr, metrics) = refresh_manager_warm(port);
+
+    // Acquire warm cap A from P1
+    let reserved = match mgr.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("acquire_for_read failed"),
+    };
+    let cap_a_id = reserved.cap.cap_id.clone();
+    let cap_a_url = reserved.cap.runtime_url.clone();
+    let cap_a_resource = reserved.cap.provider_resource_id.clone();
+    let old_arc = reserved.cap.clone();
+
+    // Create lease + child (the minimal reader/lease production fill path needs)
+    let lease = CapabilityLease::new(reserved);
+    let child = CapabilityLease::child_reader(&lease).expect("child B");
+
+    // Claim a real cache chunk
+    let tmp_dir = std::env::temp_dir().join(format!("hashsucker_test_t11_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let cache = crate::cache::CacheEngine::open(
+        crate::cache::CacheConfig {
+            root: tmp_dir.clone(),
+            max_bytes: 64 << 20,
+            chunk_size: REFRESH_CHUNK,
+        },
+        metrics.clone(),
+    ).unwrap();
+
+    let tf_id = crate::cache::TorrentFileId::new(
+        "tf_refresh_uuid".to_string(),
+        REFRESH_INFO_HASH.to_string(),
+        REFRESH_PATH.to_string(),
+        REFRESH_SIZE,
+    );
+
+    let joins = cache.inflight().join_or_claim_many(&tf_id.cache_key(), &[0]);
+    assert!(joins[0].owned, "T11: B owns chunk 0");
+
+    // Start fill_chunk_run_shared_child — blocks on barrier
+    let child_clone = child.clone();
+    let cache_for_fill = cache.clone();
+    let mgr_for_fill = mgr.clone();
+    let metrics_for_fill = metrics.clone();
+    let tf_id_for_fill = tf_id.clone();
+
+    let fill_handle = tokio::spawn(async move {
+        crate::serve::fill_chunk_run_shared_child(
+            cache_for_fill,
+            metrics_for_fill,
+            mgr_for_fill,
+            reqwest::Client::new(),
+            0,
+            tf_id_for_fill,
+            vec![0],
+            0,
+            REFRESH_CHUNK - 1,
+            0,
+            REFRESH_CHUNK - 1,
+            crate::transport::Faults {
+                fault_429_always: false,
+                fault_429_once: false,
+                fault_dead_once: false,
+                fault_midbody_once: false,
+            },
+            None,
+            None,
+            false,
+            child_clone,
+        ).await;
+    });
+
+    // HTTP BARRIER REACHED
+    barrier.entered_notify.notified().await;
+    assert!(barrier.request_entered.load(std::sync::atomic::Ordering::SeqCst), "T11: HTTP entered");
+
+    // REFRESH OCCURRED WHILE READ BLOCKED
+    let fresh_coords = vec![refresh_coord("torbox", "res-2", "file-2")];
+    let out = CapabilityManager::refresh_slots(
+        &mgr,
+        &refresh_tf(),
+        &fresh_coords,
+        ApiKeys { torbox: String::new(), realdebrid: String::new() },
+        reqwest::Client::new(),
+        metrics.clone(),
+    );
+    assert!(matches!(out.status, RefreshStatus::Refreshed), "T11: refresh succeeded");
+
+    // Release the HTTP barrier — let the in-flight read complete
+    barrier.release.notify_one();
+
+    // Wait for fill to complete
+    let _ = fill_handle.await;
+
+    // PHASE A — OLD READ COMPLETION
+    assert!(cache.is_present(&tf_id.cache_key(), 0).unwrap_or(false), "T11: chunk 0 present");
+    assert!(!cache.inflight().has(&tf_id.cache_key(), 0), "T11: chunk 0 inflight finalized");
+
+    // Old reader retained original metadata (refresh did not mutate A)
+    assert_eq!(old_arc.cap_id, cap_a_id, "T11: old cap ID unchanged");
+    assert_eq!(old_arc.runtime_url, cap_a_url, "T11: old URL unchanged");
+    assert_eq!(old_arc.provider_resource_id, cap_a_resource, "T11: old resource unchanged");
+
+    // HTTP request was for the original URL (not some refreshed variant)
+    let guard = hits.lock().unwrap();
+    assert_eq!(guard.len(), 1, "T11: exactly one HTTP request");
+    assert_eq!(guard[0].1, 0, "T11: HTTP range start = 0");
+    assert_eq!(guard[0].2, REFRESH_CHUNK - 1, "T11: HTTP range end = CHUNK-1");
+    drop(guard);
+
+    // Drop lease to release permit
+    drop(child);
+    drop(lease);
+
+    // PHASE B — FUTURE SELECTION
+    // Configure acquire stub to resolve P2
+    std::env::set_var("HY4_TEST_ACQUIRE_BASE_URL", format!("http://127.0.0.1:{port}"));
+    std::env::set_var("HY4_TEST_ACQUIRE_URL_TORBOX", format!("http://127.0.0.1:{port}/refresh-p2"));
+
+    let acq_before = metrics.capability_acquisitions.load(std::sync::atomic::Ordering::SeqCst);
+    let reserved2 = match out.manager.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("T11: refreshed acquire_for_read should succeed"),
+    };
+    let acq_after = metrics.capability_acquisitions.load(std::sync::atomic::Ordering::SeqCst);
+
+    // POST-REFRESH ACQUIRE uses P2
+    assert_ne!(reserved2.cap.cap_id, cap_a_id, "T11: new cap is not old cap A");
+    assert!(
+        reserved2.cap.provider_resource_id == "res-2",
+        "T11: new cap reflects P2 resource"
+    );
+    assert!(
+        reserved2.cap.runtime_url.contains("refresh-p2"),
+        "T11: new cap URL reflects P2"
+    );
+
+    // P1 NOT REUSED: old cap A is not in the new manager's pool
+    let old_in_new = out.manager.slots.iter().any(|s| {
+        s.caps.lock().unwrap().iter().any(|c| c.cap_id == cap_a_id)
+    });
+    assert!(!old_in_new, "T11: old cap A not resurrected into refreshed manager");
+
+    // ACQUISITION COUNT: exactly one new manager acquisition
+    assert_eq!(acq_after - acq_before, 1, "T11: exactly one new acquisition");
+
+    // OLD ARC SURVIVAL: old_arc still valid as Arc
+    assert_eq!(old_arc.cap_id, cap_a_id, "T11: old Arc still valid");
+
+    // TORRENTFILE IDENTITY: same TF throughout
+    assert_eq!(old_arc.torrent_file_id, "tf_refresh_uuid", "T11: old cap TF identity");
+    assert_eq!(reserved2.cap.torrent_file_id, "tf_refresh_uuid", "T11: new cap same TF identity");
+    assert_eq!(old_arc.provider, "torbox", "T11: old cap provider");
+    assert_eq!(reserved2.cap.provider, "torbox", "T11: new cap provider");
+
+    drop(reserved2);
+    drop(old_arc);
+    std::env::remove_var("HY4_TEST_ACQUIRE_BASE_URL");
+    std::env::remove_var("HY4_TEST_ACQUIRE_URL_TORBOX");
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
