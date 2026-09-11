@@ -1312,10 +1312,18 @@ pub(crate) async fn stripe_worker_shared_child(
         if matches!(child.cap.status(), CapabilityStatus::Dead) {
             break;
         }
-        let (idx, _stolen) = match coord.next(side, &provider, &cap_id) {
+        let (idx, stolen) = match coord.next(side, &provider, &cap_id) {
             Some(job) => job,
             None => break,
         };
+        // Track lane ownership and work-steal events for scheduler observability
+        match side {
+            StripeSide::A => { metrics.cache.scheduler_lane_a_chunks.fetch_add(1, Ordering::SeqCst); }
+            StripeSide::B => { metrics.cache.scheduler_lane_b_chunks.fetch_add(1, Ordering::SeqCst); }
+        }
+        if stolen {
+            metrics.cache.scheduler_work_steals.fetch_add(1, Ordering::SeqCst);
+        }
         let cs = grid.chunk_start(idx);
         let ce = match grid.chunk_end(idx) {
             Some(e) => e,
@@ -1955,6 +1963,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                             // what we would have fetched naively.
                             cache.metrics.cache.inflight_joins.fetch_add(1, Ordering::SeqCst);
                             cache.metrics.cache.chunk_join_waits.fetch_add(1, Ordering::SeqCst);
+                            metrics.cache.inflight_joiners.fetch_add(1, Ordering::SeqCst);
                             cache
                                 .metrics
                                 .cache
@@ -4221,6 +4230,11 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
             "chunk_join_waits": m.cache.chunk_join_waits.load(Ordering::SeqCst),
             "chunk_fills": m.cache.chunk_fills.load(Ordering::SeqCst),
             "chunk_fills_failed": m.cache.chunk_fills_failed.load(Ordering::SeqCst),
+            // Scheduler / lane / coalescing observability
+            "scheduler_lane_a_chunks": m.cache.scheduler_lane_a_chunks.load(Ordering::SeqCst),
+            "scheduler_lane_b_chunks": m.cache.scheduler_lane_b_chunks.load(Ordering::SeqCst),
+            "scheduler_work_steals": m.cache.scheduler_work_steals.load(Ordering::SeqCst),
+            "inflight_joiners": m.cache.inflight_joiners.load(Ordering::SeqCst),
         },
         // Slice 4.5 G: every upstream fetch decision, with the present coverage
         // the planner actually saw. This is the evidence for "no unexplained

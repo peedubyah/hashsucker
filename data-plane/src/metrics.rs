@@ -324,6 +324,15 @@ pub struct CacheMetrics {
     pub chunk_fills: AtomicU64,
     /// Chunks whose fill failed. A failed chunk is never published.
     pub chunk_fills_failed: AtomicU64,
+    // ---- Scheduler / lane / coalescing observability ----
+    /// Chunks owned by scheduler lane A (index 0).
+    pub scheduler_lane_a_chunks: AtomicU64,
+    /// Chunks owned by scheduler lane B (index 1).
+    pub scheduler_lane_b_chunks: AtomicU64,
+    /// Successful work-steal events (one lane took work from the other).
+    pub scheduler_work_steals: AtomicU64,
+    /// Inflight joiners: readers that waited on an existing fill.
+    pub inflight_joiners: AtomicU64,
 }
 
 // ---------------------------------------------------------------------------
