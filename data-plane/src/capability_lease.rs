@@ -1496,11 +1496,7 @@ mod reclaim {
     }
 }
 
-// ---- T17: failed chunk retry ownership ----
-// Proves: sibling success + sibling failure + reclaim + concurrent retry + sibling durability
-#[cfg(test)]
-// ---- T17: failed chunk retry ownership ----
-// Proves: concurrent claim/finalize/reclaim lifecycle for failed chunks
+// ---- T17-T18: failed chunk retry ownership ----
 #[cfg(test)]
 mod retry_ownership {
     use super::*;
@@ -1634,20 +1630,22 @@ mod retry_ownership {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
-    /// T18: Full production retry lifecycle with real failed fill → concurrent reclaim → waiters → retry.
+    /// T18: Dead-cap retry uses fresh capability.
+    /// Proves: after Class-C death, retry uses fresh capability B (not dead A).
     #[tokio::test]
-    async fn t18_production_retry_lifecycle() {
+    async fn t18_dead_cap_retry_uses_fresh_capability() {
         let _guard = crate::test_env::env_lock();
         let hits = Arc::new(Mutex::new(Vec::new()));
         let fail_chunk_1 = Arc::new(AtomicBool::new(true));
         let (port, _handle) = spawn_retry_mock(hits.clone(), fail_chunk_1.clone()).await;
         let (mgr, metrics) = build_retry_stack(port);
 
-        let reserved = match mgr.acquire_for_read(0).await {
+        let reserved_a = match mgr.acquire_for_read(0).await {
             Ok(r) => r,
             Err(_) => panic!("acquire_for_read failed"),
         };
-        let lease = CapabilityLease::new(reserved);
+        let cap_a_id = reserved_a.cap.cap_id.clone();
+        let lease = CapabilityLease::new(reserved_a);
         let child_a = CapabilityLease::child_reader(&lease).expect("A");
         let child_b = CapabilityLease::child_reader(&lease).expect("B");
 
@@ -1696,7 +1694,7 @@ mod retry_ownership {
             ).await;
         });
 
-        // Spawn B fill (chunk 1 - fails because mock returns 403 when fail_chunk_1 is set)
+        // Spawn B fill (chunk 1 - fails because mock returns 403 for chunk 1 when fail_chunk_1 is set)
         let child_b_clone = child_b.clone();
         let cache_for_b = cache.clone();
         let mgr_for_b = mgr.clone();
@@ -1716,6 +1714,10 @@ mod retry_ownership {
 
         let _ = a_handle.await;
         let _ = b_handle.await;
+
+        // OLD CAP STATUS AFTER FAILURE: capability A is Dead (mock 403 -> mark_dead)
+        assert!(matches!(child_b.cap.status(), crate::capability::CapabilityStatus::Dead),
+            "capability A is Dead after Class-C failure");
 
         // SIBLING SUCCESS: chunk 0 present
         assert!(cache.is_present(&tf_id.cache_key(), 0).unwrap_or(false), "chunk 0 present");
@@ -1775,14 +1777,40 @@ mod retry_ownership {
             }));
         }
 
-        // PHASE D: Real retry fill (disable failure for retry)
+        // PHASE D: Manager obtains fresh capability B
+        // Release old lease first (drop children)
+        drop(child_a);
+        drop(child_b);
+        assert!(lease.is_released(), "old lease released");
+
+        // Set acquire stub for fresh cap resolution
+        std::env::set_var("HY4_TEST_ACQUIRE_BASE_URL", format!("http://127.0.0.1:{port}"));
+        std::env::set_var("HY4_TEST_ACQUIRE_URL_TORBOX", format!("http://127.0.0.1:{port}/retry"));
+
+        // Acquire fresh capability B
+        let acq_before = metrics.capability_acquisitions.load(Ordering::SeqCst);
+        let reserved_b = match mgr.acquire_for_read(0).await {
+            Ok(r) => r,
+            Err(_) => panic!("acquire_for_read for fresh cap B failed"),
+        };
+        let acq_after = metrics.capability_acquisitions.load(Ordering::SeqCst);
+
+        let cap_b_id = reserved_b.cap.cap_id.clone();
+        assert_ne!(cap_b_id, cap_a_id, "fresh capability B has different cap_id from dead A");
+        assert_eq!(acq_after - acq_before, 1, "exactly one fresh acquisition for B");
+
+        // Create new lease and child for retry
+        let lease_b = CapabilityLease::new(reserved_b);
+        let child_b_retry = CapabilityLease::child_reader(&lease_b).expect("retry child");
+
+        // PHASE E: Real retry fill through fresh capability B (disable failure for retry)
         fail_chunk_1.store(false, Ordering::SeqCst);
 
         let cache_for_retry = cache.clone();
         let mgr_for_retry = mgr.clone();
         let metrics_for_retry = metrics.clone();
         let tf_id_for_retry = tf_id.clone();
-        let child_b_for_retry = child_b.clone();
+        let child_b_retry_clone = child_b_retry.clone();
 
         let retry_handle = tokio::spawn(async move {
             crate::serve::fill_chunk_run_shared_child(
@@ -1792,7 +1820,7 @@ mod retry_ownership {
                     fault_429_always: false, fault_429_once: false,
                     fault_dead_once: false, fault_midbody_once: false,
                 },
-                None, None, false, child_b_for_retry,
+                None, None, false, child_b_retry_clone,
             ).await;
         });
 
@@ -1809,24 +1837,26 @@ mod retry_ownership {
             assert!(!failed, "waiter saw no failure");
         }
 
-        // RETRY HTTP COUNT: initial failed request + retry = 2 total for chunk 1
+        // RETRY HTTP COUNT: initial failed (403) + retry (206) = 2 total for chunk 1
         let guard = hits.lock().unwrap();
-        let chunk1_requests: Vec<_> = guard.iter().filter(|(_, s, _)| *s == CHUNK).collect();
-        assert_eq!(chunk1_requests.len(), 2, "initial failed + retry = 2 HTTP requests for chunk 1");
+        let chunk1_all: Vec<_> = guard.iter().filter(|(_, s, _)| *s == CHUNK).collect();
+        assert_eq!(chunk1_all.len(), 2, "initial failed + retry = 2 HTTP requests for chunk 1");
         let chunk0_requests: Vec<_> = guard.iter().filter(|(_, s, _)| *s == 0).collect();
         assert_eq!(chunk0_requests.len(), 1, "exactly 1 HTTP request for chunk 0");
         drop(guard);
 
-        // PHASE E: Sibling durability
+        // PHASE F: Sibling durability
         assert!(cache.is_present(&tf_id.cache_key(), 0).unwrap_or(false), "chunk 0 still present");
 
-        assert_eq!(lease.child_count(), 2, "both children alive");
-        assert!(!lease.is_released(), "lease not released");
+        // PERMIT/LEASE ORDERING: old lease released before new acquisition
+        assert_eq!(lease_b.child_count(), 1, "new lease has 1 child");
+        assert!(!lease_b.is_released(), "new lease not released");
 
-        drop(child_a);
-        drop(child_b);
-        assert_eq!(lease.child_count(), 0, "all children dropped");
-        assert!(lease.is_released(), "permit released");
+        drop(child_b_retry);
+        assert!(lease_b.is_released(), "new lease released after retry child dropped");
+
+        std::env::remove_var("HY4_TEST_ACQUIRE_BASE_URL");
+        std::env::remove_var("HY4_TEST_ACQUIRE_URL_TORBOX");
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
