@@ -150,7 +150,14 @@ async function tryReuseHealthyPublication({
   episode,
 }) {
   try {
-    const isEpisode = mediaType === 'episode';
+    // Episode scope is determined by explicit season+episode coordinates
+    // (series/TV fan-out children, S:E mediaIds), not by the mediaType
+    // string alone: production TV requests arrive as mediaType 'series'
+    // with season/episode params. Series requests without coordinates
+    // never qualify for episode reuse.
+    const hasEpisodeCoords = Number.isSafeInteger(season) && season >= 1
+      && Number.isSafeInteger(episode) && episode >= 1;
+    const isEpisode = mediaType === 'episode' || hasEpisodeCoords;
     if (!isEpisode && mediaType !== 'movie') {
       return null;
     }
@@ -161,6 +168,12 @@ async function tryReuseHealthyPublication({
       ? cache.getTvPlaybackHandoff?.(mediaId, season, episode)
       : cache.getPlaybackHandoffByMediaId?.(mediaId);
     if (!stored) {
+      return null;
+    }
+    // Scope hygiene: a movie request must never reuse an episode row and
+    // vice versa. Episode lookup is already keyed by (mediaId, season,
+    // episode); the movie branch additionally requires a seasonless row.
+    if (!isEpisode && (stored.season != null || stored.episode != null)) {
       return null;
     }
     const infoHash = stored.infoHash ?? stored.selectedHash;

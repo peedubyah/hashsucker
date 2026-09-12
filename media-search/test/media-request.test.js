@@ -1137,3 +1137,119 @@ test('searchByMedia: falls back to discovery when no provider coordinate exists'
     cache.close();
   });
 });
+
+// =============================================================================
+// Fast path: reuse a healthy published TV episode without rediscovery
+// =============================================================================
+
+const EP_HASH = 'eeff00112233445566778899aabbccddeeff0011';
+const EP_TFID = 'tf_reuse_episode_1';
+
+function seedAuthoritativeEpisodeHandoff(cache, mediaId, season, episode) {
+  const requestId = cache.persistMediaRequest(
+    { mediaId, mediaType: 'series', season, episode },
+    [],
+  );
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId,
+    mediaType: 'series',
+    season,
+    episode,
+    releaseKey: `${EP_HASH}:0`,
+    infoHash: EP_HASH,
+    fileIndex: 0,
+    filename: `Show S01E0${episode} 1080p.mkv`,
+    provider: 'torbox',
+    providerState: 'cached',
+    identityTier: 'ProviderScoped',
+    resolutionState: 'resolved',
+    selectionReason: 'exact-size bound',
+    selectedAt: Date.now(),
+    torrentFileId: EP_TFID,
+  });
+}
+
+function stubHealthyEpisodeStore() {
+  return {
+    getTorrentFile: (id) => (id === EP_TFID
+      ? { id: EP_TFID, infoHash: EP_HASH, internalPath: 'Show S01E01 1080p.mkv', size: 987654321 }
+      : null),
+    listDataPlaneCoordinates: (id) => (id === EP_TFID
+      ? [{ provider: 'torbox', provider_resource_id: 'res-1' }]
+      : []),
+  };
+}
+
+test('searchByMedia: reuses a healthy published episode without discovery', async () => {
+  await withIsolatedStrmRoot(async () => {
+    const cache = createDiscoveryCache();
+    seedAuthoritativeEpisodeHandoff(cache, 'tt_ep_1', 1, 1);
+    const store = stubHealthyEpisodeStore();
+
+    const t0 = Date.now();
+    const result = await searchByMedia(cache, {
+      mediaId: 'tt_ep_1',
+      mediaType: 'series',
+      season: 1,
+      episode: 1,
+      controlPlaneStore: store,
+      skipLiveDiscovery: true,
+    });
+    const wallMs = Date.now() - t0;
+
+    assert.equal(result.selection.reason, 'reused-healthy-publication');
+    assert.equal(result.selection.selected.infoHash, EP_HASH);
+    assert.equal(result.selection.selected.torrentFileId, EP_TFID);
+    assert.equal(result.handoff.season, 1);
+    assert.equal(result.handoff.episode, 1);
+    const rows = cache.db.prepare(
+      'SELECT COUNT(*) AS n FROM playback_handoffs WHERE media_id = ? AND season = 1 AND episode = 1'
+    ).get('tt_ep_1');
+    assert.equal(rows.n, 1, 'Expected exactly one episode handoff row (no duplicates)');
+    const entry = cache.getVfsTvEntry('tt_ep_1', 1, 1);
+    assert.ok(entry, 'Expected VFS TV entry');
+    assert.ok(wallMs < 5000, `Expected fast reuse, took ${wallMs}ms`);
+    cache.close();
+  });
+});
+
+test('searchByMedia: episode reuse cannot cross S/E boundaries', async () => {
+  await withIsolatedStrmRoot(async () => {
+    const cache = createDiscoveryCache();
+    seedAuthoritativeEpisodeHandoff(cache, 'tt_ep_2', 1, 1);
+    const store = stubHealthyEpisodeStore();
+
+    // S1E2 has no handoff row: must fall through, never reuse S1E1.
+    const result = await searchByMedia(cache, {
+      mediaId: 'tt_ep_2',
+      mediaType: 'series',
+      season: 1,
+      episode: 2,
+      controlPlaneStore: store,
+      skipLiveDiscovery: true,
+    });
+
+    assert.notEqual(result.selection.reason, 'reused-healthy-publication');
+    assert.equal(result.selection.selected, null);
+    cache.close();
+  });
+});
+
+test('searchByMedia: movie request never reuses an episode handoff row', async () => {
+  await withIsolatedStrmRoot(async () => {
+    const cache = createDiscoveryCache();
+    seedAuthoritativeEpisodeHandoff(cache, 'tt_ep_3', 1, 1);
+    const store = stubHealthyEpisodeStore();
+
+    const result = await searchByMedia(cache, {
+      mediaId: 'tt_ep_3',
+      mediaType: 'movie',
+      controlPlaneStore: store,
+      skipLiveDiscovery: true,
+    });
+
+    assert.notEqual(result.selection.reason, 'reused-healthy-publication');
+    cache.close();
+  });
+});
