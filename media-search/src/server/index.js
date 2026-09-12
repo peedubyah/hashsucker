@@ -22,6 +22,10 @@ const controlPlaneStore = createControlPlaneStore(
 // durable rows). Real-Debrid is never wired into the background seam.
 
 import { createDurabilityScheduler } from '../lib/control-plane/durability-scheduler.js';
+import { buildDiagnostics, summarizeForStartup } from '../lib/diagnostics/readiness.js';
+import { listLibrary } from '../lib/library/listing.js';
+import { readRetirementPolicy } from '../lib/consumers/eligibility.js';
+import { createRealDebridClient } from '../lib/providers/realdebrid/client.js';
 import {
   createDurabilityRuntime,
   resolveDurabilityMode,
@@ -152,4 +156,22 @@ server.listen(port, host, () => {
   if (durabilityMode !== 'disabled') {
     console.log(`media-search: background durability mode=${durabilityMode}`);
   }
+  // One product-readiness summary at startup (background, never blocks
+  // listen, never retries). Short-timeout checks only; any failure logs
+  // and leaves runtime behavior unchanged.
+  setTimeout(async () => {
+    try {
+      const diagnostics = await buildDiagnostics({
+        cache: discoveryCache,
+        controlPlaneStore,
+        env: process.env,
+        listLibraryFn: listLibrary,
+        retirementPolicy: readRetirementPolicy(),
+        realDebridClientFactory: (opts) => createRealDebridClient({ ...opts, minIntervalMs: 100 }),
+      });
+      console.log(summarizeForStartup(diagnostics));
+    } catch (error) {
+      console.warn('media-search: startup readiness summary failed', error?.message);
+    }
+  }, 5000);
 });

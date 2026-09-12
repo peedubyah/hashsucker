@@ -28,6 +28,7 @@ import { createRequestIntent } from '../lib/requests/intent.js';
 import { bindPlexMetricsSink, openSeasonFanOutScope } from '../lib/requests/plex-notifier.js';
 import { unpublishMedia } from '../lib/library/unpublish.js';
 import { listLibrary } from '../lib/library/listing.js';
+import { buildDiagnostics } from '../lib/diagnostics/readiness.js';
 import { runReconcile } from '../lib/consumers/reconcile.js';
 import { evaluateRetirement, readRetirementPolicy } from '../lib/consumers/eligibility.js';
 import { setPlexRefreshAccount } from '../lib/metrics.js';
@@ -2306,6 +2307,25 @@ export function createRequestHandler(dependencies = {}) {
           });
         } catch (err) {
           return sendJson(response, 400, { error: err.message });
+        }
+      }
+      // Rollout readiness diagnostics: storage, data-plane, providers,
+      // consumers, publication, lifecycle. Cheap checks only, no secrets.
+      // See lib/diagnostics/readiness.js.
+      if (request.method === 'GET' && url.pathname === '/api/diagnostics') {
+        requireControlPlaneStore(controlPlaneStore);
+        try {
+          const diagnostics = await buildDiagnostics({
+            cache: searchCache,
+            controlPlaneStore,
+            env,
+            listLibraryFn: listLibrary,
+            retirementPolicy: readRetirementPolicy(),
+            realDebridClientFactory: (opts) => createRealDebridClient({ ...opts, minIntervalMs: 100 }),
+          });
+          return sendJson(response, 200, { generatedAt: clock(), ...diagnostics });
+        } catch (err) {
+          return sendJson(response, 500, { error: err.message });
         }
       }
       if (request.method === 'GET' && url.pathname === '/api/control-plane/items') {

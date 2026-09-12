@@ -166,6 +166,21 @@ routes; host binding and the trusted Compose/reverse-proxy boundary are the acce
 | `POST /api/library/unpublish` | Remove VFS/STRM presentation for an exact movie, episode, or season; retains Release/TorrentFile/provider truth for cheap republish |
 | `POST /api/library/reconcile` | Record consumer-library presence/absence/UNKNOWN observations for published items; retires ELIGIBLE items only when the retirement policy enables it (default OFF) |
 | `GET /api/library/retirement` | Dry-run retirement planner: per-item presence, absence age, eligibility, exact ineligibility reason; read-only |
+| `GET /api/diagnostics` | Rollout readiness: storage, data-plane, providers, consumers, publication, lifecycle in one payload (`ready|degraded|not_ready`); cheap checks only, no secrets |
+
+### Rollout readiness
+
+`GET /api/diagnostics` answers whether the system can serve households
+without SQLite archaeology. Fatal (`not_ready`): control-plane/discovery
+DBs unreadable, STRM root not writable, data-plane unreachable. Degraded:
+a provider down/unreachable, a configured consumer broken (Plex
+`PLEX_UNREACHABLE`/`PLEX_AUTH_FAILED` covered distinctly), publication
+store unreadable. Warnings (never fatal): Jellyfin library without
+realtime monitoring, disabled automatic retirement, unconfigured
+optionals. Consumer checks use cheap endpoints (TorBox single-hash
+cache probe, Real-Debrid account info, Jellyfin/Plex info + auth
+probe) — never inventory scans. A one-block readiness summary is also
+logged once at startup.
 
 ### Consumer reconciliation and retirement eligibility
 
