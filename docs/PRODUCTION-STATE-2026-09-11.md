@@ -591,3 +591,16 @@ Those documents supply detail and evidence. This file owns the verified
 checkpoint and phase status as of 2026-09-11; `docs/ROADMAP.md` owns the
 remaining shipping work, and `handoff/CURRENT.md` owns the immediate next
 action.
+
+## 15. Addendum 2026-09-12 — Phase A closed (A3)
+
+The LongCat single-lane versus fixed shared-cap A/B (work stealing OFF) is
+complete. Outcome: **A3 — no meaningful win.** Shared-cap two-lane execution
+stays default OFF with no production-code change; §10–§11 describe the
+now-closed tuning question, not active work. Ordinary sequential cold playback
+did not naturally activate two-lane (do not read the OFF/ON sequential table
+as proof that activated two-lane is slower), and concurrent-reader pressure
+already parallelizes through normal capability-pool growth. Do not reopen
+shared-cap tuning or the 8 MiB grid without a concrete production workload
+that only this mechanism solves. The Phase C exit bar is now
+[`GRADUATION-MATRIX.md`](GRADUATION-MATRIX.md).

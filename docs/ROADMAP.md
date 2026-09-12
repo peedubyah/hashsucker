@@ -53,6 +53,14 @@ shipping/default decision is explicit, and any enabled policy has passed both
 focused tests and a bounded production canary. A no-win decision exits the
 phase without production-code change.
 
+**Outcome (2026-09-12): A3 — no meaningful win.** The LongCat single-lane
+versus fixed shared-cap A/B (work stealing OFF) showed no production use-case
+justifying shared-cap two-lane execution: the mechanism is functional, ordinary
+sequential cold playback did not naturally activate it, and concurrent-reader
+pressure already parallelizes through normal capability-pool growth.
+Shared-cap two-lane stays default OFF with no production-code change. Phase A
+exits here.
+
 **Deliberately deferred:** Work stealing, slow-lane retirement/replacement,
 chunk-grid changes, and broad telemetry. Work stealing becomes eligible only if
 the two-lane result creates a concrete utilization or imbalance problem that

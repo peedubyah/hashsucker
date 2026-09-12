@@ -48,19 +48,25 @@ production code, but experimental two-lane gates remain default OFF.
 - Fixed shared-cap splitting and shared-cap work stealing are implemented and
   gated, but their production benefit has not been established.
 
-## Active LongCat investigation
+## Phase A closed — outcome A3 (2026-09-12)
 
-LongCat is currently answering:
+LongCat's single-lane versus fixed shared-cap A/B (work stealing OFF) is
+complete. Outcome: **A3 — no demonstrated production use-case justifies
+enabling shared-cap two-lane execution.**
 
-> Does shared-cap two-lane execution provide enough real production benefit to
-> ship, and under what activation conditions?
+- The gated two-lane mechanism is functional and its activation conditions are
+  understood.
+- Ordinary sequential cold playback did not naturally activate it (OFF and ON
+  arms both recorded zero two-lane activations; do not read that table as proof
+  that activated two-lane is slower).
+- Concurrent-reader pressure already obtains parallelism through normal
+  capability-pool growth (`first_alive_busy`).
+- No unique shipping benefit was demonstrated.
 
-The active work is comparing controlled single-lane and fixed shared-cap
-two-lane behavior with work stealing OFF, across cold span sizes and providers
-where applicable. Its scripts and artifacts are untracked work in progress.
-Do not modify, stage, commit, or treat those files as a final result. The next
-agent must consume LongCat's completed evidence and recommendation rather than
-restart the investigation.
+Shared-cap two-lane stays default OFF. Do not tune it further unless a concrete
+production workload exposes a gap it uniquely solves. The A/B scripts and
+artifacts remain untracked work in progress: do not modify, stage, or commit
+them.
 
 ## Frozen architectural boundaries
 
@@ -172,10 +178,9 @@ silently fall through to a legacy Node byte path.
 
 ## Immediate next action
 
-Wait for and consume LongCat's completed A/B result. Validate that its cache
-state, gate predicate, bounded metric deltas, provider attribution, and actual
-selected execution path support the conclusion. Then classify the result as a
-clear win, situational win, or no meaningful win and follow Phase A of
-[`../docs/ROADMAP.md`](../docs/ROADMAP.md). If evidence is incomplete, finish
-only the missing validation; do not restart the experiment or pre-decide the
-shipping outcome.
+Phase A is closed (A3). Use the provider-by-provider graduation matrix in
+[`../docs/GRADUATION-MATRIX.md`](../docs/GRADUATION-MATRIX.md) as the Phase C
+exit bar. Run only a bounded canary the matrix names as a true blocker;
+otherwise proceed to the Phase B evidence pass for the next production
+bottleneck. Do not reopen lifecycle hardening or shared-cap scheduler work
+without a concrete defect.
