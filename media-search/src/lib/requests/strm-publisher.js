@@ -20,6 +20,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { getMedia } from '../metadata/cinemeta.js';
+import { sanitizePathSegment as sanitizePresentationTitle } from '../control-plane/canonical-path.js';
 
 // Resolved per call (not at module load) so tests and operators can point
 // output elsewhere via env without reimporting. Production default unchanged.
@@ -29,11 +30,14 @@ function strmOutputRoot() {
 const RESOLVER_BASE_URL = process.env.RESOLVER_BASE_URL || 'http://localhost:8080';
 
 /**
- * Sanitize a title for filesystem use: replace path-unsafe characters.
+ * Legacy title sanitizer (underscore replacement, no whitespace cleanup).
+ * Kept only to locate files published before the canonical presentation
+ * rule converged VFS and STRM naming. Not used for new publications.
+ *
  * @param {string} title
  * @returns {string}
  */
-function sanitizeFilename(title) {
+function legacySanitizeFilename(title) {
   return String(title || '')
     .replace(/\//g, '_')
     .replace(/:/g, '_')
@@ -112,8 +116,8 @@ async function resolveMediaTitle({ mediaId, mediaType, selection, handoff }) {
  * @param {number|null} [params.episode] - Episode number (series only)
  * @returns {{ dir: string, file: string }} Destination directory and filename
  */
-function buildStrmPath({ title, year, mediaType, season, episode }) {
-  const safeTitle = sanitizeFilename(title);
+function buildStrmPath({ title, year, mediaType, season, episode }, sanitize = sanitizePresentationTitle) {
+  const safeTitle = sanitize(title);
   const yearPart = year ? ` (${year})` : '';
 
   if (mediaType === 'series') {
@@ -162,7 +166,9 @@ export async function publishStrm({ handoff, selection }) {
 
 
 
-  // Build destination path
+  // Build destination path with the canonical presentation rule shared
+  // with VFS publication (illegal punctuation becomes a space, whitespace
+  // collapses — no underscore artifacts).
   const { dir, file } = buildStrmPath({ title, year, mediaType, season, episode });
   const destFile = path.join(dir, file);
 
@@ -171,7 +177,30 @@ export async function publishStrm({ handoff, selection }) {
     await fs.access(destFile);
     return { published: true, path: destFile };
   } catch {
-    // File doesn't exist — proceed to create
+    // File doesn't exist — before creating, converge a legacy publication:
+    // the same item published under the old underscore sanitizer moves to
+    // the canonical name. Content is deterministic per handoff identity,
+    // so the rename is lossless and never leaves both files behind.
+    const legacy = buildStrmPath(
+      { title, year, mediaType, season, episode },
+      legacySanitizeFilename,
+    );
+    const legacyFile = path.join(legacy.dir, legacy.file);
+    if (legacyFile !== destFile) {
+      try {
+        await fs.access(legacyFile);
+        await fs.mkdir(dir, { recursive: true });
+        await fs.rename(legacyFile, destFile);
+        try {
+          await fs.rmdir(legacy.dir);
+        } catch {
+          // Legacy dir not empty — leave it alone.
+        }
+        return { published: true, path: destFile };
+      } catch {
+        // No legacy file — proceed to create
+      }
+    }
   }
 
   // Build the stable resolver URL. Series URLs MUST carry exact season/episode

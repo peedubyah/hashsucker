@@ -83,7 +83,7 @@ export function createLibraryIdentityKey({ mediaType, mediaId, season, episode, 
   return `${type}:${id}:${edition}`;
 }
 
-function sanitizePathSegment(value, fallback = null) {
+export function sanitizePathSegment(value, fallback = null) {
   let safe = String(value)
     .normalize('NFKC')
     .replace(/[\u0000-\u001f\u007f]/g, '')
