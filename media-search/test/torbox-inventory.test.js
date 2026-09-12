@@ -205,3 +205,134 @@ test('TorBox ensure binds a just-created torrent through invalidate-then-refetch
   assert.ok(result.torrentFileId, 'durable TorrentFile mapped');
   store.close();
 });
+
+test('TorBox ensure create-first binds without a prior lookup fetch', async () => {
+  const { TorBoxCallCoordinator } = await import('../src/lib/providers/torbox-call-coordinator.js');
+  const { ensureTorBoxFileIdentity } = await import('../src/lib/resolver/torbox-file-identity.js');
+  const { createControlPlaneStore } = await import('../src/lib/control-plane/store.js');
+  const store = createControlPlaneStore();
+  const FRESH_HASH = 'dddddddddddddddddddddddddddddddddddddddd';
+  let fetches = 0;
+  let creates = 0;
+  const snapshot = {
+    success: true,
+    data: [{
+      id: 55, hash: FRESH_HASH, name: 'Fresh.Movie.2024.mkv', download_state: 'cached',
+      files: [{ id: 901, name: 'Fresh.Movie.2024.mkv', size: 4242, selected: true }],
+    }],
+  };
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async () => { fetches += 1; return { ok: true, status: 200, async json() { return snapshot; } }; },
+    coordinator: new TorBoxCallCoordinator({ scope: 'test-create-first' }),
+  });
+  const torBoxProvider = {
+    supports: (cap) => cap === 'placement-create',
+    require: () => ({
+      createPlacement: async () => { creates += 1; return { providerResourceId: '55' }; },
+    }),
+  };
+  const result = await ensureTorBoxFileIdentity({
+    infoHash: FRESH_HASH,
+    selectedFileSize: 4242,
+    controlPlaneStore: store,
+    torBoxInventoryProvider: adapter,
+    torBoxProvider,
+  });
+  assert.equal(result.size, 4242);
+  assert.equal(result.providerFileId, '901');
+  assert.equal(creates, 1);
+  assert.equal(fetches, 1, 'verify + inventory share one memoized snapshot fetch');
+  store.close();
+});
+
+test('TorBox ensure uncached create fails with zero list fetches', async () => {
+  const { TorBoxCallCoordinator } = await import('../src/lib/providers/torbox-call-coordinator.js');
+  const { ensureTorBoxFileIdentity } = await import('../src/lib/resolver/torbox-file-identity.js');
+  const { createControlPlaneStore } = await import('../src/lib/control-plane/store.js');
+  const store = createControlPlaneStore();
+  let fetches = 0;
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async () => { fetches += 1; return mylist([]); },
+    coordinator: new TorBoxCallCoordinator({ scope: 'test-create-fail' }),
+  });
+  const torBoxProvider = {
+    supports: () => true,
+    require: () => ({
+      createPlacement: async () => { throw new Error('DOWNLOAD_NOT_CACHED'); },
+    }),
+  };
+  await assert.rejects(
+    ensureTorBoxFileIdentity({
+      infoHash: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      selectedFileSize: 10,
+      controlPlaneStore: store,
+      torBoxInventoryProvider: adapter,
+      torBoxProvider,
+    }),
+    /No TorBox placement/,
+  );
+  assert.equal(fetches, 0, 'failed create costs no mylist download');
+  store.close();
+});
+
+test('TorBox ensure preserves duplicate-hash conflict through verify', async () => {
+  const { TorBoxCallCoordinator } = await import('../src/lib/providers/torbox-call-coordinator.js');
+  const { ensureTorBoxFileIdentity } = await import('../src/lib/resolver/torbox-file-identity.js');
+  const { createControlPlaneStore } = await import('../src/lib/control-plane/store.js');
+  const store = createControlPlaneStore();
+  const DUP_HASH = 'ffffffffffffffffffffffffffffffffffffffff';
+  const dupBody = {
+    success: true,
+    data: [
+      { id: 61, hash: DUP_HASH, name: 'A.mkv', download_state: 'cached', files: [] },
+      { id: 62, hash: DUP_HASH, name: 'B.mkv', download_state: 'cached', files: [] },
+    ],
+  };
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async () => ({ ok: true, status: 200, async json() { return dupBody; } }),
+    coordinator: new TorBoxCallCoordinator({ scope: 'test-conflict' }),
+  });
+  const torBoxProvider = {
+    supports: () => true,
+    require: () => ({
+      createPlacement: async () => ({ providerResourceId: '61' }),
+    }),
+  };
+  await assert.rejects(
+    ensureTorBoxFileIdentity({
+      infoHash: DUP_HASH,
+      selectedFileSize: 10,
+      controlPlaneStore: store,
+      torBoxInventoryProvider: adapter,
+      torBoxProvider,
+    }),
+    (err) => err?.category === 'conflict',
+    'duplicate hash still throws conflict, never binds',
+  );
+  store.close();
+});
+
+test('TorBox ensure falls back to passive lookup when creation is unavailable', async () => {
+  const { ensureTorBoxFileIdentity } = await import('../src/lib/resolver/torbox-file-identity.js');
+  const { createControlPlaneStore } = await import('../src/lib/control-plane/store.js');
+  const store = createControlPlaneStore();
+  let fetches = 0;
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async () => { fetches += 1; return mylist([resource()]); },
+  });
+  const torBoxProvider = { supports: () => false, require: () => { throw new Error('no create'); } };
+  const result = await ensureTorBoxFileIdentity({
+    infoHash: HASH,
+    selectedFileSize: 1000,
+    controlPlaneStore: store,
+    torBoxInventoryProvider: adapter,
+    torBoxProvider,
+  });
+  assert.equal(result.providerFileId, '900');
+  assert.ok(fetches >= 1);
+  store.close();
+});

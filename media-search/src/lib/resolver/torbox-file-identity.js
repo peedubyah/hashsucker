@@ -29,6 +29,7 @@
  */
 
 import { PROVIDER_CAPABILITIES } from '../providers/capabilities.js';
+import { ProviderOperationError } from '../providers/errors.js';
 
 const INVALID_INPUT = 'INVALID_INPUT';
 const INVENTORY_UNAVAILABLE = 'INVENTORY_UNAVAILABLE';
@@ -101,8 +102,15 @@ export async function ensureTorBoxFileIdentity({
   // B. Find or passively recover the current TorBox placement.
   let placement = controlPlaneStore.findPlacementByInfoHash('torbox', normalizedHash);
 
-  if (!placement && torBoxInventoryProvider && typeof torBoxInventoryProvider.supports === 'function'
-      && torBoxInventoryProvider.supports(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)) {
+  const createSupported = torBoxProvider && typeof torBoxProvider.supports === 'function'
+    && torBoxProvider.supports(PROVIDER_CAPABILITIES.PLACEMENT_CREATE);
+  const lookupSupported = torBoxInventoryProvider && typeof torBoxInventoryProvider.supports === 'function'
+    && torBoxInventoryProvider.supports(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP);
+  // Legacy passive lookup runs only when creation is unavailable. When
+  // creation is available the create-first flow below covers it (a create
+  // for an already-listed hash returns the existing resource), and the
+  // verify step preserves identical conflict semantics.
+  if (!placement && !createSupported && lookupSupported) {
     const observedAt = now();
     const lookupSignal = fetchSignal ? fetchSignal(15_000) : AbortSignal.timeout(15_000);
     try {
@@ -149,12 +157,15 @@ export async function ensureTorBoxFileIdentity({
   if (!placement && torBoxProvider) {
   }
 
-  // B.2: If no placement found via passive lookup AND torBoxProvider is available,
-  // create a cached-only TorBox placement. This is the critical step for TV episode
-  // requests where we have no prior placement and no exact file size to guide mapping.
-  // The addOnlyIfCached flag ensures we NEVER initiate an uncached download.
-  if (!placement && torBoxProvider && typeof torBoxProvider.supports === 'function'
-      && torBoxProvider.supports(PROVIDER_CAPABILITIES.PLACEMENT_CREATE)) {
+  // B.2: create-first placement resolution. A cached-only create for an
+  // already-listed hash returns the existing resource (proven live:
+  // "Found Cached Torrent. Using Cached Torrent.", same torrent_id), so
+  // creation doubles as the existence proof and no mylist download is
+  // needed to decide. Uncached hashes fail fast here with zero list
+  // fetches. The addOnlyIfCached flag ensures we NEVER initiate an
+  // uncached download.
+  let createdPlacementId = null;
+  if (!placement && createSupported) {
     const observedAt = now();
     const createSignal = fetchSignal ? fetchSignal(30_000) : AbortSignal.timeout(30_000);
     const magnet = `magnet:?xt=urn:btih:${normalizedHash}`;
@@ -177,11 +188,17 @@ export async function ensureTorBoxFileIdentity({
           observedAt,
           expiresAt: observedAt + 5 * 60 * 1000,
         });
-        // The new torrent is absent from any memoized mylist snapshot taken
-        // earlier in this request; drop it so the inventory fetch below
-        // re-reads instead of throwing not-found. No-op without a
-        // request-scoped coordinator.
-        torBoxInventoryProvider?.invalidateMylistSnapshot?.();
+        controlPlaneStore.recordPlacementLookupObservation?.({
+          provider: 'torbox',
+          accountScope,
+          infoHash: normalizedHash,
+          observationState: 'present',
+          placementId: placement.id,
+          observedAt,
+          expiresAt: observedAt + 5 * 60 * 1000,
+          source: 'torbox-file-identity',
+        });
+        createdPlacementId = String(placementResult.providerResourceId);
       }
     } catch (createErr) {
       // Cached-only creation failed — the hash is not in the TorBox account.
@@ -192,7 +209,7 @@ export async function ensureTorBoxFileIdentity({
           provider: 'torbox',
           accountScope,
           infoHash: normalizedHash,
-          observationState: 'absent',
+          observationState: 'missing',
           placementId: null,
           observedAt,
           expiresAt: observedAt + 5 * 60 * 1000,
@@ -204,6 +221,50 @@ export async function ensureTorBoxFileIdentity({
         `No TorBox placement for infoHash ${normalizedHash}`,
         NO_PLACEMENT,
         { infoHash: normalizedHash },
+      );
+    }
+  }
+
+  // Verify a just-created placement against the request-scoped mylist
+  // snapshot. Identical conflict semantics to the legacy lookup
+  // (0 matches → one guarded re-list → fail closed; >1 → conflict
+  // throw), and the verified snapshot already contains the new torrent,
+  // so the inventory fetch below reuses it instead of re-downloading the
+  // account. Placed outside the create try/catch so verify failures are
+  // never misclassified as create failures.
+  if (createdPlacementId && lookupSupported) {
+    const verifySignal = fetchSignal ? fetchSignal(15_000) : AbortSignal.timeout(15_000);
+    const lookupCap = torBoxInventoryProvider.require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP);
+    const verifyOnce = () => lookupCap.lookupPlacement(
+      { infoHash: normalizedHash }, { signal: verifySignal },
+    );
+    let verified = null;
+    try {
+      verified = await verifyOnce();
+    } catch (verifyError) {
+      if (verifyError?.category === 'conflict') throw verifyError;
+      verified = null;
+    }
+    if (!verified) {
+      torBoxInventoryProvider.invalidateMylistSnapshot?.();
+      try {
+        verified = await verifyOnce();
+      } catch (verifyError) {
+        if (verifyError?.category === 'conflict') throw verifyError;
+        verified = null;
+      }
+    }
+    if (!verified) {
+      throw new TorBoxFileIdentityError(
+        `Created placement for ${normalizedHash} is absent from inventory`,
+        NO_PLACEMENT,
+        { infoHash: normalizedHash },
+      );
+    }
+    if (String(verified.providerResourceId) !== createdPlacementId) {
+      throw new ProviderOperationError(
+        `Multiple TorBox resources match ${normalizedHash}`,
+        { provider: 'torbox', operation: 'verify-placement', category: 'conflict' },
       );
     }
   }
