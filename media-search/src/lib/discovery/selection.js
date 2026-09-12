@@ -197,6 +197,13 @@ export async function selectBindableCandidate(results, options = {}) {
           ? candidate.selectedFileSize
           : null;
 
+    // PATH A failure code, when PATH A ran. A NO_PLACEMENT (or missing
+    // inventory provider) failure is deterministic for this candidate: the
+    // PATH B ensure below would fail identically (same placement/create
+    // preconditions), so PATH B is skipped and records what it would have
+    // recorded. Any other failure still runs PATH B (e.g. size mismatch
+    // can still bind via single-file/episode rules).
+    let pathAFailureCode = null;
     if (selectedFileSize != null && typeof ensureTorBoxFileIdentityFn === 'function') {
       try {
         const sizeResult = await ensureTorBoxFileIdentityFn({
@@ -218,9 +225,20 @@ export async function selectBindableCandidate(results, options = {}) {
           reason = 'exact-size bound';
           break;
         }
-      } catch {
-        // exact-size failed; fall through to try TV/movie PATH B
+      } catch (err) {
+        // exact-size failed; PATH B below decides whether a retry is worthwhile.
+        pathAFailureCode = err?.code ?? null;
       }
+    }
+
+    if (pathAFailureCode === 'NO_PLACEMENT' || pathAFailureCode === 'INVENTORY_UNAVAILABLE') {
+      skipped.push({
+        infoHash: candidate.infoHash,
+        rank: candidate.rank,
+        torboxState: candidate.availability?.torbox?.state || 'unknown',
+        reason: tvCoordinates ? 'TorBox placement failed' : 'movie-cached-placement-failed',
+      });
+      continue;
     }
 
     // ---- PATH B (movie): cached-only single-file binding fallback ----
@@ -402,6 +420,7 @@ export async function selectBindableCandidate(results, options = {}) {
       infoHash: candidate.infoHash,
       rank: candidate.rank,
       torboxState: candidate.availability?.torbox?.state || 'unknown',
+      reason: pathAFailureCode ? `path-a-failed:${pathAFailureCode}` : 'no-bindable-path',
     });
   }
 
