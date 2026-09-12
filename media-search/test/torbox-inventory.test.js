@@ -157,3 +157,51 @@ test('TorBox invalidateMylistSnapshot is a safe no-op without a coordinator', as
   assert.equal(typeof adapter.invalidateMylistSnapshot, 'function');
   adapter.invalidateMylistSnapshot();
 });
+
+test('TorBox ensure binds a just-created torrent through invalidate-then-refetch', async () => {
+  const { TorBoxCallCoordinator } = await import('../src/lib/providers/torbox-call-coordinator.js');
+  const { ensureTorBoxFileIdentity } = await import('../src/lib/resolver/torbox-file-identity.js');
+  const { createControlPlaneStore } = await import('../src/lib/control-plane/store.js');
+  const store = createControlPlaneStore();
+  const NEW_HASH = 'cccccccccccccccccccccccccccccccccccccccc';
+  const bodies = [
+    // First snapshot: account does not contain the hash yet.
+    { success: true, data: [] },
+    // Second snapshot: created torrent present with files.
+    {
+      success: true,
+      data: [{
+        id: 99, hash: NEW_HASH, name: 'New.Movie.2024.mkv', download_state: 'cached',
+        files: [{ id: 900, name: 'New.Movie.2024.mkv', size: 777, selected: true }],
+      }],
+    },
+  ];
+  let fetches = 0;
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async () => {
+      fetches += 1;
+      const body = bodies[Math.min(fetches - 1, bodies.length - 1)];
+      return { ok: true, status: 200, async json() { return body; } };
+    },
+    coordinator: new TorBoxCallCoordinator({ scope: 'test-create' }),
+  });
+  const torBoxProvider = {
+    supports: () => true,
+    require: () => ({
+      createPlacement: async () => ({ providerResourceId: '99' }),
+    }),
+  };
+  const result = await ensureTorBoxFileIdentity({
+    infoHash: NEW_HASH,
+    selectedFileSize: 777,
+    controlPlaneStore: store,
+    torBoxInventoryProvider: adapter,
+    torBoxProvider,
+  });
+  assert.equal(result.size, 777);
+  assert.equal(result.providerFileId, '900');
+  assert.equal(fetches, 2, 'lookup miss + one refetch after create (no third fetch)');
+  assert.ok(result.torrentFileId, 'durable TorrentFile mapped');
+  store.close();
+});
