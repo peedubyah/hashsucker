@@ -1058,7 +1058,31 @@ function stubHealthyStore(coords) {
       ? { id: REUSE_TFID, infoHash: REUSE_HASH, internalPath: 'Reuse Movie (2024) 1080p.mkv', size: 123456789 }
       : null),
     listDataPlaneCoordinates: (id) => (id === REUSE_TFID ? coords : []),
+    getLibraryItemByIdentityKey: () => ({ desiredState: 'present' }),
   };
+}
+
+function seedPublishedVfsMovie(cache) {
+  cache.createVfsMovieEntry({
+    mediaId: 'tt_reuse_1',
+    releaseKey: `${REUSE_HASH}:torrent`,
+    infoHash: REUSE_HASH,
+    fileIndex: null,
+    canonicalPath: 'Movies/Reuse Movie (2024) 1080p/Reuse Movie (2024) 1080p.mkv',
+    torrentFileId: REUSE_TFID,
+    size: 123456789,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+}
+
+async function writeStrmFile(root, rel, content) {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const file = path.join(root, rel);
+  await fs.promises.mkdir(path.dirname(file), { recursive: true });
+  await fs.promises.writeFile(file, content, 'utf8');
+  return file;
 }
 
 async function withIsolatedStrmRoot(fn) {
@@ -1250,6 +1274,160 @@ test('searchByMedia: movie request never reuses an episode handoff row', async (
     });
 
     assert.notEqual(result.selection.reason, 'reused-healthy-publication');
+    cache.close();
+  });
+});
+
+test('searchByMedia: healthy published movie takes the no-op path without rewrites', async () => {
+  await withIsolatedStrmRoot(async (root) => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const cache = createDiscoveryCache();
+    seedAuthoritativeHandoff(cache, 'tt_reuse_1');
+    seedPublishedVfsMovie(cache);
+    const rel = 'Movies/Reuse Movie (2024) 1080p/Reuse Movie (2024) 1080p.strm';
+    const file = await writeStrmFile(root, rel,
+      'http://localhost:8080/stream/movie/tt_reuse_1\n');
+    const before = await fs.promises.stat(file);
+    // Settle mtime granularity so a rewrite would be observable.
+    await new Promise((r) => setTimeout(r, 1100));
+    const store = stubHealthyStore([{ provider: 'torbox', provider_resource_id: 'res-1' }]);
+
+    const result = await searchByMedia(cache, {
+      mediaId: 'tt_reuse_1',
+      mediaType: 'movie',
+      controlPlaneStore: store,
+      skipLiveDiscovery: true,
+    });
+
+    assert.equal(result.selection.reason, 'reused-healthy-publication');
+    assert.equal(result.reuseMode, 'noop');
+    assert.equal(result.handoff.torrentFileId, REUSE_TFID);
+    const after = await fs.promises.stat(file);
+    assert.equal(after.mtimeMs, before.mtimeMs, 'existing .strm must remain untouched');
+    assert.equal(result.handoff.strmPath, undefined, 'noop sets no new publication side effects');
+    cache.close();
+    void path;
+  });
+});
+
+test('searchByMedia: missing strm forces republish repair, not false success', async () => {
+  await withIsolatedStrmRoot(async (root) => {
+    const fs = await import('node:fs');
+    const cache = createDiscoveryCache();
+    seedAuthoritativeHandoff(cache, 'tt_reuse_1');
+    seedPublishedVfsMovie(cache);
+    const store = stubHealthyStore([{ provider: 'torbox', provider_resource_id: 'res-1' }]);
+
+    const result = await searchByMedia(cache, {
+      mediaId: 'tt_reuse_1',
+      mediaType: 'movie',
+      controlPlaneStore: store,
+      skipLiveDiscovery: true,
+    });
+
+    assert.equal(result.reuseMode, 'republish');
+    const created = await fs.promises.readFile(
+      `${root}/Movies/Reuse Movie (2024) 1080p/Reuse Movie (2024) 1080p.strm`, 'utf8',
+    );
+    assert.ok(created.includes('/stream/movie/tt_reuse_1'), 'republish recreates the missing .strm');
+    cache.close();
+  });
+});
+
+test('searchByMedia: stale strm content is repaired on republish', async () => {
+  await withIsolatedStrmRoot(async (root) => {
+    const fs = await import('node:fs');
+    const cache = createDiscoveryCache();
+    seedAuthoritativeHandoff(cache, 'tt_reuse_1');
+    seedPublishedVfsMovie(cache);
+    await writeStrmFile(root,
+      'Movies/Reuse Movie (2024) 1080p/Reuse Movie (2024) 1080p.strm',
+      'http://localhost:8080/stream/movie/tt_OTHER_WRONG\n');
+    const store = stubHealthyStore([{ provider: 'torbox', provider_resource_id: 'res-1' }]);
+
+    const result = await searchByMedia(cache, {
+      mediaId: 'tt_reuse_1',
+      mediaType: 'movie',
+      controlPlaneStore: store,
+      skipLiveDiscovery: true,
+    });
+
+    assert.equal(result.reuseMode, 'republish');
+    const fixed = await fs.promises.readFile(
+      `${root}/Movies/Reuse Movie (2024) 1080p/Reuse Movie (2024) 1080p.strm`, 'utf8',
+    );
+    assert.ok(fixed.includes('/stream/movie/tt_reuse_1'), 'stale content repaired');
+    assert.ok(!fixed.includes('tt_OTHER_WRONG'), 'stale identity gone');
+    cache.close();
+  });
+});
+
+test('searchByMedia: healthy episode takes the no-op path via strm sweep', async () => {
+  await withIsolatedStrmRoot(async (root) => {
+    const fs = await import('node:fs');
+    const cache = createDiscoveryCache();
+    seedAuthoritativeEpisodeHandoff(cache, 'tt_ep_tv', 1, 1);
+    cache.createVfsTvEntry({
+      mediaId: 'tt_ep_tv', season: 1, episode: 1,
+      releaseKey: `${EP_HASH}:0`, infoHash: EP_HASH, fileIndex: 0,
+      canonicalPath: 'TV/tt_ep_tv/Season 01/tt_ep_tv - S01E01.mkv',
+      torrentFileId: EP_TFID, size: 987654321,
+      createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const rel = 'TV Shows/Show Name (2024)/Season 01/Show Name (2024) - S01E01.strm';
+    const path = await import('node:path');
+    const file = path.join(root, rel);
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    await fs.promises.writeFile(file,
+      'http://localhost:8080/stream/series/tt_ep_tv?season=1&episode=1\n', 'utf8');
+    const before = await fs.promises.stat(file);
+    await new Promise((r) => setTimeout(r, 1100));
+    const store = {
+      ...stubHealthyEpisodeStore(),
+      getLibraryItemByIdentityKey: () => ({ desiredState: 'present' }),
+    };
+
+    const result = await searchByMedia(cache, {
+      mediaId: 'tt_ep_tv',
+      mediaType: 'series',
+      season: 1,
+      episode: 1,
+      controlPlaneStore: store,
+      skipLiveDiscovery: true,
+    });
+
+    assert.equal(result.selection.reason, 'reused-healthy-publication');
+    assert.equal(result.reuseMode, 'noop');
+    assert.equal(result.handoff.torrentFileId, EP_TFID);
+    const after = await fs.promises.stat(file);
+    assert.equal(after.mtimeMs, before.mtimeMs, 'existing episode .strm untouched');
+    cache.close();
+  });
+});
+
+test('searchByMedia: missing VFS row forces republish, not false noop', async () => {
+  await withIsolatedStrmRoot(async (root) => {
+    const fs = await import('node:fs');
+    const cache = createDiscoveryCache();
+    // Handoff + strm exist, but no VFS row (incomplete state).
+    seedAuthoritativeHandoff(cache, 'tt_reuse_1');
+    const path = await import('node:path');
+    const file = path.join(root, 'Movies/Reuse Movie (2024) 1080p/Reuse Movie (2024) 1080p.strm');
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    await fs.promises.writeFile(file,
+      'http://localhost:8080/stream/movie/tt_reuse_1\n', 'utf8');
+    const store = stubHealthyStore([{ provider: 'torbox', provider_resource_id: 'res-1' }]);
+
+    const result = await searchByMedia(cache, {
+      mediaId: 'tt_reuse_1',
+      mediaType: 'movie',
+      controlPlaneStore: store,
+      skipLiveDiscovery: true,
+    });
+
+    assert.equal(result.reuseMode, 'republish');
+    assert.ok(cache.getVfsMovieEntry('tt_reuse_1'), 'VFS row recreated by republish');
     cache.close();
   });
 });

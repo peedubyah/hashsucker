@@ -135,6 +135,16 @@ function buildStrmPath({ title, year, mediaType, season, episode }, sanitize = s
 }
 
 /**
+ * Expected on-disk .strm path for a presentation identity, without
+ * touching the filesystem or network. Lets callers verify an existing
+ * publication cheaply instead of resolving titles upstream.
+ */
+export function expectedStrmPath({ title, year, mediaType, season, episode }) {
+  const { dir, file } = buildStrmPath({ title, year, mediaType, season, episode });
+  return path.join(dir, file);
+}
+
+/**
  * Publish a `.strm` artifact for a committed playback handoff.
  *
  * Idempotent: if the `.strm` already exists, returns the existing path.

@@ -21,7 +21,10 @@ import { selectBestCandidate, selectBindableCandidate } from '../lib/discovery/s
 import { computeHistoricalAvailabilityPrior } from '../lib/discovery/confidence-projection.js';
 import { resolveTvTorrentFile } from '../lib/resolver/tv-episode-resolver.js';
 import { buildPlaybackHandoff } from '../lib/discovery/playback-handoff.js';
-import { publishStrm } from '../lib/requests/strm-publisher.js';
+import { publishStrm, expectedStrmPath } from '../lib/requests/strm-publisher.js';
+import { createLibraryIdentityKey } from '../lib/control-plane/canonical-path.js';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { notifyJellyfin } from '../lib/requests/jellyfin-notifier.js';
 import { notifyPlex } from '../lib/requests/plex-notifier.js';
 import { materializeVfsEntry } from '../lib/vfs/materialize.js';
@@ -122,6 +125,98 @@ async function ensureStrmForExistingHandoff(cache, mediaId, mediaType, season = 
 }
 
 /**
+ * Verify an existing .strm file for an already-published item without any
+ * network calls. Tries the derived canonical path first (VFS presentation
+ * identity → shared sanitizer rule), then falls back to a bounded
+ * content sweep: the .strm filename always ends with ` - SNNENN.strm`
+ * (episodes) and content always carries the resolver URL, so title
+ * divergence between VFS and STRM resolution can never cause a false
+ * miss. Returns the verified path, or null when missing/mismatched
+ * (caller republishes instead of reporting false success).
+ */
+async function verifyPublishedStrm({ vfsCanonicalPath, mediaType, mediaId, season, episode }) {
+  const isMovie = mediaType === 'movie';
+  const candidates = [];
+  const dirBase = path.posix.basename(path.posix.dirname(String(vfsCanonicalPath || '')));
+  if (dirBase) {
+    const m = dirBase.match(/^(.*) \((\d{4})\)$/);
+    candidates.push(expectedStrmPath({
+      title: m ? m[1] : dirBase,
+      year: m ? Number(m[2]) : null,
+      mediaType: isMovie ? 'movie' : 'series',
+      season,
+      episode,
+    }));
+  }
+  const root = process.env.STRM_OUTPUT_PATH || '/strm';
+  if (!isMovie && season != null && episode != null) {
+    // TV filenames are consumer-structural (`TV Shows/... - SNNENN.strm`)
+    // while VFS TV rows may carry mediaId-based names: sweep boundedly.
+    const code = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
+    const showsRoot = path.join(root, 'TV Shows');
+    try {
+      const shows = await fs.readdir(showsRoot, { withFileTypes: true });
+      for (const show of shows) {
+        if (!show.isDirectory()) continue;
+        const seasonDir = path.join(showsRoot, show.name,
+          `Season ${String(season).padStart(2, '0')}`);
+        let files;
+        try {
+          files = await fs.readdir(seasonDir);
+        } catch {
+          continue;
+        }
+        for (const f of files) {
+          if (f.endsWith(` - ${code}.strm`)) candidates.push(path.join(seasonDir, f));
+        }
+      }
+    } catch {
+      // No TV Shows tree — derived path (if any) already covers it.
+    }
+  }
+  if (isMovie) {
+    // Presentation titles can diverge between VFS and STRM resolution
+    // (request canonicals vs Cinemeta vs filename); content is the arbiter.
+    const moviesRoot = path.join(root, 'Movies');
+    try {
+      const dirs = await fs.readdir(moviesRoot, { withFileTypes: true });
+      for (const d of dirs) {
+        if (!d.isDirectory()) continue;
+        let files;
+        try {
+          files = await fs.readdir(path.join(moviesRoot, d.name));
+        } catch {
+          continue;
+        }
+        for (const f of files) {
+          if (f.endsWith('.strm')) candidates.push(path.join(moviesRoot, d.name, f));
+        }
+      }
+    } catch {
+      // No Movies tree — derived path (if any) already covers it.
+    }
+  }
+  for (const candidate of candidates) {
+    let content;
+    try {
+      content = await fs.readFile(candidate, 'utf8');
+    } catch {
+      continue;
+    }
+    const firstLine = content.split('\n')[0].trim();
+    if (isMovie) {
+      if (firstLine.includes(`/stream/movie/${mediaId}`)) return candidate;
+      continue;
+    }
+    if (!firstLine.includes(`/stream/series/${mediaId}`)) continue;
+    if (season != null && !firstLine.includes(`season=${season}`)) continue;
+    if (episode != null && !firstLine.includes(`episode=${episode}`)) continue;
+    return candidate;
+  }
+  return null;
+}
+
+/**
  * Fast-path reuse predicate + idempotent republication for already-healthy
  * published media.
  *
@@ -148,6 +243,8 @@ async function tryReuseHealthyPublication({
   mediaType,
   season,
   episode,
+  canonicalTitle = null,
+  canonicalYear = null,
 }) {
   try {
     // Episode scope is determined by explicit season+episode coordinates
@@ -204,7 +301,9 @@ async function tryReuseHealthyPublication({
 
     // Rebuild the handoff shape from durable truth (original requestId is
     // preserved: this returns the existing result, it does not mint a new
-    // publication).
+    // publication). Request-supplied canonical presentation (Seerr detail
+    // body) is honored exactly like the full path; it affects only the
+    // human-facing VFS/STRM path, never identity.
     const handoff = {
       requestId: stored.requestId,
       mediaId: stored.mediaId,
@@ -222,7 +321,111 @@ async function tryReuseHealthyPublication({
       selectionReason: stored.selectionReason || stored.reason,
       selectedAt: stored.selectedAt,
       torrentFileId,
+      ...(typeof canonicalTitle === 'string' && canonicalTitle.trim() ? { canonicalTitle: canonicalTitle.trim() } : {}),
+      ...(Number.isSafeInteger(canonicalYear) ? { canonicalYear } : {}),
     };
+
+    const noopSelected = () => ({
+      infoHash,
+      fileIndex: handoff.fileIndex,
+      filename: handoff.filename,
+      provider: handoff.provider,
+      providerState: handoff.providerState,
+      identityTier: handoff.identityTier,
+      resolutionState: handoff.resolutionState,
+      releaseKey: handoff.releaseKey,
+      torrentFileId,
+      score: null,
+      reason: 'reused-healthy-publication',
+    });
+
+    const noopResultEntry = () => ({
+      rank: 1,
+      infoHash,
+      fileIndex: handoff.fileIndex,
+      filename: handoff.filename,
+      score: null,
+      identity: {
+        tier: handoff.identityTier,
+        confidence: null,
+        evidence: [],
+        state: handoff.resolutionState,
+        eligible: true,
+      },
+      release: {},
+      sources: [],
+      observations: [],
+      availability: {},
+    });
+
+    // Path-A predicate: the VFS row itself must already name this exact
+    // TorrentFile with a hydrated size, the library item must still desire
+    // it, and the verified .strm must exist. Mirrors the identity asserts
+    // inside materializeVfsEntry without any writes or network.
+    const checkPublishedNoop = async () => {
+      let vfsRow = null;
+      try {
+        vfsRow = isEpisode
+          ? cache.getVfsTvEntry?.(mediaId, season, episode)
+          : cache.getVfsMovieEntry?.(mediaId);
+      } catch {
+        return false;
+      }
+      if (!vfsRow
+        || vfsRow.torrentFileId !== torrentFileId
+        || String(vfsRow.infoHash || '').toLowerCase() !== String(infoHash).toLowerCase()
+        || vfsRow.size !== torrentFile.size
+        || typeof vfsRow.canonicalPath !== 'string'
+        || vfsRow.canonicalPath.length === 0) {
+        return false;
+      }
+      try {
+        const key = createLibraryIdentityKey({
+          mediaType: isEpisode ? 'episode' : 'movie',
+          mediaId,
+          season: isEpisode ? season : null,
+          episode: isEpisode ? episode : null,
+        });
+        const item = controlPlaneStore.getLibraryItemByIdentityKey?.(key);
+        if (!item || item.desiredState === 'absent') {
+          return false;
+        }
+      } catch {
+        return false;
+      }
+      const verified = await verifyPublishedStrm({
+        vfsCanonicalPath: vfsRow.canonicalPath,
+        mediaType: handoff.mediaType,
+        mediaId,
+        season: handoff.season,
+        episode: handoff.episode,
+      }).catch(() => null);
+      return verified != null;
+    };
+
+    // Path A: already published + healthy → pure local no-op return.
+    // All checks are SQLite reads or filesystem stats: no provider APIs,
+    // no network title resolution, no VFS/STRM rewrites, no binding work,
+    // no notifications. Anything insufficient takes path B (republish) or
+    // falls through to full discovery.
+    const noopReady = await checkPublishedNoop();
+    if (noopReady) {
+      return {
+        requestId: handoff.requestId,
+        intent: { type: handoff.mediaType, mediaId: handoff.mediaId },
+        results: [noopResultEntry()],
+        total: 1,
+        query: { mediaId, mediaType, season, episode },
+        identitySummary: { tier: handoff.identityTier, confidence: null, evidence: [] },
+        ranking: { TieredRankingApplied: false, TierCounts: {}, reusedHealthyPublication: true },
+        discovery: { liveDiscoveryTriggered: false, liveCandidates: 0, liveEligible: 0, reusedHealthyPublication: true },
+        availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
+        selection: { selected: noopSelected(), reason: 'reused-healthy-publication', alternates: [] },
+        handoff,
+        demandPromotion: { enrichmentPromoted: 0, probePromoted: 0 },
+        reuseMode: 'noop',
+      };
+    }
 
     // Idempotent republication. materializeVfsEntry re-asserts the stored
     // identity against the existing row (throws on divergence → fall
@@ -241,13 +444,46 @@ async function tryReuseHealthyPublication({
       return null;
     }
     try {
-      const strmResult = await publishStrm({ handoff });
-      if (strmResult.published && strmResult.path) {
-        handoff.strmPath = strmResult.path;
+      // Adopt an already-correct .strm when verification finds one: this
+      // skips the network title resolution inside publishStrm. Publish
+      // (create/migrate) only when nothing verified.
+      const adopted = await verifyPublishedStrm({
+        vfsCanonicalPath: vfsEntry?.canonicalPath,
+        mediaType: handoff.mediaType,
+        mediaId,
+        season: handoff.season,
+        episode: handoff.episode,
+      }).catch(() => null);
+      let finalStrm = adopted
+        ? { published: true, path: adopted }
+        : await publishStrm({ handoff });
+      if (!adopted && finalStrm.path) {
+        // publishStrm trusts path existence, not content: a stale file at
+        // the expected path (wrong media identity) would be a false
+        // success. Verify once; on mismatch remove and republish exactly
+        // once so repair converges instead of compounding.
+        const verified = await verifyPublishedStrm({
+          vfsCanonicalPath: vfsEntry?.canonicalPath,
+          mediaType: handoff.mediaType,
+          mediaId,
+          season: handoff.season,
+          episode: handoff.episode,
+        }).catch(() => null);
+        if (verified !== finalStrm.path) {
+          try {
+            await fs.unlink(finalStrm.path);
+          } catch {
+            // Already gone; republish below recreates it.
+          }
+          finalStrm = await publishStrm({ handoff });
+        }
       }
-      if (strmResult.path) {
+      if (finalStrm.published && finalStrm.path) {
+        handoff.strmPath = finalStrm.path;
+      }
+      if (finalStrm.path) {
         notifyJellyfin({
-          strmPath: strmResult.path,
+          strmPath: finalStrm.path,
           mediaId: handoff.mediaId,
           mediaType: handoff.mediaType,
         }).catch(() => {});
@@ -284,40 +520,11 @@ async function tryReuseHealthyPublication({
       return null;
     }
 
-    const selected = {
-      infoHash,
-      fileIndex: handoff.fileIndex,
-      filename: handoff.filename,
-      provider: handoff.provider,
-      providerState: handoff.providerState,
-      identityTier: handoff.identityTier,
-      resolutionState: handoff.resolutionState,
-      releaseKey: handoff.releaseKey,
-      torrentFileId,
-      score: null,
-      reason: 'reused-healthy-publication',
-    };
+    const selected = noopSelected();
     return {
       requestId: handoff.requestId,
       intent: { type: handoff.mediaType, mediaId: handoff.mediaId },
-      results: [{
-        rank: 1,
-        infoHash,
-        fileIndex: handoff.fileIndex,
-        filename: handoff.filename,
-        score: null,
-        identity: {
-          tier: handoff.identityTier,
-          confidence: null,
-          evidence: [],
-          state: handoff.resolutionState,
-          eligible: true,
-        },
-        release: {},
-        sources: [],
-        observations: [],
-        availability: {},
-      }],
+      results: [noopResultEntry()],
       total: 1,
       query: { mediaId, mediaType, season, episode },
       identitySummary: { tier: handoff.identityTier, confidence: null, evidence: [] },
@@ -327,6 +534,7 @@ async function tryReuseHealthyPublication({
       selection: { selected, reason: 'reused-healthy-publication', alternates: [] },
       handoff,
       demandPromotion: { enrichmentPromoted: 0, probePromoted: 0 },
+      reuseMode: 'republish',
     };
   } catch (error) {
     console.error(`Reuse fast path failed, falling back to discovery: ${error.message}`);
@@ -523,6 +731,8 @@ export async function searchByMedia(cache, request) {
     mediaType,
     season,
     episode,
+    canonicalTitle,
+    canonicalYear,
   });
   if (reuseResult) {
     return reuseResult;
