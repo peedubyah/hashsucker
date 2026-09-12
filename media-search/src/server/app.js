@@ -27,6 +27,7 @@ import { createHandoff, HANDLING_MODES } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
 import { bindPlexMetricsSink, openSeasonFanOutScope } from '../lib/requests/plex-notifier.js';
 import { unpublishMedia } from '../lib/library/unpublish.js';
+import { listLibrary } from '../lib/library/listing.js';
 import { setPlexRefreshAccount } from '../lib/metrics.js';
 import {
   buildSeerrIntent,
@@ -2217,6 +2218,28 @@ export function createRequestHandler(dependencies = {}) {
       }
       if (request.method === 'GET' && url.pathname === '/api/control-plane/health') {
         return sendJson(response, 200, controlPlaneHealth({ now: clock }));
+      }
+      // Product library listing: what is in the library and is it
+      // published? Derived from library_items + handoffs + VFS rows +
+      // TorrentFile + serving coordinates. See lib/library/listing.js.
+      if (request.method === 'GET' && url.pathname === '/api/library') {
+        requireControlPlaneStore(controlPlaneStore);
+        const limit = parseBoundedLimit(url.searchParams.get('limit'));
+        const mediaType = url.searchParams.get('mediaType');
+        if (mediaType != null && mediaType !== 'movie' && mediaType !== 'episode') {
+          return sendJson(response, 400, { error: 'mediaType must be movie or episode' });
+        }
+        try {
+          const result = listLibrary({
+            cache: searchCache,
+            controlPlaneStore,
+            limit,
+            mediaType,
+          });
+          return sendJson(response, 200, { generatedAt: clock(), ...result });
+        } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
       }
       if (request.method === 'GET' && url.pathname === '/api/control-plane/items') {
         requireControlPlaneStore(controlPlaneStore);

@@ -394,6 +394,17 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     return row ? rowToLibraryItem(row) : null;
   }
 
+  function listAllLibraryItems({ limit = 100 } = {}) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new TypeError('limit must be between 1 and 500');
+    }
+    return db.prepare(`
+      SELECT * FROM library_items
+      ORDER BY identity_key
+      LIMIT ?
+    `).all(limit).map(rowToLibraryItem);
+  }
+
   function listLibraryItems({ mediaId, limit = 50 } = {}) {
     const exactMediaId = requireString(mediaId, 'mediaId');
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
@@ -1884,6 +1895,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     getLibraryItem,
     getLibraryItemByIdentityKey,
     unpublishLibraryItem,
+    listAllLibraryItems,
     listLibraryItems,
     getActiveCanonicalPath,
     ensureCanonicalPath,

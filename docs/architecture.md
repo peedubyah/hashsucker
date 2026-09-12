@@ -162,6 +162,8 @@ routes; host binding and the trusted Compose/reverse-proxy boundary are the acce
 | `GET /media/lookup/:hash/:idx` | Projection as JSON, no bytes |
 | `/vfs`, `/vfs/Movies/...`, `/vfs/TV/...` | Authoritative WebDAV namespace: Node handles metadata/selection; TorrentFile-backed `GET`/Range bytes are forwarded to Rust |
 | `GET /api/data-plane/files/:tfId` | Internal S-1 projection of one TorrentFile and its usable mapped provider coordinates |
+| `GET /api/library` | Product library listing: per movie/episode desired state, published/absent/incomplete state, presentation path, TorrentFile, size, and serving-coordinate presence |
+| `POST /api/library/unpublish` | Remove VFS/STRM presentation for an exact movie, episode, or season; retains Release/TorrentFile/provider truth for cheap republish |
 
 ### Authoritative TorrentFile byte path
 
