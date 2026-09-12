@@ -188,7 +188,26 @@ export async function selectBindableCandidate(results, options = {}) {
   let selected = null;
   let reason = '';
 
+  // Two-phase traversal: candidates the fresh availability batch proved
+  // uncached are deferred to a fallback pass. Under static provider truth
+  // (the seconds-long request window) this selects the identical winner:
+  // every deferred candidate would have failed its ensure exactly as the
+  // batch predicts, and any candidate that binds is attempted in rank
+  // order within its phase. A TorBox cached-set flip mid-request is the
+  // only divergence source, and it can only swap between equally-ranked
+  // bindable releases. Unknown/missing states always attempt normally.
+  const immediate = [];
+  const deferred = [];
   for (const candidate of eligible) {
+    if (candidate.availability?.torbox?.state === 'uncached') {
+      deferred.push(candidate);
+    } else {
+      immediate.push(candidate);
+    }
+  }
+  const ordered = [...immediate, ...deferred];
+
+  for (const candidate of ordered) {
     // ---- PATH A: exact-file-size binding (existing Slice 1.75 fast path) ----
     const selectedFileSize =
       Number.isSafeInteger(candidate.exactFileSize) && candidate.exactFileSize > 0
@@ -422,6 +441,26 @@ export async function selectBindableCandidate(results, options = {}) {
       torboxState: candidate.availability?.torbox?.state || 'unknown',
       reason: pathAFailureCode ? `path-a-failed:${pathAFailureCode}` : 'no-bindable-path',
     });
+  }
+
+  // Deferred candidates ranked above the winner were deliberately never
+  // attempted (fresh batch proved them uncached); record that honestly so
+  // diagnostics distinguish deliberate skips from attempted failures.
+  // Ranks below the winner were never visited, exactly as in strict order.
+  if (selected) {
+    const seen = new Set(skipped.map((s) => `${s.infoHash}:${s.rank}`));
+    for (const candidate of eligible) {
+      if (candidate.rank >= selected.rank) break;
+      if (candidate.availability?.torbox?.state === 'uncached'
+          && !seen.has(`${candidate.infoHash}:${candidate.rank}`)) {
+        skipped.push({
+          infoHash: candidate.infoHash,
+          rank: candidate.rank,
+          torboxState: 'uncached',
+          reason: 'deferred-uncached-unattempted',
+        });
+      }
+    }
   }
 
   // ---- FALLBACK: preserve cached-first selection only when bindability cannot
