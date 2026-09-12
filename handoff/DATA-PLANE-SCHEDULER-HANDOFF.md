@@ -1,5 +1,7 @@
 # HashSucker Data-Plane Scheduler Handoff
 
+> **Active handoff:** use [`CURRENT.md`](CURRENT.md) for the next action.
+>
 > **Historical milestone:** this records scheduler graduation and its original
 > proof. For the current production checkpoint, later lifecycle hardening,
 > verified canaries, metric semantics, and active roadmap, use

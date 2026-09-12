@@ -1,5 +1,8 @@
 # MAIN-PLEX-FUNCTIONAL
 
+> **Historical evidence only:** use [`CURRENT.md`](CURRENT.md) for the active
+> state and next action.
+
 **FROZEN — 2026-09-06 — CachyOS/main Plex production proof**
 
 ## Proof Summary

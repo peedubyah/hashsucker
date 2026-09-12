@@ -584,6 +584,10 @@ shared-cap activation audit and clean throughput crossover measurement
 - `handoff/DATA-PLANE-SCHEDULER-HANDOFF.md` — historical scheduler graduation
   and gate inventory.
 - `docs/seam-audit.md` — earlier concurrency observability semantics.
+- `handoff/CURRENT.md` — active execution handoff and immediate next action.
+- `docs/ROADMAP.md` — remaining shipping phases and exit conditions.
 
-Those documents supply detail and evidence. This file owns the current phase
-status and roadmap as of 2026-09-11.
+Those documents supply detail and evidence. This file owns the verified
+checkpoint and phase status as of 2026-09-11; `docs/ROADMAP.md` owns the
+remaining shipping work, and `handoff/CURRENT.md` owns the immediate next
+action.

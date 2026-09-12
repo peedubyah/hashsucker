@@ -1,5 +1,8 @@
 # MAIN REAL PLAYBACK TRACE — CachyOS
 
+> **Historical evidence only:** use [`CURRENT.md`](CURRENT.md) for the active
+> state and next action.
+
 **main:** `de9b579`
 **date:** 2026-09-06
 **host:** CachyOS Linux (192.168.2.4)

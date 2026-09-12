@@ -1,5 +1,8 @@
 # MAIN LIFECYCLE STANDUP — CachyOS
 
+> **Historical evidence only:** use [`CURRENT.md`](CURRENT.md) for the active
+> state and next action.
+
 **main:** `359005068a222f3e75e40fe71628da74bf305861`
 **date:** 2026-09-06
 **host:** CachyOS Linux (192.168.2.4)

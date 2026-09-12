@@ -1,5 +1,8 @@
 # PRODUCTION RUNTIME CHECKPOINT — CachyOS
 
+> **Historical evidence only:** use [`CURRENT.md`](CURRENT.md) for the active
+> state and next action.
+
 **main:** `46bde71beee3044792196e15f524f11bc3e05c5d`
 **date:** 2026-09-08
 **host:** CachyOS Linux (192.168.2.4)
