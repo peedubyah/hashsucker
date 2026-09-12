@@ -102,6 +102,54 @@ export async function ensureTorBoxFileIdentity({
   // B. Find or passively recover the current TorBox placement.
   let placement = controlPlaneStore.findPlacementByInfoHash('torbox', normalizedHash);
 
+  // B.0: local-fresh shortcut. When a placement already exists with an
+  // authoritative, complete, unexpired inventory snapshot, the mapped
+  // present files answer from durable truth with zero provider calls —
+  // the same TTL bound activateBinding enforces for binding validity.
+  // Binds ONLY on a unique match; anything else (including a miss) falls
+  // through to the provider flow unchanged, so local data can never fail
+  // fast, misbind, or go stale: staleness just costs the normal fetch.
+  if (placement && !skipSizeMatch && Number.isSafeInteger(selectedFileSize) && selectedFileSize > 0
+      && typeof controlPlaneStore.getProviderInventorySnapshot === 'function'
+      && typeof controlPlaneStore.listProviderFiles === 'function') {
+    try {
+      const snapshot = controlPlaneStore.getProviderInventorySnapshot(placement.id);
+      if (snapshot?.authoritative && snapshot?.complete
+          && Number.isSafeInteger(snapshot.expiresAt) && snapshot.expiresAt > now()) {
+        const matches = controlPlaneStore.listProviderFiles(placement.id)
+          .filter((f) => f?.present && f?.mappingState === 'mapped'
+            && f?.torrentFileId && f?.size === selectedFileSize);
+        if (matches.length === 1) {
+          const file = matches[0];
+          return {
+            placementId: placement.id,
+            providerFileId: file.providerFileId,
+            torrentFileId: file.torrentFileId,
+            size: file.size,
+          };
+        }
+      }
+    } catch {
+      // Local read failed; fall through to the provider flow.
+    }
+  }
+  if (placement && skipSizeMatch
+      && typeof controlPlaneStore.getProviderInventorySnapshot === 'function'
+      && typeof controlPlaneStore.listTorrentFilesForRelease === 'function') {
+    try {
+      const snapshot = controlPlaneStore.getProviderInventorySnapshot(placement.id);
+      if (snapshot?.authoritative && snapshot?.complete
+          && Number.isSafeInteger(snapshot.expiresAt) && snapshot.expiresAt > now()) {
+        const torrentFiles = controlPlaneStore.listTorrentFilesForRelease(normalizedHash);
+        if (Array.isArray(torrentFiles) && torrentFiles.length > 0) {
+          return { placementId: placement.id, torrentFiles };
+        }
+      }
+    } catch {
+      // Local read failed; fall through to the provider flow.
+    }
+  }
+
   const createSupported = torBoxProvider && typeof torBoxProvider.supports === 'function'
     && torBoxProvider.supports(PROVIDER_CAPABILITIES.PLACEMENT_CREATE);
   const lookupSupported = torBoxInventoryProvider && typeof torBoxInventoryProvider.supports === 'function'

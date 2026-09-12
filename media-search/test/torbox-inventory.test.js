@@ -336,3 +336,132 @@ test('TorBox ensure falls back to passive lookup when creation is unavailable', 
   assert.ok(fetches >= 1);
   store.close();
 });
+
+test('TorBox ensure binds from fresh local snapshot with zero provider calls', async () => {
+  const { ensureTorBoxFileIdentity } = await import('../src/lib/resolver/torbox-file-identity.js');
+  const LHASH = '1111111111111111111111111111111111111111';
+  const noProviders = new Proxy({}, {
+    get: () => { throw new Error('provider must not be touched'); },
+  });
+  const localStore = {
+    findPlacementByInfoHash: () => ({ id: 'pl-local' }),
+    getProviderInventorySnapshot: () => ({
+      authoritative: true, complete: true, expiresAt: Date.now() + 60_000,
+    }),
+    listProviderFiles: () => [{
+      present: true, mappingState: 'mapped', torrentFileId: 'tf-local-1',
+      providerFileId: 'pf-local-1', size: 4242,
+    }],
+    listTorrentFilesForRelease: () => [],
+  };
+  const result = await ensureTorBoxFileIdentity({
+    infoHash: LHASH,
+    selectedFileSize: 4242,
+    controlPlaneStore: localStore,
+    torBoxInventoryProvider: noProviders,
+    torBoxProvider: noProviders,
+  });
+  assert.equal(result.torrentFileId, 'tf-local-1');
+  assert.equal(result.providerFileId, 'pf-local-1');
+  assert.equal(result.size, 4242);
+  assert.equal(result.placementId, 'pl-local');
+});
+
+test('TorBox local shortcut never fails fast: ambiguous and expired fall through', async () => {
+  const { ensureTorBoxFileIdentity } = await import('../src/lib/resolver/torbox-file-identity.js');
+  const LHASH = '2222222222222222222222222222222222222222';
+  const noProviders = new Proxy({}, {
+    get: () => { throw new Error('provider must not be touched'); },
+  });
+  const mkStore = (snapshot, files) => ({
+    findPlacementByInfoHash: () => ({ id: 'pl-local', providerResourceId: 'res-local' }),
+    getProviderInventorySnapshot: () => snapshot,
+    listProviderFiles: () => files,
+    listTorrentFilesForRelease: () => [],
+  });
+  const dupeFiles = [
+    { present: true, mappingState: 'mapped', torrentFileId: 'tf-a', providerFileId: 'pf-a', size: 100 },
+    { present: true, mappingState: 'mapped', torrentFileId: 'tf-b', providerFileId: 'pf-b', size: 100 },
+  ];
+  const freshSnap = () => ({ authoritative: true, complete: true, expiresAt: Date.now() + 60_000 });
+  // Ambiguous local match falls through to provider flow (which is absent here).
+  await assert.rejects(
+    ensureTorBoxFileIdentity({
+      infoHash: LHASH, selectedFileSize: 100,
+      controlPlaneStore: mkStore(freshSnap(), dupeFiles),
+      torBoxInventoryProvider: null, torBoxProvider: null,
+    }),
+    (err) => err?.code === 'INVENTORY_UNAVAILABLE',
+    'ambiguous local state defers to provider flow, never binds blind',
+  );
+  // Expired snapshot falls through identically.
+  await assert.rejects(
+    ensureTorBoxFileIdentity({
+      infoHash: LHASH, selectedFileSize: 100,
+      controlPlaneStore: mkStore(
+        { authoritative: true, complete: true, expiresAt: Date.now() - 1000 },
+        [{ present: true, mappingState: 'mapped', torrentFileId: 'tf-a', providerFileId: 'pf-a', size: 100 }],
+      ),
+      torBoxInventoryProvider: null, torBoxProvider: null,
+    }),
+    (err) => err?.code === 'INVENTORY_UNAVAILABLE',
+    'expired local state defers to provider flow',
+  );
+});
+
+test('TorBox local shortcut serves TV file lists without provider calls', async () => {
+  const { ensureTorBoxFileIdentity } = await import('../src/lib/resolver/torbox-file-identity.js');
+  const noProviders = new Proxy({}, {
+    get: () => { throw new Error('provider must not be touched'); },
+  });
+  const tfs = [{ id: 'tf-tv-1', infoHash: 'x', internalPath: 'S.S01E01.mkv', size: 50 }];
+  const localStore = {
+    findPlacementByInfoHash: () => ({ id: 'pl-tv' }),
+    getProviderInventorySnapshot: () => ({
+      authoritative: true, complete: true, expiresAt: Date.now() + 60_000,
+    }),
+    listProviderFiles: () => [],
+    listTorrentFilesForRelease: () => tfs,
+  };
+  const result = await ensureTorBoxFileIdentity({
+    infoHash: '3333333333333333333333333333333333333333',
+    controlPlaneStore: localStore,
+    torBoxInventoryProvider: noProviders,
+    torBoxProvider: noProviders,
+    skipSizeMatch: true,
+  });
+  assert.equal(result.placementId, 'pl-tv');
+  assert.deepEqual(result.torrentFiles, tfs);
+});
+
+test('TorBox ensure binds from a real fresh snapshot with zero provider calls', async () => {
+  const { ensureTorBoxFileIdentity } = await import('../src/lib/resolver/torbox-file-identity.js');
+  const { createControlPlaneStore } = await import('../src/lib/control-plane/store.js');
+  const store = createControlPlaneStore();
+  const PHASH = '4444444444444444444444444444444444444444';
+  const placement = store.recordPlacement({
+    provider: 'torbox', accountScope: 'default', infoHash: PHASH,
+    providerResourceId: 'res-local-1', state: 'ready', ownership: 'owned',
+    ownerKey: 'test', provenance: 'test',
+    idempotencyKey: 'placement:torbox:local-1',
+  });
+  store.replaceProviderFileInventory(placement.id, [
+    { providerFileId: 'pf-1', path: '/Local.Movie.2024.mkv', name: 'Local.Movie.2024.mkv', size: 31337 },
+  ], {
+    authoritative: true, complete: true,
+    observedAt: Date.now(), expiresAt: Date.now() + 3_600_000,
+  });
+  const result = await ensureTorBoxFileIdentity({
+    infoHash: PHASH,
+    selectedFileSize: 31337,
+    controlPlaneStore: store,
+    torBoxInventoryProvider: null,
+    torBoxProvider: null,
+  });
+  assert.equal(result.size, 31337);
+  assert.equal(result.providerFileId, 'pf-1');
+  assert.ok(result.torrentFileId, 'durable TorrentFile mapped without provider calls');
+  const tf = store.getTorrentFile(result.torrentFileId);
+  assert.equal(tf.infoHash, PHASH);
+  store.close();
+});
