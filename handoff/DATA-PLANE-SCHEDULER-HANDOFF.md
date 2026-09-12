@@ -5,9 +5,10 @@
 > verified canaries, metric semantics, and active roadmap, use
 > [`../docs/PRODUCTION-STATE-2026-09-11.md`](../docs/PRODUCTION-STATE-2026-09-11.md).
 
-**Status:** graduated to `main` production. The scheduler is now HashSucker
-production behavior; the original development branch (`m3-north-db`) is no
-longer required as a live development branch (see §6).
+**Status:** graduated to `main` production. The scheduler code is now part of
+HashSucker production; default-OFF paths are not thereby enabled. The original
+development branch (`m3-north-db`) is no longer required as a live development
+branch (see §6).
 **Scope rule for this branch:** additive transplant only. No scheduler
 redesign, no threatens to existing recovery ordering, no metrics project,
 no live-provider benchmarking.
@@ -53,7 +54,7 @@ document updates none of that behavior.
 | Entity | Identity |
 |---|---|
 | Release | `infoHash` |
-| **TorrentFile** | `infoHash` + `canonicalInternalPath` + exact positive `size` |
+| **TorrentFile** | row identity: `infoHash` + `canonicalInternalPath`; exact positive `size` is immutable and is also included in Rust's cache/single-flight key |
 | `torrent_files.id` | routing UUID only — forensic/logging, never a cache key |
 | ProviderPlacement | durable, provider/account-scoped placement |
 | DeliveryCapability | **runtime only** — signed URL, never logged/persisted/used as identity |
@@ -93,7 +94,9 @@ Release (fallback across TorrentFiles is Node's classified decision only).
   resets); retired lane finishes active, then gets nothing; survivor drains
   with the ≥ 1 gate.
 - **Bounded automatic engagement** (T14): explicit TWO_SPAN or
-  (AUTO + run ≥ min-chunks); AUTO alone without STEAL is the fixed path.
+  (AUTO + run ≥ min-chunks). With a distinct warm standby, AUTO without
+  STEAL selects the fixed path; without one, shared fallback also requires
+  `SHARED_CAP`, otherwise execution remains single-lane.
 - **Sustained-low-throughput promotion** (T15/T16): detector (useful bytes
   over monotonic time from first byte, contamination boundary) +
   two-observation policy; warm-only handoff resuming at offset, else
@@ -108,12 +111,16 @@ Release (fallback across TorrentFiles is Node's classified decision only).
   is never refetched; emitter joins workers so the remainder drains durably.
 - **Shared retired/terminal vacancy seam** (T20): distinct causes, one
   transition (`declare_vacancy`) and one predicate (`is_vacant`).
-- Invariants: maximum two active lanes; zero cold acquisition for
+- Invariants: maximum two active lanes per scheduled missing run; zero cold acquisition for
   engagement, stealing, retirement drain, promotion, hedge, and replacement.
 
 ---
 
 ## 4. T22 live proof (2026-09-09, unmodified tip `04d2458`)
+
+This was a live proof against real provider bytes in an isolated
+production-code stack, not the deployed production stack. It exercised two
+distinct capabilities, not the later shared-cap lease path.
 
 Isolated transplant stack (fresh images, fresh cache volume, copied DBs;
 production stack untouched) against the safe control:
@@ -133,25 +140,27 @@ production stack untouched) against the safe control:
 
 ## 5. Gates
 
-All experimental gates default OFF. Nothing below has a recommended
-production value; the measurement defaults shown are the proven
+All experimental gates default OFF. Canonical `DATA_PLANE_*` names win over
+the listed deprecated `HY4_*` aliases when both are set. Nothing below has a
+recommended production value; the measurement defaults shown are the proven
 experimental ones, not production thresholds.
 
 | Gate | Default | Meaning when ON |
 |---|---|---|
-| `HY4_PLAYBACK_REDUNDANCY=1` (Node) | OFF | playback-intent redundancy activation |
-| `HY4_ACTIVE_ACTIVE_TWO_SPAN=1` | OFF | explicit two-lane entry |
-| `HY4_ACTIVE_ACTIVE_AUTO=1` | OFF | bounded automatic entry |
-| `HY4_ACTIVE_ACTIVE_MIN_CHUNKS=n` | 4 | minimum missing chunks for AUTO entry (≥ 1) |
-| `HY4_ACTIVE_ACTIVE_STEAL=1` | OFF | steal path (needs TWO_SPAN or AUTO) |
-| `HY4_ACTIVE_ACTIVE_RETIRE_SLOW_LANE=1` | OFF | slow-lane retirement (needs steal path) |
-| `HY4_ACTIVE_ACTIVE_RETIRE_RATIO=f` | 4.0 | sibling avg must exceed `f × slow` (finite, > 1) |
-| `HY4_ACTIVE_ACTIVE_REPLACE_LANE=1` | OFF | warm replacement of vacant lanes (needs steal path) |
-| `HY4_HEDGE_ENABLED=1` | OFF | one bounded hedge election per fill on policy arming |
-| `HY4_LOW_THROUGHPUT_BPS=n` | unset/0 = inert | sustained-useful-bytes floor arming detector + promotion |
-| `HY4_LOW_THROUGHPUT_WINDOW_MS=n` | 10000 | bounded observation window |
-| `HY4_LOW_THROUGHPUT_BLOCKED_MS=n` | 50 | send-blocked hygiene threshold |
-| `HY4_CROSS_PROVIDER_STANDBY=1` | OFF | cross-provider same-TF standby (already ON in production compose) |
+| `DATA_PLANE_PLAYBACK_REDUNDANCY=1` (`HY4_PLAYBACK_REDUNDANCY`) (Node) | OFF | playback-intent redundancy activation |
+| `DATA_PLANE_ACTIVE_ACTIVE_TWO_SPAN=1` (`HY4_ACTIVE_ACTIVE_TWO_SPAN`) | OFF | explicit two-lane entry |
+| `DATA_PLANE_ACTIVE_ACTIVE_AUTO=1` (`HY4_ACTIVE_ACTIVE_AUTO`) | OFF | bounded automatic entry |
+| `DATA_PLANE_ACTIVE_ACTIVE_MIN_CHUNKS=n` (`HY4_ACTIVE_ACTIVE_MIN_CHUNKS`) | 4 | minimum missing chunks for AUTO entry (≥ 1) |
+| `DATA_PLANE_ACTIVE_ACTIVE_SHARED_CAP=1` (`HY4_ACTIVE_ACTIVE_SHARED_CAP`) | OFF | shared-cap fallback; exact fixed/steal predicates are in the canonical production-state document |
+| `DATA_PLANE_ACTIVE_ACTIVE_STEAL=1` (`HY4_ACTIVE_ACTIVE_STEAL`) | OFF | steal path (needs TWO_SPAN or qualifying AUTO) |
+| `DATA_PLANE_ACTIVE_ACTIVE_RETIRE_SLOW_LANE=1` (`HY4_ACTIVE_ACTIVE_RETIRE_SLOW_LANE`) | OFF | slow-lane retirement (needs steal path) |
+| `DATA_PLANE_ACTIVE_ACTIVE_RETIRE_RATIO=f` (`HY4_ACTIVE_ACTIVE_RETIRE_RATIO`) | 4.0 | sibling avg must exceed `f × slow` (finite, > 1) |
+| `DATA_PLANE_ACTIVE_ACTIVE_REPLACE_LANE=1` (`HY4_ACTIVE_ACTIVE_REPLACE_LANE`) | OFF | warm replacement of vacant lanes (needs steal path) |
+| `DATA_PLANE_HEDGE_ENABLED=1` (`HY4_HEDGE_ENABLED`) | OFF | one bounded hedge election per fill on policy arming |
+| `DATA_PLANE_LOW_THROUGHPUT_BPS=n` (`HY4_LOW_THROUGHPUT_BPS`) | unset/0 = inert | sustained-useful-bytes floor arming detector + promotion |
+| `DATA_PLANE_LOW_THROUGHPUT_WINDOW_MS=n` (`HY4_LOW_THROUGHPUT_WINDOW_MS`) | 10000 | bounded observation window |
+| `DATA_PLANE_LOW_THROUGHPUT_BLOCKED_MS=n` (`HY4_LOW_THROUGHPUT_BLOCKED_MS`) | 50 | send-blocked hygiene threshold |
+| `DATA_PLANE_CROSS_PROVIDER_STANDBY=1` (`HY4_CROSS_PROVIDER_STANDBY`) | OFF | cross-provider same-TF standby; not set by the current compose file |
 | `HY4_TEST_ACQUIRE_BASE_URL` / `HY4_TEST_ACQUIRE_FAIL` | unset | test-only stubbed provider edge (never set in production) |
 | `PREFETCH_ENABLED=0` | (compose diagnostic) | disables speculative prefetch so demand reads stay attributable |
 

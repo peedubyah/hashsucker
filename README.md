@@ -69,21 +69,25 @@ Plex / Jellyfin  ->  /stream/{type}/{id}
   -> on "do not redirect": next persisted alternate; no re-discovery, no re-ranking
 ```
 
-A second delivery path exists beside the redirect: `/media/{infoHash}/{fileIndex}` proxies bytes
-  
-directly from a mounted filesystem, with `Range` support. It serves direct clients and the WebDAV
-  
-internals. The two paths do not overlap and neither falls through to the other.
+The legacy `/media/{infoHash}/{fileIndex}` path still proxies mounted bytes with
+`Range` support. Authoritative VFS entries that carry a TorrentFile now forward
+the client Range to Rust at `/files/:tfId`: Node chooses the durable file and
+Rust owns Range parsing, provider recovery, caching, scheduling, and byte
+motion. Non-provider-exhaustion failures do not silently fall back to the legacy
+Node byte path; only classified provider exhaustion allows Node to choose a
+persisted alternate TorrentFile and forward that to Rust.
 
 ## What is worth stealing
 
 Design decisions that hold up independent of the rest of the project:
 
-- **Two identity layers, never collapsed.** Library identity is `<type>:<mediaId>[:<editionKey>]`;
+- **Identity layers, never collapsed.** Library identity is `<type>:<mediaId>[:<editionKey>]`;
     
-  release identity is `(infoHash, fileIndex)`. A provider resource ID, CDN URL, filesystem path, or
+  durable Release identity is `infoHash`; `(infoHash, fileIndex)` is the discovery `releaseKey`,
+  and TorrentFile row identity is `(infoHash, canonicalInternalPath)` with immutable positive
+  size. A provider resource ID, provider-internal path, CDN URL, or mount/VFS path is never
     
-  mount path is never identity — each is a replaceable observation. Renaming a file, re-adding a
+  identity — each is a replaceable observation. Renaming a file, re-adding a
     
   torrent, or moving a mount must not change identity.
 - **Null file index is not zero.** A torrent-level release renders as `torrent` in the release key
@@ -186,11 +190,15 @@ Reconciliation observes drift; it does not correct it.
 
 ## How it fits together
 
-- **`media-search`** — Node service holding everything except acquisition: HTTP API, both SQLite
+- **`media-search`** — Node service owning durable truth and selection: HTTP API, both SQLite
     
-  databases, discovery, ranking, the resolver, WebDAV, `.strm` publishing, and a React UI. Bound to
+  databases, discovery, ranking, the resolver, VFS selection/WebDAV, `.strm` publishing, and a
+  React UI. Bound to
     
   loopback by default.
+- **`data-plane`** — Rust service that consumes Node's per-TorrentFile S-1 projection and owns
+  provider capabilities, Range delivery, same-TorrentFile recovery, fixed-grid caching,
+  coalescing, and scheduler execution.
 - **Two SQLite databases** — one for the discovery corpus and request results, one for the control
     
   plane (placements, exposures, bindings, observations). No external database, no message broker.
@@ -221,6 +229,7 @@ Reconciliation observes drift; it does not correct it.
 - [`docs/PRODUCTION-STATE-2026-09-11.md`](docs/PRODUCTION-STATE-2026-09-11.md) — canonical current
   production state, verified milestones, scheduler gates, and roadmap.
 - `media-search/` — the service: API, discovery, ranking, resolver, control plane, WebDAV, UI.
+- `data-plane/` — Rust Range delivery, runtime capabilities, cache, coalescer, and scheduler.
 - `torbox-importer/` — shell-based acquisition worker; places with TorBox, hands off to
     
   Radarr/Sonarr.

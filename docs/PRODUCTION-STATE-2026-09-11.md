@@ -29,9 +29,9 @@ HashSucker has completed provider lifecycle hardening and live operational
 playback-abuse proof for TorBox and Real-Debrid. Exact byte identity across the
 two providers has also been confirmed for the same TorrentFile and exact Range.
 
-The project is no longer asking whether concurrent delivery and provider
-failure recovery are correct. The current question is narrower and
-shipping-oriented:
+Concurrent delivery and provider-failure ownership are structurally proven,
+and normal provider, cancellation, reclaim, and restart behavior are live
+proven. The current question is narrower and shipping-oriented:
 
 > At what real workload and resilience crossover does shared-cap two-lane
 > execution earn its request cost and operational complexity?
@@ -43,6 +43,10 @@ default OFF while that question is measured.
 
 The system boundary remains: **Node owns durable truth; Rust owns execution and
 byte motion.**
+
+This boundary governs the authoritative TorrentFile/VFS data-plane path.
+Legacy `/stream` redirects and mounted `/media` delivery remain compatibility
+paths; this boundary does not claim that they have been removed.
 
 ### Node (`media-search`) owns durable truth
 
@@ -82,28 +86,36 @@ Release = infoHash
 ### TorrentFile
 
 ```text
-TorrentFile = Release + canonicalInternalPath + immutable exact positive size
+TorrentFile row identity = Release + canonicalInternalPath
+size = immutable exact positive invariant
 ```
 
-This tuple is the durable byte identity and the logical cache/coalescing key.
-The physical cache key is a path-safe SHA-256 encoding of the tuple.
+The Node schema enforces uniqueness on `(info_hash, internal_path)` and rejects
+a later observation of that identity with a different size. Rust deliberately
+includes the exact positive size in its logical cache/coalescing key, so that
+key is `(info_hash, canonical_path, size)`. The physical cache key is a
+path-safe SHA-256 encoding of the three values.
 `torrent_files.id` is a routing UUID and forensic label; it is a replaceable
 SQLite surrogate and must not define byte or cache identity.
 
 ### ProviderPlacement
 
 ```text
-ProviderPlacement = Release + provider + accountScope + providerResourceId
+ProviderPlacement key = provider + accountScope + providerResourceId
+Release/infoHash = immutable placement attribute
 ```
 
-A placement is durable provider/account-scoped execution metadata. A
-`ProviderFile` is a current provider-placement observation mapped to a
-TorrentFile when authoritative inventory is known.
+A placement is durable provider/account-scoped execution metadata. The schema
+rejects reuse of the same placement key for another infoHash. A `ProviderFile`
+is a current provider-placement observation mapped to a TorrentFile when
+authoritative inventory is known.
 
 ### MediaBinding
 
-`MediaBinding` maps semantic media identity to a TorrentFile. It does not make
-provider metadata part of byte identity.
+The binding layer maps semantic library identity and path to durable delivery
+coordinates; the current `bindings` schema reaches a TorrentFile through the
+mapped `ProviderFile`, while `playback_handoffs` can carry `torrent_file_id`
+directly. Neither makes provider metadata part of byte identity.
 
 ### DeliveryCapability
 
@@ -138,6 +150,13 @@ permit ownership
 → fresh-capability retry after dead-cap failure
 ```
 
+These ownership and failure cases are executable production code backed by
+deterministic tests against mock CDNs. The live provider canaries in §5 proved
+normal provider delivery, client cancellation, reclaim, and restart behavior;
+they did not deliberately force a real provider dead-link plus concurrent
+failed-chunk retry. Do not describe every item in this progression as a live
+production fault proof.
+
 ### Shared capability ownership
 
 One shared reservation owns one `DeliveryCapability`, one provider permit, and
@@ -153,7 +172,8 @@ A disconnected client cannot strand an in-flight chunk.
 
 ### Dead capability boundary
 
-For a shared-cap Class-C failure:
+For a shared-cap transport Class C failure (a stale/rejected capability returning
+401/403/404/410):
 
 ```text
 child detects dead capability
@@ -162,8 +182,8 @@ child detects dead capability
 → no new scheduler work is assigned to the Dead capability
 → children terminate
 → old lease releases
-→ manager prunes the Dead capability
-→ manager acquires a fresh capability
+→ the next manager acquisition prunes/avoids the Dead capability
+→ that acquisition may create a fresh capability
 ```
 
 Children do not independently reacquire. The lower-level
@@ -171,7 +191,7 @@ Children do not independently reacquire. The lower-level
 admission; the scheduler/worker boundary in `stripe_worker_shared_child()` does.
 This ownership split is intentional.
 
-### Failed chunk retry
+### Failed chunk retry (deterministic test proof)
 
 The proven retry sequence is:
 
@@ -222,7 +242,8 @@ Both providers passed a playback-shaped workload containing:
 
 All requested byte ranges remained exact. No production defect, stuck in-flight
 state, stale-capability dependency, or request/acquisition storm was observed.
-This closes the correctness and operational-hardening phase.
+This closes the normal lifecycle and operational playback-abuse phase; forced
+dead-link concurrency remains deterministic-test proof as noted in §4.
 
 ### Exact cross-provider byte identity
 
@@ -246,11 +267,15 @@ identity model.
 The scheduler is production architecture, with experimental activation gates:
 
 ```text
-maximum active lanes: 2
+maximum active lanes per scheduled missing run: 2
 cache grid:           8 MiB
 sub-chunk striping:   none
 N-way scheduling:     none
 ```
+
+The two-lane bound is not a process-wide client-concurrency or capability-pool
+limit; separate requests and per-provider pool slots have their own bounded
+concurrency.
 
 Two execution shapes exist:
 
@@ -259,10 +284,11 @@ Two execution shapes exist:
 2. **Shared-cap lanes.** One capability lease and provider permit are shared by
    two logical child readers issuing disjoint HTTP Range work.
 
-Shared-cap execution can provide request concurrency, throughput improvement,
-and continued useful progress when one upstream Range is slow. It does **not**
-provide provider redundancy or failure-domain independence: both lanes share
-the same provider capability and signed URL.
+Shared-cap execution is designed to provide request concurrency and potentially
+continue useful work when one upstream Range is slow. Its throughput and stall
+benefits have not yet been established by a live A/B. It does **not** provide
+provider redundancy or failure-domain independence: both lanes share the same
+provider capability and signed URL.
 
 The fixed-grid coalescer gives each missing chunk exactly one owner. Readers
 whose requests overlap an existing fill join its in-flight record rather than
@@ -274,6 +300,13 @@ shipping decision.
 Work stealing is implemented as a separate experimental policy. Each lane
 starts on its own half; an idle lane can take unstarted chunks from the far end
 of its peer's queue. It is not part of the first shared-cap throughput A/B.
+
+Distinct-cap two-lane execution has a live proof from an isolated
+production-code stack using real TorBox and Real-Debrid bytes. That was not the
+deployed production stack, and it was not shared-cap execution.
+Shared-cap fixed splitting, shared-cap work stealing, dead-cap ownership, and
+retry ownership are structurally/deterministically proven but have not yet been
+activated and measured as live shipping defaults.
 
 ## 7. Fixed-grid cache observations
 
@@ -324,8 +357,9 @@ Interpretation limits matter:
 - All four counters are cumulative for the process. Compare before/after deltas
   for a bounded probe.
 - Zero lane counts can mean the shared-cap coordinator path was not selected,
-  the work was served from cache, or the relevant gates were OFF. Zero alone is
-  not evidence of scheduler failure.
+  the fixed-half shared-cap path was selected, the work was served from cache,
+  or the relevant gates were OFF. Zero alone is not evidence of scheduler
+  failure or proof that shared-cap fixed splitting did not run.
 
 Other useful existing metrics include:
 
@@ -363,6 +397,13 @@ The total-amplification and grid-overfetch ratios answer different questions.
 Do not attribute a difference between them to retry, recovery, or any other
 cause unless the corresponding counters prove it.
 
+These are cumulative cache-workload counters, not isolated per-request wire
+measurements. `bytes_requested_total` includes cache-hit requests (and the
+single-byte cache-bypass request), while the upstream counters above are
+charged by cache fill spans. Use bounded before/after deltas and a known cache
+state for the scheduler A/B; a process-lifetime ratio can mostly describe the
+hot/cold workload mix.
+
 Also distinguish `limiter_waits` (throttle/cooldown) from
 `limiter_permit_waits` (queueing for a capability permit).
 
@@ -370,7 +411,7 @@ Also distinguish `limiter_waits` (throttle/cooldown) from
 
 The current production defaults leave shared-cap two-lane execution OFF. The
 canonical gate names use the `DATA_PLANE_*` prefix; deprecated `HY4_*` aliases
-remain accepted as fallback.
+remain accepted as fallback. When both are set, the canonical name wins.
 
 | Canonical gate | Default | Purpose |
 |---|---:|---|
@@ -420,6 +461,13 @@ fixed shared-cap two-lane behavior while work stealing remains OFF. Use known
 cold, comparable spans around 8, 16, 32, 64, and 128 MiB for each provider.
 Confirm the effective gate state and actual lane selection before accepting any
 timing result.
+
+The `scheduler_lane_a_chunks`, `scheduler_lane_b_chunks`, and
+`scheduler_work_steals` counters cannot confirm this first fixed-half,
+STEAL-OFF arm: they are incremented only by the shared-cap coordinator/steal
+worker. Fixed-half activation must instead be established from existing
+per-probe fetch-span/cache-decision and CDN-attempt evidence. Lane-counter zeros
+are expected on that path.
 
 For each arm record at least:
 
