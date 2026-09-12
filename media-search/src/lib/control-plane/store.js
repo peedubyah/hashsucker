@@ -1432,6 +1432,54 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     `).all(placementId).map(rowToBinding);
   }
 
+  function getLibraryItemByIdentityKey(identityKey) {
+    if (typeof identityKey !== 'string' || identityKey.length === 0) {
+      throw new TypeError('identityKey must be a non-empty string');
+    }
+    const row = db.prepare(
+      'SELECT * FROM library_items WHERE identity_key = ?',
+    ).get(identityKey);
+    return row ? rowToLibraryItem(row) : null;
+  }
+
+  /**
+   * Unpublish a library item: mark desired_state='absent' and supersede any
+   * active bindings. Durable Release/TorrentFile/placement/provider-file
+   * rows are untouched, so a later re-request can cheaply republish from
+   * existing truth (materialize upserts desired_state back to 'present').
+   * Idempotent: repeated calls converge on the same state. Returns null
+   * when no library item exists for the key (caller still removes VFS/STRM
+   * presentation).
+   */
+  function unpublishLibraryItem(identityKey) {
+    const item = getLibraryItemByIdentityKey(identityKey);
+    if (!item) {
+      return null;
+    }
+    const timestamp = now();
+    return transaction(() => {
+      db.prepare(`
+        UPDATE library_items SET desired_state = 'absent', updated_at = ?
+        WHERE id = ?
+      `).run(timestamp, item.id);
+      const active = db.prepare(
+        "SELECT * FROM bindings WHERE library_item_id = ? AND status = 'active'",
+      ).all(item.id);
+      for (const row of active) {
+        db.prepare(`
+          UPDATE bindings SET status = 'superseded', superseded_at = ?, reconciled_at = ?
+          WHERE id = ?
+        `).run(timestamp, timestamp, row.id);
+      }
+      return {
+        libraryItemId: item.id,
+        identityKey,
+        desiredState: 'absent',
+        supersededBindings: active.length,
+      };
+    });
+  }
+
   function markBindingDegraded(input) {
     const item = requireLibraryItem(input.libraryItemId);
     const timestamp = now();
@@ -1834,6 +1882,8 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   return {
     ensureLibraryItem,
     getLibraryItem,
+    getLibraryItemByIdentityKey,
+    unpublishLibraryItem,
     listLibraryItems,
     getActiveCanonicalPath,
     ensureCanonicalPath,

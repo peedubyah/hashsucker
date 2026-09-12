@@ -26,6 +26,7 @@ import { searchTitles, getMediaById, getCacheMetrics } from '../lib/metadata/uni
 import { createHandoff, HANDLING_MODES } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
 import { bindPlexMetricsSink, openSeasonFanOutScope } from '../lib/requests/plex-notifier.js';
+import { unpublishMedia } from '../lib/library/unpublish.js';
 import { setPlexRefreshAccount } from '../lib/metrics.js';
 import {
   buildSeerrIntent,
@@ -2406,6 +2407,26 @@ export function createRequestHandler(dependencies = {}) {
           controlPlaneStore,
           ensureTorBoxFileIdentityFn,
         });
+      }
+      // Library unpublish: remove VFS/STRM presentation for an exact movie
+      // or episode (or a whole season) without touching durable Release,
+      // TorrentFile, placement, handoff, or history rows. Later re-request
+      // cheaply republishes from retained truth. See lib/library/unpublish.js.
+      if (request.method === 'POST' && url.pathname === '/api/library/unpublish') {
+        const body = await readBody(request);
+        try {
+          const result = await unpublishMedia({
+            cache: searchCache,
+            controlPlaneStore,
+            mediaId: body.mediaId,
+            mediaType: body.mediaType,
+            season: body.season ?? null,
+            episode: body.episode ?? null,
+          });
+          return sendJson(response, 200, result);
+        } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
       }
       if (request.method === 'GET' && url.pathname === '/api/search') {
         const startedAt = performance.now();

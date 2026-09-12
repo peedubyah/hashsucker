@@ -4313,6 +4313,13 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     return rowToVfsMovieEntry(getVfsMovieEntryStmt.get({ media_id: mediaId }));
   }
 
+  function deleteVfsMovieEntry(mediaId) {
+    const info = db.prepare(
+      'DELETE FROM vfs_movie_entries WHERE media_id = ?',
+    ).run(mediaId);
+    return info.changes ?? 0;
+  }
+
   function listVfsMovieEntries() {
     return listVfsMovieEntriesStmt.all().map(rowToVfsMovieEntry);
   }
@@ -4525,6 +4532,13 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       season,
       episode,
     }));
+  }
+
+  function deleteVfsTvEntry(mediaId, season, episode) {
+    const info = db.prepare(
+      'DELETE FROM vfs_tv_entries WHERE media_id = ? AND season = ? AND episode = ?',
+    ).run(mediaId, season, episode);
+    return info.changes ?? 0;
   }
 
   function listVfsTvEntries() {
@@ -6127,6 +6141,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getPlaybackHandoffByReleaseKey,
     getVfsMovieEntry,
     listVfsMovieEntries,
+    deleteVfsMovieEntry,
     createVfsMovieEntry,
     setVfsMovieEntrySize,
     replaceVfsMovieEntry,
@@ -6134,6 +6149,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getTvPlaybackHandoff,
     getVfsTvEntry,
     listVfsTvEntries,
+    deleteVfsTvEntry,
     createVfsTvEntry,
     setVfsTvEntrySize,
     replaceVfsTvEntry,

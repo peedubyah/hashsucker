@@ -16,7 +16,7 @@ import { finished } from 'node:stream/promises';
 
 import { attemptRdResolution, getRdPlaybackUrl } from '../providers/realdebrid/resolve.js';
 import { isUrlLive } from '../resolver/liveness.js';
-import { materializeVfsEntry } from './materialize.js';
+import { materializeVfsEntry, isUnpublishedHandoff } from './materialize.js';
 import { providerAccounting } from '../providers/provider-accounting.js';
 import {
   validateRangeResponseBody,
@@ -299,6 +299,8 @@ export function createTvWebDav({
 
   async function getCatalog() {
     for (const handoff of searchCache.listTvPlaybackHandoffs()) {
+      // Same anti-resurrection rule as the movie catalog.
+      if (isUnpublishedHandoff(controlPlaneStore, handoff)) continue;
       await materializeVfsEntry(searchCache, handoff, controlPlaneStore, now, { allowLegacy: true });
     }
     const nextStates = [];

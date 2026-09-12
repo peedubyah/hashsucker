@@ -3,6 +3,7 @@ import path from 'node:path';
 import {
   addDeterministicCollisionSuffix,
   buildPreferredCanonicalPath,
+  createLibraryIdentityKey,
 } from '../control-plane/canonical-path.js';
 import { notifyBindingActivated } from '../control-plane/durability-enroller.js';
 import { createDefaultRdPlacementRealizer } from '../control-plane/rd-placement-realizer.js';
@@ -453,6 +454,37 @@ function raceRecoverVfsTvEntry(searchCache, handoff, torrentFile, now) {
     }
   }
   return assertExistingIdentityOrThrow(existing, handoff, torrentFile);
+}
+
+/**
+ * True when durable truth says this handoff's library item is unpublished
+ * (desired_state='absent'). Catalog builds must skip such handoffs so
+ * routine PROPFIND/hydration traffic never resurrects removed publication.
+ * Missing item rows or any lookup failure means "not unpublished" — the
+ * safe default is to materialize as before.
+ */
+export function isUnpublishedHandoff(controlPlaneStore, handoff) {
+  try {
+    if (!controlPlaneStore || typeof controlPlaneStore.getLibraryItemByIdentityKey !== 'function') {
+      return false;
+    }
+    const mediaType = handoff?.mediaType === 'movie' ? 'movie' : 'episode';
+    const season = handoff?.season ?? null;
+    const episode = handoff?.episode ?? null;
+    if (mediaType === 'episode' && (season == null || episode == null)) {
+      return false;
+    }
+    const key = createLibraryIdentityKey({
+      mediaType,
+      mediaId: handoff.mediaId,
+      season,
+      episode,
+    });
+    const item = controlPlaneStore.getLibraryItemByIdentityKey(key);
+    return !!item && item.desiredState === 'absent';
+  } catch {
+    return false;
+  }
 }
 
 export async function materializeVfsEntry(

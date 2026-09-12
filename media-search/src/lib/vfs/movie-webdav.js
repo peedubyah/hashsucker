@@ -4,7 +4,7 @@ import { finished } from 'node:stream/promises';
 import { attemptRdResolution, getRdPlaybackUrl } from '../providers/realdebrid/resolve.js';
 import { isUrlLive } from '../resolver/liveness.js';
 import { providerAccounting } from '../providers/provider-accounting.js';
-import { materializeVfsEntry } from './materialize.js';
+import { materializeVfsEntry, isUnpublishedHandoff } from './materialize.js';
 import {
   validateRangeResponseBody,
   validateRangeResponseHeaders,
@@ -291,6 +291,9 @@ export function createMovieWebDav({
 
   async function getCatalog() {
     for (const handoff of searchCache.listMoviePlaybackHandoffs()) {
+      // Unpublished items stay unpublished: catalog traffic must not
+      // resurrect removed VFS rows (re-request reactivates explicitly).
+      if (isUnpublishedHandoff(controlPlaneStore, handoff)) continue;
       await materializeVfsEntry(searchCache, handoff, controlPlaneStore, now, { allowLegacy: true });
     }
     const nextStates = [];

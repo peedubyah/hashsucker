@@ -408,3 +408,44 @@ test('legacy exposure schema migrates in place without retargeting evidence', ()
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('unpublishLibraryItem marks absent and supersedes active bindings without deleting durable rows', () => {
+  const store = createControlPlaneStore();
+  const item = store.ensureLibraryItem(movie());
+  const identity = createReleaseIdentity(HASH, null);
+  const data = setupBindable(store, item, identity);
+  store.activateBinding({
+    libraryItemId: item.id, libraryPathId: data.path.id, ...identity,
+    placementId: data.placement.id, providerFileId: data.providerFileId,
+    exposureId: data.exposure.id, reason: 'initial',
+  });
+
+  const result = store.unpublishLibraryItem('movie:tt0133093:default');
+  assert.equal(result.desiredState, 'absent');
+  assert.equal(result.supersededBindings, 1);
+  assert.equal(store.getLibraryItem(item.id).desiredState, 'absent');
+  assert.equal(store.listBindings(item.id).length, 1);
+  assert.equal(store.listBindings(item.id)[0].status, 'superseded');
+
+  // Idempotent repeat converges.
+  const again = store.unpublishLibraryItem('movie:tt0133093:default');
+  assert.equal(again.desiredState, 'absent');
+  assert.equal(again.supersededBindings, 0);
+  assert.equal(store.listBindings(item.id).length, 1);
+  store.close();
+});
+
+test('unpublishLibraryItem returns null for unknown identity keys', () => {
+  const store = createControlPlaneStore();
+  assert.equal(store.unpublishLibraryItem('movie:tt0000000:default'), null);
+  assert.equal(store.getLibraryItemByIdentityKey('movie:tt0000000:default'), null);
+  store.close();
+});
+
+test('getLibraryItemByIdentityKey roundtrips ensureLibraryItem identity', () => {
+  const store = createControlPlaneStore();
+  const item = store.ensureLibraryItem(movie());
+  const found = store.getLibraryItemByIdentityKey('movie:tt0133093:default');
+  assert.equal(found.id, item.id);
+  store.close();
+});
