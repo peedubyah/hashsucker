@@ -218,6 +218,8 @@ Reconciliation observes drift; it does not correct it.
 
 ## Repository map
 
+- [`docs/PRODUCTION-STATE-2026-09-11.md`](docs/PRODUCTION-STATE-2026-09-11.md) — canonical current
+  production state, verified milestones, scheduler gates, and roadmap.
 - `media-search/` — the service: API, discovery, ranking, resolver, control plane, WebDAV, UI.
 - `torbox-importer/` — shell-based acquisition worker; places with TorBox, hands off to
     

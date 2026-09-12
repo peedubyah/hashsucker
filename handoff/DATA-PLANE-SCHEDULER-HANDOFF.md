@@ -1,5 +1,10 @@
 # HashSucker Data-Plane Scheduler Handoff
 
+> **Historical milestone:** this records scheduler graduation and its original
+> proof. For the current production checkpoint, later lifecycle hardening,
+> verified canaries, metric semantics, and active roadmap, use
+> [`../docs/PRODUCTION-STATE-2026-09-11.md`](../docs/PRODUCTION-STATE-2026-09-11.md).
+
 **Status:** graduated to `main` production. The scheduler is now HashSucker
 production behavior; the original development branch (`m3-north-db`) is no
 longer required as a live development branch (see §6).
