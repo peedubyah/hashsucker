@@ -469,3 +469,16 @@ test('delivery lifecycle: mylist hit short-circuits second inventory read', asyn
   assert.equal(budget.snapshot().operations.mylist.hits, 1);
   assert.equal(budget.snapshot().operations.mylist.misses, 1);
 });
+
+test('coordinator.invalidate drops memoized operations without touching inflight work', async () => {
+  const { coordinator } = buildCoordinator();
+  let calls = 0;
+  const fn = async () => { calls += 1; return { v: calls }; };
+  assert.equal((await coordinator.run('mylist', ['a'], fn)).v, 1);
+  assert.equal((await coordinator.run('mylist', ['a'], fn)).v, 1, 'memoized');
+  coordinator.invalidate('mylist');
+  assert.equal((await coordinator.run('mylist', ['a'], fn)).v, 2, 're-fetched after invalidate');
+  assert.equal((await coordinator.run('other', ['a'], fn)).v, 3);
+  coordinator.invalidate('mylist');
+  assert.equal((await coordinator.run('other', ['a'], fn)).v, 3, 'other operations untouched');
+});

@@ -205,6 +205,23 @@ export class TorBoxCallCoordinator {
   }
 
   /**
+   * Drop memoized successes for one operation (or all when op is null)
+   * without touching in-flight work. Used after a request-scoped write
+   * (e.g. a placement-create whose new torrent is absent from the
+   * memoized mylist snapshot) so the next read re-fetches.
+   */
+  invalidate(op = null) {
+    if (op == null) {
+      this._memo.clear();
+      return;
+    }
+    const prefix = `${op}::`;
+    for (const key of this._memo.keys()) {
+      if (key.startsWith(prefix)) this._memo.delete(key);
+    }
+  }
+
+  /**
    * Detach the budget and drop any in-flight tracking. In-flight
    * promises continue to settle naturally; their budget updates
    * become no-ops. Memoized successes are also dropped so a future

@@ -98,10 +98,22 @@ export function createTorBoxInventoryProvider(options = {}) {
     }
   }
 
-  return createProviderAdapter({
-    provider: 'torbox',
-    accountScope,
-    capabilities: {
+  /**
+   * Drop the memoized mylist snapshot so the next read re-fetches. Called
+   * after a request-scoped write (placement-create) whose new torrent is
+   * absent from the memoized snapshot; without this, a follow-up inventory
+   * read for the new placement throws not-found. Safe no-op when no
+   * coordinator is configured.
+   */
+  function invalidateMylistSnapshot() {
+    activeCoordinator?.invalidate?.('mylist');
+  }
+
+  return Object.freeze({
+    ...createProviderAdapter({
+      provider: 'torbox',
+      accountScope,
+      capabilities: {
       [PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP]: {
         async lookupPlacement(subject, context = {}) {
           const infoHash = normalizeInfoHash(subject?.infoHash);
@@ -175,7 +187,9 @@ export function createTorBoxInventoryProvider(options = {}) {
         },
       },
     },
-  });
+  }),
+  invalidateMylistSnapshot,
+});
 }
 
 function placementFromResource(resource, infoHash, observedAt, options) {

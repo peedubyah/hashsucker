@@ -70,6 +70,7 @@ import { createResolverTelemetry, getRecentResolverTelemetry, RESOLVER_OUTCOME }
 import { createResolverProfiler } from '../lib/resolver/profiler.js';
 import { createTorBoxProvider } from '../lib/providers/torbox.js';
 import { createTorBoxInventoryProvider } from '../lib/providers/torbox-inventory.js';
+import { TorBoxCallCoordinator } from '../lib/providers/torbox-call-coordinator.js';
 import { ensureTorBoxDelivery, TorBoxDeliveryError, resolveTorBoxDeliveryWithStaleRecovery } from '../lib/resolver/torbox-delivery.js';
 import { ensureTorBoxFileIdentity } from '../lib/resolver/torbox-file-identity.js';
 import {
@@ -1549,6 +1550,7 @@ export function createRequestHandler(dependencies = {}) {
   // helper is only available when both the control plane and the TorBox
   // provider are configured; in that case the same factory is reused for
   // every ingress path so the seam has a single source of truth.
+  const hasExplicitEnsureFn = dependencies.ensureTorBoxFileIdentity != null;
   const ensureTorBoxFileIdentityFn = dependencies.ensureTorBoxFileIdentity || (controlPlaneStore && torBoxProvider && torBoxInventoryProvider
     ? (params) => ensureTorBoxFileIdentity({
       ...params,
@@ -2862,11 +2864,38 @@ export function createRequestHandler(dependencies = {}) {
           // Slice 1.75: same for the identity-binding seam — server-side
           // and overridable only via the createApp dependency factory,
           // not via the client body.
+          //
+          // Request-scoped TorBox mylist memoization: one coordinator-owned
+          // snapshot shared by every placement-lookup/inventory read inside
+          // this request (placement creates invalidate it, so fresh
+          // torrents are never missed). Without this, each selection
+          // attempt re-downloads the full account list. Falls back to the
+          // shared provider when request scoping is unavailable.
+          let requestEnsureFn = ensureTorBoxFileIdentityFn;
+          if (!hasExplicitEnsureFn && controlPlaneStore && torBoxProvider && env.TORBOX_API_KEY) {
+            try {
+              const requestInventoryProvider = createTorBoxInventoryProvider({
+                apiKey: env.TORBOX_API_KEY,
+                apiBase: env.TORBOX_API_URL,
+                now: clock,
+                coordinator: new TorBoxCallCoordinator({ scope: 'media-request' }),
+              });
+              requestEnsureFn = (params) => ensureTorBoxFileIdentity({
+                ...params,
+                controlPlaneStore,
+                torBoxProvider,
+                torBoxInventoryProvider: requestInventoryProvider,
+                now: clock,
+              });
+            } catch {
+              // Scoping failed; use the shared seam unchanged.
+            }
+          }
           const result = await searchByMedia(searchCache, {
             ...body,
             hydrateVfs: hydrateVfsForRequest,
             controlPlaneStore,
-            ...(ensureTorBoxFileIdentityFn ? { ensureTorBoxFileIdentity: ensureTorBoxFileIdentityFn } : {}),
+            ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
           });
           return sendJson(response, 200, {
             ...result,

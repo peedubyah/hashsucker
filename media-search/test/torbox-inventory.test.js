@@ -114,3 +114,46 @@ test('TorBox mylist transport and response failures are typed', async () => {
     (error) => error instanceof ProviderOperationError && error.category === 'invalid-response',
   );
 });
+
+test('TorBox request-scoped coordinator shares one mylist fetch across lookup and inventory', async () => {
+  const { TorBoxCallCoordinator } = await import('../src/lib/providers/torbox-call-coordinator.js');
+  let fetches = 0;
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async () => { fetches += 1; return mylist([resource()]); },
+    coordinator: new TorBoxCallCoordinator({ scope: 'test-request' }),
+  });
+  await adapter.require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
+    .lookupPlacement({ infoHash: HASH });
+  await adapter.require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
+    .getFileInventory({ providerResourceId: '77' });
+  await adapter.require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
+    .lookupPlacement({ infoHash: OTHER_HASH });
+  assert.equal(fetches, 1, 'lookup + inventory + second lookup share one snapshot fetch');
+});
+
+test('TorBox invalidateMylistSnapshot forces a re-fetch on next read', async () => {
+  const { TorBoxCallCoordinator } = await import('../src/lib/providers/torbox-call-coordinator.js');
+  let fetches = 0;
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async () => { fetches += 1; return mylist([resource()]); },
+    coordinator: new TorBoxCallCoordinator({ scope: 'test-request' }),
+  });
+  await adapter.require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
+    .lookupPlacement({ infoHash: HASH });
+  assert.equal(fetches, 1);
+  adapter.invalidateMylistSnapshot();
+  await adapter.require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
+    .lookupPlacement({ infoHash: HASH });
+  assert.equal(fetches, 2, 'invalidation drops the memoized snapshot');
+});
+
+test('TorBox invalidateMylistSnapshot is a safe no-op without a coordinator', async () => {
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async () => mylist([resource()]),
+  });
+  assert.equal(typeof adapter.invalidateMylistSnapshot, 'function');
+  adapter.invalidateMylistSnapshot();
+});

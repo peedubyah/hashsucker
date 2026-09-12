@@ -177,6 +177,11 @@ export async function ensureTorBoxFileIdentity({
           observedAt,
           expiresAt: observedAt + 5 * 60 * 1000,
         });
+        // The new torrent is absent from any memoized mylist snapshot taken
+        // earlier in this request; drop it so the inventory fetch below
+        // re-reads instead of throwing not-found. No-op without a
+        // request-scoped coordinator.
+        torBoxInventoryProvider?.invalidateMylistSnapshot?.();
       }
     } catch (createErr) {
       // Cached-only creation failed — the hash is not in the TorBox account.
