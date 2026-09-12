@@ -122,6 +122,206 @@ async function ensureStrmForExistingHandoff(cache, mediaId, mediaType, season = 
 }
 
 /**
+ * Fast-path reuse predicate + idempotent republication for already-healthy
+ * published media.
+ *
+ * Returns an API-compatible searchByMedia result when durable truth proves
+ * reusability, or null when the full discovery path must run. Only exact
+ * lookups are eligible (movies by mediaId; episodes by mediaId+season+episode).
+ *
+ * Validity (all required):
+ * - existing selected handoff with infoHash, releaseKey, and torrentFileId;
+ * - TorrentFile row exists with identical infoHash and positive size
+ *   (enforced again inside materializeVfsEntry via torrentFileForHandoff);
+ * - at least one mapped present provider coordinate exists for the
+ *   TorrentFile (listDataPlaneCoordinates — the S-1 serving set).
+ *
+ * On any insufficiency, unhealthy state, or publication error, returns null
+ * so the caller falls through to full discovery. No new Release is ever
+ * selected here.
+ */
+async function tryReuseHealthyPublication({
+  cache,
+  controlPlaneStore,
+  hydrateVfs,
+  mediaId,
+  mediaType,
+  season,
+  episode,
+}) {
+  try {
+    const isEpisode = mediaType === 'episode';
+    if (!isEpisode && mediaType !== 'movie') {
+      return null;
+    }
+    // Full-shape handoff rows (rowToPlaybackHandoff), which carry
+    // torrentFileId. getExistingSelection omits it, so it cannot serve
+    // this predicate.
+    const stored = isEpisode
+      ? cache.getTvPlaybackHandoff?.(mediaId, season, episode)
+      : cache.getPlaybackHandoffByMediaId?.(mediaId);
+    if (!stored) {
+      return null;
+    }
+    const infoHash = stored.infoHash ?? stored.selectedHash;
+    const torrentFileId = stored.torrentFileId ?? null;
+    // A stored row is a durable selection only when it names the full
+    // physical identity (same substance as the persisted-selection check).
+    if (!infoHash || !stored.releaseKey || !torrentFileId || !stored.filename || !stored.provider) {
+      return null;
+    }
+    if (isEpisode && (stored.season !== season || stored.episode !== episode)) {
+      return null;
+    }
+    if (!controlPlaneStore
+      || typeof controlPlaneStore.getTorrentFile !== 'function'
+      || typeof controlPlaneStore.listDataPlaneCoordinates !== 'function') {
+      return null;
+    }
+    const torrentFile = controlPlaneStore.getTorrentFile(torrentFileId);
+    if (!torrentFile
+      || String(torrentFile.infoHash || '').toLowerCase() !== String(infoHash).toLowerCase()
+      || !(Number.isSafeInteger(torrentFile.size) && torrentFile.size > 0)) {
+      return null;
+    }
+    const coords = controlPlaneStore.listDataPlaneCoordinates(torrentFileId) || [];
+    if (coords.length === 0) {
+      return null;
+    }
+
+    // Rebuild the handoff shape from durable truth (original requestId is
+    // preserved: this returns the existing result, it does not mint a new
+    // publication).
+    const handoff = {
+      requestId: stored.requestId,
+      mediaId: stored.mediaId,
+      mediaType: stored.mediaType,
+      season: stored.season ?? null,
+      episode: stored.episode ?? null,
+      releaseKey: stored.releaseKey,
+      infoHash,
+      fileIndex: stored.fileIndex ?? null,
+      filename: stored.filename,
+      provider: stored.provider,
+      providerState: stored.providerState,
+      identityTier: stored.identityTier,
+      resolutionState: stored.resolutionState,
+      selectionReason: stored.selectionReason || stored.reason,
+      selectedAt: stored.selectedAt,
+      torrentFileId,
+    };
+
+    // Idempotent republication. materializeVfsEntry re-asserts the stored
+    // identity against the existing row (throws on divergence → fall
+    // through to full discovery). publishStrm is idempotent.
+    let vfsEntry = null;
+    try {
+      vfsEntry = await materializeVfsEntry(
+        cache,
+        handoff,
+        controlPlaneStore,
+        undefined,
+        { allowLegacy: false },
+      );
+    } catch (error) {
+      console.error(`Reuse fast path found divergent publication, falling back to discovery: ${error.message}`);
+      return null;
+    }
+    try {
+      const strmResult = await publishStrm({ handoff });
+      if (strmResult.published && strmResult.path) {
+        handoff.strmPath = strmResult.path;
+      }
+      if (strmResult.path) {
+        notifyJellyfin({
+          strmPath: strmResult.path,
+          mediaId: handoff.mediaId,
+          mediaType: handoff.mediaType,
+        }).catch(() => {});
+      }
+      // Same hydration rule as the full path: hydrate authoritative VFS
+      // metadata so Plex never scans a size-NULL entry; skip the Plex
+      // notification when hydration fails.
+      let hydratedEntry = vfsEntry;
+      if (hydratedEntry && hydrateVfs) {
+        try {
+          if (handoff.mediaType === 'movie') {
+            await hydrateVfs.hydrateMovie(handoff.releaseKey);
+          } else if (typeof hydrateVfs.hydrateTv === 'function') {
+            await hydrateVfs.hydrateTv({
+              mediaId: handoff.mediaId,
+              season: handoff.season,
+              episode: handoff.episode,
+            });
+          }
+        } catch (hydrateError) {
+          console.error(`[Plex] Will be discovered on next scan: VFS metadata hydration failed for ${handoff.mediaId}: ${hydrateError.message}`);
+          hydratedEntry = null;
+        }
+      }
+      if (hydratedEntry) {
+        notifyPlex({
+          mediaId: handoff.mediaId,
+          mediaType: handoff.mediaType,
+          canonicalPath: hydratedEntry.canonicalPath,
+        }).catch(() => {});
+      }
+    } catch (error) {
+      console.error(`Reuse republication failed, falling back to discovery: ${error.message}`);
+      return null;
+    }
+
+    const selected = {
+      infoHash,
+      fileIndex: handoff.fileIndex,
+      filename: handoff.filename,
+      provider: handoff.provider,
+      providerState: handoff.providerState,
+      identityTier: handoff.identityTier,
+      resolutionState: handoff.resolutionState,
+      releaseKey: handoff.releaseKey,
+      torrentFileId,
+      score: null,
+      reason: 'reused-healthy-publication',
+    };
+    return {
+      requestId: handoff.requestId,
+      intent: { type: handoff.mediaType, mediaId: handoff.mediaId },
+      results: [{
+        rank: 1,
+        infoHash,
+        fileIndex: handoff.fileIndex,
+        filename: handoff.filename,
+        score: null,
+        identity: {
+          tier: handoff.identityTier,
+          confidence: null,
+          evidence: [],
+          state: handoff.resolutionState,
+          eligible: true,
+        },
+        release: {},
+        sources: [],
+        observations: [],
+        availability: {},
+      }],
+      total: 1,
+      query: { mediaId, mediaType, season, episode },
+      identitySummary: { tier: handoff.identityTier, confidence: null, evidence: [] },
+      ranking: { TieredRankingApplied: false, TierCounts: {}, reusedHealthyPublication: true },
+      discovery: { liveDiscoveryTriggered: false, liveCandidates: 0, liveEligible: 0, reusedHealthyPublication: true },
+      availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
+      selection: { selected, reason: 'reused-healthy-publication', alternates: [] },
+      handoff,
+      demandPromotion: { enrichmentPromoted: 0, probePromoted: 0 },
+    };
+  } catch (error) {
+    console.error(`Reuse fast path failed, falling back to discovery: ${error.message}`);
+    return null;
+  }
+}
+
+/**
  * Get availability info for a candidate from stored observations.
  * @param {Object} hit - Ranked candidate
  * @returns {Object}
@@ -291,6 +491,29 @@ export async function searchByMedia(cache, request) {
     : (intent.season != null ? intent.season : null);
   const episode = request.episode != null ? parseInt(request.episode, 10)
     : (intent.episodes?.length > 0 ? intent.episodes[0] : null);
+
+  // Fast path: reuse a healthy durable publication.
+  //
+  // When current durable truth already proves this exact media item has a
+  // reusable publication (selected handoff → identical TorrentFile identity
+  // → at least one mapped present provider coordinate, i.e. exactly what
+  // the S-1 projection would serve), skip discovery/ranking/availability
+  // and re-run only the idempotent publication steps. Anything insufficient
+  // or unhealthy falls through to the full path below. Never substitutes a
+  // different Release: identity comes from the stored handoff itself, and
+  // provider liveness is not stricter than S-1 serving semantics.
+  const reuseResult = await tryReuseHealthyPublication({
+    cache,
+    controlPlaneStore: request.controlPlaneStore ?? null,
+    hydrateVfs,
+    mediaId,
+    mediaType,
+    season,
+    episode,
+  });
+  if (reuseResult) {
+    return reuseResult;
+  }
 
   // Stage 1: Retrieve candidates by media association
   const candidates = cache.queryCandidatesByMedia(mediaId);

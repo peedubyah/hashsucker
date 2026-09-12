@@ -21,7 +21,11 @@ import path from 'node:path';
 
 import { getMedia } from '../metadata/cinemeta.js';
 
-const STRM_OUTPUT_ROOT = process.env.STRM_OUTPUT_PATH || '/strm';
+// Resolved per call (not at module load) so tests and operators can point
+// output elsewhere via env without reimporting. Production default unchanged.
+function strmOutputRoot() {
+  return process.env.STRM_OUTPUT_PATH || '/strm';
+}
 const RESOLVER_BASE_URL = process.env.RESOLVER_BASE_URL || 'http://localhost:8080';
 
 /**
@@ -115,13 +119,13 @@ function buildStrmPath({ title, year, mediaType, season, episode }) {
   if (mediaType === 'series') {
     const seasonNum = season != null ? String(season).padStart(2, '0') : '00';
     const episodeNum = episode != null ? String(episode).padStart(2, '0') : '00';
-    const dir = path.join(STRM_OUTPUT_ROOT, 'TV Shows', `${safeTitle}${yearPart}`, `Season ${seasonNum}`);
+    const dir = path.join(strmOutputRoot(), 'TV Shows', `${safeTitle}${yearPart}`, `Season ${seasonNum}`);
     const file = `${safeTitle}${yearPart} - S${seasonNum}E${episodeNum}.strm`;
     return { dir, file };
   }
 
   // Movie
-  const dir = path.join(STRM_OUTPUT_ROOT, 'Movies', `${safeTitle}${yearPart}`);
+  const dir = path.join(strmOutputRoot(), 'Movies', `${safeTitle}${yearPart}`);
   const file = `${safeTitle}${yearPart}.strm`;
   return { dir, file };
 }

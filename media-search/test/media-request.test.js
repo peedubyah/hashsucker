@@ -1019,3 +1019,121 @@ test('searchByMedia: season pack matches are counted in diagnostics', async () =
 
   cache.close();
 });
+
+// =============================================================================
+// Fast path: reuse a healthy published movie without rediscovery
+// =============================================================================
+
+const REUSE_HASH = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+const REUSE_TFID = 'tf_reuse_healthy_1';
+
+function seedAuthoritativeHandoff(cache, mediaId) {
+  const requestId = cache.persistMediaRequest(
+    { mediaId, mediaType: 'movie', season: null, episode: null },
+    [],
+  );
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId,
+    mediaType: 'movie',
+    season: null,
+    episode: null,
+    releaseKey: `${REUSE_HASH}:torrent`,
+    infoHash: REUSE_HASH,
+    fileIndex: null,
+    filename: 'Reuse Movie (2024) 1080p.mkv',
+    provider: 'torbox',
+    providerState: 'cached',
+    identityTier: 'ProviderConfirmed',
+    resolutionState: 'resolved',
+    selectionReason: 'movie-cached-single-file bound',
+    selectedAt: Date.now(),
+    torrentFileId: REUSE_TFID,
+  });
+}
+
+function stubHealthyStore(coords) {
+  return {
+    getTorrentFile: (id) => (id === REUSE_TFID
+      ? { id: REUSE_TFID, infoHash: REUSE_HASH, internalPath: 'Reuse Movie (2024) 1080p.mkv', size: 123456789 }
+      : null),
+    listDataPlaneCoordinates: (id) => (id === REUSE_TFID ? coords : []),
+  };
+}
+
+async function withIsolatedStrmRoot(fn) {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'reuse-strm-'));
+  const savedStrm = process.env.STRM_OUTPUT_PATH;
+  const savedPlexUrl = process.env.PLEX_URL;
+  const savedPlexToken = process.env.PLEX_TOKEN;
+  const savedJfUrl = process.env.JELLYFIN_URL;
+  process.env.STRM_OUTPUT_PATH = dir;
+  delete process.env.PLEX_URL;
+  delete process.env.PLEX_TOKEN;
+  delete process.env.JELLYFIN_URL;
+  try {
+    return await fn(dir);
+  } finally {
+    if (savedStrm === undefined) delete process.env.STRM_OUTPUT_PATH;
+    else process.env.STRM_OUTPUT_PATH = savedStrm;
+    if (savedPlexUrl !== undefined) process.env.PLEX_URL = savedPlexUrl;
+    if (savedPlexToken !== undefined) process.env.PLEX_TOKEN = savedPlexToken;
+    if (savedJfUrl !== undefined) process.env.JELLYFIN_URL = savedJfUrl;
+    await fs.promises.rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('searchByMedia: reuses a healthy published movie without discovery', async () => {
+  await withIsolatedStrmRoot(async () => {
+    const cache = createDiscoveryCache();
+    seedAuthoritativeHandoff(cache, 'tt_reuse_1');
+    const store = stubHealthyStore([{ provider: 'torbox', provider_resource_id: 'res-1' }]);
+
+    const t0 = Date.now();
+    const result = await searchByMedia(cache, {
+      mediaId: 'tt_reuse_1',
+      mediaType: 'movie',
+      controlPlaneStore: store,
+      skipLiveDiscovery: true,
+    });
+    const wallMs = Date.now() - t0;
+
+    assert.equal(result.selection.reason, 'reused-healthy-publication');
+    assert.equal(result.selection.selected.infoHash, REUSE_HASH);
+    assert.equal(result.selection.selected.torrentFileId, REUSE_TFID);
+    assert.equal(result.handoff.torrentFileId, REUSE_TFID);
+    // Same durable identity, no duplicate handoff rows.
+    const rows = cache.db.prepare(
+      'SELECT COUNT(*) AS n FROM playback_handoffs WHERE media_id = ?'
+    ).get('tt_reuse_1');
+    assert.equal(rows.n, 1, 'Expected exactly one handoff row (no duplicates)');
+    // VFS entry materialized for the same TorrentFile.
+    const entry = cache.getVfsMovieEntry('tt_reuse_1');
+    assert.ok(entry, 'Expected VFS entry');
+    assert.equal(entry.torrentFileId, REUSE_TFID);
+    assert.ok(wallMs < 5000, `Expected fast reuse, took ${wallMs}ms`);
+    cache.close();
+  });
+});
+
+test('searchByMedia: falls back to discovery when no provider coordinate exists', async () => {
+  await withIsolatedStrmRoot(async () => {
+    const cache = createDiscoveryCache();
+    seedAuthoritativeHandoff(cache, 'tt_reuse_2');
+    const store = stubHealthyStore([]);
+
+    const result = await searchByMedia(cache, {
+      mediaId: 'tt_reuse_2',
+      mediaType: 'movie',
+      controlPlaneStore: store,
+      skipLiveDiscovery: true,
+    });
+
+    assert.equal(result.selection.selected, null);
+    assert.equal(result.selection.reason, 'no candidates');
+    cache.close();
+  });
+});
