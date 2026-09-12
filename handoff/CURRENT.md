@@ -142,16 +142,18 @@ silently fall through to a legacy Node byte path.
   `DATA_PLANE_ACTIVE_ACTIVE_MIN_CHUNKS` defaults to 4. Cross-provider warm
   standby (`DATA_PLANE_CROSS_PROVIDER_STANDBY`) is separately default OFF. Work
   stealing is a separate shipping question.
-- Fixed shared-cap selection requires qualifying AUTO, `SHARED_CAP`, an existing
-  primary reservation, and at least two missing chunks. `TWO_SPAN + SHARED_CAP`
-  with AUTO and STEAL OFF does not select that fixed branch.
+- Fixed shared-cap selection requires `SHARED_CAP`, an existing primary
+  reservation, and at least two missing chunks, plus two-lane engagement via
+  explicit `TWO_SPAN` or qualifying AUTO — no second warm standby is required.
+  A genuine second warm capability still takes the distinct-cap path first.
+  Shared-cap stays default OFF; A3 remains the shipping disposition.
 
 ### Metric limits that affect the A/B
 
-- `scheduler_lane_a_chunks`, `scheduler_lane_b_chunks`, and
-  `scheduler_work_steals` are incremented only by the shared-cap coordinator
-  worker. Fixed-half shared-cap execution can be active while all three remain
-  zero.
+- `scheduler_lane_a_chunks` and `scheduler_lane_b_chunks` record shared-cap
+  lane assignment on both the fixed-half path and the coordinator/work-stealing
+  path. `scheduler_work_steals` is incremented only by the coordinator worker.
+  Neither lane counter covers distinct-cap execution.
 - `inflight_joiners` counts per-chunk join events, not unique clients.
 - Metrics are process-lifetime cumulative counters. Use bounded before/after
   deltas and a known cache state.
@@ -160,9 +162,9 @@ silently fall through to a legacy Node byte path.
 
 ## Known traps
 
-- Zero lane counters do not prove fixed-half shared-cap execution failed to
-  activate; confirm the actual branch with fetch-span/cache-decision and CDN
-  attempt evidence.
+- Zero lane counters rule out shared-cap lane assignment but not distinct-cap
+  two-lane execution; confirm the actual branch with fetch-span/cache-decision
+  and CDN attempt evidence.
 - Shared-cap lanes share a provider capability and failure domain. They are not
   provider redundancy.
 - Never explain different bytes as a provider variation for the same
