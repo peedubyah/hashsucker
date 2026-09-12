@@ -164,6 +164,27 @@ routes; host binding and the trusted Compose/reverse-proxy boundary are the acce
 | `GET /api/data-plane/files/:tfId` | Internal S-1 projection of one TorrentFile and its usable mapped provider coordinates |
 | `GET /api/library` | Product library listing: per movie/episode desired state, published/absent/incomplete state, presentation path, TorrentFile, size, and serving-coordinate presence |
 | `POST /api/library/unpublish` | Remove VFS/STRM presentation for an exact movie, episode, or season; retains Release/TorrentFile/provider truth for cheap republish |
+| `POST /api/library/reconcile` | Record consumer-library presence/absence/UNKNOWN observations for published items; retires ELIGIBLE items only when the retirement policy enables it (default OFF) |
+| `GET /api/library/retirement` | Dry-run retirement planner: per-item presence, absence age, eligibility, exact ineligibility reason; read-only |
+
+### Consumer reconciliation and retirement eligibility
+
+HashSucker observes playback-consumer libraries (Jellyfin reachable; Plex
+currently UNKNOWN pending the parked endpoint/credential repair) and maps
+consumer rows back to `(mediaId [+ season/episode])` via IMDb ids —
+never filenames alone, never TorrentFile ids. Observations live in
+`consumer_observations` (`present` 1/0/NULL for seen/absent/unknown) and
+are a projection, not media identity.
+
+Eligibility requires: policy enabled (`RETIREMENT_ENABLED`, default OFF),
+item published, fresh observations, every required consumer (`JELLYFIN`
+by default) reporting absent, and absence sustained past
+`RETIREMENT_ABSENCE_GRACE_MS` (default 7 days) with history proving
+sustained watching. UNKNOWN, stale, missing, or insufficient history
+fails closed to not-eligible; a single missing scan never retires. The
+executor reuses safe-unpublish semantics only — no provider or durable
+identity deletion. No request-intent guard exists: request history cannot
+safely answer "still wanted," so none is inferred.
 
 ### Authoritative TorrentFile byte path
 

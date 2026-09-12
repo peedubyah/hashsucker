@@ -26,6 +26,45 @@ import {
   createDurabilityRuntime,
   resolveDurabilityMode,
 } from '../lib/control-plane/durability-runtime.js';
+import { runReconcile } from '../lib/consumers/reconcile.js';
+
+// ─── consumer reconciliation ticker ─────────────────────────────────────
+// Read-only consumer presence checks on a slow cadence (default 15 min,
+// first run 60 s after boot so startup never blocks on consumer
+// availability). One pass at a time; failures log and retry next run.
+// Automatic retirement runs inside the pass only when RETIREMENT_ENABLED
+// is explicitly set (default OFF).
+const reconcileFlag = String(process.env.CONSUMER_RECONCILE_ENABLED ?? '').toLowerCase();
+const reconcileEnabled = reconcileFlag !== '0' && reconcileFlag !== 'false';
+const reconcileIntervalMs = (() => {
+  const n = Number(process.env.CONSUMER_RECONCILE_INTERVAL_MS ?? 15 * 60 * 1000);
+  return Number.isSafeInteger(n) && n >= 60_000 ? n : 15 * 60 * 1000;
+})();
+let reconcileTimer = null;
+let reconcileInFlight = false;
+function armReconcileTimer(delayMs) {
+  reconcileTimer = setTimeout(async () => {
+    if (!reconcileInFlight) {
+      reconcileInFlight = true;
+      try {
+        const summary = await runReconcile({ cache: discoveryCache, controlPlaneStore });
+        console.log(
+          `media-search: consumer reconcile pass: published=${summary.published} `
+          + `eligible=${summary.eligible} retired=${summary.retired} consumers=${summary.consumers.join(',') || 'none'}`,
+        );
+      } catch (error) {
+        console.warn('media-search: consumer reconcile pass failed', error?.message);
+      } finally {
+        reconcileInFlight = false;
+      }
+    }
+    armReconcileTimer(reconcileIntervalMs);
+  }, delayMs);
+  if (reconcileTimer.unref) reconcileTimer.unref();
+}
+if (reconcileEnabled) {
+  armReconcileTimer(60_000);
+}
 
 const durabilityMode = resolveDurabilityMode(process.env);
 let durabilityRuntime = null;
@@ -97,6 +136,7 @@ function shutdown(signal) {
   shuttingDown = true;
   console.log(`media-search received ${signal}; shutting down`);
   if (durabilityTimer) clearTimeout(durabilityTimer);
+  if (reconcileTimer) clearTimeout(reconcileTimer);
   server.close(() => {
     discoveryCache.close();
     controlPlaneStore.close();

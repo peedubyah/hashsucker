@@ -338,6 +338,33 @@ CREATE INDEX IF NOT EXISTS idx_provider_delivery_evidence_hash
   ON provider_delivery_evidence(info_hash, file_index_key);
 `;
 
+const CONSUMER_OBSERVATIONS_SCHEMA = `
+-- Consumer library observations. Records whether a published HashSucker
+-- item is currently present in a playback consumer's library (Plex,
+-- Jellyfin). Pure projection: never media identity, never provider data.
+-- present is 1 (seen), 0 (checked, not found), or NULL (check failed or
+-- item unmappable — UNKNOWN, never absence). Grace math uses
+-- last_seen_present_at; first_checked_at proves sustained watching so a
+-- single missing scan can never retire anything.
+CREATE TABLE IF NOT EXISTS consumer_observations (
+  consumer TEXT NOT NULL,
+  instance_scope TEXT NOT NULL DEFAULT 'default',
+  media_type TEXT NOT NULL,
+  media_id TEXT NOT NULL,
+  season INTEGER,
+  episode INTEGER,
+  present INTEGER CHECK (present IS NULL OR present IN (0, 1)),
+  consumer_item_id TEXT,
+  source TEXT,
+  first_checked_at INTEGER NOT NULL,
+  last_checked_at INTEGER NOT NULL,
+  last_seen_present_at INTEGER,
+  PRIMARY KEY (consumer, instance_scope, media_type, media_id, season, episode)
+);
+CREATE INDEX IF NOT EXISTS idx_consumer_observations_media
+  ON consumer_observations(media_type, media_id, season, episode);
+`;
+
 export function createControlPlaneStore({ dbPath = ':memory:', database = null, now = () => Date.now() } = {}) {
   const db = database || new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
@@ -348,6 +375,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   // backfilled columns.
   migrateTorrentFileSchema(db);
   db.exec(CONTROL_PLANE_SCHEMA);
+  db.exec(CONSUMER_OBSERVATIONS_SCHEMA);
   migrateExposureSchema(db);
   migrateRepairEvidenceSchema(db);
   let closed = false;
@@ -1443,14 +1471,89 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     `).all(placementId).map(rowToBinding);
   }
 
-  function getLibraryItemByIdentityKey(identityKey) {
-    if (typeof identityKey !== 'string' || identityKey.length === 0) {
+  function getLibraryItemByIdentityKey(identityKey) {    if (typeof identityKey !== 'string' || identityKey.length === 0) {
       throw new TypeError('identityKey must be a non-empty string');
     }
     const row = db.prepare(
       'SELECT * FROM library_items WHERE identity_key = ?',
     ).get(identityKey);
     return row ? rowToLibraryItem(row) : null;
+  }
+
+  /**
+   * Record one consumer presence check. present is 1 (seen), 0 (checked,
+   * not found), or null (check failed / item unmappable — UNKNOWN).
+   * first_checked_at is set once and preserved so grace math can require
+   * sustained watching; last_seen_present_at advances only on present=1.
+   */
+  function recordConsumerObservation({
+    consumer, instanceScope = 'default', mediaType, mediaId,
+    season = null, episode = null, present = null,
+    consumerItemId = null, source = null, now = Date.now(),
+  }) {
+    if (typeof consumer !== 'string' || !consumer) throw new TypeError('consumer is required');
+    const mid = requireString(mediaId, 'mediaId');
+    const mtype = mediaType === 'episode' ? 'episode' : 'movie';
+    const existing = db.prepare(`
+      SELECT * FROM consumer_observations
+      WHERE consumer = ? AND instance_scope = ? AND media_type = ?
+        AND media_id = ? AND season IS ? AND episode IS ?
+    `).get(consumer, instanceScope, mtype, mid, season, episode);
+    if (!existing) {
+      db.prepare(`
+        INSERT INTO consumer_observations (
+          consumer, instance_scope, media_type, media_id, season, episode,
+          present, consumer_item_id, source,
+          first_checked_at, last_checked_at, last_seen_present_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        consumer, instanceScope, mtype, mid, season, episode,
+        present, consumerItemId, source,
+        now, now, present === 1 ? now : null,
+      );
+      return;
+    }
+    db.prepare(`
+      UPDATE consumer_observations
+      SET present = ?, consumer_item_id = ?, source = ?,
+          last_checked_at = ?,
+          last_seen_present_at = CASE WHEN ? = 1 THEN ? ELSE last_seen_present_at END
+      WHERE consumer = ? AND instance_scope = ? AND media_type = ?
+        AND media_id = ? AND season IS ? AND episode IS ?
+    `).run(
+      present, consumerItemId, source, now, present, now,
+      consumer, instanceScope, mtype, mid, season, episode,
+    );
+  }
+
+  function listConsumerObservations({ mediaType = null, mediaId = null } = {}) {
+    let sql = 'SELECT * FROM consumer_observations';
+    const params = [];
+    const clauses = [];
+    if (mediaType != null) {
+      clauses.push('media_type = ?');
+      params.push(mediaType);
+    }
+    if (mediaId != null) {
+      clauses.push('media_id = ?');
+      params.push(mediaId);
+    }
+    if (clauses.length > 0) sql += ' WHERE ' + clauses.join(' AND ');
+    sql += ' ORDER BY consumer, media_id, season, episode';
+    return db.prepare(sql).all(...params).map((row) => ({
+      consumer: row.consumer,
+      instanceScope: row.instance_scope,
+      mediaType: row.media_type,
+      mediaId: row.media_id,
+      season: row.season,
+      episode: row.episode,
+      present: row.present,
+      consumerItemId: row.consumer_item_id,
+      source: row.source,
+      firstCheckedAt: row.first_checked_at,
+      lastCheckedAt: row.last_checked_at,
+      lastSeenPresentAt: row.last_seen_present_at,
+    }));
   }
 
   /**
@@ -1895,6 +1998,8 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     getLibraryItem,
     getLibraryItemByIdentityKey,
     unpublishLibraryItem,
+    recordConsumerObservation,
+    listConsumerObservations,
     listAllLibraryItems,
     listLibraryItems,
     getActiveCanonicalPath,

@@ -28,6 +28,8 @@ import { createRequestIntent } from '../lib/requests/intent.js';
 import { bindPlexMetricsSink, openSeasonFanOutScope } from '../lib/requests/plex-notifier.js';
 import { unpublishMedia } from '../lib/library/unpublish.js';
 import { listLibrary } from '../lib/library/listing.js';
+import { runReconcile } from '../lib/consumers/reconcile.js';
+import { evaluateRetirement, readRetirementPolicy } from '../lib/consumers/eligibility.js';
 import { setPlexRefreshAccount } from '../lib/metrics.js';
 import {
   buildSeerrIntent,
@@ -2237,6 +2239,69 @@ export function createRequestHandler(dependencies = {}) {
             mediaType,
           });
           return sendJson(response, 200, { generatedAt: clock(), ...result });
+        } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
+      }
+      // Consumer reconciliation: record presence/absence/UNKNOWN of
+      // published items in playback-consumer libraries and, only when the
+      // retirement policy enables it (default OFF), retire ELIGIBLE items
+      // via the existing safe-unpublish path. See lib/consumers/.
+      if (request.method === 'POST' && url.pathname === '/api/library/reconcile') {
+        requireControlPlaneStore(controlPlaneStore);
+        try {
+          const summary = await runReconcile({ cache: searchCache, controlPlaneStore });
+          return sendJson(response, 200, summary);
+        } catch (err) {
+          return sendJson(response, 500, { error: err.message });
+        }
+      }
+      // Retirement dry-run planner: eligibility per published item with
+      // exact ineligibility reasons. Read-only; never retires.
+      if (request.method === 'GET' && url.pathname === '/api/library/retirement') {
+        requireControlPlaneStore(controlPlaneStore);
+        try {
+          const policy = readRetirementPolicy();
+          const { items } = listLibrary({ cache: searchCache, controlPlaneStore, limit: 500 });
+          const now = clock();
+          const evaluations = items
+            .filter((item) => item.state === 'published')
+            .map((item) => {
+              const rows = controlPlaneStore.listConsumerObservations({
+                mediaId: item.mediaId,
+              }).filter((o) => (o.season ?? null) === (item.season ?? null)
+                && (o.episode ?? null) === (item.episode ?? null));
+              // Presence detail is computed with the gate lifted so the
+              // dry-run stays informative while disabled; eligibility
+              // itself still honors the real policy below.
+              const detail = evaluateRetirement(
+                item, rows, { ...policy, enabled: true }, now,
+              );
+              const evalResult = policy.enabled
+                ? detail
+                : { ...detail, eligible: false, reason: 'POLICY_DISABLED' };
+              return {
+                mediaId: item.mediaId,
+                season: item.season,
+                episode: item.episode,
+                title: item.title,
+                state: item.state,
+                presence: evalResult.presence,
+                absenceAgeMs: evalResult.absenceAgeMs,
+                eligible: evalResult.eligible,
+                reason: evalResult.reason,
+              };
+            });
+          return sendJson(response, 200, {
+            generatedAt: now,
+            policy: {
+              enabled: policy.enabled,
+              absenceGraceMs: policy.absenceGraceMs,
+              observationMaxAgeMs: policy.observationMaxAgeMs,
+              requiredConsumers: policy.requiredConsumers,
+            },
+            evaluations,
+          });
         } catch (err) {
           return sendJson(response, 400, { error: err.message });
         }
