@@ -2452,11 +2452,15 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                 continue;
                             }
 
-else if auto_go(sub.len())
+else if stripe_wanted(sub.len())
                                 && shared_cap_fallback()
                                 && fr.is_some()
                                 && sub.len() >= 2
                             {
+                                // Fixed-half shared-cap from ONE live reservation:
+                                // explicit TWO_SPAN or qualifying AUTO engages;
+                                // no second warm standby is required (distinct-cap
+                                // stays preferred above when one genuinely exists).
                                 let half = (sub.len() + 1) / 2;
                                 let (sub_a, sub_b) =
                                     (sub[..half].to_vec(), sub[half..].to_vec());
@@ -2501,6 +2505,12 @@ else if auto_go(sub.len())
                                 let (atx, arx) = mpsc::channel::<SpanMsg>(32);
                                 let (btx, brx) = mpsc::channel::<SpanMsg>(32);
                                 let sub_b0 = sub_b[0];
+                                // Fixed-half lane accounting: this path bypasses the
+                                // shared-cap coordinator worker, so record the actual
+                                // per-lane chunk assignment here (assignment, like
+                                // the steal worker, not completion).
+                                metrics.cache.scheduler_lane_a_chunks.fetch_add(sub_a.len() as u64, Ordering::SeqCst);
+                                metrics.cache.scheduler_lane_b_chunks.fetch_add(sub_b.len() as u64, Ordering::SeqCst);
                                 tokio::spawn(fill_chunk_run_shared_child(
                                     cache.clone(),
                                     metrics.clone(),
@@ -2545,8 +2555,8 @@ else if auto_go(sub.len())
 
                             // ---- Slice 4.5 G: record WHY this fetch happens,
                             // including the grid's effect on the Range we issue.
-                            // Exact existing single-fill path (gate OFF, or
-                            // gate ON without a second warm cap).
+                            // Exact existing single-fill path (gates OFF, or
+                            // gates ON without any two-lane engagement).
                             cache.metrics.cache_decisions.push(CacheDecision {
                                 request: (start, end),
                                 present_before: present_before.clone(),

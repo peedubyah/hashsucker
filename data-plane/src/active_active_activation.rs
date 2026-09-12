@@ -259,6 +259,73 @@ fn build_stack(port: u16, caps: Vec<WarmCap>) -> Stack {
     }
 }
 
+/// Build a true-cold demand stack: slots/coords exist but the pool holds zero
+/// warm caps, so the demand's own `acquire_for_read` mints the single
+/// capability via the `HY4_TEST_ACQUIRE_*` stub (set by the caller).
+fn build_cold_stack(port: u16) -> Stack {
+    let tmp = tempfile::tempdir().unwrap();
+    let metrics = Arc::new(Metrics::default());
+    let cache = CacheEngine::open(
+        CacheConfig {
+            root: tmp.path().join("c"),
+            max_bytes: 64 << 20,
+            chunk_size: CHUNK,
+        },
+        metrics.clone(),
+    )
+    .unwrap();
+    let coords: Vec<ProviderCoord> = vec![ProviderCoord {
+        provider: "torbox".into(),
+        account_scope: "test".into(),
+        provider_resource_id: "res-a".into(),
+        provider_file_id: "file-res-a".into(),
+        state: "ready".into(),
+        canonical_internal_path: Some(PATH.into()),
+        size: FILE,
+    }];
+    let control_tf = ControlTorrentFile {
+        id: TF_ID.into(),
+        info_hash: INFO_HASH.into(),
+        canonical_internal_path: Some(PATH.into()),
+        size: FILE,
+    };
+    let client = reqwest::Client::new();
+    let manager = Arc::new(CapabilityManager::new(
+        control_tf,
+        coords,
+        ApiKeys {
+            torbox: String::new(),
+            realdebrid: String::new(),
+        },
+        client.clone(),
+        metrics.clone(),
+    ));
+    let playback = PlaybackIntelligence::new(PfConfig {
+        enabled: false,
+        ahead_chunks: 1,
+        sequential_threshold: 3,
+        prefetch_priority: 0,
+        mode: PrefetchMode::Try,
+    });
+    let state = Arc::new(AppState {
+        authoritative_size: FILE,
+        tf_id: TF_ID.into(),
+        tf_id_durable: TF_ID.into(),
+        info_hash: INFO_HASH.into(),
+        canonical_path: PATH.into(),
+        client: client.clone(),
+        metrics: metrics.clone(),
+        manager: manager.clone(),
+        cache: Some(cache),
+        playback,
+    });
+    Stack {
+        state,
+        metrics,
+        _tmp: tmp,
+    }
+}
+
 struct DemandOutcome {
     status: StatusCode,
     bytes: Vec<u8>,
@@ -664,4 +731,68 @@ async fn t14_single_lane_when_shared_cap_off() {
     );
     server.abort();
     cleanup_gates();
+}
+
+// ---- Proof 9: explicit TWO_SPAN + shared_cap activates fixed-half from ONE cold capability ----
+// No AUTO, no STEAL, empty pool (true cold: the demand's own acquire mints the
+// single capability). The fixed-half shared-cap branch must engage from that
+// one live reservation: two disjoint Ranges, exact bytes, exactly one
+// acquisition (the demand's own), and lane counters reflecting actual lane work.
+#[tokio::test]
+async fn t14_two_span_shared_cap_cold_single_cap() {
+    let _guard = env_lock();
+    set_two_span(true);
+    set_steal(false);
+    set_retire(false);
+    set_auto(false);
+    set_min_chunks(None);
+    std::env::set_var("HY4_CROSS_PROVIDER_STANDBY", "1");
+    std::env::set_var("HY4_ACTIVE_ACTIVE_SHARED_CAP", "1");
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let (port, server) = spawn_mock(Arc::new(Mutex::new(HashMap::from([
+        ("/la".to_string(), Mode::Full),
+    ]))), hits.clone()).await;
+    // True cold: no pre-injected warm caps; the acquire stub mints the one cap.
+    std::env::set_var("HY4_TEST_ACQUIRE_BASE_URL", format!("http://127.0.0.1:{port}"));
+    std::env::set_var(
+        "HY4_TEST_ACQUIRE_URL_TORBOX",
+        format!("http://127.0.0.1:{port}/la"),
+    );
+    let stack = build_cold_stack(port);
+    let api0 = stack.metrics.api_requests.load(Ordering::SeqCst);
+    let lane_a0 = stack.metrics.cache.scheduler_lane_a_chunks.load(Ordering::SeqCst);
+    let lane_b0 = stack.metrics.cache.scheduler_lane_b_chunks.load(Ordering::SeqCst);
+    let out = demand(&stack.state, 0, SPAN6_END).await;
+    assert_eq!(out.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(out.bytes, expected_range(0, SPAN6_END), "P9: bytes exact");
+    {
+        let h = hits.lock().unwrap();
+        assert_eq!(h.len(), 2, "P9: two concurrent Ranges (shared-cap), got {h:?}");
+        let ranges = sorted_ranges(&h);
+        assert_eq!(
+            ranges,
+            vec![(0, 3 * CHUNK - 1), (3 * CHUNK, SPAN6_END)],
+            "P9: disjoint halves"
+        );
+    }
+    assert_eq!(
+        stack.metrics.api_requests.load(Ordering::SeqCst) - api0,
+        1,
+        "P9: exactly one acquisition (the demand's own cold acquire; lane B adds none)"
+    );
+    assert_eq!(
+        stack.metrics.cache.scheduler_lane_a_chunks.load(Ordering::SeqCst) - lane_a0,
+        3,
+        "P9: lane A counter reflects fixed-half work"
+    );
+    assert_eq!(
+        stack.metrics.cache.scheduler_lane_b_chunks.load(Ordering::SeqCst) - lane_b0,
+        3,
+        "P9: lane B counter reflects fixed-half work"
+    );
+    server.abort();
+    cleanup_gates();
+    std::env::remove_var("HY4_ACTIVE_ACTIVE_SHARED_CAP");
+    std::env::remove_var("HY4_TEST_ACQUIRE_BASE_URL");
+    std::env::remove_var("HY4_TEST_ACQUIRE_URL_TORBOX");
 }
