@@ -50,9 +50,18 @@ services:
     ports:
       - "${MEDIA_SEARCH_BIND_ADDRESS:-127.0.0.1}:${MEDIA_SEARCH_PORT:-3000}:3000"
     volumes:
-      - ${DISCOVERY_HOST_PATH:-./hy4-data/discovery}:/data
-      - ${REQUESTS_HOST_PATH:?Set REQUESTS_HOST_PATH in .env}:/requests
-      - ${STRM_HOST_PATH:-./hy4-data/strm}:/strm
+      # Collapsed host-path contract (first-run tranche): two roots cover
+      # everything. Legacy single-purpose vars still win when explicitly
+      # set; otherwise each mount derives from its root.
+      #   HASHSUCKER_DATA_PATH  private state: discovery DBs, queue,
+      #                         importer state, download staging
+      #   HASHSUCKER_MEDIA_PATH consumer-visible media: STRM files
+      #                         (this is the path Plex/Jellyfin must see)
+      # hy4-cache stays a named volume: container-managed cache bytes with
+      # no host-sharing need (avoids bind copy-up surprises).
+      - ${DISCOVERY_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/discovery}:/data
+      - ${REQUESTS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/queue}:/requests
+      - ${STRM_HOST_PATH:-${HASHSUCKER_MEDIA_PATH:-./hy4-media}/strm}:/strm
     group_add:
       - "${MEDIA_SEARCH_QUEUE_GID:-100}"
     security_opt:
@@ -84,10 +93,10 @@ services:
       SONARR_URL: ${SONARR_URL:-}
       SONARR_API_KEY: ${SONARR_API_KEY:-}
     volumes:
-      - ${TORBOX_IMPORTER_HOST_PATH:-./hy4-data/torbox-importer}:/config
-      - ${REQUESTS_HOST_PATH:?Set REQUESTS_HOST_PATH in .env}:/requests
-      - ${DOWNLOADS_HOST_PATH:-./hy4-data/downloads}:/downloads
-      - ${STRM_HOST_PATH:-/tmp/strm}:/strm
+      - ${TORBOX_IMPORTER_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/torbox-importer}:/config
+      - ${REQUESTS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/queue}:/requests
+      - ${DOWNLOADS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/downloads}:/downloads
+      - ${STRM_HOST_PATH:-${HASHSUCKER_MEDIA_PATH:-./hy4-media}/strm}:/strm
     security_opt:
       - no-new-privileges:true
 

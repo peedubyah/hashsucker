@@ -355,6 +355,114 @@ test('stuck bootstrapping without revision recovers to absent', async () => {
   }
 });
 
+test('stuck bootstrapping with imported candidates recovers to usable-partial', async () => {
+  const cache = (await import('../src/lib/discovery/cache.js')).createDiscoveryCache();
+  try {
+    const lc = lifecycle(cache, {});
+    void lc.getState();
+    cache.db.exec(`UPDATE corpus_state SET state='bootstrapping', imported_revision=NULL, candidate_count=41, last_check=1000 WHERE id=1`);
+    const t = lc.tick({ intervalMs: 6 * 60 * 60 * 1000, autoBootstrap: false });
+    assert.equal(t.action, 'idle-absent');
+    assert.equal(lc.getState().state, CORPUS_STATES.USABLE_PARTIAL);
+  } finally {
+    cache.close();
+  }
+});
+
+test('stuck bootstrapping recovers via candidate-table probe when counters predate', async () => {
+  const cache = (await import('../src/lib/discovery/cache.js')).createDiscoveryCache();
+  try {
+    const lc = lifecycle(cache, {});
+    void lc.getState();
+    // Old-code partial: counters never written mid-run, but a candidate
+    // row exists from the killed session.
+    cache.db.prepare(`INSERT INTO candidates (info_hash, file_index, file_index_key, filename, size, first_seen, last_seen, metadata, sources)
+      VALUES ('aa', 0, -1, 'M.2020.1080p.mkv', 100, 1, 1, '{}', '[]')`).run();
+    cache.db.exec(`UPDATE corpus_state SET state='bootstrapping', imported_revision=NULL, candidate_count=NULL, fragment_count=NULL, last_check=1000 WHERE id=1`);
+    const t = lc.tick({ intervalMs: 6 * 60 * 60 * 1000, autoBootstrap: false });
+    assert.equal(t.action, 'idle-absent');
+    assert.equal(lc.getState().state, CORPUS_STATES.USABLE_PARTIAL);
+  } finally {
+    cache.close();
+  }
+});
+
+function fiveFragmentSource(fetchLog = []) {
+  const recs = {};
+  const frags = {};
+  for (let i = 1; i <= 5; i++) {
+    recs[`f${i}.html`] = fragmentHtml([{ filename: `Movie.${i}.2020.1080p.mkv`, hash: `aabbccddeeff00112233445566778899aabbcc0${i}`, bytes: 1000 * i }]);
+  }
+  return stubSource(recs, fetchLog);
+}
+
+test('bounded sessions never claim the revision until fully covered', async () => {
+  const cache = createDiscoveryCache();
+  try {
+    const fetchLog = [];
+    const lc = lifecycle(cache, { source: fiveFragmentSource(fetchLog) });
+    assert.equal(lc.getState().state, CORPUS_STATES.ABSENT);
+    // Session 1: 2 of 5 fragments.
+    const r1 = await lc.bootstrap({ maxFragments: 2 });
+    assert.equal(r1.ok, true);
+    assert.equal(r1.complete, 2);
+    assert.equal(r1.boundedStop, true);
+    assert.equal(r1.remaining, 3);
+    let st = lc.getState();
+    assert.equal(st.state, CORPUS_STATES.USABLE_PARTIAL, 'partial progress serves, not wedges');
+    assert.equal(st.imported_revision, null, 'no revision claimed mid-bootstrap');
+    // Session 2: resumes past session 1 (no re-fetch), still partial.
+    const r2 = await lc.bootstrap({ maxFragments: 2 });
+    assert.equal(r2.complete, 2);
+    assert.equal(fetchLog.length, 4, 'session 1 fragments never re-fetched');
+    assert.equal(lc.getState().state, CORPUS_STATES.USABLE_PARTIAL);
+    assert.equal(lc.getState().imported_revision, null);
+    // Session 3: covers the remainder -> usable + revision pinned.
+    const r3 = await lc.bootstrap({ maxFragments: 2 });
+    assert.equal(r3.complete, 1);
+    assert.equal(r3.boundedStop, false);
+    assert.equal(fetchLog.length, 5);
+    st = lc.getState();
+    assert.equal(st.state, CORPUS_STATES.USABLE);
+    assert.equal(st.imported_revision, TREE_A);
+  } finally {
+    cache.close();
+  }
+});
+
+test('wall-clock cap stops the session without losing checkpoint', async () => {
+  const cache = createDiscoveryCache();
+  try {
+    const fetchLog = [];
+    const lc = lifecycle(cache, { source: fiveFragmentSource(fetchLog) });
+    const r = await lc.bootstrap({ maxFragments: 100, maxWallMs: 0 });
+    assert.equal(r.boundedStop, true);
+    assert.equal(r.complete, 0, 'cap trips before any fetch');
+    assert.equal(r.remaining, 5);
+    assert.equal(lc.getState().state, CORPUS_STATES.ABSENT, 'no progress, no partial claim');
+  } finally {
+    cache.close();
+  }
+});
+
+test('usable-partial without revision keeps bootstrapping on a short cadence', async () => {
+  const cache = createDiscoveryCache();
+  try {
+    const lc = lifecycle(cache, {});
+    void lc.getState();
+    const H = 6 * 60 * 60 * 1000;
+    cache.db.exec(`UPDATE corpus_state SET state='usable-partial', imported_revision=NULL, candidate_count=9, fragment_count=9, last_check=${Date.now()} WHERE id=1`);
+    const w = lc.tick({ intervalMs: H, autoBootstrap: true });
+    assert.equal(w.action, 'wait');
+    assert.ok(w.nextDueMs < H, `short session cadence, not 6h (got ${w.nextDueMs})`);
+    assert.ok(w.nextDueMs <= 2 * 60 * 1000 + 5000, 'bounded by the session pause');
+    cache.db.exec(`UPDATE corpus_state SET last_check=1000 WHERE id=1`);
+    assert.equal(lc.tick({ intervalMs: H, autoBootstrap: true }).action, 'bootstrap');
+  } finally {
+    cache.close();
+  }
+});
+
 test('unreadable database degrades tick to wait, never throws', async () => {
   const broken = { db: { exec: () => { throw new Error('disk I/O error'); }, prepare: () => { throw new Error('disk I/O error'); } } };
   const { createCorpusLifecycle: mk } = await import('../src/lib/discovery/corpus-lifecycle.js');

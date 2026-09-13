@@ -37,6 +37,7 @@ import {
   corpusUpdateIntervalMs,
   corpusAutoBootstrap,
   corpusMaintenanceEnabled,
+  bootstrapSessionPolicy,
 } from '../lib/discovery/corpus-lifecycle.js';
 import { createFutureIntentStore } from '../lib/anticipation/future-intents.js';
 import { createAnticipationScheduler } from '../lib/anticipation/scheduler.js';
@@ -109,10 +110,16 @@ function armCorpusTimer(delayMs) {
           autoBootstrap: corpusAutoBootstrap(process.env),
         });
         if (tick.action === 'bootstrap') {
-          console.log('media-search: corpus bootstrap starting (absent baseline)');
-          const result = await corpusLifecycle.bootstrap();
-          console.log(`media-search: corpus bootstrap done ok=${result.ok} complete=${result.complete ?? 0} failed=${result.failed ?? 0}`);
-          armCorpusTimer(corpusUpdateIntervalMs(process.env));
+          const session = bootstrapSessionPolicy();
+          console.log(`media-search: corpus bootstrap session starting (max ${session.maxFragments} fragments)`);
+          const result = await corpusLifecycle.bootstrap({
+            maxFragments: session.maxFragments,
+            maxWallMs: session.maxWallMs,
+          });
+          console.log(`media-search: corpus bootstrap session ok=${result.ok} complete=${result.complete ?? 0} failed=${result.failed ?? 0} boundedStop=${result.boundedStop ?? false} remaining=${result.remaining ?? 0}`);
+          // Bounded sessions continue soon (polite pause); a finished
+          // baseline returns to the cheap periodic delta cadence.
+          armCorpusTimer(result.boundedStop ? session.pauseMs : corpusUpdateIntervalMs(process.env));
         } else if (tick.action === 'update') {
           const result = await corpusLifecycle.updateOnce();
           console.log(`media-search: corpus update ok=${result.ok} changed=${result.changed ?? false} reason=${result.reason ?? '-'}`);

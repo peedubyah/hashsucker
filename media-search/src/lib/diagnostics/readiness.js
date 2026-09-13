@@ -353,19 +353,29 @@ function corpusSummary(cache, env = process.env) {
     } catch {
       out.enrichmentQueued = 0;
     }
-    // Live progress while a run is in flight.
-    if (row.state === 'bootstrapping' || row.state === 'updating') {
+    // Live progress while a run is in flight; between bounded bootstrap
+    // sessions fall back to the latest run total + durable fragment count.
+    if (row.state === 'bootstrapping' || row.state === 'updating' || row.state === 'usable-partial') {
       try {
         const run = db.prepare(`SELECT id, fragments_discovered AS total FROM dmm_ingestion_runs
-          WHERE status = 'running' ORDER BY id DESC LIMIT 1`).get();
+          WHERE status = 'running' ORDER BY id DESC LIMIT 1`).get()
+          ?? db.prepare(`SELECT id, fragments_discovered AS total FROM dmm_ingestion_runs
+          ORDER BY id DESC LIMIT 1`).get();
         if (run) {
-          const done = db.prepare(`SELECT COUNT(*) AS n FROM dmm_fragments WHERE run_id = ? AND status = 'complete'`).get(run.id)?.n ?? 0;
+          const done = run.status === 'running'
+            ? (db.prepare(`SELECT COUNT(*) AS n FROM dmm_fragments WHERE run_id = ? AND status = 'complete'`).get(run.id)?.n ?? 0)
+            : (row.fragment_count ?? 0);
           out.progress = { complete: done, total: run.total ?? null };
         }
       } catch {
         // Progress is best-effort.
       }
     }
+    // Usable-now signal for first-run ergonomics: requests work while the
+    // corpus is still improving (live sources carry). Usable-partial with
+    // imported candidates is serving, not broken.
+    out.usable = row.state === 'usable' || row.state === 'usable-partial'
+      || ((row.candidate_count ?? 0) > 0 && row.state !== 'degraded');
     return out;
   } catch {
     return { state: 'unknown', detail: 'corpus state unreadable' };

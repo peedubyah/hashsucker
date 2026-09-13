@@ -23,10 +23,33 @@ import { runAttributeWorker } from './attribute-worker.js';
 export const CORPUS_STATES = Object.freeze({
   ABSENT: 'absent',
   BOOTSTRAPPING: 'bootstrapping',
+  // Partially bootstrapped but serving: candidates imported, revision
+  // not yet fully covered. Requests work (live sources carry); the
+  // scheduler keeps running bounded sessions until usable.
+  USABLE_PARTIAL: 'usable-partial',
   USABLE: 'usable',
   UPDATING: 'updating',
   DEGRADED: 'degraded',
 });
+
+// Bounded bootstrap sessions (first-run tranche): measured ~250
+// fragments/min on reference hardware; 1000 fragments ≈ 4 min of polite
+// background work, then checkpoint + yield. Crash/restart loses at most
+// the current session (fragment provenance is per-fragment durable).
+const BOOTSTRAP_SESSION_FRAGMENTS = 1000;
+const BOOTSTRAP_SESSION_MAX_MS = 8 * 60 * 1000;
+const BOOTSTRAP_SESSION_PAUSE_MS = 2 * 60 * 1000;
+const BOOTSTRAP_ATTRIBUTE_LIMIT = 5000;
+
+/** Session policy for first-run bootstrap (single source for ticker + tests). */
+export function bootstrapSessionPolicy() {
+  return {
+    maxFragments: BOOTSTRAP_SESSION_FRAGMENTS,
+    maxWallMs: BOOTSTRAP_SESSION_MAX_MS,
+    pauseMs: BOOTSTRAP_SESSION_PAUSE_MS,
+    attributeLimit: BOOTSTRAP_ATTRIBUTE_LIMIT,
+  };
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS corpus_state (
@@ -285,14 +308,36 @@ export function createCorpusLifecycle({
     /**
      * Bootstrap from an empty (or partial) data directory to a usable
      * corpus. Resumable: fragments already complete for the target tree
-     * are skipped; candidate upserts are idempotent. Never advertises
-     * partial state as usable.
+     * are skipped; candidate upserts are idempotent.
+     *
+     * Bounded sessions (first-run tranche): maxFragments caps fragments
+     * per call and maxWallMs caps wall time; reaching either stops the
+     * session WITHOUT claiming the revision (boundedStop=true) so the
+     * scheduler can checkpoint, yield, and resume. Only a session that
+     * covers every remaining fragment with zero failures advances the
+     * revision to usable. Partial progress advertises usable-partial
+     * (serving) rather than wedging on bootstrapping or crying degraded.
      */
-    async bootstrap({ maxFragments = null, onProgress = null } = {}) {
+    async bootstrap({ maxFragments = null, maxWallMs = null, onProgress = null } = {}) {
       if (inFlight) return { ok: false, reason: 'already-in-flight' };
       inFlight = true;
       const prior = readState(db);
-      writeState(db, { state: CORPUS_STATES.BOOTSTRAPPING, last_error: null, last_check: now() }, now);
+      // Session start must not lie about serving state: when candidates
+      // are already imported (resume/continuation), the session runs
+      // under usable-partial, not bootstrapping, so diagnostics keep
+      // reporting usable:true while the corpus improves. Single-flight
+      // within the process is still guarded by inFlight above.
+      let servingAlready = !!prior.imported_revision
+        || (prior.candidate_count ?? 0) > 0 || (prior.fragment_count ?? 0) > 0;
+      if (!servingAlready) {
+        try {
+          servingAlready = !!db.prepare('SELECT 1 AS ok FROM candidates LIMIT 1').get();
+        } catch {}
+      }
+      writeState(db, {
+        state: prior.imported_revision ? prior.state : (servingAlready ? CORPUS_STATES.USABLE_PARTIAL : CORPUS_STATES.BOOTSTRAPPING),
+        last_error: null, last_check: now(),
+      }, now);
       const t0 = now();
       let runId = null;
       let complete = 0, failed = 0, rawRecords = 0, accepted = 0;
@@ -304,11 +349,18 @@ export function createCorpusLifecycle({
         let fragments = listing.fragments || [];
         const done = completedForTree(treeSha);
         fragments = fragments.filter((f) => !done.has(f.name || f.url));
+        const remainingTotal = fragments.length;
         if (maxFragments != null) fragments = fragments.slice(0, maxFragments);
         log(`corpus bootstrap tree=${String(treeSha).slice(0, 8)} fragments=${fragments.length} skipped=${done.size}`);
         runId = openRun({ treeSha, discovered: fragments.length });
         const failures = [];
+        const baseFragmentCount = prior.fragment_count ?? 0;
+        let cappedByWall = false;
         for (const fragment of fragments) {
+          if (maxWallMs != null && now() - t0 >= maxWallMs) {
+            cappedByWall = true;
+            break;
+          }
           const name = fragment.name || fragment.url;
           try {
             const html = await source.fetchFragment(fragment.url);
@@ -327,35 +379,68 @@ export function createCorpusLifecycle({
             failures.push(`${name}: ${msg}`);
             recordFragment(runId, { name, url: fragment.url, status: 'failed', error: msg });
           }
+          // Periodic durable progress so a kill loses at most the current
+          // batch and diagnostics can report between sessions.
+          if ((complete + failed) % 50 === 0) {
+            try {
+              writeState(db, { fragment_count: baseFragmentCount + complete }, now);
+            } catch {}
+          }
           if (onProgress) onProgress({ complete, failed, total: fragments.length });
         }
-        // Attribute parsing over newly-ingested candidates (idempotent).
+        // Attribute parsing over newly-ingested candidates (idempotent,
+        // bounded per session so the pass cannot dominate a session).
         let attrStats = null;
         try {
           const { runAttributeWorker } = await import('./attribute-worker.js');
-          attrStats = await runAttributeWorker(cache, { limit: undefined });
+          attrStats = await runAttributeWorker(cache, { limit: BOOTSTRAP_ATTRIBUTE_LIMIT });
         } catch (err) {
           log(`corpus bootstrap attribute pass failed: ${err?.message || err}`);
         }
         const candidateCount = db.prepare('SELECT COUNT(*) AS n FROM candidates').get()?.n ?? null;
-        const status = failed === 0 ? 'complete' : 'incomplete';
+        const coveredAll = !cappedByWall && (complete + failed) >= remainingTotal;
+        const status = failed === 0 && coveredAll ? 'complete' : 'incomplete';
         closeRun(runId, { complete, failed, rawRecords, accepted, status });
-        if (failed === 0) {
+        const boundedStop = !coveredAll;
+        const hasServing = complete > 0 || (candidateCount ?? 0) > 0 || prior.imported_revision;
+        if (failed === 0 && coveredAll) {
           writeState(db, {
             state: CORPUS_STATES.USABLE, imported_revision: treeSha,
             last_success: now(), last_error: null, consecutive_failures: 0,
-            candidate_count: candidateCount, fragment_count: complete,
+            candidate_count: candidateCount, fragment_count: baseFragmentCount + complete,
+          }, now);
+        } else if (boundedStop && failed === 0) {
+          // Clean session slice, not a failure: keep the serving position
+          // (usable-partial once anything is imported), never claim a
+          // revision the session did not fully cover, and do NOT touch
+          // failure accounting or raise degraded. The scheduler resumes
+          // shortly on the session cadence.
+          writeState(db, {
+            state: hasServing && !prior.imported_revision
+              ? CORPUS_STATES.USABLE_PARTIAL
+              : (prior.state ?? CORPUS_STATES.ABSENT),
+            candidate_count: candidateCount, fragment_count: baseFragmentCount + complete,
+          }, now);
+        } else if (hasServing) {
+          // Genuine failures with something serving: usable-partial when
+          // no revision is claimed yet, else keep the existing usable
+          // baseline. Never claim a revision the session did not cover.
+          writeState(db, {
+            state: prior.imported_revision ? CORPUS_STATES.USABLE : CORPUS_STATES.USABLE_PARTIAL,
+            last_error: `bootstrap ${complete} ok / ${failed} failed: ${failures.slice(0, 3).join('; ')}`,
+            consecutive_failures: (prior.consecutive_failures ?? 0) + 1,
+            candidate_count: candidateCount, fragment_count: baseFragmentCount + complete,
           }, now);
         } else {
-          // Partial bootstrap: keep prior usable state if one existed,
-          // otherwise degraded (live-only discovery continues).
+          // Nothing serving and nothing new: prior usable baseline keeps
+          // serving, otherwise degraded (live-only discovery continues).
           writeState(db, {
             state: prior.imported_revision ? CORPUS_STATES.USABLE : CORPUS_STATES.DEGRADED,
             last_error: `bootstrap ${complete} ok / ${failed} failed: ${failures.slice(0, 3).join('; ')}`,
             consecutive_failures: (prior.consecutive_failures ?? 0) + 1,
           }, now);
         }
-        return { ok: failed === 0, treeSha, complete, failed, rawRecords, accepted, wallMs: now() - t0, attrStats: attrStats ? true : false };
+        return { ok: failed === 0, boundedStop, remaining: Math.max(0, remainingTotal - complete - failed), treeSha, complete, failed, rawRecords, accepted, wallMs: now() - t0, attrStats: attrStats ? true : false };
       } catch (err) {
         try {
           if (runId != null) closeRun(runId, { complete, failed, rawRecords, accepted, status: 'incomplete' });
@@ -489,8 +574,20 @@ export function createCorpusLifecycle({
       let cur = readState(db);
       if (!inFlight && (cur.state === CORPUS_STATES.UPDATING || cur.state === CORPUS_STATES.BOOTSTRAPPING)) {
         try {
+          // Resume position: usable when a revision exists, usable-partial
+          // when candidates were imported but no revision is claimed yet,
+          // else absent. Candidate presence is an O(1) existence probe
+          // (state counters may predate partial imports from older code).
+          // Fragment-level resume data makes the retry cheap.
+          let partial = !cur.imported_revision
+            && ((cur.candidate_count ?? 0) > 0 || (cur.fragment_count ?? 0) > 0);
+          if (!partial && !cur.imported_revision) {
+            try {
+              partial = !!db.prepare('SELECT 1 AS ok FROM candidates LIMIT 1').get();
+            } catch {}
+          }
           writeState(db, {
-            state: cur.imported_revision ? CORPUS_STATES.USABLE : CORPUS_STATES.ABSENT,
+            state: cur.imported_revision ? CORPUS_STATES.USABLE : (partial ? CORPUS_STATES.USABLE_PARTIAL : CORPUS_STATES.ABSENT),
             last_error: `recovered stuck ${cur.state} after restart`,
           }, now);
         } catch {
@@ -505,10 +602,16 @@ export function createCorpusLifecycle({
       const backoff = Math.min(cur.consecutive_failures ?? 0, 3);
       const dueIn = (cur.last_check ?? 0) + intervalMs * 2 ** backoff - now();
       if (!cur.imported_revision) {
-        // Absent (or failed bootstrap with nothing usable): bootstrap when
-        // due, never in a hot loop. Discovery stays live-only meanwhile.
+        // Absent or partially bootstrapped (no claimed revision): bootstrap
+        // when due, never in a hot loop. Bounded sessions continue on a
+        // SHORT cadence (session pause, backed off under persistent
+        // failure) — not the 6 h steady-state cadence — so a fresh install
+        // converges in about an hour of polite background work instead of
+        // one giant foreground run. Discovery stays live-only meanwhile.
         if (!autoBootstrap) return { action: 'idle-absent' };
-        if (dueIn > 0) return { action: 'wait', nextDueMs: dueIn };
+        const sessionDueIn = (cur.last_check ?? 0)
+          + BOOTSTRAP_SESSION_PAUSE_MS * 2 ** backoff - now();
+        if (sessionDueIn > 0) return { action: 'wait', nextDueMs: sessionDueIn };
         return { action: 'bootstrap' };
       }
       if (dueIn > 0) return { action: 'wait', nextDueMs: dueIn };
