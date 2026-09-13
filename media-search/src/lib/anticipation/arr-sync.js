@@ -210,7 +210,7 @@ export function createArrSync({
 }
 
 /** Apply descriptors to the intent store (insert/refresh + unmonitored withdraw). Visible for tests. */
-export function applyDescriptors(store, descriptors, { prepareDays = 30, nowMs = Date.now() } = {}) {
+export function applyDescriptors(store, descriptors, { prepareDays = 30, tvPrepareDays = 3, nowMs = Date.now() } = {}) {
   const existing = store.listArrSources();
   const { upserts, unmonitoredSources, skipped } = diffArrIntents(descriptors, existing);
   let applied = 0;
@@ -223,10 +223,13 @@ export function applyDescriptors(store, descriptors, { prepareDays = 30, nowMs =
       source: u.source,
       expectedAt: u.expectedAt,
     });
+    // TV episodes use the tighter series window: an episode weeks out
+    // must not burn discovery on every sync the way movies may.
+    const windowDays = u.mediaType === 'series' ? tvPrepareDays : prepareDays;
     store.refreshArr(intent.id, {
       expectedAt: u.expectedAt,
       satisfied: u.satisfied,
-      nextCheckAt: arrNextCheck({ expectedAt: u.expectedAt, satisfied: u.satisfied }, nowMs, { prepareDays }),
+      nextCheckAt: arrNextCheck({ expectedAt: u.expectedAt, satisfied: u.satisfied }, nowMs, { prepareDays: windowDays }),
     });
     applied++;
   }

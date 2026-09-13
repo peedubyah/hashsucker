@@ -17,6 +17,7 @@
  */
 import { INTENT_STATES, intentBackoffMs } from './future-intents.js';
 import { DEFER_REASONS } from '../defers/seerr-defer.js';
+import { judgeReleaseQuality, ANTICIPATION_QUALITY } from './quality-gate.js';
 import { probeByteReady, prewarmRanges } from './prewarm.js';
 import { unpublishMedia } from '../library/unpublish.js';
 
@@ -37,6 +38,14 @@ export function createAnticipationScheduler({
   log = () => {},
   prepareDays = 30,
   publishDays = 7,
+  // TV episodes become useful at airtime, not weeks out: much tighter
+  // internal windows (no new env surface — one media-type policy).
+  tvPrepareDays = 3,
+  tvPublishDays = 1,
+  // Near-release quality protection horizon: the speculative-publication
+  // quality floor applies while the release is upcoming or fresh.
+  // Older catalog falls back to the ranker's existing behavior bit-for-bit.
+  qualityHorizonDays = 90,
 } = {}) {
   if (!store) throw new Error('anticipation scheduler requires store');
   if (!baseUrl) throw new Error('anticipation scheduler requires baseUrl');
@@ -61,6 +70,59 @@ export function createAnticipationScheduler({
     }
   }
 
+  function windowsFor(intent) {
+    if (intent.media_type === 'series') return { prepareDays: tvPrepareDays, publishDays: tvPublishDays };
+    return { prepareDays, publishDays };
+  }
+
+  /**
+   * Whether the speculative-publication quality floor applies to this
+   * intent right now: expected date known AND the release is upcoming
+   * or fresh (inside the quality horizon). Older/undated catalog keeps
+   * the ranker's existing behavior bit-for-bit — the floor protects
+   * near-release anticipation, never rewrites interactive semantics.
+   */
+  function qualityGateActive(intent, nowMs) {
+    const exp = intent.expected_at;
+    if (exp == null) return false;
+    return exp > nowMs - qualityHorizonDays * 86400 * 1000;
+  }
+
+  /**
+   * Pick the winning candidate out of a prepare response for quality
+   * judging: the ranker's SELECTED candidate matched back into results
+   * (exact attrs), else the top-ranked result, else the persisted
+   * handoff filename (reuse responses carry no results). Returns null
+   * when nothing describes a winner.
+   */
+  function pickPrepareWinner(json) {
+    if (!json) return null;
+    const results = Array.isArray(json.results) ? json.results : [];
+    const selHash = (json.selection?.selected?.infoHash || '').toLowerCase() || null;
+    const selIdx = json.selection?.selected?.fileIndex ?? null;
+    if (selHash) {
+      const hit = results.find((r) =>
+        String(r.infoHash || '').toLowerCase() === selHash
+        && (selIdx == null || r.fileIndex == null || r.fileIndex === selIdx));
+      if (hit) {
+        return { filename: hit.filename ?? null, sourceType: hit.release?.source ?? null, infoHash: selHash };
+      }
+    }
+    const top = results[0];
+    if (top) {
+      return {
+        filename: top.filename ?? null,
+        sourceType: top.release?.source ?? null,
+        infoHash: (top.infoHash || '').toLowerCase() || null,
+      };
+    }
+    const ho = json.handoff;
+    if (ho && ho.filename) {
+      return { filename: ho.filename, sourceType: null, infoHash: (ho.infoHash || '').toLowerCase() || null };
+    }
+    return null;
+  }
+
   async function prepareIntent(intent) {
     const body = {
       mediaId: intent.media_id,
@@ -75,7 +137,33 @@ export function createAnticipationScheduler({
     if (r.status !== 200 || r.json?.prepared !== true || !r.json?.handoff?.torrentFileId) {
       return { ok: false, terminal: r.status === 400, error: r.json?.error || `prepare-http-${r.status}` };
     }
-    return { ok: true, torrentFileId: r.json.handoff.torrentFileId };
+    return { ok: true, torrentFileId: r.json.handoff.torrentFileId, winner: pickPrepareWinner(r.json), fresh: r.json?.alreadyPrepared !== true };
+  }
+
+  /**
+   * Quality probe: full discovery + ranking through the existing
+   * prepare endpoint with persist:false — zero writes, zero
+   * presentation. Returns the current market winner (or null when the
+   * market is empty) so the scheduler can judge quality before
+   * committing to publish. Transport failure → not-ok (caller re-parks;
+   * never treated as market evidence).
+   */
+  async function probeIntent(intent) {
+    const body = {
+      mediaId: intent.media_id,
+      mediaType: intent.media_type,
+      source: 'anticipation',
+      sourceType: 'future-intent-probe',
+      sourceId: `future-intent:${intent.id}`,
+      persist: false,
+    };
+    if (intent.season != null) body.season = intent.season;
+    if (intent.episode != null) body.episode = intent.episode;
+    const r = await post('/api/media-prepare', body, PREPARE_TIMEOUT_MS);
+    if (r.status !== 200) {
+      return { ok: false, error: r.json?.error || `probe-http-${r.status}` };
+    }
+    return { ok: true, winner: pickPrepareWinner(r.json) };
   }
 
   async function publishIntent(intent) {
@@ -172,16 +260,49 @@ export function createAnticipationScheduler({
           last_error: 'arr-satisfied', next_check_at: now() + PARKED_MS,
         });
       }
-      // Preparation window: far-future expectations sleep until the window.
+      // Preparation window: far-future expectations sleep until the
+      // window. TV episodes use the much tighter series window so an
+      // episode three weeks out costs zero discovery. The sleep reason
+      // is recorded so logs explain the wait.
       if (intent.expected_at != null) {
-        const windowStart = intent.expected_at - prepareDays * 86400 * 1000;
+        const windowStart = intent.expected_at - windowsFor(intent).prepareDays * 86400 * 1000;
         if (windowStart > now()) {
-          return done(INTENT_STATES.ANTICIPATED, { next_check_at: windowStart });
+          return done(INTENT_STATES.ANTICIPATED, {
+            last_error: 'outside-prepare-window', next_check_at: windowStart,
+          });
         }
       }
       const prep = await prepareIntent(intent);
       if (prep.ok) {
-        return done(INTENT_STATES.PREPARED, { torrent_file_id: prep.torrentFileId, next_check_at: now(), last_error: null });
+        // Speculative-publication quality floor (policy hardening):
+        // preparation persists whatever the ranker selects (durable
+        // intelligence, zero presentation), but only an acceptable
+        // release advances toward publication. Garbage/unknown winners
+        // park with an explicit reason; the intent stays alive and the
+        // market is re-probed on later ticks so a later WEB-DL upgrades
+        // naturally. Outside the near-release quality horizon the
+        // ranker's existing behavior applies bit-for-bit.
+        if (!qualityGateActive(intent, now())) {
+          return done(INTENT_STATES.PREPARED, { torrent_file_id: prep.torrentFileId, next_check_at: now(), last_error: null });
+        }
+        let verdict = ANTICIPATION_QUALITY.UNKNOWN;
+        if (prep.fresh && prep.winner) {
+          verdict = judgeReleaseQuality(prep.winner);
+        } else {
+          // Reuse responses carry no market data (already-prepared, no
+          // results) — judging the stale handoff would wedge the intent
+          // on yesterday's CAM forever. Probe the live market instead
+          // (zero writes); a probe transport failure parks cautiously.
+          const probe = await probeIntent(intent);
+          verdict = (probe.ok && probe.winner) ? judgeReleaseQuality(probe.winner) : ANTICIPATION_QUALITY.UNKNOWN;
+        }
+        if (verdict === ANTICIPATION_QUALITY.ACCEPTABLE) {
+          return done(INTENT_STATES.PREPARED, { torrent_file_id: prep.torrentFileId, next_check_at: now(), last_error: null });
+        }
+        return done(INTENT_STATES.ANTICIPATED, {
+          last_error: `waiting-for-acceptable-quality:${verdict}`,
+          next_check_at: now() + intentBackoffMs(intent.attempts),
+        });
       }
       if (prep.terminal || intent.attempts + 1 >= MAX_ATTEMPTS) {
         return done(INTENT_STATES.FAILED, { last_error: prep.error, next_check_at: now() + PARKED_MS });
@@ -199,11 +320,29 @@ export function createAnticipationScheduler({
       }
       // Publication window: preparation may run earlier, but consumer
       // publication + prewarm wait until use is near (prewarm costs
-      // ~142 MB/title and must not be spent months ahead).
+      // ~142 MB/title and must not be spent months ahead). TV episodes
+      // use the tighter series window. The sleep reason is recorded.
       if (intent.expected_at != null) {
-        const windowStart = intent.expected_at - publishDays * 86400 * 1000;
+        const windowStart = intent.expected_at - windowsFor(intent).publishDays * 86400 * 1000;
         if (windowStart > now()) {
-          return done(intent.state, { next_check_at: windowStart });
+          return done(intent.state, {
+            last_error: 'outside-publish-window', next_check_at: windowStart,
+          });
+        }
+      }
+      // Publish-side quality floor: re-probe the live market before
+      // presenting. Preparation may be older than the market (a CAM
+      // bound weeks ago); publication fires only with a freshly
+      // observed acceptable winner. Otherwise the row stays PREPARED —
+      // durable truth retained — and publication retries later.
+      if (qualityGateActive(intent, now())) {
+        const probe = await probeIntent(intent);
+        const verdict = (probe.ok && probe.winner) ? judgeReleaseQuality(probe.winner) : ANTICIPATION_QUALITY.UNKNOWN;
+        if (verdict !== ANTICIPATION_QUALITY.ACCEPTABLE) {
+          return done(intent.state, {
+            last_error: `waiting-for-acceptable-quality:${verdict}`,
+            next_check_at: now() + intentBackoffMs(intent.attempts),
+          });
         }
       }
       const pub = await publishIntent(intent);

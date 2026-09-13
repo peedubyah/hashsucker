@@ -1,6 +1,7 @@
 import { createControlPlaneStore } from '../lib/control-plane/store.js';
 import { createDiscoveryCache } from '../lib/discovery/cache.js';
 import { createApp } from './app.js';
+import { envNumber } from '../lib/config/env.js';
 import { createTorBoxInventoryProvider } from '../lib/providers/torbox-inventory.js';
 
 const port = Number(process.env.PORT || 3000);
@@ -140,17 +141,18 @@ if (corpusMaintenanceOn) {
 // never destroy serving state. No seeded intents = fully inert.
 // ANTICIPATION_ENABLED=0 disables. Interval default 15 min, first tick
 // 2 min after boot.
+//
+// Numeric parsing goes through envNumber (lib/config/env.js): blank or
+// whitespace compose values fall back to defaults instead of silently
+// becoming zero. Explicit "0" still means zero where the range allows it.
 function anticipationIntervalMs() {
-  const n = Number(process.env.FUTURE_INTENT_INTERVAL_MIN ?? 15);
-  return Number.isFinite(n) && n >= 1 ? n * 60 * 1000 : 15 * 60 * 1000;
+  return envNumber(process.env, 'FUTURE_INTENT_INTERVAL_MIN', { fallback: 15, min: 1 }) * 60 * 1000;
 }
 function anticipationPrepareDays() {
-  const n = Number(process.env.ANTICIPATION_PREPARE_DAYS ?? 30);
-  return Number.isFinite(n) && n >= 0 ? n : 30;
+  return envNumber(process.env, 'ANTICIPATION_PREPARE_DAYS', { fallback: 30, min: 0 });
 }
 function anticipationPublishDays() {
-  const n = Number(process.env.ANTICIPATION_PUBLISH_DAYS ?? 7);
-  return Number.isFinite(n) && n >= 0 ? n : 7;
+  return envNumber(process.env, 'ANTICIPATION_PUBLISH_DAYS', { fallback: 7, min: 0 });
 }
 const anticipationFlag = String(process.env.ANTICIPATION_ENABLED ?? '').toLowerCase();
 const anticipationOn = anticipationFlag !== '0' && anticipationFlag !== 'false';
@@ -208,8 +210,7 @@ if (anticipationOn) {
 // disabled. Failures leave existing intents intact; restarts do not
 // hammer Arr (last sync persists in arr_sync_state).
 function arrSyncIntervalMs() {
-  const n = Number(process.env.ARR_SYNC_INTERVAL_HOURS ?? 6);
-  return Number.isFinite(n) && n >= 0.5 ? n * 60 * 60 * 1000 : 6 * 60 * 60 * 1000;
+  return envNumber(process.env, 'ARR_SYNC_INTERVAL_HOURS', { fallback: 6, min: 0.5 }) * 60 * 60 * 1000;
 }
 const arrSyncClients = (() => {
   const out = {};
