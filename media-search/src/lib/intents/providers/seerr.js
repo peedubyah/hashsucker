@@ -49,6 +49,19 @@ const TEST_NOTIFICATION_TYPES = new Set([
   'TEST',
 ]);
 
+/**
+ * Notification types we treat as human cancellation of a prior request.
+ * MEDIA_DECLINED (request declined) and MEDIA_DELETED (media/request
+ * removed) withdraw still-pending deferred intent. Deliberately NOT
+ * MEDIA_FAILED: a failed download is a fulfillment problem, not a
+ * revoked human decision — it stays ignored here and remains retryable
+ * through the normal deferred path.
+ */
+const WITHDRAWAL_NOTIFICATION_TYPES = new Set([
+  'MEDIA_DECLINED',
+  'MEDIA_DELETED',
+]);
+
 const SEERR_PROVIDER_NAME = 'seerr';
 const SEERR_PROVIDER_TYPE = 'request';
 
@@ -196,6 +209,35 @@ export function buildSeerrIntent(body) {
   }
 
   if (!isApproval) {
+    // A human cancellation (declined/deleted request) is actionable as
+    // a withdrawal signal, not as new demand. The intent carries the
+    // Seerr request id so the handler can withdraw matching deferred
+    // rows by source prefix without any identity resolution.
+    if (notificationType && WITHDRAWAL_NOTIFICATION_TYPES.has(notificationType)) {
+      return {
+        ok: true,
+        intent: {
+          mediaId: identity.mediaId,
+          mediaType,
+          season: null,
+          episode: null,
+          source: SEERR_PROVIDER_NAME,
+          sourceType: SEERR_PROVIDER_TYPE,
+          sourceId: requestId,
+          sourceLabel: subject || null,
+          status: 'active',
+          priority: 100,
+          requestedBy: null,
+          imdbId: identity.imdbId,
+          tmdbId: identity.tmdbId,
+          tvdbId: identity.tvdbId,
+        },
+        withdrawal: true,
+        notificationType,
+        subject,
+        extra,
+      };
+    }
     // Not an approval-equivalent notification. Acknowledge but ignore.
     return {
       ignored: true,
@@ -451,5 +493,6 @@ export const SEERR_CONSTANTS = Object.freeze({
   NAME: SEERR_PROVIDER_NAME,
   TYPE: SEERR_PROVIDER_TYPE,
   APPROVAL_NOTIFICATION_TYPES: Array.from(APPROVAL_NOTIFICATION_TYPES),
+  WITHDRAWAL_NOTIFICATION_TYPES: Array.from(WITHDRAWAL_NOTIFICATION_TYPES),
   TEST_NOTIFICATION_TYPES: Array.from(TEST_NOTIFICATION_TYPES),
 });

@@ -381,6 +381,7 @@ function anticipationSummary(cache) {
   const empty = {
     state: 'ok', pending: 0, due: 0, preparing: 0, prepared: 0,
     awaitingBytes: 0, playable: 0, failed: 0, nextCheck: null,
+    deferredSeerr: 0, deferredByReason: {},
   };
   try {
     const db = cache?.db;
@@ -394,6 +395,20 @@ function anticipationSummary(cache) {
       WHERE state IN ('anticipated','failed','prepared','published_preparing','preparing')
       AND next_check_at <= ?`).get(nowMs)?.n ?? 0;
     const next = db.prepare('SELECT MIN(next_check_at) AS t FROM future_intents').get()?.t ?? null;
+    // Household deferred-request tranche: how many Seerr-deferred rows
+    // are waiting, and why. No babysitting — one glanceable breakdown.
+    let deferredSeerr = 0;
+    let deferredByReason = {};
+    try {
+      const cols = db.prepare('PRAGMA table_info(future_intents)').all().map((c) => c.name);
+      if (cols.includes('defer_reason')) {
+        const drows = db.prepare(`SELECT defer_reason AS reason, COUNT(*) AS n FROM future_intents
+          WHERE source LIKE 'seerr:%' AND state IN ('anticipated','failed')
+          GROUP BY defer_reason`).all();
+        deferredByReason = Object.fromEntries(drows.map((r) => [r.reason ?? 'unknown', r.n]));
+        deferredSeerr = Object.values(deferredByReason).reduce((a, b) => a + b, 0);
+      }
+    } catch {}
     return {
       ...empty,
       pending: byState.anticipated ?? 0,
@@ -404,6 +419,8 @@ function anticipationSummary(cache) {
       playable: byState.playable ?? 0,
       failed: (byState.failed ?? 0) + (byState.withdrawn ?? 0),
       nextCheck: next,
+      deferredSeerr,
+      deferredByReason,
     };
   } catch {
     return { state: 'unknown', detail: 'intent state unreadable' };

@@ -50,7 +50,11 @@ function buildCache() {
 }
 
 function buildHandler(cache) {
-  return createRequestHandler({ searchCache: cache });
+  // Harness drift fix (verified pre-existing on clean e971ec8):
+  // createRequestHandler unconditionally builds the playback revalidator
+  // chain, which requires a terminal evidence store. Seerr ingress never
+  // touches playback; an inert stub keeps these tests on the ingress path.
+  return createRequestHandler({ searchCache: cache, terminalEvidenceStore: { get: () => null, set: () => {} } });
 }
 
 async function postJson(handler, urlPath, body, headers = {}) {
@@ -145,9 +149,11 @@ test('seerr ingress: correct token + valid movie → one durable intent', async 
       VALID_PAYLOAD,
       { authorization: `Bearer ${TOKEN}` },
     );
-    assert.equal(res.status, 200, res.text);
+    assert.equal(res.status, 202, res.text);
     const body = JSON.parse(res.text);
-    assert.equal(body.status, 'created');
+    assert.equal(body.status, 'deferred');
+    assert.equal(body.deferReason, 'candidate-not-fulfillable');
+    assert.ok(body.futureIntentId > 0, 'unbound candidates defer to durable intent');
     assert.equal(body.notificationType, 'MEDIA_AUTO_APPROVED');
     assert.equal(body.mediaId, 'tt1375666');
     assert.equal(body.imdbId, 'tt1375666');
@@ -179,24 +185,25 @@ test('seerr ingress: same payload twice → still one intent (idempotent)', asyn
     const headers = { authorization: `Bearer ${TOKEN}` };
 
     const first = await postJson(handler, '/api/ingress/seerr', VALID_PAYLOAD, headers);
-    assert.equal(first.status, 200);
-    assert.equal(JSON.parse(first.text).status, 'created');
+    assert.equal(first.status, 202);
+    assert.equal(JSON.parse(first.text).status, 'deferred');
 
+    // Still pending → redeliveries re-drive onto the same durable row
+    // (household deferred-request tranche), never duplicating it.
     const second = await postJson(handler, '/api/ingress/seerr', VALID_PAYLOAD, headers);
-    assert.equal(second.status, 200);
-    assert.equal(JSON.parse(second.text).status, 'duplicate');
+    assert.equal(second.status, 202);
+    assert.equal(JSON.parse(second.text).status, 'deferred');
 
     const third = await postJson(handler, '/api/ingress/seerr', VALID_PAYLOAD, headers);
-    assert.equal(third.status, 200);
-    assert.equal(JSON.parse(third.text).status, 'duplicate');
+    assert.equal(third.status, 202);
+    assert.equal(JSON.parse(third.text).status, 'deferred');
 
     const intents = cache.getMediaIntentsBySource('seerr', 100);
     assert.equal(intents.length, 1, 'duplicate deliveries must not create additional intent rows');
-    // The Seerr ingress writes the intent once; persistMediaRequest reuses
-    // the same intentId without a second upsert. Duplicate webhooks take
-    // the duplicate path and never reach either writer, so the count is
-    // stable across deliveries.
-    assert.equal(intents[0].requestCount, 1, 'first request produces request_count=1; duplicates do not increment');
+    const futureRows = cache.db.prepare("SELECT * FROM future_intents WHERE media_id = 'tt1375666'").all();
+    assert.equal(futureRows.length, 1, 'redeliveries converge on one durable future intent');
+    assert.equal(JSON.parse(first.text).futureIntentId, futureRows[0].id);
+    assert.equal(JSON.parse(second.text).futureIntentId, futureRows[0].id);
   } finally {
     clearSeerrToken();
   }
@@ -429,7 +436,7 @@ test('seerr ingress: null/empty string IDs are not persisted as truthy', async (
       payload,
       { authorization: `Bearer ${TOKEN}` },
     );
-    assert.equal(res.status, 200, res.text);
+    assert.equal(res.status, 202, res.text);
     const body = JSON.parse(res.text);
     assert.equal(body.tmdbId, null, 'string "null" must be normalized to null');
     assert.equal(body.tvdbId, null, 'empty string tvdbId must be null');
@@ -542,9 +549,9 @@ test('seerr ingress: MEDIA_AUTO_APPROVED payload creates an intent (post-fix reg
       extra: [],
     };
     const res = await postJson(handler, '/api/ingress/seerr', payload, { authorization: `Bearer ${TOKEN}` });
-    assert.equal(res.status, 200, res.text);
+    assert.equal(res.status, 202, res.text);
     const body = JSON.parse(res.text);
-    assert.equal(body.status, 'created', `expected created, got: ${res.text}`);
+    assert.equal(body.status, 'deferred', `expected deferred, got: ${res.text}`);
     assert.equal(body.notificationType, 'MEDIA_AUTO_APPROVED');
     assert.equal(body.mediaId, 'tt1375666');
 
@@ -626,10 +633,10 @@ test('seerr ingress: actionable webhook → one media_intents row AND one media_
       extra: [],
     };
     const res = await postJson(handler, '/api/ingress/seerr', payload, { authorization: `Bearer ${TOKEN}` });
-    assert.equal(res.status, 200, res.text);
+    assert.equal(res.status, 202, res.text);
     const body = JSON.parse(res.text);
-    assert.equal(body.status, 'created', `expected created, got: ${res.text}`);
-    assert.ok(body.requestId > 0, 'response must include the newly created requestId');
+    assert.equal(body.status, 'deferred', `expected deferred, got: ${res.text}`);
+    assert.ok(body.futureIntentId > 0, 'unbound candidates defer to durable intent');
     assert.ok(body.resultCount > 0, 'response must include the search result count');
 
     // Exactly one Seerr intent
@@ -650,13 +657,12 @@ test('seerr ingress: actionable webhook → one media_intents row AND one media_
     assert.equal(requests.length, 1, 'exactly one media_request must be created for the intent');
     assert.equal(requests[0].source, 'seerr');
     assert.equal(requests[0].media_id, mediaId);
-    assert.equal(requests[0].id, body.requestId);
   } finally {
     clearSeerrToken();
   }
 });
 
-test('seerr ingress: duplicate webhook → one intent and one media request (no extra rows)', async () => {
+test('seerr ingress: redelivery re-drives while pending (one intent, one future intent)', async () => {
   setSeerrToken();
   try {
     const cache = buildCache();
@@ -675,29 +681,30 @@ test('seerr ingress: duplicate webhook → one intent and one media request (no 
     const headers = { authorization: `Bearer ${TOKEN}` };
 
     const first = await postJson(handler, '/api/ingress/seerr', payload, headers);
-    assert.equal(first.status, 200);
+    assert.equal(first.status, 202);
     const firstBody = JSON.parse(first.text);
-    assert.equal(firstBody.status, 'created');
-    const firstRequestId = firstBody.requestId;
+    assert.equal(firstBody.status, 'deferred');
 
+    // Still pending → the redelivery re-drives onto the same durable
+    // rows (household deferred-request tranche). Intent and future
+    // intent stay singular; each delivery runs the pipeline once, so a
+    // second media_request row records the second run — same as two
+    // human re-requests, never a duplicate demand.
     const second = await postJson(handler, '/api/ingress/seerr', payload, headers);
-    assert.equal(second.status, 200);
-    assert.equal(JSON.parse(second.text).status, 'duplicate');
+    assert.equal(second.status, 202);
+    const secondBody = JSON.parse(second.text);
+    assert.equal(secondBody.status, 'deferred');
+    assert.equal(secondBody.futureIntentId, firstBody.futureIntentId);
 
     const intents = cache.getMediaIntentsBySource('seerr', 100);
-    assert.equal(intents.length, 1, 'duplicate must not create a second intent');
-    assert.equal(
-      intents[0].requestCount,
-      1,
-      'first Seerr request must produce exactly one media_intents row with request_count=1 (no double upsert)',
-    );
+    assert.equal(intents.length, 1, 'redelivery must not create a second intent');
+    const futureRows = cache.db.prepare("SELECT * FROM future_intents WHERE media_id = 'tt1375666'").all();
+    assert.equal(futureRows.length, 1, 'redelivery must not duplicate durable intent');
 
-    // Exactly one media_request, not two
     const requests = cache.db.prepare(
       'SELECT id, intent_id, source FROM media_requests WHERE intent_id = ?'
     ).all(intents[0].id);
-    assert.equal(requests.length, 1, 'duplicate must not create a second media_request');
-    assert.equal(requests[0].id, firstRequestId, 'duplicate returns same requestId');
+    assert.equal(requests.length, 2, 'each delivery runs the pipeline once (two runs, two rows)');
     assert.equal(requests[0].source, 'seerr');
     assert.equal(
       requests[0].intent_id,
@@ -752,12 +759,15 @@ test('seerr ingress: zero-candidate result leaves durable intent with lastProces
       extra: [],
     };
     const res = await postJson(handler, '/api/ingress/seerr', payload, { authorization: `Bearer ${TOKEN}` });
-    // Zero-candidate is a valid outcome; handler returns 200.
-    assert.equal(res.status, 200, `expected 200 for zero-candidate, got: ${res.text}`);
+    // Zero-candidate is durable demand, not silent success: the handler
+    // takes responsibility for eventual fulfillment (202 deferred +
+    // future intent). See the household deferred-request tranche.
+    assert.equal(res.status, 202, `expected 202 deferred for zero-candidate, got: ${res.text}`);
     const body = JSON.parse(res.text);
-    assert.equal(body.status, 'created');
+    assert.equal(body.status, 'deferred');
     assert.equal(body.resultCount, 0, 'zero candidates yields resultCount=0');
-    assert.equal(body.requestId, null, 'no requestId when no candidates');
+    assert.equal(body.requestId, undefined, 'no requestId when no candidates');
+    assert.ok(body.futureIntentId > 0, 'deferred response carries the durable intent id');
 
     // Intent row is durable with lastProcessedAt set
     const intents = cache.getMediaIntentsBySource('seerr', 100);
@@ -953,9 +963,9 @@ test('seerr ingress: TMDB-only movie → Seerr resolves → media_id becomes tt.
     const res = await postJson(handler, '/api/ingress/seerr', payload, {
       authorization: `Bearer ${TOKEN}`,
     });
-    assert.equal(res.status, 200, res.text);
+    assert.equal(res.status, 202, res.text);
     const body = JSON.parse(res.text);
-    assert.equal(body.status, 'created');
+    assert.equal(body.status, 'deferred');
     assert.equal(body.identityStatus, 'imdb-resolved');
     assert.equal(body.mediaId, 'tt0133093');
     assert.equal(body.imdbId, 'tt0133093');
@@ -1098,9 +1108,9 @@ test('seerr ingress: TMDB-only movie → canonical title threaded into searchByM
     const res = await postJson(handler, '/api/ingress/seerr', payload, {
       authorization: `Bearer ${TOKEN}`,
     });
-    assert.equal(res.status, 200, res.text);
+    assert.equal(res.status, 202, res.text);
     const body = JSON.parse(res.text);
-    assert.equal(body.status, 'created');
+    assert.equal(body.status, 'deferred');
     assert.equal(body.identityStatus, 'imdb-resolved');
     assert.equal(body.mediaId, 'tt0133093');
     assert.equal(body.imdbId, 'tt0133093');

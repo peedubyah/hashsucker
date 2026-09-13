@@ -16,6 +16,7 @@
  * preserved and no provider GC runs.
  */
 import { INTENT_STATES, intentBackoffMs } from './future-intents.js';
+import { DEFER_REASONS } from '../defers/seerr-defer.js';
 import { probeByteReady, prewarmRanges } from './prewarm.js';
 import { unpublishMedia } from '../library/unpublish.js';
 
@@ -237,7 +238,21 @@ export function createAnticipationScheduler({
     }
 
     if (intent.state === INTENT_STATES.FAILED) {
-      if (intent.attempts >= MAX_ATTEMPTS) return { acted: false, intentId: intent.id, reason: 'attempts-exhausted' };
+      if (intent.attempts >= MAX_ATTEMPTS) {
+        // Household deferred-request tranche: a Seerr-deferred row that
+        // never fulfilled is still wanted — the human decision stands.
+        // Park it at the low 7-day cadence instead of letting it die.
+        // Rows without a retryable defer reason (operator seeds, Arr
+        // rows, deterministic failures) keep the old exhaustion behavior.
+        const d = intent.defer_reason;
+        if (d === DEFER_REASONS.RELEASED_NO_CANDIDATE
+          || d === DEFER_REASONS.CANDIDATE_NOT_FULFILLABLE
+          || d === DEFER_REASONS.FUTURE_NOT_RELEASED) {
+          store.retry(intent.id, now() + PARKED_MS);
+          return { acted: true, intentId: intent.id, from: 'failed', to: 'anticipated', ms: now() - t0, rearmed: true };
+        }
+        return { acted: false, intentId: intent.id, reason: 'attempts-exhausted' };
+      }
       store.retry(intent.id, now() + intentBackoffMs(intent.attempts));
       return { acted: true, intentId: intent.id, from: 'failed', to: 'anticipated', ms: now() - t0 };
     }

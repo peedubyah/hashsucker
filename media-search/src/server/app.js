@@ -38,6 +38,7 @@ import {
   parseRequestedSeasons,
   resolveSeerrSeasonEpisodes,
 } from '../lib/intents/providers/seerr.js';
+import { classifySeerrDeferral } from '../lib/defers/seerr-defer.js';
 import { fulfillVirtualSelection } from '../lib/requests/virtual-library.js';
 import { searchReleases, combinedSearch, searchTrace, getSearchStats } from '../lib/discovery/search-engine.js';
 import { runLiveDiscovery, runLiveDiscoveryWithCounts } from '../lib/discovery/live-bridge.js';
@@ -582,7 +583,8 @@ async function handleSeerrIngress(
   hydrateVfs = null,
   { controlPlaneStore = null, ensureTorBoxFileIdentityFn = null,
     torBoxProvider = null, torBoxApiKey = null, torBoxApiBase = undefined,
-    clock = () => Date.now(), hasExplicitEnsureFn = false } = {},
+    clock = () => Date.now(), hasExplicitEnsureFn = false,
+    futureIntentStore = null } = {},
 ) {
   // 1. Auth
   const authHeader = request.headers && typeof request.headers.authorization === 'string'
@@ -612,6 +614,23 @@ async function handleSeerrIngress(
     return sendJson(response, 400, { error: 'malformed-payload', message: built.error });
   }
   const { intent, notificationType } = built;
+  const isWithdrawal = built.withdrawal === true;
+
+  // Human cancellation (declined/deleted request): withdraw still-pending
+  // deferred rows for this Seerr request id. Passive only — no Seerr API
+  // polling, no identity resolution, no provider work. Prepared+ rows and
+  // other sources' rows are untouched by construction.
+  if (isWithdrawal) {
+    const withdrawn = futureIntentStore
+      ? futureIntentStore.withdrawSeerrRequest(intent.sourceId, `seerr-withdrawn:${notificationType}`)
+      : 0;
+    return sendJson(response, 200, {
+      status: withdrawn > 0 ? 'withdrawn' : 'withdrawal-nothing-pending',
+      notificationType,
+      sourceId: intent.sourceId,
+      withdrawn,
+    });
+  }
 
   // 3. Idempotency by Seerr request_id (source_id).
   //    A parent counts as successfully completed/idempotent only when
@@ -620,15 +639,28 @@ async function handleSeerrIngress(
   //    enumeration/fan-out, a subsequent webhook with the same request
   //    ID must be allowed to retry rather than being permanently
   //    poisoned by the parent row.
+  //    Household deferred-request tranche: a deferred ("not yet") outcome
+  //    is durable intent, not completion. While a non-terminal deferred
+  //    row exists for this media, redelivery re-drives the pipeline
+  //    (converge faster than the scheduler tick); only short-circuit
+  //    when nothing is still pending.
   const existing = searchCache.db.prepare(
     'SELECT id, last_processed_at, last_error FROM media_intents WHERE source = ? AND source_id = ? LIMIT 1'
   ).get('seerr', intent.sourceId);
   if (existing && existing.last_processed_at != null && existing.last_error == null) {
-    return sendJson(response, 200, {
-      status: 'duplicate',
-      notificationType,
-      intentId: existing.id,
-    });
+    let stillPending = false;
+    try {
+      stillPending = futureIntentStore
+        ? futureIntentStore.hasPendingForMedia(intent.mediaId)
+        : false;
+    } catch {}
+    if (!stillPending) {
+      return sendJson(response, 200, {
+        status: 'duplicate',
+        notificationType,
+        intentId: existing.id,
+      });
+    }
   }
 
   // 4. Parse requested seasons BEFORE resolving identity so we can fail
@@ -647,6 +679,11 @@ async function handleSeerrIngress(
   let identityStatus = 'imdb-already-known';
   let canonicalMediaTitle = null;
   let canonicalMediaYear = null;
+  // Full ISO release/air date from the same Seerr detail response that
+  // supplied the IMDb id (no extra metadata fanout). Drives deferred-
+  // request classification: future date → future-not-released with an
+  // expected_at the scheduler can sleep on; anything else → bounded retry.
+  let canonicalReleaseDate = null;
   if (!intent.imdbId && intent.tmdbId) {
     const resolved = await resolveSeerrIdentity(
       { tmdbId: intent.tmdbId, mediaType: intent.mediaType },
@@ -692,6 +729,7 @@ async function handleSeerrIngress(
       if (Number.isSafeInteger(parsed) && parsed > 0) {
         canonicalMediaYear = parsed;
       }
+      canonicalReleaseDate = resolved.releaseDate.trim() || null;
     }
   }
 
@@ -742,10 +780,12 @@ async function handleSeerrIngress(
         scope: 'seerr-ingress',
       });
       return await runSingleSearchByMedia({
-        searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, intentId,
+        searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, canonicalReleaseDate, intentId,
         identityStatus, notificationType, response, hydrateVfs,
         ensureTorBoxFileIdentity: requestEnsureFn,
         controlPlaneStore,
+        futureIntentStore,
+        clock,
       });
     }
     // For series with parse failure, we stop here — the parent is durable
@@ -922,6 +962,22 @@ async function handleSeerrIngress(
           // `resultCount`. (Look at the return object in
           // src/api/media-request.js — there is no `resultCount` field.)
           resultCount: result?.total ?? 0,
+          // Household deferred-request tranche: an aired-or-future
+          // episode with zero candidates — or candidates that never
+          // bound — becomes durable intent keyed on exact S/E
+          // (ep.airDate comes from the Seerr season call above — no
+          // extra metadata fanout). Deferred children are not failures;
+          // the parent outcome below excludes them from failedCount.
+          ...unfulfilledTvDeferral({
+            store: futureIntentStore,
+            mediaId: operationalIntent.mediaId,
+            season: seasonNum,
+            episode: ep.episodeNumber,
+            airDate: ep.airDate,
+            childSourceId,
+            result,
+            clock,
+          }),
         });
         // Clear any stale error from a prior failed attempt on this
         // child — successful processing supersedes the earlier failure.
@@ -929,6 +985,41 @@ async function handleSeerrIngress(
           'UPDATE media_intents SET last_error = NULL, last_processed_at = ? WHERE id = ?'
         ).run(Date.now(), childIntentId);
       } catch (episodeErr) {
+        // Per-episode failure isolation: a transient pipeline failure
+        // becomes durable deferred intent (exact S/E); a deterministic
+        // failure is recorded on this child as before. Either way the
+        // remaining episodes continue.
+        const classification = classifySeerrDeferral({
+          dateRaw: ep.airDate,
+          total: null,
+          error: episodeErr,
+          nowMs: clock(),
+        });
+        const deferral = futureIntentStore ? deferSeerrRequest({
+          store: futureIntentStore,
+          mediaType: 'series',
+          mediaId: operationalIntent.mediaId,
+          season: seasonNum,
+          episode: ep.episodeNumber,
+          seerrSourceId: childSourceId,
+          classification,
+        }) : null;
+        if (deferral) {
+          searchCache.db.prepare(
+            'UPDATE media_intents SET last_error = NULL, last_processed_at = ? WHERE id = ?'
+          ).run(Date.now(), childIntentId);
+          childResults.push({
+            season: seasonNum,
+            episode: ep.episodeNumber,
+            childIntentId,
+            resultCount: 0,
+            deferred: true,
+            deferReason: deferral.deferReason,
+            futureIntentId: deferral.futureIntentId,
+            detail: classification.detail,
+          });
+          continue;
+        }
         // Per-episode failure isolation: record on this child and
         // continue with remaining episodes in the season.
         searchCache.db.prepare(
@@ -986,7 +1077,11 @@ async function handleSeerrIngress(
   // retry the failed children. We record the failure on the parent so
   // the duplicate short-circuit (last_processed_at IS NOT NULL AND
   // last_error IS NULL) does not poison the parent row.
+  // Household deferred-request tranche: deferred children likewise keep
+  // the parent redeliverable, under their own marker (deferred is
+  // scheduled work, not a failure — the scheduler also converges on it).
   const failedChildren = childResults.filter((r) => r.error);
+  const deferredChildren = childResults.filter((r) => r.deferred === true);
   if (failedChildren.length > 0) {
     const summary = failedChildren
       .map((r) => `s${r.season}e${r.episode}:${r.error}`)
@@ -994,6 +1089,13 @@ async function handleSeerrIngress(
     searchCache.db.prepare(
       'UPDATE media_intents SET last_processed_at = ?, last_error = ? WHERE id = ?'
     ).run(Date.now(), `tv-fan-out-children-failed:${summary}`, parentIntentId);
+  } else if (deferredChildren.length > 0) {
+    const summary = deferredChildren
+      .map((r) => `s${r.season}e${r.episode}:${r.deferReason}`)
+      .join(',');
+    searchCache.db.prepare(
+      'UPDATE media_intents SET last_processed_at = ?, last_error = ? WHERE id = ?'
+    ).run(Date.now(), `tv-fan-out-children-deferred:${summary}`, parentIntentId);
   } else {
     searchCache.db.prepare(
       'UPDATE media_intents SET last_processed_at = ?, last_error = NULL WHERE id = ?'
@@ -1007,6 +1109,7 @@ async function handleSeerrIngress(
     parentIntentId,
     childCount: childResults.filter((r) => r.episode != null).length,
     failedCount: failedChildren.length,
+    deferredCount: childResults.filter((r) => r.deferred === true).length,
     childResults,
     mediaId: operationalIntent.mediaId,
     mediaType: 'series',
@@ -1015,13 +1118,79 @@ async function handleSeerrIngress(
 }
 
 /**
+ * Household deferred-request tranche: turn a retryable Seerr "not yet"
+ * into durable future intent so the anticipation scheduler converges on
+ * it automatically. Idempotent on exact media identity (the store's
+ * unique index); a re-request revives withdrawn/exhausted rows instead
+ * of duplicating them. Returns null when there is no store or the
+ * classification is not retryable.
+ */
+function deferSeerrRequest({ store, mediaType, mediaId, season, episode, seerrSourceId, classification }) {
+  if (!store || !classification || classification.retryable !== true) return null;
+  const { intent } = store.seed({
+    mediaType,
+    mediaId,
+    season: season ?? null,
+    episode: episode ?? null,
+    source: `seerr:${seerrSourceId}`,
+    expectedAt: classification.expectedAt,
+    deferReason: classification.outcome,
+  });
+  store.revive(intent.id, { expectedAt: classification.expectedAt, deferReason: classification.outcome });
+  const row = store.findByIdentity({ mediaId, season: season ?? null, episode: episode ?? null }) ?? intent;
+  return {
+    futureIntentId: row.id,
+    deferReason: row.defer_reason ?? classification.outcome,
+    intentState: row.state,
+    expectedAt: row.expected_at,
+    nextCheckAt: row.next_check_at,
+  };
+}
+
+/**
+ * TV unfulfilled-child deferral fragment for one episode child. Returns
+ * the extra childResults fields (or {} when the child fulfilled). Covers
+ * both zero-candidate children and children whose candidates never bound
+ * a provider-backed handoff.
+ */
+function unfulfilledTvDeferral({ store, mediaId, season, episode, airDate, childSourceId, result, clock = () => Date.now() }) {
+  const total = result?.total ?? 0;
+  const bound = result?.handoff != null;
+  if (!store || (total !== 0 && bound)) return {};
+  const classification = classifySeerrDeferral({
+    dateRaw: airDate,
+    total,
+    bound,
+    selectionReason: result?.selection?.reason ?? null,
+    nowMs: clock(),
+  });
+  const deferral = deferSeerrRequest({
+    store,
+    mediaType: 'series',
+    mediaId,
+    season,
+    episode,
+    seerrSourceId: childSourceId,
+    classification,
+  });
+  if (!deferral) return {};
+  return {
+    deferred: true,
+    deferReason: deferral.deferReason,
+    futureIntentId: deferral.futureIntentId,
+    expectedAt: deferral.expectedAt,
+    nextCheckAt: deferral.nextCheckAt,
+  };
+}
+
+/**
  * Single-intent searchByMedia path used by movies (and series with a
  * missing/malformed Requested Seasons entry, which never reach here).
  */
 async function runSingleSearchByMedia({
-  searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, intentId,
+  searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, canonicalReleaseDate = null, intentId,
   identityStatus, notificationType, response, hydrateVfs = null,
-  ensureTorBoxFileIdentity = null, controlPlaneStore = null,
+  ensureTorBoxFileIdentity = null, controlPlaneStore = null, futureIntentStore = null, clock = () => Date.now(),
 }) {
   try {
     const result = await searchByMedia(searchCache, {
@@ -1059,6 +1228,49 @@ async function runSingleSearchByMedia({
     searchCache.db.prepare(
       'UPDATE media_intents SET last_processed_at = ?, last_result_count = ?, last_error = NULL WHERE id = ?'
     ).run(Date.now(), result.total ?? 0, intentId);
+    // Household deferred-request tranche: zero usable candidates is not
+    // a fulfillment — it is durable demand the scheduler must converge
+    // on. Neither is an unbound candidate set (e.g. unreleased titles
+    // with only fake/uncached rows and no provider-backed handoff).
+    // Classify (future vs released vs transient) and seed a future
+    // intent instead of silently dropping the human decision.
+    if ((result.total ?? 0) === 0 || result.handoff == null) {
+      const classification = classifySeerrDeferral({
+        dateRaw: canonicalReleaseDate,
+        total: result.total ?? 0,
+        bound: result.handoff != null,
+        selectionReason: result.selection?.reason ?? null,
+        nowMs: clock(),
+      });
+      const deferral = deferSeerrRequest({
+        store: futureIntentStore,
+        mediaType: operationalIntent.mediaType,
+        mediaId: operationalIntent.mediaId,
+        season: operationalIntent.season,
+        episode: operationalIntent.episode,
+        seerrSourceId: operationalIntent.sourceId,
+        classification,
+      });
+      if (deferral) {
+        return sendJson(response, 202, {
+          status: 'deferred',
+          identityStatus,
+          notificationType,
+          intentId,
+          resultCount: result.total ?? 0,
+          mediaId: operationalIntent.mediaId,
+          mediaType: operationalIntent.mediaType,
+          imdbId: operationalIntent.imdbId,
+          tmdbId: operationalIntent.tmdbId,
+          tvdbId: operationalIntent.tvdbId,
+          deferReason: deferral.deferReason,
+          futureIntentId: deferral.futureIntentId,
+          intentState: deferral.intentState,
+          expectedAt: deferral.expectedAt,
+          nextCheckAt: deferral.nextCheckAt,
+        });
+      }
+    }
     return sendJson(response, 200, {
       status: 'created',
       identityStatus,
@@ -1073,6 +1285,47 @@ async function runSingleSearchByMedia({
       tvdbId: operationalIntent.tvdbId,
     });
   } catch (err) {
+    // A thrown pipeline error is either transient (provider, hydration,
+    // availability — retry later via durable intent) or deterministic
+    // (bad identity/mapping — fail loudly, never background-retry).
+    const classification = classifySeerrDeferral({
+      dateRaw: canonicalReleaseDate,
+      total: null,
+      error: err,
+      nowMs: clock(),
+    });
+    const deferral = deferSeerrRequest({
+      store: futureIntentStore,
+      mediaType: operationalIntent.mediaType,
+      mediaId: operationalIntent.mediaId,
+      season: operationalIntent.season,
+      episode: operationalIntent.episode,
+      seerrSourceId: operationalIntent.sourceId,
+      classification,
+    });
+    if (deferral) {
+      searchCache.db.prepare(
+        'UPDATE media_intents SET last_processed_at = ?, last_result_count = ?, last_error = NULL WHERE id = ?'
+      ).run(Date.now(), 0, intentId);
+      return sendJson(response, 202, {
+        status: 'deferred',
+        identityStatus,
+        notificationType,
+        intentId,
+        resultCount: 0,
+        mediaId: operationalIntent.mediaId,
+        mediaType: operationalIntent.mediaType,
+        imdbId: operationalIntent.imdbId,
+        tmdbId: operationalIntent.tmdbId,
+        tvdbId: operationalIntent.tvdbId,
+        deferReason: deferral.deferReason,
+        futureIntentId: deferral.futureIntentId,
+        intentState: deferral.intentState,
+        expectedAt: deferral.expectedAt,
+        nextCheckAt: deferral.nextCheckAt,
+        detail: classification.detail,
+      });
+    }
     searchCache.db.prepare(
       'UPDATE media_intents SET last_processed_at = ?, last_error = ? WHERE id = ?'
     ).run(Date.now(), err.message, intentId);
@@ -2671,6 +2924,7 @@ export function createRequestHandler(dependencies = {}) {
           torBoxApiBase: env.TORBOX_API_URL,
           clock,
           hasExplicitEnsureFn,
+          futureIntentStore: getFutureIntentStore(),
         });
       }
       // Library unpublish: remove VFS/STRM presentation for an exact movie

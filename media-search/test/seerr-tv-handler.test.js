@@ -33,7 +33,9 @@ function buildCache() {
 }
 
 function buildHandler(cache) {
-  return createRequestHandler({ searchCache: cache });
+  // Same harness-drift stub as seerr-ingress.test.js (pre-existing on
+  // clean e971ec8): ingress never touches playback.
+  return createRequestHandler({ searchCache: cache, terminalEvidenceStore: { get: () => null, set: () => {} } });
 }
 
 function setSeerrToken() {
@@ -450,16 +452,31 @@ test('TV handler: partial retry — completed child is skipped, failed child is 
       ).all(first02.intentId);
       assert.equal(s01e02Completed.length, 0, 'S01E02 must have NO media_request row (throw)');
 
-      // Child S01E02 has last_error recorded; parent is retryable.
+      // Child S01E02's transient throw becomes durable deferred intent
+      // (household deferred-request tranche), NOT a terminal last_error:
+      // the human decision survives for the scheduler to converge on.
+      // The parent honestly records incomplete work under its own marker
+      // (deferred is scheduled, not failed) and stays redeliverable.
       const parentRow = cache.db.prepare(
         "SELECT id, last_processed_at, last_error FROM media_intents WHERE media_type = 'series' AND source_id = 'req-tv-partial-retry-pass21'"
       ).get();
       assert.ok(parentRow, 'parent must exist');
+      assert.match(parentRow.last_error ?? '', /tv-fan-out-children-deferred:s1e2:candidate-not-fulfillable/,
+        'parent must record deferred (not failed) incomplete work');
       const s01e02Row = cache.db.prepare(
         "SELECT last_error FROM media_intents WHERE id = ?"
       ).get(first02.intentId);
-      assert.match(s01e02Row.last_error, /searchByMedia-failed/,
-        'S01E02 must have a last_error recording the per-episode failure');
+      assert.equal(s01e02Row.last_error, null,
+        'S01E02 transient throw must defer (no terminal last_error)');
+      const s01e02Intent = cache.db.prepare(
+        "SELECT state, defer_reason FROM future_intents WHERE media_id = 'tt0903747' AND season = 1 AND episode = 2"
+      ).get();
+      assert.ok(s01e02Intent, 'S01E02 must have a durable deferred intent');
+      assert.equal(s01e02Intent.state, 'anticipated');
+      assert.equal(s01e02Intent.defer_reason, 'candidate-not-fulfillable');
+      const e02Result = firstBody.childResults.find((r) => r.episode === 2);
+      assert.equal(e02Result.deferred, true, 'child result must carry the deferral');
+      assert.equal(firstBody.deferredCount, 1, 'parent must report one deferred child');
 
       // ── Second webhook (identical): stop throwing, let everything
       //    complete. The completed-skip path must short-circuit S01E01

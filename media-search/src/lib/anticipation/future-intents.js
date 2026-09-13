@@ -55,6 +55,13 @@ function ensureSchema(db) {
     if (!cols.includes('arr_satisfied')) {
       db.exec('ALTER TABLE future_intents ADD COLUMN arr_satisfied INTEGER NOT NULL DEFAULT 0');
     }
+    // Deferral reason (Phase: household deferred requests). Records WHY a
+    // Seerr-deferred row is waiting (future-not-released /
+    // released-no-candidate / candidate-not-fulfillable); NULL for rows
+    // that were never deferred. Diagnostics only — never drives scheduling.
+    if (!cols.includes('defer_reason')) {
+      db.exec('ALTER TABLE future_intents ADD COLUMN defer_reason TEXT');
+    }
   } catch {}
 }
 
@@ -64,7 +71,7 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
 
   const now = () => clock();
 
-  function seed({ mediaType, mediaId, season = null, episode = null, source = 'operator', expectedAt = null, checkInMs = 0 }) {
+  function seed({ mediaType, mediaId, season = null, episode = null, source = 'operator', expectedAt = null, checkInMs = 0, deferReason = null }) {
     if (!mediaId || !mediaType) throw new Error('mediaId and mediaType required');
     const t = now();
     // INSERT-or-select (uniqueness is a COALESCE expression index, which
@@ -74,19 +81,86 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
     try {
       const row = db.prepare(
         `INSERT INTO future_intents
-          (media_type, media_id, season, episode, source, expected_at, next_check_at, state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'anticipated', ?, ?)
+          (media_type, media_id, season, episode, source, expected_at, next_check_at, state, created_at, updated_at, defer_reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'anticipated', ?, ?, ?)
          RETURNING *`,
-      ).get(mediaType, mediaId, season, episode, source, expectedAt, t + checkInMs, t, t);
+      ).get(mediaType, mediaId, season, episode, source, expectedAt, t + checkInMs, t, t, deferReason);
       return { intent: row, created: true };
     } catch (err) {
       if (!/UNIQUE|unique|constraint/i.test(String(err?.message || ''))) throw err;
-      return {
-        intent: db.prepare(`SELECT * FROM future_intents
+      const intent = db.prepare(`SELECT * FROM future_intents
           WHERE media_id = ? AND COALESCE(season, -1) = COALESCE(?, -1) AND COALESCE(episode, -1) = COALESCE(?, -1)`)
-          .get(mediaId, season, episode),
-        created: false,
-      };
+        .get(mediaId, season, episode);
+      // Converge, never clobber: a duplicate seed (e.g. a Seerr request
+      // arriving for an Arr-seeded row, or a re-request) fills in
+      // expected_at/defer_reason only when the row lacks them. Source
+      // stays with the first seeder — per-request provenance already
+      // lives on media_intents; the scheduler converges on identity.
+      try {
+        const patch = [];
+        const vals = [];
+        if (intent && intent.expected_at == null && expectedAt != null) {
+          patch.push('expected_at = ?');
+          vals.push(expectedAt);
+        }
+        if (intent && intent.defer_reason == null && deferReason != null) {
+          patch.push('defer_reason = ?');
+          vals.push(deferReason);
+        }
+        if (patch.length > 0) {
+          vals.push(t, intent.id);
+          db.prepare(`UPDATE future_intents SET ${patch.join(', ')}, updated_at = ? WHERE id = ?`).run(...vals);
+          intent.expected_at = expectedAt ?? intent.expected_at;
+          intent.defer_reason = deferReason ?? intent.defer_reason;
+        }
+      } catch {}
+      return { intent, created: false };
+    }
+  }
+  function findByIdentity({ mediaId, season = null, episode = null } = {}) {
+    if (!mediaId) return null;
+    try {
+      return db.prepare(`SELECT * FROM future_intents
+        WHERE media_id = ? AND COALESCE(season, -1) = COALESCE(?, -1) AND COALESCE(episode, -1) = COALESCE(?, -1)`)
+        .get(mediaId, season, episode) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Whether any non-terminal intent exists for this media (any season /
+   * episode). Lets a redelivered Seerr webhook distinguish "already done"
+   * from "still waiting" without re-running discovery itself.
+   */
+  function hasPendingForMedia(mediaId) {
+    if (!mediaId) return false;
+    try {
+      const row = db.prepare(`SELECT 1 AS ok FROM future_intents
+        WHERE media_id = ? AND state IN ('anticipated', 'failed') LIMIT 1`).get(mediaId);
+      return !!row;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Revive a terminally-parked row when fresh human demand arrives (e.g.
+   * a Seerr re-request after withdrawal or attempt exhaustion). Resets
+   * the retry budget so the scheduler actually acts on it; a no-op for
+   * rows that are already live. Returns true when a transition happened.
+   */
+  function revive(id, { expectedAt = null, deferReason = null } = {}) {
+    const t = now();
+    try {
+      const info = db.prepare(`UPDATE future_intents
+        SET state = 'anticipated', attempts = 0, last_error = NULL,
+            next_check_at = ?, expected_at = COALESCE(?, expected_at),
+            defer_reason = COALESCE(?, defer_reason), updated_at = ?
+        WHERE id = ? AND state IN ('withdrawn', 'failed')`).run(t, expectedAt, deferReason, t, id);
+      return info.changes === 1;
+    } catch {
+      return false;
     }
   }
 
@@ -142,6 +216,27 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
   }
 
   /**
+   * Withdraw never-fulfilled rows for one Seerr request id (human
+   * cancellation: declined/deleted). Prefix-matches both the parent
+   * (`seerr:<reqId>`) and episode children (`seerr:<reqId>:s..:e..`).
+   * Only anticipated/failed rows move — prepared+ rows are useful
+   * durable truth and stay, as do other sources' rows.
+   */
+  function withdrawSeerrRequest(requestId, reason) {
+    ensureSchema(db);
+    if (!requestId) return 0;
+    try {
+      const info = db.prepare(`UPDATE future_intents
+        SET state = 'withdrawn', last_error = ?, updated_at = ?
+        WHERE source LIKE ? AND state IN ('anticipated', 'failed')`)
+        .run(reason, now(), `seerr:${requestId}%`);
+      return info.changes;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
    * Withdraw never-prepared anticipated rows for a vanished/unmonitored
    * Arr source. Prepared+ rows are useful durable truth and stay.
    */
@@ -179,7 +274,7 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
     return row?.t ?? null;
   }
 
-  return { seed, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored };
+  return { seed, findByIdentity, hasPendingForMedia, revive, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest };
 }
 
 /** Backoff for retryable intent work: 15m, 1h, 4h, cap 24h. */
