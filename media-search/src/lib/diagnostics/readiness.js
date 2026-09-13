@@ -362,10 +362,14 @@ function corpusSummary(cache, env = process.env) {
           ?? db.prepare(`SELECT id, fragments_discovered AS total FROM dmm_ingestion_runs
           ORDER BY id DESC LIMIT 1`).get();
         if (run) {
-          const done = run.status === 'running'
+          let done = run.status === 'running'
             ? (db.prepare(`SELECT COUNT(*) AS n FROM dmm_fragments WHERE run_id = ? AND status = 'complete'`).get(run.id)?.n ?? 0)
             : (row.fragment_count ?? 0);
-          out.progress = { complete: done, total: run.total ?? null };
+          // Cumulative fragment counts can exceed the latest run's slice
+          // total across sessions/trees; clamp the display, never the data.
+          const total = run.total ?? null;
+          if (total != null) done = Math.min(done, total);
+          out.progress = { complete: done, total };
         }
       } catch {
         // Progress is best-effort.

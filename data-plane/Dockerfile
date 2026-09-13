@@ -51,6 +51,10 @@ RUN cargo build --release --bin data-plane
 # parity with the builder and with the already-cached image.
 FROM alpine:3.22
 
+# Release provenance (build args; never secrets — labels only).
+ARG REVISION=unknown
+ARG VERSION=dev
+
 # tini for clean signal handling (Ctrl-C, SIGTERM). The Rust binary uses
 # tokio's signal handling, but a wrapper is still the convention for
 # short-lived containers and matches the project's other services.
@@ -73,6 +77,11 @@ WORKDIR /app
 
 # Copy only the release binary. No source, no Cargo.toml, no target/.
 COPY --from=builder /build/target/release/data-plane /app/data-plane
+
+LABEL org.opencontainers.image.title="HashSucker data-plane" \
+      org.opencontainers.image.source="https://github.com/peedubyah/hashsucker" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.version="${VERSION}"
 
 # Default config. The compose service overrides CONTROL_URL and
 # CACHE_ROOT so the service reaches S-1 over the internal compose network

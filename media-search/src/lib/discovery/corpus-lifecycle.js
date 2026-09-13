@@ -352,7 +352,9 @@ export function createCorpusLifecycle({
         const remainingTotal = fragments.length;
         if (maxFragments != null) fragments = fragments.slice(0, maxFragments);
         log(`corpus bootstrap tree=${String(treeSha).slice(0, 8)} fragments=${fragments.length} skipped=${done.size}`);
-        runId = openRun({ treeSha, discovered: fragments.length });
+        // Record the session-start backlog (pre-slice) as the run total so
+        // progress displays against the tree, not the session slice.
+        runId = openRun({ treeSha, discovered: remainingTotal });
         const failures = [];
         const baseFragmentCount = prior.fragment_count ?? 0;
         let cappedByWall = false;

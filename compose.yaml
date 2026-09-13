@@ -1,9 +1,20 @@
+# Image policy (packaging tranche): every built service has BOTH an
+# `image:` reference and a `build:` section.
+#   Normal users:  docker compose pull && docker compose up -d
+#                  (consumes prebuilt GHCR images, no toolchain needed)
+#   Developers:    docker compose build / up --build (local sources)
+# `up -d` without --build uses the pulled image when present.
+# HASHSUCKER_VERSION pins the release (a git tag like v1.2.3, a SHA, or
+# `latest`); HASHSUCKER_REGISTRY overrides the registry host.
 services:
   media-search:
+    image: ${HASHSUCKER_REGISTRY:-ghcr.io/peedubyah}/hashsucker-media-search:${HASHSUCKER_VERSION:-latest}
     build:
       context: ./media-search
       dockerfile: Dockerfile
-    image: media-search:local
+      args:
+        REVISION: ${HASHSUCKER_REVISION:-dev}
+        VERSION: ${HASHSUCKER_VERSION:-latest}
     restart: unless-stopped
     environment:
       PORT: "3000"
@@ -68,9 +79,12 @@ services:
       - no-new-privileges:true
 
   torbox-importer:
+    image: ${HASHSUCKER_REGISTRY:-ghcr.io/peedubyah}/hashsucker-torbox-importer:${HASHSUCKER_VERSION:-latest}
     build:
       context: ./torbox-importer
-    image: torbox-importer:local
+      args:
+        REVISION: ${HASHSUCKER_REVISION:-dev}
+        VERSION: ${HASHSUCKER_VERSION:-latest}
     restart: unless-stopped
     user: "${PUID:-99}:${PGID:-100}"
     environment:
@@ -101,14 +115,17 @@ services:
       - no-new-privileges:true
 
   edge:
-    image: caddy:2-alpine
+    image: ${HASHSUCKER_REGISTRY:-ghcr.io/peedubyah}/hashsucker-edge:${HASHSUCKER_VERSION:-latest}
+    build:
+      context: ./edge
+      args:
+        REVISION: ${HASHSUCKER_REVISION:-dev}
+        VERSION: ${HASHSUCKER_VERSION:-latest}
     restart: unless-stopped
     environment:
       EDGE_PORT: "${EDGE_PORT:-8080}"
     ports:
       - "${EDGE_BIND_ADDRESS:-0.0.0.0}:${EDGE_PORT:-8080}:${EDGE_PORT:-8080}"
-    volumes:
-      - ./edge/Caddyfile:/etc/caddy/Caddyfile:ro
     depends_on:
       - media-search
     security_opt:
@@ -133,10 +150,13 @@ services:
   # operator workflows and scripts that reference the old name continue
   # to resolve.
   data-plane:
+    image: ${HASHSUCKER_REGISTRY:-ghcr.io/peedubyah}/hashsucker-data-plane:${HASHSUCKER_VERSION:-latest}
     build:
       context: ./data-plane
       dockerfile: Dockerfile
-    image: data-plane:local
+      args:
+        REVISION: ${HASHSUCKER_REVISION:-dev}
+        VERSION: ${HASHSUCKER_VERSION:-latest}
     restart: unless-stopped
     hostname: data-plane
     environment:
