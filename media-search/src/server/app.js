@@ -39,6 +39,7 @@ import {
   resolveSeerrSeasonEpisodes,
 } from '../lib/intents/providers/seerr.js';
 import { classifySeerrDeferral } from '../lib/defers/seerr-defer.js';
+import { createAvailabilityWakeLog } from '../lib/defers/availability-wakes.js';
 import { fulfillVirtualSelection } from '../lib/requests/virtual-library.js';
 import { searchReleases, combinedSearch, searchTrace, getSearchStats } from '../lib/discovery/search-engine.js';
 import { runLiveDiscovery, runLiveDiscoveryWithCounts } from '../lib/discovery/live-bridge.js';
@@ -584,7 +585,7 @@ async function handleSeerrIngress(
   { controlPlaneStore = null, ensureTorBoxFileIdentityFn = null,
     torBoxProvider = null, torBoxApiKey = null, torBoxApiBase = undefined,
     clock = () => Date.now(), hasExplicitEnsureFn = false,
-    futureIntentStore = null } = {},
+    futureIntentStore = null, availabilityWakeLog = null, schedulingNudge = null } = {},
 ) {
   // 1. Auth
   const authHeader = request.headers && typeof request.headers.authorization === 'string'
@@ -615,6 +616,7 @@ async function handleSeerrIngress(
   }
   const { intent, notificationType } = built;
   const isWithdrawal = built.withdrawal === true;
+  const isAvailable = built.available === true;
 
   // Human cancellation (declined/deleted request): withdraw still-pending
   // deferred rows for this Seerr request id. Passive only — no Seerr API
@@ -629,6 +631,55 @@ async function handleSeerrIngress(
       notificationType,
       sourceId: intent.sourceId,
       withdrawn,
+    });
+  }
+
+  // Seerr availability wake-up (availability tranche): MEDIA_AVAILABLE is
+  // a scheduling nudge, never fulfillment proof. Matching deferred rows
+  // go due-now; the existing scheduler claims them through normal
+  // corpus/live discovery and ranking. No Seerr calls, no discovery, no
+  // ranking inside the handler — and no second fulfillment pipeline.
+  if (isAvailable) {
+    const wakeAt = clock();
+    let awakened = 0;
+    let via = 'none';
+    if (futureIntentStore) {
+      awakened = futureIntentStore.wakeSeerrRequest(intent.sourceId, wakeAt);
+      via = 'request';
+      if (awakened === 0) {
+        // No row keyed to this request id (re-requested under a new id,
+        // or housekeeping event): fall back to exact media identity in
+        // every operational form worth trying.
+        const forms = [intent.mediaId];
+        if (intent.tmdbId) forms.push(`tmdb:${intent.tmdbId}`);
+        if (intent.tvdbId) forms.push(`tvdb:${intent.tvdbId}`);
+        awakened = futureIntentStore.wakeMedia(forms, wakeAt);
+        via = awakened > 0 ? 'identity' : 'none';
+      }
+    }
+    try {
+      availabilityWakeLog?.record({
+        requestId: intent.sourceId,
+        mediaId: intent.mediaId,
+        awakened,
+        via,
+      });
+    } catch {}
+    // Prompt the scheduler toward an early pass (debounced there) so
+    // event→retry starts in seconds. The claim stays authoritative:
+    // an already-claimed row cannot be double-driven by this nudge.
+    if (awakened > 0) {
+      try {
+        schedulingNudge?.();
+      } catch {}
+    }
+    return sendJson(response, 200, {
+      status: awakened > 0 ? 'woken' : 'availability-no-match',
+      notificationType,
+      sourceId: intent.sourceId,
+      mediaId: intent.mediaId,
+      awakened,
+      via,
     });
   }
 
@@ -1730,6 +1781,22 @@ export function createRequestHandler(dependencies = {}) {
     }
     return futureIntentStoreInstance;
   }
+
+  // Availability wake log (availability tranche). Same DB, same pattern.
+  let availabilityWakeLogInstance = dependencies.availabilityWakeLog ?? null;
+  function getAvailabilityWakeLog() {
+    if (!availabilityWakeLogInstance) {
+      availabilityWakeLogInstance = createAvailabilityWakeLog({ db: searchCache.db, clock });
+    }
+    return availabilityWakeLogInstance;
+  }
+
+  // Scheduler nudge hook (availability tranche). The process owner
+  // (index.js) may inject a callback that pulls the next anticipation
+  // tick forward; absent in tests and minimal embeddings.
+  const schedulingNudge = typeof dependencies.schedulingNudge === 'function'
+    ? dependencies.schedulingNudge
+    : null;
 
   // Arr sync instance for the manual trigger. Same construction as the
   // index.js scheduler; sync operations are idempotent across instances.
@@ -2925,6 +2992,8 @@ export function createRequestHandler(dependencies = {}) {
           clock,
           hasExplicitEnsureFn,
           futureIntentStore: getFutureIntentStore(),
+          availabilityWakeLog: getAvailabilityWakeLog(),
+          schedulingNudge,
         });
       }
       // Library unpublish: remove VFS/STRM presentation for an exact movie

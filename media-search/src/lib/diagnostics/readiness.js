@@ -428,6 +428,33 @@ function anticipationSummary(cache) {
 }
 
 /**
+ * Seerr availability wake stats (availability tranche): events received,
+ * intents awakened, last wake. Absent table (pre-migration) reports zeros.
+ */
+function availabilityWakeSummary(cache) {
+  const empty = { received: 0, awakenedTotal: 0, lastWakeAt: null, last: null };
+  try {
+    const db = cache?.db;
+    if (!db) return { ...empty, state: 'unknown' };
+    const tbl = db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='seerr_availability_wakes'").get();
+    if (!tbl) return { ...empty, state: 'ok' };
+    const row = db.prepare(`SELECT COUNT(*) AS received,
+      COALESCE(SUM(awakened), 0) AS awakenedTotal,
+      MAX(received_at) AS lastWakeAt FROM seerr_availability_wakes`).get();
+    const last = db.prepare(`SELECT request_id AS requestId, media_id AS mediaId, awakened, via
+      FROM seerr_availability_wakes ORDER BY id DESC LIMIT 1`).get() ?? null;
+    return {
+      state: 'ok',
+      received: row?.received ?? 0,
+      awakenedTotal: row?.awakenedTotal ?? 0,
+      lastWakeAt: row?.lastWakeAt ?? null,
+      last,
+    };
+  } catch {
+    return { ...empty, state: 'unknown' };
+  }
+}
+/**
  * Arr sensor status (anticipatory tranche): configuration, last sync
  * outcome, and imported intent counts. No live Arr calls here — reachability
  * is derived from the last sync result. URL without key is an explicit
@@ -590,6 +617,7 @@ export async function buildDiagnostics({
   const corpus = corpusSummary(cache, env);
   const anticipation = anticipationSummary(cache);
   const arr = arrSummary(cache, env);
+  const availabilityWake = availabilityWakeSummary(cache);
   const prowlarr = await prowlarrSummary(env, fetchFn);
   if (retirementPolicy && !retirementPolicy.enabled) {
     warnings.push('Automatic retirement is disabled (default safe state).');
@@ -612,6 +640,7 @@ export async function buildDiagnostics({
     corpus,
     anticipation,
     arr,
+    availabilityWake,
     prowlarr,
   };
 }

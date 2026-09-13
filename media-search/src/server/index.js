@@ -329,7 +329,23 @@ if (durabilityMode === 'observe' || durabilityMode === 'execute') {
   if (durabilityTimer.unref) durabilityTimer.unref();
 }
 
-const server = createApp({ searchCache: discoveryCache, controlPlaneStore });
+const server = createApp({
+  searchCache: discoveryCache,
+  controlPlaneStore,
+  // Availability tranche: a Seerr MEDIA_AVAILABLE wake that actually
+  // awakened deferred intent pulls the next anticipation tick forward
+  // (5 s, debounced by replacing the pending timer). The tick still
+  // processes exactly one intent through the normal claim; the global
+  // 15-minute cadence is untouched, and an in-flight tick is never
+  // interrupted.
+  schedulingNudge: () => {
+    if (!anticipationOn || anticipationInFlight) return;
+    try {
+      if (anticipationTimer) clearTimeout(anticipationTimer);
+    } catch {}
+    armAnticipationTimer(5000);
+  },
+});
 let shuttingDown = false;
 
 function shutdown(signal) {

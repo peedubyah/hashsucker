@@ -50,6 +50,20 @@ const TEST_NOTIFICATION_TYPES = new Set([
 ]);
 
 /**
+ * Notification types we treat as availability wake signals.
+ * MEDIA_AVAILABLE means Seerr observed the requested media become
+ * available (typically via Sonarr/Radarr import). It is a scheduling
+ * nudge, not fulfillment proof: the handler wakes matching deferred
+ * intents due-now and the normal discovery/ranking pipeline decides.
+ * The event carries no episode granularity (verified against the live
+ * webhook template: identity bundle + request_id only), so series
+ * events wake by request id, never by guessed S/E.
+ */
+const AVAILABILITY_NOTIFICATION_TYPES = new Set([
+  'MEDIA_AVAILABLE',
+]);
+
+/**
  * Notification types we treat as human cancellation of a prior request.
  * MEDIA_DECLINED (request declined) and MEDIA_DELETED (media/request
  * removed) withdraw still-pending deferred intent. Deliberately NOT
@@ -209,6 +223,35 @@ export function buildSeerrIntent(body) {
   }
 
   if (!isApproval) {
+    // A Seerr availability signal wakes matching deferred intent but
+    // creates no new demand. The intent carries the request id + identity
+    // so the handler can wake by exact request match first, identity
+    // fallback second — without any identity resolution or Seerr calls.
+    if (notificationType && AVAILABILITY_NOTIFICATION_TYPES.has(notificationType)) {
+      return {
+        ok: true,
+        intent: {
+          mediaId: identity.mediaId,
+          mediaType,
+          season: null,
+          episode: null,
+          source: SEERR_PROVIDER_NAME,
+          sourceType: SEERR_PROVIDER_TYPE,
+          sourceId: requestId,
+          sourceLabel: subject || null,
+          status: 'active',
+          priority: 100,
+          requestedBy: null,
+          imdbId: identity.imdbId,
+          tmdbId: identity.tmdbId,
+          tvdbId: identity.tvdbId,
+        },
+        available: true,
+        notificationType,
+        subject,
+        extra,
+      };
+    }
     // A human cancellation (declined/deleted request) is actionable as
     // a withdrawal signal, not as new demand. The intent carries the
     // Seerr request id so the handler can withdraw matching deferred
@@ -493,6 +536,7 @@ export const SEERR_CONSTANTS = Object.freeze({
   NAME: SEERR_PROVIDER_NAME,
   TYPE: SEERR_PROVIDER_TYPE,
   APPROVAL_NOTIFICATION_TYPES: Array.from(APPROVAL_NOTIFICATION_TYPES),
+  AVAILABILITY_NOTIFICATION_TYPES: Array.from(AVAILABILITY_NOTIFICATION_TYPES),
   WITHDRAWAL_NOTIFICATION_TYPES: Array.from(WITHDRAWAL_NOTIFICATION_TYPES),
   TEST_NOTIFICATION_TYPES: Array.from(TEST_NOTIFICATION_TYPES),
 });

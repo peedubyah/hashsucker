@@ -216,20 +216,93 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
   }
 
   /**
+   * Escape LIKE wildcards in a Seerr request id. Request ids are
+   * operator-influenced strings; without escaping, `req-1` would also
+   * match `req-10` / `req-1x` as a prefix pattern.
+   */
+  function escapeLike(s) {
+    return String(s).replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+  }
+
+  /**
+   * Match one Seerr request's rows exactly: the parent
+   * (`seerr:<reqId>`) plus episode children (`seerr:<reqId>:s..:e..`),
+   * and nothing else. Shared by withdrawal and availability wake-up.
+   */
+  function seerrRequestPredicate(requestId) {
+    const esc = escapeLike(requestId);
+    return {
+      sql: `(source = ? OR source LIKE ? ESCAPE '\\')`,
+      params: [`seerr:${requestId}`, `seerr:${esc}:%`],
+    };
+  }
+
+  /**
+   * Seerr availability wake-up (availability tranche): bring matching
+   * anticipated/failed rows due immediately so the next scheduler claim
+   * retries them through normal discovery. Touches ONLY next_check_at —
+   * attempts, last_error, defer_reason, source, and expected_at are
+   * preserved. Preparing+ rows are excluded by construction (the atomic
+   * claim owns them; an event must never fork provider work). Returns
+   * the number of rows awakened.
+   */
+  function wakeSeerrRequest(requestId, nowMs) {
+    ensureSchema(db);
+    if (!requestId) return 0;
+    const t = nowMs ?? now();
+    const pred = seerrRequestPredicate(requestId);
+    try {
+      const info = db.prepare(`UPDATE future_intents
+        SET next_check_at = ?, updated_at = ?
+        WHERE ${pred.sql} AND state IN ('anticipated', 'failed')`)
+        .run(t, t, ...pred.params);
+      return info.changes;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Identity fallback wake: same semantics as wakeSeerrRequest, matched
+   * on exact media identity instead of the Seerr request id. Used when
+   * the event carries no usable request id (or it matches nothing).
+   * The caller passes every operational form worth trying (e.g. the
+   * resolved IMDb id and the `tmdb:<id>` form).
+   */
+  function wakeMedia(mediaIds, nowMs) {
+    ensureSchema(db);
+    const ids = (Array.isArray(mediaIds) ? mediaIds : [mediaIds]).filter(Boolean);
+    if (ids.length === 0) return 0;
+    const t = nowMs ?? now();
+    try {
+      const placeholders = ids.map(() => '?').join(',');
+      const info = db.prepare(`UPDATE future_intents
+        SET next_check_at = ?, updated_at = ?
+        WHERE media_id IN (${placeholders}) AND state IN ('anticipated', 'failed')`)
+        .run(t, t, ...ids);
+      return info.changes;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
    * Withdraw never-fulfilled rows for one Seerr request id (human
-   * cancellation: declined/deleted). Prefix-matches both the parent
-   * (`seerr:<reqId>`) and episode children (`seerr:<reqId>:s..:e..`).
-   * Only anticipated/failed rows move — prepared+ rows are useful
-   * durable truth and stay, as do other sources' rows.
+   * cancellation: declined/deleted). Matches the parent plus episode
+   * children exactly (see seerrRequestPredicate) — never a neighboring
+   * request id that merely shares a string prefix. Only
+   * anticipated/failed rows move — prepared+ rows are useful durable
+   * truth and stay, as do other sources' rows.
    */
   function withdrawSeerrRequest(requestId, reason) {
     ensureSchema(db);
     if (!requestId) return 0;
+    const pred = seerrRequestPredicate(requestId);
     try {
       const info = db.prepare(`UPDATE future_intents
         SET state = 'withdrawn', last_error = ?, updated_at = ?
-        WHERE source LIKE ? AND state IN ('anticipated', 'failed')`)
-        .run(reason, now(), `seerr:${requestId}%`);
+        WHERE ${pred.sql} AND state IN ('anticipated', 'failed')`)
+        .run(reason, now(), ...pred.params);
       return info.changes;
     } catch {
       return 0;
@@ -274,7 +347,7 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
     return row?.t ?? null;
   }
 
-  return { seed, findByIdentity, hasPendingForMedia, revive, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest };
+  return { seed, findByIdentity, hasPendingForMedia, revive, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest, wakeSeerrRequest, wakeMedia };
 }
 
 /** Backoff for retryable intent work: 15m, 1h, 4h, cap 24h. */
