@@ -326,3 +326,71 @@ test('legacy tree-only base resolves via compare and advances', async () => {
     cache.close();
   }
 });
+
+test('stuck updating state recovers to usable on next tick', async () => {
+  const cache = (await import('../src/lib/discovery/cache.js')).createDiscoveryCache();
+  try {
+    const lc = lifecycle(cache, {});
+    void lc.getState();
+    cache.db.exec(`UPDATE corpus_state SET state='updating', imported_revision='${TREE_A}', imported_commit='${COMMIT_A}', last_check=1000 WHERE id=1`);
+    const t = lc.tick({ intervalMs: 6 * 60 * 60 * 1000, autoBootstrap: true });
+    assert.equal(t.action, 'update', 'recovered stuck updating into an update tick');
+    assert.equal(lc.getState().state, 'usable');
+  } finally {
+    cache.close();
+  }
+});
+
+test('stuck bootstrapping without revision recovers to absent', async () => {
+  const cache = (await import('../src/lib/discovery/cache.js')).createDiscoveryCache();
+  try {
+    const lc = lifecycle(cache, {});
+    void lc.getState();
+    cache.db.exec(`UPDATE corpus_state SET state='bootstrapping', imported_revision=NULL, last_check=1000 WHERE id=1`);
+    const t = lc.tick({ intervalMs: 6 * 60 * 60 * 1000, autoBootstrap: false });
+    assert.equal(t.action, 'idle-absent');
+    assert.equal(lc.getState().state, 'absent');
+  } finally {
+    cache.close();
+  }
+});
+
+test('unreadable database degrades tick to wait, never throws', async () => {
+  const broken = { db: { exec: () => { throw new Error('disk I/O error'); }, prepare: () => { throw new Error('disk I/O error'); } } };
+  const { createCorpusLifecycle: mk } = await import('../src/lib/discovery/corpus-lifecycle.js');
+  const lc = mk({ cache: broken, log: () => {} });
+  assert.equal(lc.getState().state, 'unknown');
+  const t = lc.tick({ intervalMs: 1000, autoBootstrap: true });
+  assert.equal(t.action, 'wait');
+});
+
+test('maintenance switch honors both spellings', async () => {
+  const { corpusMaintenanceEnabled } = await import('../src/lib/discovery/corpus-lifecycle.js');
+  assert.equal(corpusMaintenanceEnabled({}), true);
+  assert.equal(corpusMaintenanceEnabled({ CORPUS_ENABLED: '0' }), false);
+  assert.equal(corpusMaintenanceEnabled({ CORPUS_ENABLED: 'false' }), false);
+  assert.equal(corpusMaintenanceEnabled({ CORPUS_MAINTENANCE: '0' }), false);
+  assert.equal(corpusMaintenanceEnabled({ CORPUS_MAINTENANCE: '0', CORPUS_ENABLED: '1' }), false);
+});
+
+test('github outage preserves revision and usable state', async () => {
+  const cache = (await import('../src/lib/discovery/cache.js')).createDiscoveryCache();
+  try {
+    const lc = createCorpusLifecycle({
+      cache, repo: 'test/repo', clock: () => 1000, log: () => {},
+      fetchFn: async () => { throw new Error('net down'); },
+      sourceFactory: () => ({ listFragments: async () => ({ fragments: [], treeSha: TREE_B, branch: 'main' }), fetchFragment: async () => '' }),
+    });
+    void lc.getState();
+    cache.db.exec(`UPDATE corpus_state SET state='usable', imported_revision='${TREE_A}', imported_commit='${COMMIT_A}', candidate_count=5, fragment_count=5, updated_at=1000 WHERE id=1`);
+    const r = await lc.updateOnce();
+    assert.equal(r.ok, false);
+    const st = lc.getState();
+    assert.equal(st.imported_revision, TREE_A);
+    assert.equal(st.state, 'usable');
+    assert.equal(st.consecutive_failures, 1);
+    assert.equal(st.candidate_count, 5, 'counts preserved');
+  } finally {
+    cache.close();
+  }
+});

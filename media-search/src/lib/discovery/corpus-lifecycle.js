@@ -88,7 +88,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_dmm_fragments_run_name
 `;
 
 function readState(db) {
-  ensureSchema(db);
+  try {
+    ensureSchema(db);
+  } catch {
+    return { state: 'unknown', dbError: true };
+  }
   let row = null;
   try {
     row = db.prepare('SELECT * FROM corpus_state WHERE id = 1').get();
@@ -477,10 +481,27 @@ export function createCorpusLifecycle({
      * does not hammer (last_check persists).
      */
     tick({ intervalMs, autoBootstrap }) {
-      const cur = readState(db);
+      // Crash recovery: a kill mid-bootstrap/update leaves the persisted
+      // state behind while inFlight is gone. Recover to the last-good
+      // position (usable when a revision exists, else absent) so the
+      // scheduler resumes instead of wedging on 'busy' forever.
+      // Fragment-level resume data makes the retry cheap.
+      let cur = readState(db);
+      if (!inFlight && (cur.state === CORPUS_STATES.UPDATING || cur.state === CORPUS_STATES.BOOTSTRAPPING)) {
+        try {
+          writeState(db, {
+            state: cur.imported_revision ? CORPUS_STATES.USABLE : CORPUS_STATES.ABSENT,
+            last_error: `recovered stuck ${cur.state} after restart`,
+          }, now);
+        } catch {
+          return { action: 'wait', nextDueMs: intervalMs };
+        }
+        cur = readState(db);
+      }
       if (inFlight || cur.state === CORPUS_STATES.UPDATING || cur.state === CORPUS_STATES.BOOTSTRAPPING) {
         return { action: 'busy' };
       }
+      if (cur.dbError) return { action: 'wait', nextDueMs: intervalMs };
       const backoff = Math.min(cur.consecutive_failures ?? 0, 3);
       const dueIn = (cur.last_check ?? 0) + intervalMs * 2 ** backoff - now();
       if (!cur.imported_revision) {
@@ -505,4 +526,18 @@ export function corpusUpdateIntervalMs(env = process.env) {
 export function corpusAutoBootstrap(env = process.env) {
   const v = String(env.CORPUS_AUTO_BOOTSTRAP ?? '1').toLowerCase();
   return v !== '0' && v !== 'false';
+}
+
+/**
+ * Maintenance master switch. CORPUS_ENABLED is canonical;
+ * CORPUS_MAINTENANCE is honored as a legacy alias. Default ON.
+ */
+export function corpusMaintenanceEnabled(env = process.env) {
+  const off = (v) => {
+    const s = String(v ?? '').toLowerCase();
+    return s === '0' || s === 'false';
+  };
+  if (off(env.CORPUS_MAINTENANCE)) return false;
+  if (off(env.CORPUS_ENABLED)) return false;
+  return true;
 }

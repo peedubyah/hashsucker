@@ -312,15 +312,23 @@ function lifecycleSummary({ cache, controlPlaneStore, listLibraryFn, retirementP
  * counts. All values come from the corpus_state row — no live COUNT(*),
  * no network. Absent table (pre-migration DB) reports state unknown.
  */
-function corpusSummary(cache) {
+function corpusSummary(cache, env = process.env) {
+  // Maintenance switch mirror (canonical lives in corpus-lifecycle.js;
+  // duplicated here to avoid pulling provider modules into diagnostics).
+  const off = (v) => {
+    const s = String(v ?? '').toLowerCase();
+    return s === '0' || s === 'false';
+  };
+  const enabled = !(off(env.CORPUS_MAINTENANCE) || off(env.CORPUS_ENABLED));
   try {
     const db = cache?.db;
-    if (!db) return { state: 'unknown', detail: 'corpus store unavailable' };
+    if (!db) return { enabled, state: 'unknown', detail: 'corpus store unavailable' };
     const tbl = db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='corpus_state'").get();
-    if (!tbl) return { state: 'absent', detail: 'no corpus baseline imported' };
+    if (!tbl) return { enabled, state: 'absent', detail: 'no corpus baseline imported' };
     const row = db.prepare('SELECT * FROM corpus_state WHERE id = 1').get();
-    if (!row) return { state: 'absent', detail: 'no corpus baseline imported' };
+    if (!row) return { enabled, state: 'absent', detail: 'no corpus baseline imported' };
     const out = {
+      enabled,
       state: row.state ?? 'unknown',
       revision: row.imported_revision ?? null,
       revisionCommit: row.imported_commit ?? null,
@@ -436,7 +444,7 @@ export async function buildDiagnostics({
   const reconcile = controlPlaneStore && typeof controlPlaneStore.listConsumerObservations === 'function'
     ? reconcileSummary(controlPlaneStore)
     : { state: 'unknown', detail: 'observations unavailable' };
-  const corpus = corpusSummary(cache);
+  const corpus = corpusSummary(cache, env);
   if (retirementPolicy && !retirementPolicy.enabled) {
     warnings.push('Automatic retirement is disabled (default safe state).');
   }

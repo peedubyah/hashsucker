@@ -35,6 +35,7 @@ import {
   createCorpusLifecycle,
   corpusUpdateIntervalMs,
   corpusAutoBootstrap,
+  corpusMaintenanceEnabled,
 } from '../lib/discovery/corpus-lifecycle.js';
 
 // ─── consumer reconciliation ticker ─────────────────────────────────────
@@ -82,10 +83,9 @@ if (reconcileEnabled) {
 // Single-flight via the lifecycle; failures back off boundedly and
 // never destroy the serving corpus. Discovery stays live-only while
 // the corpus is absent — the service never blocks on it.
-// CORPUS_MAINTENANCE=0 disables both bootstrap and updates.
-const corpusMaintenanceFlag = String(process.env.CORPUS_MAINTENANCE ?? '').toLowerCase();
-const corpusMaintenanceEnabled = corpusMaintenanceFlag !== '0' && corpusMaintenanceFlag !== 'false';
-const corpusLifecycle = corpusMaintenanceEnabled
+// CORPUS_MAINTENANCE=0 (or CORPUS_ENABLED=0) disables both bootstrap and updates.
+const corpusMaintenanceOn = corpusMaintenanceEnabled(process.env);
+const corpusLifecycle = corpusMaintenanceOn
   ? createCorpusLifecycle({
     cache: discoveryCache,
     repo: process.env.CORPUS_DMM_REPO || 'debridmediamanager/hashlists',
@@ -124,7 +124,7 @@ function armCorpusTimer(delayMs) {
   }, delayMs);
   if (corpusTimer.unref) corpusTimer.unref();
 }
-if (corpusMaintenanceEnabled) {
+if (corpusMaintenanceOn) {
   armCorpusTimer(5 * 60_000);
 }
 

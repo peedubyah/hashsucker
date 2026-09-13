@@ -73,6 +73,28 @@ Provider tokens must never reach browser code and must never cross the edge boun
 `COMET_REALDEBRID_MANIFEST_URL`, `COMET_MANIFEST_URL`, `TORRENTIO_TORBOX_MANIFEST_URL`,
 `TORRENTIO_REALDEBRID_MANIFEST_URL`, `CINEMETA_BASE_URL`.
 
+### Corpus maintenance
+
+All optional; defaults keep a fresh deploy self-sufficient. States
+(absent/bootstrapping/usable/updating/degraded) and revision are reported
+under `corpus` in `GET /api/diagnostics`; `POST /api/corpus/update`
+triggers bootstrap/update manually.
+
+`CORPUS_ENABLED` (`1`; `0` disables all corpus maintenance),
+`CORPUS_MAINTENANCE` (legacy alias for the same switch),
+`CORPUS_AUTO_BOOTSTRAP` (`1`; blank data directories bootstrap automatically),
+`CORPUS_UPDATE_INTERVAL_HOURS` (`6`; min `0.5`),
+`CORPUS_DMM_REPO` (`debridmediamanager/hashlists`),
+`CORPUS_GITHUB_TOKEN` (unset; raises upstream API rate limits).
+
+Corpus storage is the discovery DB itself (`DISCOVERY_DB`, default
+`/data/discovery-cache.db`, ~1.9 GB with indexes ~15%); corpus tables are
+namespaced (`candidates`, `release_attributes`, `dmm_*`, `corpus_*`) and
+migrate additively. Backup/migration: stop containers, copy the whole
+`/data` directory (`discovery-cache.db` + `control-plane.db`), start —
+no rebuild required. Keep 6 GB free on the data volume (live DB plus
+headroom for a parallel rebuild, WAL, and delta growth at ~4 MB/day).
+
 ### Ingress and notifications
 
 `SEERR_URL`, `SEERR_API_KEY`, `SEERR_WEBHOOK_TOKEN`, `JELLYFIN_URL`, `JELLYFIN_MEDIA_ROOT`,
