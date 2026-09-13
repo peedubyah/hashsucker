@@ -34,6 +34,8 @@ export function createAnticipationScheduler({
   checkTorBoxCachedFn = null,
   clock = () => Date.now(),
   log = () => {},
+  prepareDays = 30,
+  publishDays = 7,
 } = {}) {
   if (!store) throw new Error('anticipation scheduler requires store');
   if (!baseUrl) throw new Error('anticipation scheduler requires baseUrl');
@@ -163,6 +165,19 @@ export function createAnticipationScheduler({
     };
 
     if (intent.state === INTENT_STATES.ANTICIPATED) {
+      // Arr-satisfied items stay known but take no fulfillment action.
+      if (intent.arr_satisfied) {
+        return done(INTENT_STATES.ANTICIPATED, {
+          last_error: 'arr-satisfied', next_check_at: now() + PARKED_MS,
+        });
+      }
+      // Preparation window: far-future expectations sleep until the window.
+      if (intent.expected_at != null) {
+        const windowStart = intent.expected_at - prepareDays * 86400 * 1000;
+        if (windowStart > now()) {
+          return done(INTENT_STATES.ANTICIPATED, { next_check_at: windowStart });
+        }
+      }
       const prep = await prepareIntent(intent);
       if (prep.ok) {
         return done(INTENT_STATES.PREPARED, { torrent_file_id: prep.torrentFileId, next_check_at: now(), last_error: null });
@@ -176,6 +191,20 @@ export function createAnticipationScheduler({
     }
 
     if (intent.state === INTENT_STATES.PREPARED || intent.state === INTENT_STATES.PUBLISHED_PREPARING) {
+      if (intent.arr_satisfied) {
+        return done(intent.state, {
+          last_error: 'arr-satisfied', next_check_at: now() + PARKED_MS,
+        });
+      }
+      // Publication window: preparation may run earlier, but consumer
+      // publication + prewarm wait until use is near (prewarm costs
+      // ~142 MB/title and must not be spent months ahead).
+      if (intent.expected_at != null) {
+        const windowStart = intent.expected_at - publishDays * 86400 * 1000;
+        if (windowStart > now()) {
+          return done(intent.state, { next_check_at: windowStart });
+        }
+      }
       const pub = await publishIntent(intent);
       if (!pub.ok) {
         return done(intent.state, { last_error: pub.error, next_check_at: now() + intentBackoffMs(intent.attempts) });

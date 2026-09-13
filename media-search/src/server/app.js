@@ -73,7 +73,9 @@ import { createTorBoxProvider } from '../lib/providers/torbox.js';
 import { createTorBoxInventoryProvider } from '../lib/providers/torbox-inventory.js';
 import { buildRequestScopedEnsureFn } from '../lib/requests/scoped-ensure.js';
 import { createCorpusLifecycle, corpusUpdateIntervalMs, corpusAutoBootstrap } from '../lib/discovery/corpus-lifecycle.js';
-import { createFutureIntentStore } from '../lib/anticipation/future-intents.js';
+import { createFutureIntentStore, isWantedByArr } from '../lib/anticipation/future-intents.js';
+import { createArrClient } from '../lib/anticipation/arr-client.js';
+import { createArrSync } from '../lib/anticipation/arr-sync.js';
 import { ensureTorBoxDelivery, TorBoxDeliveryError, resolveTorBoxDeliveryWithStaleRecovery } from '../lib/resolver/torbox-delivery.js';
 import {
   getTorBoxDownloadUrlCache,
@@ -1476,6 +1478,23 @@ export function createRequestHandler(dependencies = {}) {
     return futureIntentStoreInstance;
   }
 
+  // Arr sync instance for the manual trigger. Same construction as the
+  // index.js scheduler; sync operations are idempotent across instances.
+  let arrSyncInstance = dependencies.arrSync ?? null;
+  function getArrSync() {
+    if (!arrSyncInstance) {
+      const hasRadarr = !!(env.RADARR_URL && env.RADARR_API_KEY);
+      const hasSonarr = !!(env.SONARR_URL && env.SONARR_API_KEY);
+      if (!hasRadarr && !hasSonarr) return null;
+      arrSyncInstance = createArrSync({
+        db: searchCache.db,
+        radarr: hasRadarr ? createArrClient({ baseUrl: env.RADARR_URL, apiKey: env.RADARR_API_KEY }) : null,
+        sonarr: hasSonarr ? createArrClient({ baseUrl: env.SONARR_URL, apiKey: env.SONARR_API_KEY }) : null,
+      });
+    }
+    return arrSyncInstance;
+  }
+
   // Wire Plex refresh coalescer accounting into the live metrics
   // counters so /api/metrics surfaces the same numbers the notifier
   // tracks. The notifier emits a snapshot per change; we forward it
@@ -2335,9 +2354,19 @@ export function createRequestHandler(dependencies = {}) {
               const detail = evaluateRetirement(
                 item, rows, { ...policy, enabled: true }, now,
               );
-              const evalResult = policy.enabled
+              let evalResult = policy.enabled
                 ? detail
                 : { ...detail, eligible: false, reason: 'POLICY_DISABLED' };
+              // Arr lifecycle guard (same rule as the executor path).
+              try {
+                if (evalResult.eligible && searchCache?.db && isWantedByArr(searchCache.db, {
+                  mediaId: item.mediaId, season: item.season, episode: item.episode,
+                })) {
+                  evalResult = { ...evalResult, eligible: false, reason: 'ARR_MONITORED' };
+                }
+              } catch {
+                // Guard failure must never enable retirement.
+              }
               return {
                 mediaId: item.mediaId,
                 season: item.season,
@@ -2612,6 +2641,21 @@ export function createRequestHandler(dependencies = {}) {
             counts: store.counts(),
             nextCheck: store.nextCheck(),
           });
+        } catch (err) {
+          return sendJson(response, 500, { error: err?.message || String(err) });
+        }
+      }
+      // Arr sync trigger (headless operator convention): batch reconcile
+      // Sonarr/Radarr monitored/upcoming into future intents. Idempotent;
+      // failures leave existing intents intact.
+      if (request.method === 'POST' && url.pathname === '/api/arr/sync') {
+        try {
+          const sync = getArrSync();
+          if (!sync) {
+            return sendJson(response, 200, { ok: false, reason: 'arr-disabled' });
+          }
+          const summary = await sync.syncOnce({ store: getFutureIntentStore() });
+          return sendJson(response, 200, { ok: true, summary });
         } catch (err) {
           return sendJson(response, 500, { error: err?.message || String(err) });
         }

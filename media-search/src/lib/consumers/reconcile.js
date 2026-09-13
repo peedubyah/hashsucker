@@ -14,6 +14,7 @@
 
 import { listLibrary } from '../library/listing.js';
 import { evaluateRetirement, readRetirementPolicy } from './eligibility.js';
+import { isWantedByArr } from '../anticipation/future-intents.js';
 import { jellyfinAdapter } from './jellyfin.js';
 import { plexAdapter } from './plex.js';
 import { unpublishMedia } from '../library/unpublish.js';
@@ -114,6 +115,16 @@ export async function runReconcile({
     }).filter((o) => (o.season ?? null) === (item.season ?? null)
       && (o.episode ?? null) === (item.episode ?? null));
     const evalResult = evaluateRetirement(item, rows, effectivePolicy, now);
+    // Arr lifecycle guard: a household-monitored item is still wanted even
+    // when absent from consumers. Guard, not authority: it only vetoes.
+    let arrGuarded = false;
+    try {
+      arrGuarded = evalResult.eligible && cache?.db
+        ? isWantedByArr(cache.db, { mediaId: item.mediaId, season: item.season, episode: item.episode })
+        : false;
+    } catch {
+      arrGuarded = false;
+    }
     const outcome = {
       mediaId: item.mediaId,
       season: item.season,
@@ -121,11 +132,11 @@ export async function runReconcile({
       state: item.state,
       presence: evalResult.presence,
       absenceAgeMs: evalResult.absenceAgeMs,
-      eligible: evalResult.eligible,
-      reason: evalResult.reason,
+      eligible: arrGuarded ? false : evalResult.eligible,
+      reason: arrGuarded ? 'ARR_MONITORED' : evalResult.reason,
       retired: false,
     };
-    if (evalResult.eligible && shouldExecute) {
+    if (evalResult.eligible && !arrGuarded && shouldExecute) {
       try {
         await unpublishMedia({
           cache,

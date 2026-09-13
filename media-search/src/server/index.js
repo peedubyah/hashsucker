@@ -40,6 +40,8 @@ import {
 import { createFutureIntentStore } from '../lib/anticipation/future-intents.js';
 import { createAnticipationScheduler } from '../lib/anticipation/scheduler.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
+import { createArrClient } from '../lib/anticipation/arr-client.js';
+import { createArrSync } from '../lib/anticipation/arr-sync.js';
 
 // ─── consumer reconciliation ticker ─────────────────────────────────────
 // Read-only consumer presence checks on a slow cadence (default 15 min,
@@ -142,6 +144,14 @@ function anticipationIntervalMs() {
   const n = Number(process.env.FUTURE_INTENT_INTERVAL_MIN ?? 15);
   return Number.isFinite(n) && n >= 1 ? n * 60 * 1000 : 15 * 60 * 1000;
 }
+function anticipationPrepareDays() {
+  const n = Number(process.env.ANTICIPATION_PREPARE_DAYS ?? 30);
+  return Number.isFinite(n) && n >= 0 ? n : 30;
+}
+function anticipationPublishDays() {
+  const n = Number(process.env.ANTICIPATION_PUBLISH_DAYS ?? 7);
+  return Number.isFinite(n) && n >= 0 ? n : 7;
+}
 const anticipationFlag = String(process.env.ANTICIPATION_ENABLED ?? '').toLowerCase();
 const anticipationOn = anticipationFlag !== '0' && anticipationFlag !== 'false';
 let anticipationTimer = null;
@@ -153,6 +163,8 @@ const anticipationScheduler = anticipationOn
     controlPlaneStore,
     baseUrl: `http://127.0.0.1:${port}`,
     dataPlaneBaseUrl: process.env.DATA_PLANE_URL ?? 'http://data-plane:3001',
+    prepareDays: anticipationPrepareDays(),
+    publishDays: anticipationPublishDays(),
     checkTorBoxCachedFn: async (hashes) => {
       const r = await checkTorBoxCached(hashes);
       return hashes.map((h) => ({
@@ -186,6 +198,73 @@ function armAnticipationTimer(delayMs) {
 }
 if (anticipationOn) {
   armAnticipationTimer(2 * 60_000);
+}
+
+// ─── Arr intent sync ────────────────────────────────────────────────
+// Sonarr/Radarr are sensors, not fulfillment authorities: periodic batch
+// reconciliation (default 6 h, first run 3 min after boot) imports
+// monitored/upcoming items as future intents. URL without key (or bad
+// key) is a degraded config error, never silent. Neither configured =
+// disabled. Failures leave existing intents intact; restarts do not
+// hammer Arr (last sync persists in arr_sync_state).
+function arrSyncIntervalMs() {
+  const n = Number(process.env.ARR_SYNC_INTERVAL_HOURS ?? 6);
+  return Number.isFinite(n) && n >= 0.5 ? n * 60 * 60 * 1000 : 6 * 60 * 60 * 1000;
+}
+const arrSyncClients = (() => {
+  const out = {};
+  if (process.env.RADARR_URL) {
+    out.radarr = {
+      client: createArrClient({ baseUrl: process.env.RADARR_URL, apiKey: process.env.RADARR_API_KEY || null }),
+      configured: true,
+      keyPresent: !!process.env.RADARR_API_KEY,
+    };
+  }
+  if (process.env.SONARR_URL) {
+    out.sonarr = {
+      client: createArrClient({ baseUrl: process.env.SONARR_URL, apiKey: process.env.SONARR_API_KEY || null }),
+      configured: true,
+      keyPresent: !!process.env.SONARR_API_KEY,
+    };
+  }
+  return out;
+})();
+const arrSync = (arrSyncClients.radarr || arrSyncClients.sonarr)
+  ? createArrSync({
+    db: discoveryCache.db,
+    radarr: arrSyncClients.radarr?.keyPresent ? arrSyncClients.radarr.client : null,
+    sonarr: arrSyncClients.sonarr?.keyPresent ? arrSyncClients.sonarr.client : null,
+  })
+  : null;
+let arrSyncTimer = null;
+let arrSyncInFlight = false;
+function armArrSyncTimer(delayMs) {
+  arrSyncTimer = setTimeout(async () => {
+    try {
+      if (arrSync && !arrSyncInFlight) {
+        arrSyncInFlight = true;
+        try {
+          const intentStore = createFutureIntentStore({ db: discoveryCache.db });
+          const summary = await arrSync.syncOnce({ store: intentStore });
+          for (const [name, result] of Object.entries(summary)) {
+            if (!result) continue;
+            console.log(`media-search: arr sync ${name} ok=${result.ok} `
+              + (result.ok ? `intents=${result.intents}` : `error=${result.error}`));
+          }
+        } finally {
+          arrSyncInFlight = false;
+        }
+      }
+    } catch (error) {
+      console.warn('media-search: arr sync failed', error?.message);
+    } finally {
+      armArrSyncTimer(arrSyncIntervalMs());
+    }
+  }, delayMs);
+  if (arrSyncTimer.unref) arrSyncTimer.unref();
+}
+if (arrSync) {
+  armArrSyncTimer(3 * 60_000);
 }
 
 const durabilityMode = resolveDurabilityMode(process.env);

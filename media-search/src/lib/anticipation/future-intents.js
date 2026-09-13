@@ -49,6 +49,13 @@ CREATE INDEX IF NOT EXISTS idx_future_intents_due
 
 function ensureSchema(db) {
   db.exec(SCHEMA);
+  // Additive Arr columns (Phase: Arr sync). PRAGMA-guarded for existing DBs.
+  try {
+    const cols = db.prepare('PRAGMA table_info(future_intents)').all().map((c) => c.name);
+    if (!cols.includes('arr_satisfied')) {
+      db.exec('ALTER TABLE future_intents ADD COLUMN arr_satisfied INTEGER NOT NULL DEFAULT 0');
+    }
+  } catch {}
 }
 
 export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
@@ -115,6 +122,37 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
     return info.changes === 1;
   }
 
+  /** Arr-managed rows only (radarr:/sonarr: sources). */
+  function listArrSources() {
+    ensureSchema(db);
+    try {
+      return db.prepare(`SELECT * FROM future_intents
+        WHERE source LIKE 'radarr:%' OR source LIKE 'sonarr:%'`).all();
+    } catch {
+      return [];
+    }
+  }
+
+  /** Refresh Arr-supplied fields after a sync (never resets progress). */
+  function refreshArr(id, { expectedAt = null, satisfied = false, nextCheckAt = null } = {}) {
+    ensureSchema(db);
+    db.prepare(`UPDATE future_intents
+      SET expected_at = ?, arr_satisfied = ?, next_check_at = COALESCE(?, next_check_at), updated_at = ?
+      WHERE id = ?`).run(expectedAt, satisfied ? 1 : 0, nextCheckAt, now(), id);
+  }
+
+  /**
+   * Withdraw never-prepared anticipated rows for a vanished/unmonitored
+   * Arr source. Prepared+ rows are useful durable truth and stay.
+   */
+  function withdrawUnmonitored(source) {
+    ensureSchema(db);
+    const info = db.prepare(`UPDATE future_intents
+      SET state = 'withdrawn', last_error = 'arr-unmonitored', updated_at = ?
+      WHERE source = ? AND state = 'anticipated'`).run(now(), source);
+    return info.changes;
+  }
+
   function transition(id, state, patch = {}) {
     const allowed = Object.values(INTENT_STATES);
     if (!allowed.includes(state)) throw new Error(`bad intent state ${state}`);
@@ -141,11 +179,31 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
     return row?.t ?? null;
   }
 
-  return { seed, list, due, claim, retry, transition, counts, nextCheck };
+  return { seed, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored };
 }
 
 /** Backoff for retryable intent work: 15m, 1h, 4h, cap 24h. */
 export function intentBackoffMs(attempts) {
   const steps = [15 * 60 * 1000, 60 * 60 * 1000, 4 * 60 * 60 * 1000, 24 * 60 * 60 * 1000];
   return steps[Math.min(Math.max(0, attempts), steps.length - 1)];
+}
+
+/**
+ * Retirement guard (lifecycle evidence, not authority): exact match on an
+ * Arr-sourced, non-terminal intent means the household still monitors the
+ * item — do not auto-retire on consumer absence alone.
+ */
+export function isWantedByArr(db, { mediaId, season = null, episode = null } = {}) {
+  if (!db || !mediaId) return false;
+  try {
+    const row = db.prepare(`SELECT 1 AS ok FROM future_intents
+      WHERE media_id = ? AND COALESCE(season, -1) = COALESCE(?, -1)
+        AND COALESCE(episode, -1) = COALESCE(?, -1)
+        AND (source LIKE 'radarr:%' OR source LIKE 'sonarr:%')
+        AND state IN ('anticipated','preparing','prepared','published_preparing','playable')
+      LIMIT 1`).get(mediaId, season, episode);
+    return !!row;
+  } catch {
+    return false;
+  }
 }

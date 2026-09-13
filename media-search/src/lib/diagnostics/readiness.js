@@ -410,6 +410,54 @@ function anticipationSummary(cache) {
   }
 }
 
+/**
+ * Arr sensor status (anticipatory tranche): configuration, last sync
+ * outcome, and imported intent counts. No live Arr calls here — reachability
+ * is derived from the last sync result. URL without key is an explicit
+ * degraded configuration error, never silent.
+ */
+function arrSummary(cache, env = process.env) {
+  const one = (urlKey, keyKey, name) => {
+    const configured = !!env[urlKey];
+    const keyPresent = !!env[keyKey];
+    const base = { name, configured, keyPresent };
+    if (!configured) return { ...base, state: 'disabled' };
+    if (!keyPresent) return { ...base, state: 'degraded-config', detail: `${urlKey} set without ${keyKey}` };
+    try {
+      const db = cache?.db;
+      if (!db) return { ...base, state: 'unknown' };
+      const row = db.prepare('SELECT * FROM arr_sync_state WHERE source = ?').get(name);
+      if (!row || (!row.last_sync && !row.last_error)) return { ...base, state: 'never-synced' };
+      return {
+        ...base,
+        state: row.last_error ? 'sync-failed' : 'ok',
+        lastSync: row.last_sync ?? null,
+        lastError: row.last_error ?? null,
+        imported: (row.imported_movies ?? 0) + (row.imported_episodes ?? 0),
+      };
+    } catch {
+      return { ...base, state: 'unknown' };
+    }
+  };
+  const out = {
+    radarr: one('RADARR_URL', 'RADARR_API_KEY', 'radarr'),
+    sonarr: one('SONARR_URL', 'SONARR_API_KEY', 'sonarr'),
+  };
+  try {
+    const db = cache?.db;
+    if (db) {
+      const tbl = db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='future_intents'").get();
+      if (tbl) {
+        out.arrIntents = db.prepare(`SELECT COUNT(*) AS n FROM future_intents
+          WHERE source LIKE 'radarr:%' OR source LIKE 'sonarr:%'`).get()?.n ?? 0;
+      }
+    }
+  } catch {
+    out.arrIntents = 0;
+  }
+  return out;
+}
+
 function reconcileSummary(controlPlaneStore) {
   try {
     const rows = controlPlaneStore.listConsumerObservations();
@@ -484,6 +532,7 @@ export async function buildDiagnostics({
     : { state: 'unknown', detail: 'observations unavailable' };
   const corpus = corpusSummary(cache, env);
   const anticipation = anticipationSummary(cache);
+  const arr = arrSummary(cache, env);
   if (retirementPolicy && !retirementPolicy.enabled) {
     warnings.push('Automatic retirement is disabled (default safe state).');
   }
@@ -504,6 +553,7 @@ export async function buildDiagnostics({
     lifecycle: { ...lifecycle, reconcile },
     corpus,
     anticipation,
+    arr,
   };
 }
 

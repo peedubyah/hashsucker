@@ -271,6 +271,8 @@ regardless of TorBox vs Real-Debrid execution
 | `POST /api/media-request` | `searchByMedia` — the canonical request pipeline |
 | `POST /api/media-prepare` | `searchByMedia` with preparation only: discovery/ranking/selection/binding persisted, no presentation |
 | `POST /api/ingress/seerr` | Seerr webhook ingress (bearer token) |
+| `POST /api/future-intents` | Seed durable future intent (no presentation); scheduler prepares/publishes ahead of demand |
+| `GET /api/future-intents` | List intents, counts, next check |
 
 **Prepared vs published.** A *prepared* item has durable fulfillment truth —
 playback handoff (exact Release + TorrentFile) + positive-size TorrentFile row
@@ -296,6 +298,14 @@ playable, plus failed/withdrawn. Provider exhaustion withdraws
 presentation through safe-unpublish with history preserved. Future hooks
 (Sonarr/Radarr) only need to seed intents; they never touch
 provider/VFS internals.
+
+**Intent sources.** Sonarr/Radarr act as sensors (monitored/upcoming reads
+only — never downloads, queue edits, or release choice) via batched sync
+into `future_intents` (`radarr:movie:<id>`, `sonarr:<series>:SxxExx`
+provenance). Prowlarr/Torznab remains the next slice: it will become
+another *candidate-intelligence* source (what hashes exist), parallel to
+the corpus title index — never a fulfillment authority. The ranking and
+binding path stays single and unchanged regardless of source.
 
 ### Control plane
 
