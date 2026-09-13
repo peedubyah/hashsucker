@@ -1,5 +1,25 @@
 # HashSucker
 
+## Quick start (5 minutes)
+
+```bash
+cp .env.example .env        # then edit: TORBOX_API_KEY + two HOST PATHS
+docker compose pull         # prebuilt images, no toolchain needed
+docker compose up -d
+curl localhost:3000/api/diagnostics | head -c 600
+```
+
+Unraid (Compose Manager plugin): same three steps with
+[`.env.unraid.example`](.env.unraid.example) values
+(`HASHSUCKER_DATA_PATH=/mnt/user/appdata/hashsucker`,
+`HASHSUCKER_MEDIA_PATH=/mnt/user/media/hashsucker`, `PUID=99`, `PGID=100`).
+
+What to expect: diagnostics says `ready` within seconds. The corpus then
+bootstraps in bounded background sessions (`usable-partial` + progress
+while it converges, about an hour wall-clock); **requests work immediately**
+— live sources carry while the corpus improves. No dashboard, no account,
+no build step.
+
 Self-hosted service that turns a media intent — a movie, or one specific episode — into a ranked
   
 torrent release on a debrid provider, then hands Plex or Jellyfin a URL that stays valid after the
