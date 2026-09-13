@@ -210,8 +210,11 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
   /** Refresh Arr-supplied fields after a sync (never resets progress). */
   function refreshArr(id, { expectedAt = null, satisfied = false, nextCheckAt = null } = {}) {
     ensureSchema(db);
+    // expected_at converges toward information, never away from it: a
+    // null Arr date must not erase a date another source (Seerr, prior
+    // sync) already established on a converged row.
     db.prepare(`UPDATE future_intents
-      SET expected_at = ?, arr_satisfied = ?, next_check_at = COALESCE(?, next_check_at), updated_at = ?
+      SET expected_at = COALESCE(?, expected_at), arr_satisfied = ?, next_check_at = COALESCE(?, next_check_at), updated_at = ?
       WHERE id = ?`).run(expectedAt, satisfied ? 1 : 0, nextCheckAt, now(), id);
   }
 

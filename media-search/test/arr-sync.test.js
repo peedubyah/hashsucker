@@ -116,8 +116,7 @@ test('satisfied items park without fulfillment state', () => {
   assert.ok(row.next_check_at > 1000 + 20 * 86400 * 1000, 'parked far future');
 });
 
-test('arrNextCheck windows: released due, far-future sparse', () => {
-  const now = 1_000_000_000;
+test('arrNextCheck windows: released due, far-future sparse', () => {  const now = 1_000_000_000;
   const day = 86400 * 1000;
   assert.equal(arrNextCheck({ expectedAt: null }, now, { prepareDays: 30 }), now);
   assert.equal(arrNextCheck({ expectedAt: now - day }, now, { prepareDays: 30 }), now);
@@ -154,4 +153,38 @@ test('sync failure leaves existing intents intact', async () => {
   assert.equal(summary.radarr.ok, false);
   assert.equal(store.list({}).length, 1, 'existing intent preserved');
   assert.equal(store.list({})[0].state, 'anticipated');
+});
+
+test('separate radarr/sonarr passes never cross-withdraw (live-adoption fix)', () => {
+  const store = memStore();
+  const movie = { mediaType: 'movie', mediaId: 'ttM', season: null, episode: null, source: 'radarr:movie:1', expectedAt: 5000, satisfied: false };
+  const ep = { mediaType: 'series', mediaId: 'ttS', season: 1, episode: 2, source: 'sonarr:9:S01E02', expectedAt: 6000, satisfied: false };
+  const r1 = applyDescriptors(store, [movie], { nowMs: 1000, withdrawPrefix: 'radarr:' });
+  assert.equal(r1.applied, 1);
+  const r2 = applyDescriptors(store, [ep], { nowMs: 1000, withdrawPrefix: 'sonarr:' });
+  assert.equal(r2.applied, 1);
+  assert.equal(r2.withdrawn, 0, 'sonarr pass must not withdraw the radarr row');
+  const states = Object.fromEntries(store.list({}).map((x) => [x.media_id, x.state]));
+  assert.equal(states.ttM, 'anticipated', 'radarr row survives the sonarr pass');
+  assert.equal(states.ttS, 'anticipated');
+  // A genuinely vanished radarr source still withdraws on its own pass.
+  const r3 = applyDescriptors(store, [], { nowMs: 2000, withdrawPrefix: 'radarr:' });
+  assert.equal(r3.withdrawn, 1, 'vanished radarr source withdraws');
+  assert.equal(store.list({}).find((x) => x.media_id === 'ttM').state, 'withdrawn');
+  assert.equal(store.list({}).find((x) => x.media_id === 'ttS').state, 'anticipated', 'sonarr row untouched by radarr vanish');
+});
+
+test('converged rows refresh arr fields but keep provenance and dates', () => {
+  const store = memStore();
+  store.seed({ mediaType: 'movie', mediaId: 'ttC', source: 'seerr:req-9', expectedAt: 7777, deferReason: 'released-no-candidate' });
+  const d = { mediaType: 'movie', mediaId: 'ttC', season: null, episode: null, source: 'radarr:movie:9', expectedAt: 8888, satisfied: false };
+  applyDescriptors(store, [d], { nowMs: 1000, withdrawPrefix: 'radarr:' });
+  const row = store.findByIdentity({ mediaId: 'ttC' });
+  assert.equal(row.source, 'seerr:req-9', 'first seeder keeps provenance');
+  assert.equal(row.expected_at, 8888, 'arr refreshes the date');
+  assert.equal(row.defer_reason, 'released-no-candidate', 'deferral reason preserved');
+  assert.equal(store.list({}).length, 1, 'no duplicate row');
+  // A null Arr date must not erase the established date.
+  store.refreshArr(row.id, { expectedAt: null, satisfied: false, nextCheckAt: null });
+  assert.equal(store.findByIdentity({ mediaId: 'ttC' }).expected_at, 8888, 'null date converges toward information, never away');
 });

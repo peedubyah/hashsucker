@@ -96,8 +96,12 @@ export function mapSonarrEntry(entry) {
  * - upserts: descriptors to insert/refresh (new or date/satisfaction changed).
  * - unmonitoredSources: previously-seen Arr sources absent from this sync
  *   (caller withdraws only never-prepared anticipated rows).
+ * - sourcePrefix: when set, unmonitored detection is scoped to that
+ *   source family ('radarr:' / 'sonarr:'). REQUIRED when radarr and
+ *   sonarr sync in separate passes — without it, each pass would read
+ *   the other half's rows as vanished and withdraw them.
  */
-export function diffArrIntents(descriptors, existingRows) {
+export function diffArrIntents(descriptors, existingRows, { sourcePrefix = null } = {}) {
   const bySource = new Map((existingRows || []).map((r) => [r.source, r]));
   const seen = new Set();
   const upserts = [];
@@ -121,6 +125,7 @@ export function diffArrIntents(descriptors, existingRows) {
   const unmonitoredSources = [];
   for (const r of existingRows || []) {
     if ((r.source || '').startsWith('radarr:') || (r.source || '').startsWith('sonarr:')) {
+      if (sourcePrefix && !(r.source || '').startsWith(sourcePrefix)) continue;
       if (!seen.has(r.source)) unmonitoredSources.push(r.source);
     }
   }
@@ -178,7 +183,7 @@ export function createArrSync({
       try {
         const movies = await radarr.radarrMovies();
         const descriptors = movies.map(mapRadarrMovie);
-        const { applied, skipped } = applyDescriptors(store, descriptors);
+        const { applied, skipped } = applyDescriptors(store, descriptors, { withdrawPrefix: 'radarr:' });
         const imported = descriptors.filter((d) => !d.skip).length;
         recordSync('radarr', { last_sync: now(), last_error: null, imported_movies: imported, imported_episodes: 0 });
         summary.radarr = { ok: true, movies: movies.length, intents: imported, applied, skipped };
@@ -194,7 +199,7 @@ export function createArrSync({
           start: isoDay(start.getTime()), end: isoDay(end.getTime()), unmonitored: false,
         });
         const descriptors = entries.map(mapSonarrEntry);
-        const { applied, skipped } = applyDescriptors(store, descriptors);
+        const { applied, skipped } = applyDescriptors(store, descriptors, { withdrawPrefix: 'sonarr:' });
         const imported = descriptors.filter((d) => !d.skip).length;
         recordSync('sonarr', { last_sync: now(), last_error: null, imported_movies: 0, imported_episodes: imported });
         summary.sonarr = { ok: true, entries: entries.length, intents: imported, applied, skipped };
@@ -210,9 +215,9 @@ export function createArrSync({
 }
 
 /** Apply descriptors to the intent store (insert/refresh + unmonitored withdraw). Visible for tests. */
-export function applyDescriptors(store, descriptors, { prepareDays = 30, tvPrepareDays = 3, nowMs = Date.now() } = {}) {
+export function applyDescriptors(store, descriptors, { prepareDays = 30, tvPrepareDays = 3, nowMs = Date.now(), withdrawPrefix = null } = {}) {
   const existing = store.listArrSources();
-  const { upserts, unmonitoredSources, skipped } = diffArrIntents(descriptors, existing);
+  const { upserts, unmonitoredSources, skipped } = diffArrIntents(descriptors, existing, { sourcePrefix: withdrawPrefix });
   let applied = 0;
   for (const u of upserts) {
     const { intent } = store.seed({
