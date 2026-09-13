@@ -13,6 +13,19 @@ log() {
 log "starting TorBox importer"
 log "poll interval: ${POLL_INTERVAL}s"
 
+# Arr-less operation (deployment tranche): physical import dispatch needs
+# Radarr/Sonarr. Without either, the worker still polls the queue and the
+# TorBox inventory, but never dispatches account-inventory jobs into the
+# Arr classifiers — otherwise every loop would loudly fail each pending
+# job (`SONARR_API_KEY required`) forever. Jobs accumulate as discovered
+# (inspectable) and dispatch resumes after Arr is configured + restarted.
+ARR_DISPATCH_ENABLED=0
+if [ -n "${RADARR_URL:-}" ] || [ -n "${SONARR_URL:-}" ]; then
+    ARR_DISPATCH_ENABLED=1
+else
+    log "Arr not configured; physical import dispatch disabled (queue + inventory polling continue)"
+fi
+
 "$SCRIPTS_DIR/db-init.sh" >/dev/null
 
 while :; do
@@ -64,22 +77,24 @@ while :; do
     fi
 
     #
-    # Classify every newly discovered job.
+    # Classify every newly discovered job (Arr dispatch only; see top).
     #
-    for JOB_ID in $(
-        sqlite3 "$DB" "
-            SELECT torbox_id
-            FROM jobs
-            WHERE state='discovered'
-            ORDER BY first_seen;
-        "
-    ); do
-        log "dispatching new job $JOB_ID"
+    if [ "$ARR_DISPATCH_ENABLED" -eq 1 ]; then
+        for JOB_ID in $(
+            sqlite3 "$DB" "
+                SELECT torbox_id
+                FROM jobs
+                WHERE state='discovered'
+                ORDER BY first_seen;
+            "
+        ); do
+            log "dispatching new job $JOB_ID"
 
-        if ! "$SCRIPTS_DIR/dispatch-job.sh" "$JOB_ID"; then
-            log "dispatcher error on job $JOB_ID"
-        fi
-    done
+            if ! "$SCRIPTS_DIR/dispatch-job.sh" "$JOB_ID"; then
+                log "dispatcher error on job $JOB_ID"
+            fi
+        done
+    fi
 
     #
     # Process exactly one explicitly opted-in legacy movie job at a time.

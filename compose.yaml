@@ -15,8 +15,6 @@ services:
       REALDEBRID_API_KEY: ${REALDEBRID_API_KEY:-}
       COMET_TORBOX_MANIFEST_URL: ${COMET_TORBOX_MANIFEST_URL:-}
       COMET_REALDEBRID_MANIFEST_URL: ${COMET_REALDEBRID_MANIFEST_URL:-}
-      TORRENTIO_TORBOX_MANIFEST_URL: ${TORRENTIO_TORBOX_MANIFEST_URL:-}
-      TORRENTIO_REALDEBRID_MANIFEST_URL: ${TORRENTIO_REALDEBRID_MANIFEST_URL:-}
       TORZNAB_URLS: ${TORZNAB_URLS:-}
       PROWLARR_URL: ${PROWLARR_URL:-}
       PROWLARR_API_KEY: ${PROWLARR_API_KEY:-}
@@ -73,18 +71,22 @@ services:
       POLL_INTERVAL: "${POLL_INTERVAL:-10}"
       STRM_OUTPUT_PATH: "${STRM_OUTPUT_PATH:-/strm}"
       HASHSUCKER_BASE_URL: "${HASHSUCKER_BASE_URL:-http://media-search:3000}"
-      RADARR_URL: ${RADARR_URL:?Set RADARR_URL in .env}
-      RADARR_API_KEY: ${RADARR_API_KEY:?Set RADARR_API_KEY in .env}
+      # Arr endpoints are OPTIONAL for boot: the worker idles without them
+      # (queue polling + TorBox inventory need only the TorBox key) and the
+      # import scripts fail fast and loudly per-job when Arr is absent.
+      # A TorBox-only instance without Arr boots and idles cleanly.
+      RADARR_URL: ${RADARR_URL:-}
+      RADARR_API_KEY: ${RADARR_API_KEY:-}
       RADARR_ROOT_FOLDER: "${RADARR_ROOT_FOLDER:-/data/Movies}"
       RADARR_PROFILE_HD: "${RADARR_PROFILE_HD:-4}"
       RADARR_PROFILE_4K_WEB: "${RADARR_PROFILE_4K_WEB:-7}"
       RADARR_PROFILE_4K_BLU: "${RADARR_PROFILE_4K_BLU:-8}"
-      SONARR_URL: ${SONARR_URL:?Set SONARR_URL in .env}
-      SONARR_API_KEY: ${SONARR_API_KEY:?Set SONARR_API_KEY in .env}
+      SONARR_URL: ${SONARR_URL:-}
+      SONARR_API_KEY: ${SONARR_API_KEY:-}
     volumes:
-      - ${TORBOX_IMPORTER_HOST_PATH:?Set TORBOX_IMPORTER_HOST_PATH in .env}:/config
+      - ${TORBOX_IMPORTER_HOST_PATH:-./hy4-data/torbox-importer}:/config
       - ${REQUESTS_HOST_PATH:?Set REQUESTS_HOST_PATH in .env}:/requests
-      - ${DOWNLOADS_HOST_PATH:?Set DOWNLOADS_HOST_PATH in .env}:/downloads
+      - ${DOWNLOADS_HOST_PATH:-./hy4-data/downloads}:/downloads
       - ${STRM_HOST_PATH:-/tmp/strm}:/strm
     security_opt:
       - no-new-privileges:true
@@ -148,5 +150,4 @@ services:
       - no-new-privileges:true
 
 volumes:
-  discovery-data:
   hy4-cache:

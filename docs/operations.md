@@ -70,8 +70,9 @@ Provider tokens must never reach browser code and must never cross the edge boun
 ### Discovery sources
 
 `TORZNAB_URLS` (JSON array of indexer definitions), `COMET_TORBOX_MANIFEST_URL`,
-`COMET_REALDEBRID_MANIFEST_URL`, `COMET_MANIFEST_URL`, `TORRENTIO_TORBOX_MANIFEST_URL`,
-`TORRENTIO_REALDEBRID_MANIFEST_URL`, `CINEMETA_BASE_URL`.
+`COMET_REALDEBRID_MANIFEST_URL`, `COMET_MANIFEST_URL`, `CINEMETA_BASE_URL`.
+(Torrentio needs no variables: its manifest URL is derived from the
+provider keys at runtime.)
 
 ### Corpus maintenance
 
