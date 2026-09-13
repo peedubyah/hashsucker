@@ -71,9 +71,8 @@ import { createResolverTelemetry, getRecentResolverTelemetry, RESOLVER_OUTCOME }
 import { createResolverProfiler } from '../lib/resolver/profiler.js';
 import { createTorBoxProvider } from '../lib/providers/torbox.js';
 import { createTorBoxInventoryProvider } from '../lib/providers/torbox-inventory.js';
-import { TorBoxCallCoordinator } from '../lib/providers/torbox-call-coordinator.js';
+import { buildRequestScopedEnsureFn } from '../lib/requests/scoped-ensure.js';
 import { ensureTorBoxDelivery, TorBoxDeliveryError, resolveTorBoxDeliveryWithStaleRecovery } from '../lib/resolver/torbox-delivery.js';
-import { ensureTorBoxFileIdentity } from '../lib/resolver/torbox-file-identity.js';
 import {
   getTorBoxDownloadUrlCache,
   resolveTorBoxDownloadUrl,
@@ -577,7 +576,9 @@ async function handleSeerrIngress(
   response,
   searchCache,
   hydrateVfs = null,
-  { controlPlaneStore = null, ensureTorBoxFileIdentityFn = null } = {},
+  { controlPlaneStore = null, ensureTorBoxFileIdentityFn = null,
+    torBoxProvider = null, torBoxApiKey = null, torBoxApiBase = undefined,
+    clock = () => Date.now(), hasExplicitEnsureFn = false } = {},
 ) {
   // 1. Auth
   const authHeader = request.headers && typeof request.headers.authorization === 'string'
@@ -721,11 +722,25 @@ async function handleSeerrIngress(
     }
 
     // For non-TV (movies) the existing single-intent pipeline continues.
+    // Request-scoped mylist memoization (same mechanism as POST
+    // /api/media-request): one coordinator-owned snapshot for this
+    // webhook's selection attempts instead of a full account-list
+    // download per verify+inventory pair.
     if (intent.mediaType !== 'series') {
+      const requestEnsureFn = buildRequestScopedEnsureFn({
+        fallbackFn: ensureTorBoxFileIdentityFn,
+        explicitFn: hasExplicitEnsureFn,
+        controlPlaneStore,
+        torBoxProvider,
+        apiKey: torBoxApiKey,
+        apiBase: torBoxApiBase,
+        clock,
+        scope: 'seerr-ingress',
+      });
       return await runSingleSearchByMedia({
         searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, intentId,
         identityStatus, notificationType, response, hydrateVfs,
-        ensureTorBoxFileIdentity: ensureTorBoxFileIdentityFn,
+        ensureTorBoxFileIdentity: requestEnsureFn,
         controlPlaneStore,
       });
     }
@@ -844,6 +859,19 @@ async function handleSeerrIngress(
       });
 
       try {
+        // Fresh request-scoped mylist memoization per episode child: the
+        // coordinator must not outlive one searchByMedia call, otherwise a
+        // later sibling could verify against a stale snapshot.
+        const childEnsureFn = buildRequestScopedEnsureFn({
+          fallbackFn: ensureTorBoxFileIdentityFn,
+          explicitFn: hasExplicitEnsureFn,
+          controlPlaneStore,
+          torBoxProvider,
+          apiKey: torBoxApiKey,
+          apiBase: torBoxApiBase,
+          clock,
+          scope: 'seerr-ingress-tv',
+        });
         const result = await searchByMedia(searchCache, {
           mediaId: operationalIntent.mediaId,
           // searchByMedia's intent factory accepts only 'movie' or 'series'
@@ -872,7 +900,7 @@ async function handleSeerrIngress(
           // configured, this matches the size against the live TorBox
           // inventory and threads the resulting torrentFileId into
           // the handoff.
-          ...(ensureTorBoxFileIdentityFn ? { ensureTorBoxFileIdentity: ensureTorBoxFileIdentityFn } : {}),
+          ...(childEnsureFn ? { ensureTorBoxFileIdentity: childEnsureFn } : {}),
           // TV series don't currently use the canonical title/year for
           // the VFS path (TV materializer uses its own filename-derived
           // identity — unchanged in this slice). Forwarding them is
@@ -2516,6 +2544,11 @@ export function createRequestHandler(dependencies = {}) {
         return handleSeerrIngress(request, response, searchCache, hydrateVfsForRequest, {
           controlPlaneStore,
           ensureTorBoxFileIdentityFn,
+          torBoxProvider,
+          torBoxApiKey: env.TORBOX_API_KEY,
+          torBoxApiBase: env.TORBOX_API_URL,
+          clock,
+          hasExplicitEnsureFn,
         });
       }
       // Library unpublish: remove VFS/STRM presentation for an exact movie
@@ -2891,26 +2924,16 @@ export function createRequestHandler(dependencies = {}) {
           // torrents are never missed). Without this, each selection
           // attempt re-downloads the full account list. Falls back to the
           // shared provider when request scoping is unavailable.
-          let requestEnsureFn = ensureTorBoxFileIdentityFn;
-          if (!hasExplicitEnsureFn && controlPlaneStore && torBoxProvider && env.TORBOX_API_KEY) {
-            try {
-              const requestInventoryProvider = createTorBoxInventoryProvider({
-                apiKey: env.TORBOX_API_KEY,
-                apiBase: env.TORBOX_API_URL,
-                now: clock,
-                coordinator: new TorBoxCallCoordinator({ scope: 'media-request' }),
-              });
-              requestEnsureFn = (params) => ensureTorBoxFileIdentity({
-                ...params,
-                controlPlaneStore,
-                torBoxProvider,
-                torBoxInventoryProvider: requestInventoryProvider,
-                now: clock,
-              });
-            } catch {
-              // Scoping failed; use the shared seam unchanged.
-            }
-          }
+          const requestEnsureFn = buildRequestScopedEnsureFn({
+            fallbackFn: ensureTorBoxFileIdentityFn,
+            explicitFn: hasExplicitEnsureFn,
+            controlPlaneStore,
+            torBoxProvider,
+            apiKey: env.TORBOX_API_KEY,
+            apiBase: env.TORBOX_API_URL,
+            clock,
+            scope: 'media-request',
+          });
           const result = await searchByMedia(searchCache, {
             ...body,
             hydrateVfs: hydrateVfsForRequest,

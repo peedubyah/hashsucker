@@ -23,7 +23,9 @@ import { evaluateObservationFreshness } from '../providers/observations.js';
  * @property {string} [apiKey] - TorBox API key (default: TORBOX_API_KEY env)
  * @property {number} [maxRequestsPerMinute=30] - Max API requests per minute
  * @property {number} [batchSize=10] - Hashes per batch request
- * @property {number} [concurrency=2] - Max concurrent batch requests
+ * @property {number} [concurrency=5] - Max concurrent batch requests.
+ *   Independent read-only checkcached batches; 5 covers a full 50-hash
+ *   request in one wave. Self rate limit (30/min) still bounds bursts.
  * @property {number} [freshnessTtlMs=300000] - TTL for fresh observations (5 min)
  * @property {number} [timeoutMs=5000] - Request timeout
  * @property {Function} [fetchFn] - Fetch function (for testing)
@@ -60,7 +62,7 @@ export class AvailabilityChecker {
     this.apiKey = config.apiKey || process.env.TORBOX_API_KEY || null;
     this.maxRequestsPerMinute = config.maxRequestsPerMinute || 30;
     this.batchSize = config.batchSize || 10;
-    this.concurrency = config.concurrency || 2;
+    this.concurrency = config.concurrency || 5;
     this.freshnessTtlMs = config.freshnessTtlMs || 300000;
     this.timeoutMs = config.timeoutMs || 5000;
     this.fetchFn = config.fetchFn || fetch;
