@@ -124,6 +124,37 @@ export function getPreparedDurableState({
 }
 
 /**
+ * Corpus backfill (corpus productization tranche): record observed
+ * request outcomes as candidate→media associations so the corpus can
+ * serve future discovery for previously-requested media without any
+ * external matching. Only eligible ranked results are recorded, with
+ * their identity confidence; ranking rules are untouched. Best-effort:
+ * never fails the request. Runs after persistMediaRequest commits.
+ */
+export function backfillRequestMediaAssociations(cache, intent, explainable, requestId) {
+  if (typeof cache.upsertMediaAssociation !== 'function') return 0;
+  if (!intent?.mediaId || !Array.isArray(explainable) || explainable.length === 0) return 0;
+  let associated = 0;
+  for (const r of explainable) {
+    try {
+      if (!r || !r.infoHash) continue;
+      if (r.identity?.eligible === false) continue;
+      cache.upsertMediaAssociation(r.infoHash, r.fileIndex ?? null, intent.mediaId, {
+        source: 'request-outcome',
+        confidence: typeof r.identity?.confidence === 'number' ? r.identity.confidence : 0.5,
+        evidence: [`request:${requestId}`, `rank:${r.rank ?? '?'}`],
+        resolutionState: r.identity?.state || 'unresolved',
+        matchMethod: 'request-ranked',
+      });
+      associated++;
+    } catch {
+      // One bad row must not poison the rest.
+    }
+  }
+  return associated;
+}
+
+/**
  * Ensure the canonical STRM is materialized for an existing durable handoff.
  *
  * Idempotence invariant:
@@ -1021,6 +1052,13 @@ export async function searchByMedia(cache, request) {
         },
         explainable
       );
+      // Corpus backfill: record eligible ranked outcomes as durable
+      // candidate→media associations (best-effort, post-commit).
+      try {
+        backfillRequestMediaAssociations(cache, intent, explainable, requestId);
+      } catch {
+        // Association bookkeeping must never fail fulfillment.
+      }
     }
 
     // Stage 9: Build playback handoff if bindable selection succeeded and request was persisted
@@ -1570,6 +1608,13 @@ export async function searchByMedia(cache, request) {
       },
       explainable
     );
+    // Corpus backfill (same as Stage 8 path): record eligible ranked
+    // outcomes as durable candidate→media associations.
+    try {
+      backfillRequestMediaAssociations(cache, intent, explainable, requestId);
+    } catch {
+      // Association bookkeeping must never fail fulfillment.
+    }
   }
 
   // Stage 7: Select bindable candidate

@@ -83,11 +83,19 @@ export function createAlternateFallback(dependencies = {}) {
     // Scope the request lookup to (mediaId, season, episode) when provided so
     // series episodes get the matching episode request — not the latest
     // request for the media_id (which would be the wrong episode).
-    const request = searchCache.getMediaRequestsByMediaId(mediaId, season, episode);
-    if (!request) return [];
+    // Corruption-hardened: a storage read failure degrades to "no
+    // alternates" (the caller maps the primary outcome on its own) rather
+    // than failing resolution.
+    try {
+      const request = searchCache.getMediaRequestsByMediaId(mediaId, season, episode);
+      if (!request) return [];
 
-    const results = searchCache.getMediaRequestResults(request.id);
-    return results;
+      const results = searchCache.getMediaRequestResults(request.id);
+      return results;
+    } catch (err) {
+      console.error(`[alternate-fallback] persisted results unreadable for ${mediaId}: ${err?.message ?? err}`);
+      return [];
+    }
   }
 
   /**

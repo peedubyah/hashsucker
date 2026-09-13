@@ -31,6 +31,11 @@ import {
   resolveDurabilityMode,
 } from '../lib/control-plane/durability-runtime.js';
 import { runReconcile } from '../lib/consumers/reconcile.js';
+import {
+  createCorpusLifecycle,
+  corpusUpdateIntervalMs,
+  corpusAutoBootstrap,
+} from '../lib/discovery/corpus-lifecycle.js';
 
 // ─── consumer reconciliation ticker ─────────────────────────────────────
 // Read-only consumer presence checks on a slow cadence (default 15 min,
@@ -68,6 +73,59 @@ function armReconcileTimer(delayMs) {
 }
 if (reconcileEnabled) {
   armReconcileTimer(60_000);
+}
+
+// ─── corpus maintenance ticker ──────────────────────────────────────
+// Blank bootstrap + incremental DMM updates on a slow cadence (default
+// 6 h, aligned to upstream sync). First tick 5 min after boot; the
+// lifecycle persists last_check, so restarts never hammer GitHub.
+// Single-flight via the lifecycle; failures back off boundedly and
+// never destroy the serving corpus. Discovery stays live-only while
+// the corpus is absent — the service never blocks on it.
+// CORPUS_MAINTENANCE=0 disables both bootstrap and updates.
+const corpusMaintenanceFlag = String(process.env.CORPUS_MAINTENANCE ?? '').toLowerCase();
+const corpusMaintenanceEnabled = corpusMaintenanceFlag !== '0' && corpusMaintenanceFlag !== 'false';
+const corpusLifecycle = corpusMaintenanceEnabled
+  ? createCorpusLifecycle({
+    cache: discoveryCache,
+    repo: process.env.CORPUS_DMM_REPO || 'debridmediamanager/hashlists',
+    githubToken: process.env.CORPUS_GITHUB_TOKEN || process.env.GITHUB_TOKEN || null,
+    log: (msg) => console.log(`media-search: ${msg}`),
+  })
+  : null;
+let corpusTimer = null;
+function armCorpusTimer(delayMs) {
+  corpusTimer = setTimeout(async () => {
+    try {
+      if (corpusLifecycle) {
+        const tick = corpusLifecycle.tick({
+          intervalMs: corpusUpdateIntervalMs(process.env),
+          autoBootstrap: corpusAutoBootstrap(process.env),
+        });
+        if (tick.action === 'bootstrap') {
+          console.log('media-search: corpus bootstrap starting (absent baseline)');
+          const result = await corpusLifecycle.bootstrap();
+          console.log(`media-search: corpus bootstrap done ok=${result.ok} complete=${result.complete ?? 0} failed=${result.failed ?? 0}`);
+          armCorpusTimer(corpusUpdateIntervalMs(process.env));
+        } else if (tick.action === 'update') {
+          const result = await corpusLifecycle.updateOnce();
+          console.log(`media-search: corpus update ok=${result.ok} changed=${result.changed ?? false} reason=${result.reason ?? '-'}`);
+          armCorpusTimer(corpusUpdateIntervalMs(process.env));
+        } else if (tick.action === 'wait') {
+          armCorpusTimer(Math.max(60_000, tick.nextDueMs));
+        } else {
+          armCorpusTimer(corpusUpdateIntervalMs(process.env));
+        }
+      }
+    } catch (error) {
+      console.warn('media-search: corpus tick failed', error?.message);
+      armCorpusTimer(corpusUpdateIntervalMs(process.env));
+    }
+  }, delayMs);
+  if (corpusTimer.unref) corpusTimer.unref();
+}
+if (corpusMaintenanceEnabled) {
+  armCorpusTimer(5 * 60_000);
 }
 
 const durabilityMode = resolveDurabilityMode(process.env);

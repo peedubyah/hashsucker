@@ -6041,6 +6041,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     queryRawCandidatesByTokens,
     iterateRawCandidates,
     associateMedia,
+    upsertMediaAssociation,
     getMediaAssociations,
     queryCandidatesByMedia,
     ingestCandidate,

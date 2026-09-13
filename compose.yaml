@@ -33,14 +33,19 @@ services:
       PLEX_TV_SECTION_ID: ${PLEX_TV_SECTION_ID:-}
       PLEX_MOVIES_ROOT: ${PLEX_MOVIES_ROOT:-}
       PLEX_TV_ROOT: ${PLEX_TV_ROOT:-}
+      CORPUS_MAINTENANCE: ${CORPUS_MAINTENANCE:-}
+      CORPUS_AUTO_BOOTSTRAP: ${CORPUS_AUTO_BOOTSTRAP:-}
+      CORPUS_UPDATE_INTERVAL_HOURS: ${CORPUS_UPDATE_INTERVAL_HOURS:-}
+      CORPUS_DMM_REPO: ${CORPUS_DMM_REPO:-}
+      CORPUS_GITHUB_TOKEN: ${CORPUS_GITHUB_TOKEN:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "${MEDIA_SEARCH_BIND_ADDRESS:-127.0.0.1}:${MEDIA_SEARCH_PORT:-3000}:3000"
     volumes:
-      - /home/patrick/hashsucker-data/discovery:/data
+      - ${DISCOVERY_HOST_PATH:-./hy4-data/discovery}:/data
       - ${REQUESTS_HOST_PATH:?Set REQUESTS_HOST_PATH in .env}:/requests
-      - ${STRM_HOST_PATH:-/home/patrick/hashsucker-data/strm}:/strm
+      - ${STRM_HOST_PATH:-./hy4-data/strm}:/strm
     group_add:
       - "${MEDIA_SEARCH_QUEUE_GID:-100}"
     security_opt:

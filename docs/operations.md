@@ -180,7 +180,9 @@ planned repairs are computed and never applied.
 
 ### Correctness
 
-- DMM ingestion fails against current source fragments; the compatible importer is unwired.
+- DMM corpus ingestion is automatic (blank bootstrap + scheduled deltas via
+  `discovery/corpus-lifecycle.js`); `GET /api/diagnostics` reports corpus
+  state/revision. Single-fragment `POST /api/ingest/dmm` remains for manual use.
 - `GET /api/search?q=` (no `type`/`mediaId`) routes through Cinemeta's catalog endpoint, which
   returns static popular results for every query. Title search does not work.
 - The importer worker resumes the first file in `/requests/processing/` before claiming any new

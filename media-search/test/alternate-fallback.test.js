@@ -464,3 +464,27 @@ test('additional attempted keys are excluded', async () => {
   assert.equal(result.candidate.info_hash, HASH3);
   assert.equal(result.candidate.rank, 3);
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Corruption hardening: unreadable persisted results degrade to no-alternates
+// ═══════════════════════════════════════════════════════════════════════════════
+
+test('corrupt results store degrades to no-alternates instead of throwing', async () => {
+  const searchCache = createMockSearchCache({
+    request: { id: 1, media_type: 'movie', season: null, episode: null },
+    results: [],
+  });
+  searchCache.getMediaRequestResults = () => {
+    throw new Error('database disk image is malformed');
+  };
+  const revalidator = createMockRevalidator({});
+  const fallback = createAlternateFallback({ searchCache, revalidator });
+
+  assert.deepEqual(fallback.loadPersistedResults('tt0000001'), []);
+  const result = await fallback.findUsableAlternate({
+    mediaId: 'tt0000001',
+    primaryReleaseKey: `${HASH1}:torrent`,
+    expectedScope: { media_type: 'movie' },
+  });
+  assert.equal(result, null);
+});

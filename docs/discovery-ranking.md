@@ -8,7 +8,7 @@ surface see [`architecture.md`](architecture.md); for what happens after selecti
 
 | Source | Kind | Wired via |
 |---|---|---|
-| DMM hashlists | Corpus ingest, operator-triggered | `POST /api/ingest/dmm` → `discovery/dmm-ingestion-runner.js` |
+| DMM hashlists | Corpus ingest, automatic lifecycle | scheduler + `POST /api/corpus/update` → `discovery/corpus-lifecycle.js` |
 | Torrentio | Live Stremio add-on | `stremio/search.js` |
 | Comet | Live Stremio add-on | `stremio/search.js` |
 | Torznab | Live indexer search | `torznab/torznab.js`, indexers from `TORZNAB_URLS` |
@@ -17,10 +17,13 @@ The two live adapters run concurrently through `Promise.allSettled`; a source th
 to a count of zero rather than failing the search. Live discovery runs only when the corpus has
 nothing for the requested media.
 
-`src/lib/ingestion/dmm.js` can decode the current DMM iframe/hash fragment format, but it is not
-called by any route, script, or entrypoint. The API-reachable runner recognises only the older
-script-call wrapper, so `POST /api/ingest/dmm` fails with `No payload found` against current
-fragments. Neither path is resumable, checkpointed, or bounded-memory.
+The corpus lifecycle keeps a revision-pinned DMM baseline: blank deployments
+bootstrap automatically (resumable, never advertised partial), then a scheduler
+applies compare-based deltas every few hours. Revision advances only on fully
+successful updates; failures preserve the last-good corpus. Request outcomes
+are backfilled as candidate→media associations, so the corpus incrementally
+learns to serve previously-requested media. See `architecture.md` (Discovery
+and requests) and `corpus` in `GET /api/diagnostics`.
 
 ## 2. Canonicalization and merge
 

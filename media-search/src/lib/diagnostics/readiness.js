@@ -306,6 +306,37 @@ function lifecycleSummary({ cache, controlPlaneStore, listLibraryFn, retirementP
   }
 }
 
+/**
+ * Corpus lifecycle state (corpus productization tranche): state machine
+ * position, pinned upstream revision, check/update timestamps, and stored
+ * counts. All values come from the corpus_state row — no live COUNT(*),
+ * no network. Absent table (pre-migration DB) reports state unknown.
+ */
+function corpusSummary(cache) {
+  try {
+    const db = cache?.db;
+    if (!db) return { state: 'unknown', detail: 'corpus store unavailable' };
+    const tbl = db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='corpus_state'").get();
+    if (!tbl) return { state: 'absent', detail: 'no corpus baseline imported' };
+    const row = db.prepare('SELECT * FROM corpus_state WHERE id = 1').get();
+    if (!row) return { state: 'absent', detail: 'no corpus baseline imported' };
+    return {
+      state: row.state ?? 'unknown',
+      revision: row.imported_revision ?? null,
+      revisionCommit: row.imported_commit ?? null,
+      upstreamHeadCommit: row.upstream_head_commit ?? null,
+      lastCheck: row.last_check ?? null,
+      lastSuccess: row.last_success ?? null,
+      lastError: row.last_error ?? null,
+      consecutiveFailures: row.consecutive_failures ?? 0,
+      candidates: row.candidate_count ?? null,
+      fragments: row.fragment_count ?? null,
+    };
+  } catch {
+    return { state: 'unknown', detail: 'corpus state unreadable' };
+  }
+}
+
 function reconcileSummary(controlPlaneStore) {
   try {
     const rows = controlPlaneStore.listConsumerObservations();
@@ -378,6 +409,7 @@ export async function buildDiagnostics({
   const reconcile = controlPlaneStore && typeof controlPlaneStore.listConsumerObservations === 'function'
     ? reconcileSummary(controlPlaneStore)
     : { state: 'unknown', detail: 'observations unavailable' };
+  const corpus = corpusSummary(cache);
   if (retirementPolicy && !retirementPolicy.enabled) {
     warnings.push('Automatic retirement is disabled (default safe state).');
   }
@@ -396,6 +428,7 @@ export async function buildDiagnostics({
     consumers,
     publication,
     lifecycle: { ...lifecycle, reconcile },
+    corpus,
   };
 }
 

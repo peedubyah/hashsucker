@@ -72,6 +72,7 @@ import { createResolverProfiler } from '../lib/resolver/profiler.js';
 import { createTorBoxProvider } from '../lib/providers/torbox.js';
 import { createTorBoxInventoryProvider } from '../lib/providers/torbox-inventory.js';
 import { buildRequestScopedEnsureFn } from '../lib/requests/scoped-ensure.js';
+import { createCorpusLifecycle, corpusUpdateIntervalMs, corpusAutoBootstrap } from '../lib/discovery/corpus-lifecycle.js';
 import { ensureTorBoxDelivery, TorBoxDeliveryError, resolveTorBoxDeliveryWithStaleRecovery } from '../lib/resolver/torbox-delivery.js';
 import {
   getTorBoxDownloadUrlCache,
@@ -1449,6 +1450,22 @@ export function createRequestHandler(dependencies = {}) {
   const staticRoot = dependencies.staticRoot === undefined ? process.env.STATIC_ROOT : dependencies.staticRoot;
   const env = dependencies.env ?? process.env;
 
+  // Corpus lifecycle (bootstrap + incremental DMM updates). One instance
+  // per handler: its in-flight flag is the process single-flight guard.
+  // Injectable for tests via dependencies.corpusLifecycle.
+  let corpusLifecycleInstance = dependencies.corpusLifecycle ?? null;
+  function getCorpusLifecycle() {
+    if (!corpusLifecycleInstance) {
+      corpusLifecycleInstance = createCorpusLifecycle({
+        cache: searchCache,
+        repo: env.CORPUS_DMM_REPO || 'debridmediamanager/hashlists',
+        githubToken: env.CORPUS_GITHUB_TOKEN || env.GITHUB_TOKEN || null,
+        clock,
+      });
+    }
+    return corpusLifecycleInstance;
+  }
+
   // Wire Plex refresh coalescer accounting into the live metrics
   // counters so /api/metrics surfaces the same numbers the notifier
   // tracks. The notifier emits a snapshot per change; we forward it
@@ -2537,6 +2554,23 @@ export function createRequestHandler(dependencies = {}) {
           limit: body.limit ? parseInt(body.limit, 10) : undefined,
         });
         return sendJson(response, 200, stats);
+      }
+      // Corpus maintenance trigger (headless operator convention):
+      // bootstrap when absent, otherwise cheap HEAD check + compare-based
+      // delta. Never destroys the serving corpus; revision advances only
+      // on fully successful updates.
+      if (request.method === 'POST' && url.pathname === '/api/corpus/update') {
+        const body = await readBody(request).catch(() => ({}));
+        try {
+          const lifecycle = getCorpusLifecycle();
+          const state = lifecycle.getState();
+          const result = !state.imported_revision
+            ? await lifecycle.bootstrap({ maxFragments: body.maxFragments ?? null })
+            : await lifecycle.updateOnce();
+          return sendJson(response, 200, { state: lifecycle.getState(), result });
+        } catch (err) {
+          return sendJson(response, 500, { error: err?.message || String(err) });
+        }
       }
       // Seerr ingress: webhook → durable intent → TMDB→IMDb translation →
       // existing single-intent discovery pipeline.
