@@ -167,8 +167,9 @@ async function collectTitleIndexCandidates({
 }) {
   const inputs = [];
   const eligibilityByHash = new Map();
+  let wanted = { title: null, year: null, source: 'none' };
   try {
-    const wanted = await resolveWantedIdentity({ mediaId, mediaType, mediaTitle, canonicalYear });
+    wanted = await resolveWantedIdentity({ mediaId, mediaType, mediaTitle, canonicalYear });
     if (!wanted.title) return { inputs, eligibilityByHash };
     const rows = lookupCorpusByTitle(cache, {
       title: wanted.title, year: wanted.year, season, episode, mediaType,
@@ -217,7 +218,7 @@ async function collectTitleIndexCandidates({
   } catch {
     // Title lookup is best-effort enrichment, never fatal.
   }
-  return { inputs, eligibilityByHash };
+  return { inputs, eligibilityByHash, wanted };
 }
 
 /**
@@ -903,8 +904,9 @@ export async function searchByMedia(cache, request) {
 
   // Corpus title-index inputs, collected once per request and merged
   // into whichever ranking path runs (live, corpus, or title-only).
-  // One FTS query plus at most one cached metadata lookup.
-  const { inputs: titleInputs, eligibilityByHash: titleEligibilityByHash } =
+  // One FTS query plus at most one cached metadata lookup. The resolved
+  // wanted identity is reused for Prowlarr live search below.
+  const { inputs: titleInputs, eligibilityByHash: titleEligibilityByHash, wanted: wantedIdentity } =
     await collectTitleIndexCandidates({
       cache, mediaId, mediaType, season, episode, mediaTitle, canonicalYear,
     });
@@ -931,7 +933,13 @@ export async function searchByMedia(cache, request) {
     let requestId = null;
 
     try {
-      const liveResults = await runLiveDiscovery(mediaId, { season, episode });
+      const liveResults = await runLiveDiscovery(mediaId, {
+        season,
+        episode,
+        title: wantedIdentity?.title ?? mediaTitle ?? null,
+        year: wantedIdentity?.year ?? canonicalYear ?? null,
+        wantedImdbId: mediaId,
+      });
       for (const live of liveResults) {
         const key = live.releaseKey;
         if (!key || !live.infoHash) continue;
@@ -974,13 +982,16 @@ export async function searchByMedia(cache, request) {
           fileIndex: live.fileIndex,
           releaseKey: key,
           filename: live.filename || live.title,
-          relevance: 0.8,
+          // Preserve per-source relevance/provenance when the discovery
+          // source supplies them (Prowlarr rows carry relevance 0.7 and
+          // origin 'prowlarr'); legacy rows fall back to live defaults.
+          relevance: live.relevance ?? 0.8,
           releaseAttributes: releaseAttrs,
-          parserConfidence: live.confidence ?? 0.5,
+          parserConfidence: live.parserConfidence ?? live.confidence ?? 0.5,
           mediaAssociations: [],
           providerObservations: [],
           providerEvidence: [],
-          sources: [{ origin: 'live', evidence: [], confidence: live.confidence ?? 0.5 }],
+          sources: live.sources ?? [{ origin: 'live', evidence: [], confidence: live.confidence ?? 0.5 }],
           selectedMediaId: mediaId,
           hasLiveDiscovery: true,
           // Slice 1.75: propagate the RAW byte size from behaviorHints.videoSize
@@ -1472,7 +1483,13 @@ export async function searchByMedia(cache, request) {
   if (!skipLiveDiscovery && corpusEligibleCount < liveDiscoveryThreshold) {
     liveDiscoveryTriggered = true;
     try {
-      const liveResults = await runLiveDiscovery(mediaId, { season, episode });
+      const liveResults = await runLiveDiscovery(mediaId, {
+        season,
+        episode,
+        title: wantedIdentity?.title ?? mediaTitle ?? null,
+        year: wantedIdentity?.year ?? canonicalYear ?? null,
+        wantedImdbId: mediaId,
+      });
 
       for (const live of liveResults) {
         const key = live.releaseKey;
@@ -1531,13 +1548,13 @@ export async function searchByMedia(cache, request) {
           fileIndex: live.fileIndex,
           releaseKey: key,
           filename: live.filename || live.title,
-          relevance: 0.8, // Live discovery slightly lower relevance than direct corpus match
+          relevance: live.relevance ?? 0.8, // Live discovery slightly lower relevance than direct corpus match
           releaseAttributes: releaseAttrs,
-          parserConfidence: live.confidence ?? 0.5,
+          parserConfidence: live.parserConfidence ?? live.confidence ?? 0.5,
           mediaAssociations: [], // Live has no persisted media associations
           providerObservations: [], // Will be populated by availability check
           providerEvidence: [],
-          sources: [{ origin: 'live', evidence: [], confidence: live.confidence ?? 0.5 }],
+          sources: live.sources ?? [{ origin: 'live', evidence: [], confidence: live.confidence ?? 0.5 }],
           selectedMediaId: mediaId,
           hasLiveDiscovery: true,
           historicalPrior: computeHistoricalAvailabilityPrior(

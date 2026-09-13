@@ -11,6 +11,18 @@
 import { createReleaseIdentity } from '../../api/release-contract.js';
 import { searchStremio } from '../stremio/search.js';
 import { searchTorznab } from '../torznab/torznab.js';
+import { createProwlarrClient, searchProwlarr } from './prowlarr.js';
+
+/**
+ * Build a Prowlarr client from environment. Returns null when unconfigured
+ * (Prowlarr stays a disabled source — never an error).
+ */
+function prowlarrClientFromEnv(env = process.env) {
+  const baseUrl = env.PROWLARR_URL;
+  const apiKey = env.PROWLARR_API_KEY;
+  if (!baseUrl || !apiKey) return null;
+  return createProwlarrClient({ baseUrl, apiKey });
+}
 
 /**
  * Run live discovery for a given media ID.
@@ -22,7 +34,7 @@ import { searchTorznab } from '../torznab/torznab.js';
  * @returns {Promise<Array>} Normalized release candidates
  */
 export async function runLiveDiscovery(mediaId, options = {}) {
-  const { season, episode } = options;
+  const { season, episode, title, year, wantedImdbId } = options;
   const mediaType = episode != null ? 'series' : 'movie';
 
   // Stremio requires full episode identifier format: tt0944947:5:14
@@ -33,11 +45,22 @@ export async function runLiveDiscovery(mediaId, options = {}) {
     stremioMediaId = `${mediaId}:${season}`;
   }
 
+  // Prowlarr is optional: unconfigured (or failing) means fewer candidates,
+  // never a failed request. Failure isolation via allSettled, same as peers.
+  const prowlarrClient = prowlarrClientFromEnv(options.env);
+  const prowlarrTask = prowlarrClient
+    ? searchProwlarr({
+      type: mediaType, title: title ?? null, year: year ?? null,
+      season, episode, wantedImdbId: wantedImdbId ?? mediaId, client: prowlarrClient,
+    })
+    : Promise.resolve([]);
+
   const results = await Promise.allSettled([
     // Stremio/Torrentio discovery
     searchStremio({ type: mediaType, mediaId: stremioMediaId }),
     // Torznab discovery
     searchTorznab({ type: mediaType, mediaId }),
+    prowlarrTask,
   ]);
 
   const allReleases = [];
@@ -97,22 +120,32 @@ export async function runLiveDiscovery(mediaId, options = {}) {
  * @returns {Promise<{ releases: Array, sources: Object }>}
  */
 export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
-  const { season, episode } = options;
+  const { season, episode, title, year, wantedImdbId } = options;
   const mediaType = episode != null ? 'series' : 'movie';
+
+  const prowlarrClient = prowlarrClientFromEnv(options.env);
+  const prowlarrTask = prowlarrClient
+    ? searchProwlarr({
+      type: mediaType, title: title ?? null, year: year ?? null,
+      season, episode, wantedImdbId: wantedImdbId ?? mediaId, client: prowlarrClient,
+    })
+    : Promise.resolve([]);
 
   const results = await Promise.allSettled([
     searchStremio({ type: mediaType, mediaId }),
     searchTorznab({ type: mediaType, mediaId }),
+    prowlarrTask,
   ]);
 
   const sources = {
     torrentio: { count: 0, error: null },
     torznab: { count: 0, error: null },
+    prowlarr: { count: 0, error: null },
   };
 
   const allReleases = [];
 
-  const [stremioResult, torznabResult] = results;
+  const [stremioResult, torznabResult, prowlarrResult] = results;
 
   if (stremioResult.status === 'fulfilled' && Array.isArray(stremioResult.value)) {
     const valid = stremioResult.value.filter(r => r.infoHash);
@@ -128,6 +161,14 @@ export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
     allReleases.push(...valid);
   } else if (torznabResult.status === 'rejected') {
     sources.torznab.error = torznabResult.reason?.message || 'unknown error';
+  }
+
+  if (prowlarrResult.status === 'fulfilled' && Array.isArray(prowlarrResult.value)) {
+    const valid = prowlarrResult.value.filter(r => r.infoHash);
+    sources.prowlarr.count = valid.length;
+    allReleases.push(...valid);
+  } else if (prowlarrResult.status === 'rejected') {
+    sources.prowlarr.error = prowlarrResult.reason?.message || 'unknown error';
   }
 
   // Normalize (same as runLiveDiscovery)

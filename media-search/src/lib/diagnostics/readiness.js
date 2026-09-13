@@ -458,6 +458,46 @@ function arrSummary(cache, env = process.env) {
   return out;
 }
 
+/**
+ * Prowlarr candidate-source status (Prowlarr tranche). Cheap by design:
+ * env presence plus two fast Prowlarr API reads (indexer list + health)
+ * with a short timeout; any failure degrades to unreachable without
+ * affecting overall readiness. Per-search counters come from the
+ * in-memory discovery accounting (no extra calls).
+ */
+async function prowlarrSummary(env = process.env, fetchFn = fetch) {
+  const base = { name: 'prowlarr', configured: !!env.PROWLARR_URL, keyPresent: !!env.PROWLARR_API_KEY };
+  if (!base.configured) return { ...base, state: 'disabled' };
+  if (!base.keyPresent) return { ...base, state: 'degraded-config', detail: 'PROWLARR_URL set without PROWLARR_API_KEY' };
+  try {
+    const { createProwlarrClient, prowlarrStats } = await import('../discovery/prowlarr.js');
+    const { discoveryAccounting } = await import('../discovery/discovery-accounting.js');
+    const client = createProwlarrClient({ baseUrl: env.PROWLARR_URL, apiKey: env.PROWLARR_API_KEY, timeoutMs: 3000, fetchFn });
+    const [indexers, health] = await Promise.all([
+      client.indexers().catch(() => null),
+      client.health().catch(() => null),
+    ]);
+    if (!indexers) return { ...base, state: 'unreachable', detail: 'Prowlarr API did not answer' };
+    const snap = discoveryAccounting.snapshot();
+    const mine = (snap.sources && snap.sources.prowlarr) || { requests: 0, candidates: 0, errors: 0 };
+    const stats = prowlarrStats();
+    return {
+      ...base,
+      state: 'ok',
+      indexersConfigured: indexers.length,
+      indexersEnabled: indexers.filter((i) => i?.enable !== false).length,
+      healthIssues: Array.isArray(health) ? health.length : 0,
+      lastSearch: stats.at,
+      lastError: stats.error,
+      requests: mine.requests ?? 0,
+      candidatesSeen: mine.candidates ?? 0,
+      errors: mine.errors ?? 0,
+    };
+  } catch (err) {
+    return { ...base, state: 'unreachable', detail: String(err?.message || err).slice(0, 120) };
+  }
+}
+
 function reconcileSummary(controlPlaneStore) {
   try {
     const rows = controlPlaneStore.listConsumerObservations();
@@ -533,6 +573,7 @@ export async function buildDiagnostics({
   const corpus = corpusSummary(cache, env);
   const anticipation = anticipationSummary(cache);
   const arr = arrSummary(cache, env);
+  const prowlarr = await prowlarrSummary(env, fetchFn);
   if (retirementPolicy && !retirementPolicy.enabled) {
     warnings.push('Automatic retirement is disabled (default safe state).');
   }
@@ -554,6 +595,7 @@ export async function buildDiagnostics({
     corpus,
     anticipation,
     arr,
+    prowlarr,
   };
 }
 

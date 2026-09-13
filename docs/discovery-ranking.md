@@ -12,6 +12,20 @@ surface see [`architecture.md`](architecture.md); for what happens after selecti
 | Torrentio | Live Stremio add-on | `stremio/search.js` |
 | Comet | Live Stremio add-on | `stremio/search.js` |
 | Torznab | Live indexer search | `torznab/torznab.js`, indexers from `TORZNAB_URLS` |
+| Prowlarr/TPB | Live tracker search (candidate intelligence only) | `discovery/prowlarr.js` → same live merge/rank; `PROWLARR_URL` + `PROWLARR_API_KEY` |
+
+Prowlarr rows carry tracker provenance (`prowlarr` origin) but tier exactly
+like equivalent live rows (relevance 0.7 input handicap, same ranker and
+weights). Whole-torrent sizes are never presented as per-file sizes, and
+key-bearing Prowlarr URLs are never logged or stored — only bare infoHashes.
+Same-hash rows dedupe to the established source position; failures isolate
+per-source via `Promise.allSettled` plus a bounded search timeout.
+
+Anti-bot boundary: HashSucker consumes Prowlarr's normalized search surface
+only (`/api/v1/search`, `/indexer`, `/health`). Tracker challenges, proxies,
+and helpers (Trawl/Byparr/FlareSolverr) are configured between Prowlarr and
+the helper, never in HashSucker. No browser automation or challenge bypass
+exists here by design.
 
 The two live adapters run concurrently through `Promise.allSettled`; a source that fails degrades
 to a count of zero rather than failing the search. Live discovery runs only when the corpus has
