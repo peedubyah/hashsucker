@@ -372,6 +372,44 @@ function corpusSummary(cache, env = process.env) {
   }
 }
 
+/**
+ * Anticipatory intent counts (anticipatory tranche): pending/due,
+ * preparing, prepared, awaiting-bytes, playable, failed. Cheap
+ * GROUP BY over a tiny table; absent table (pre-migration) reports empty.
+ */
+function anticipationSummary(cache) {
+  const empty = {
+    state: 'ok', pending: 0, due: 0, preparing: 0, prepared: 0,
+    awaitingBytes: 0, playable: 0, failed: 0, nextCheck: null,
+  };
+  try {
+    const db = cache?.db;
+    if (!db) return { state: 'unknown', detail: 'intent store unavailable' };
+    const tbl = db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='future_intents'").get();
+    if (!tbl) return empty;
+    const rows = db.prepare('SELECT state, COUNT(*) AS n FROM future_intents GROUP BY state').all();
+    const byState = Object.fromEntries(rows.map((r) => [r.state, r.n]));
+    const nowMs = Date.now();
+    const due = db.prepare(`SELECT COUNT(*) AS n FROM future_intents
+      WHERE state IN ('anticipated','failed','prepared','published_preparing','preparing')
+      AND next_check_at <= ?`).get(nowMs)?.n ?? 0;
+    const next = db.prepare('SELECT MIN(next_check_at) AS t FROM future_intents').get()?.t ?? null;
+    return {
+      ...empty,
+      pending: byState.anticipated ?? 0,
+      due,
+      preparing: (byState.preparing ?? 0),
+      prepared: byState.prepared ?? 0,
+      awaitingBytes: byState.published_preparing ?? 0,
+      playable: byState.playable ?? 0,
+      failed: (byState.failed ?? 0) + (byState.withdrawn ?? 0),
+      nextCheck: next,
+    };
+  } catch {
+    return { state: 'unknown', detail: 'intent state unreadable' };
+  }
+}
+
 function reconcileSummary(controlPlaneStore) {
   try {
     const rows = controlPlaneStore.listConsumerObservations();
@@ -445,6 +483,7 @@ export async function buildDiagnostics({
     ? reconcileSummary(controlPlaneStore)
     : { state: 'unknown', detail: 'observations unavailable' };
   const corpus = corpusSummary(cache, env);
+  const anticipation = anticipationSummary(cache);
   if (retirementPolicy && !retirementPolicy.enabled) {
     warnings.push('Automatic retirement is disabled (default safe state).');
   }
@@ -464,6 +503,7 @@ export async function buildDiagnostics({
     publication,
     lifecycle: { ...lifecycle, reconcile },
     corpus,
+    anticipation,
   };
 }
 

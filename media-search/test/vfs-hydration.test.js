@@ -298,3 +298,54 @@ test('searchByMedia passes the wired hydrateVfs object through to the request co
   assert.equal(result.intent?.mediaId, 'tt0000300');
   assert.equal(hydrateMovieCalled, 0, 'persisted-candidate path does not invoke hydrateMovie');
 });
+
+test('hydrateVfsTvEntry finds a freshly materialized row without a prior catalog read', async (t) => {
+  // Regression: the TV hydrator must await catalog rebuild (like the movie
+  // hydrator) instead of racing a freshly materialized episode whose state
+  // was never loaded by an earlier WebDAV request.
+  const cache = createDiscoveryCache();
+  t.after(() => cache.close());
+
+  const requestId = cache.persistMediaRequest({
+    mediaId: 'tt0000201', mediaType: 'tv', source: 'test', season: 1, episode: 1,
+  }, []);
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId: 'tt0000201',
+    mediaType: 'tv',
+    season: 1,
+    episode: 1,
+    releaseKey: `${SEED_HASH}:1`,
+    infoHash: SEED_HASH,
+    fileIndex: 1,
+    filename: 'Show.S01E01.2160p.mkv',
+    provider: 'torbox',
+    providerState: 'cached',
+    identityTier: 'Verified',
+    resolutionState: 'confirmed',
+    selectionReason: 'test',
+    selectedAt: 1_700_000_000_000,
+  });
+  // Materialized row, size unknown, no handler has ever built a catalog.
+  cache.db.prepare(`INSERT INTO vfs_tv_entries
+    (media_id, season, episode, release_key, info_hash, file_index, canonical_path, size, created_at, updated_at, torrent_file_id)
+    VALUES ('tt0000201', 1, 1, '${SEED_HASH}:1', '${SEED_HASH}', 1, 'TV/Show/Season 01/Show - S01E01.mkv', NULL, 1, 1, NULL)`).run();
+
+  const fetchFn = async () => providerResponse(206, {
+    body: 'x',
+    contentRange: 'bytes 0-0/3333333333',
+  });
+  const handler = createTvWebDav({
+    searchCache: cache,
+    controlPlaneStore: createControlPlane(SEED_HASH),
+    rdClient: null,
+    rdResolutionCache: createRdResolutionCache(),
+    resolveTorBoxDeliverySeam: createSeam(),
+    torBoxDownloadUrlCache: createTorBoxDownloadUrlCache(),
+    fetchFn,
+  });
+
+  const result = await handler.hydrateVfsTvEntry({ mediaId: 'tt0000201', season: 1, episode: 1 });
+  assert.equal(result.size, 3333333333);
+  assert.equal(cache.getVfsTvEntry('tt0000201', 1, 1).size, 3333333333);
+});

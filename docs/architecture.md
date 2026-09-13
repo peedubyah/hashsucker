@@ -283,6 +283,20 @@ zero provider work. Identity rows are immutable and carry no TTL; placement
 liveness is re-proven at serve time, and stale truth falls back safely into
 the normal path. `GET /api/diagnostics` reports the prepared count.
 
+**Anticipatory intents.** `POST /api/future-intents` seeds durable
+"expect this media later" records (movie or exact S/E scope, source,
+optional expected date); seeding creates no presentation. The scheduler
+runs one bounded intent per tick: prepare via `POST /api/media-prepare`,
+then publish via the normal request path (which republishes prepared
+truth and fires consumer refresh for overlap), then a byte-readiness
+probe; head+tail grid prewarm fills cache concurrently in the background.
+Intent states (`GET /api/future-intents`, counts under `anticipation` in
+diagnostics): anticipated → preparing → prepared → published_preparing →
+playable, plus failed/withdrawn. Provider exhaustion withdraws
+presentation through safe-unpublish with history preserved. Future hooks
+(Sonarr/Radarr) only need to seed intents; they never touch
+provider/VFS internals.
+
 ### Control plane
 
 | Route | Purpose |

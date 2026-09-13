@@ -73,6 +73,7 @@ import { createTorBoxProvider } from '../lib/providers/torbox.js';
 import { createTorBoxInventoryProvider } from '../lib/providers/torbox-inventory.js';
 import { buildRequestScopedEnsureFn } from '../lib/requests/scoped-ensure.js';
 import { createCorpusLifecycle, corpusUpdateIntervalMs, corpusAutoBootstrap } from '../lib/discovery/corpus-lifecycle.js';
+import { createFutureIntentStore } from '../lib/anticipation/future-intents.js';
 import { ensureTorBoxDelivery, TorBoxDeliveryError, resolveTorBoxDeliveryWithStaleRecovery } from '../lib/resolver/torbox-delivery.js';
 import {
   getTorBoxDownloadUrlCache,
@@ -1454,8 +1455,7 @@ export function createRequestHandler(dependencies = {}) {
   // per handler: its in-flight flag is the process single-flight guard.
   // Injectable for tests via dependencies.corpusLifecycle.
   let corpusLifecycleInstance = dependencies.corpusLifecycle ?? null;
-  function getCorpusLifecycle() {
-    if (!corpusLifecycleInstance) {
+  function getCorpusLifecycle() {    if (!corpusLifecycleInstance) {
       corpusLifecycleInstance = createCorpusLifecycle({
         cache: searchCache,
         repo: env.CORPUS_DMM_REPO || 'debridmediamanager/hashlists',
@@ -1464,6 +1464,16 @@ export function createRequestHandler(dependencies = {}) {
       });
     }
     return corpusLifecycleInstance;
+  }
+
+  // Future-intent store (anticipatory tranche). Table lives in the
+  // discovery DB beside the corpus; injectable for tests.
+  let futureIntentStoreInstance = dependencies.futureIntentStore ?? null;
+  function getFutureIntentStore() {
+    if (!futureIntentStoreInstance) {
+      futureIntentStoreInstance = createFutureIntentStore({ db: searchCache.db, clock });
+    }
+    return futureIntentStoreInstance;
   }
 
   // Wire Plex refresh coalescer accounting into the live metrics
@@ -2568,6 +2578,40 @@ export function createRequestHandler(dependencies = {}) {
             ? await lifecycle.bootstrap({ maxFragments: body.maxFragments ?? null })
             : await lifecycle.updateOnce();
           return sendJson(response, 200, { state: lifecycle.getState(), result });
+        } catch (err) {
+          return sendJson(response, 500, { error: err?.message || String(err) });
+        }
+      }
+      // Future-intent seeding (headless operator convention): durable
+      // "expect this media later" records. Seeding creates no VFS, STRM,
+      // library, or consumer state — it only authorizes the anticipatory
+      // scheduler to prepare ahead of demand.
+      if (request.method === 'POST' && url.pathname === '/api/future-intents') {
+        const body = await readBody(request).catch(() => ({}));
+        try {
+          const store = getFutureIntentStore();
+          const { intent, created } = store.seed({
+            mediaType: body.mediaType || 'movie',
+            mediaId: body.mediaId,
+            season: body.season ?? null,
+            episode: body.episode ?? null,
+            source: body.source || 'operator',
+            expectedAt: body.expectedAt ?? null,
+          });
+          return sendJson(response, 200, { intent, created });
+        } catch (err) {
+          return sendJson(response, 400, { error: err?.message || String(err) });
+        }
+      }
+      if (request.method === 'GET' && url.pathname === '/api/future-intents') {
+        try {
+          const store = getFutureIntentStore();
+          const state = url.searchParams.get('state');
+          return sendJson(response, 200, {
+            intents: store.list({ state: state || null }),
+            counts: store.counts(),
+            nextCheck: store.nextCheck(),
+          });
         } catch (err) {
           return sendJson(response, 500, { error: err?.message || String(err) });
         }

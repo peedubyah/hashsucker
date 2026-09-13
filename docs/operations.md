@@ -95,6 +95,17 @@ migrate additively. Backup/migration: stop containers, copy the whole
 no rebuild required. Keep 6 GB free on the data volume (live DB plus
 headroom for a parallel rebuild, WAL, and delta growth at ~4 MB/day).
 
+### Anticipatory scheduler
+
+Future intents (`POST /api/future-intents`, listed by
+`GET /api/future-intents`, counts under `anticipation` in
+`GET /api/diagnostics`) authorize prepare-ahead-of-demand plus speculative
+publication with byte prewarm. Scheduler runs one bounded intent per tick
+(default every 15 min via `FUTURE_INTENT_INTERVAL_MIN`; `ANTICIPATION_ENABLED=0`
+disables). No seeded intents = fully inert. Publication occurs only after an
+exact TorrentFile is finalized; provider exhaustion withdraws presentation
+via safe-unpublish while preserving history.
+
 ### Ingress and notifications
 
 `SEERR_URL`, `SEERR_API_KEY`, `SEERR_WEBHOOK_TOKEN`, `JELLYFIN_URL`, `JELLYFIN_MEDIA_ROOT`,

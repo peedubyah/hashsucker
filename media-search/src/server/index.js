@@ -37,6 +37,9 @@ import {
   corpusAutoBootstrap,
   corpusMaintenanceEnabled,
 } from '../lib/discovery/corpus-lifecycle.js';
+import { createFutureIntentStore } from '../lib/anticipation/future-intents.js';
+import { createAnticipationScheduler } from '../lib/anticipation/scheduler.js';
+import { checkTorBoxCached } from '../lib/providers/torbox.js';
 
 // ─── consumer reconciliation ticker ─────────────────────────────────────
 // Read-only consumer presence checks on a slow cadence (default 15 min,
@@ -126,6 +129,63 @@ function armCorpusTimer(delayMs) {
 }
 if (corpusMaintenanceOn) {
   armCorpusTimer(5 * 60_000);
+}
+
+// ─── anticipatory scheduler ─────────────────────────────────────────
+// Future intents → prepare ahead of demand → speculative publication +
+// byte prewarm. One bounded tick at a time (serial: a tick fully settles
+// one intent before the next begins); failures back off per intent and
+// never destroy serving state. No seeded intents = fully inert.
+// ANTICIPATION_ENABLED=0 disables. Interval default 15 min, first tick
+// 2 min after boot.
+function anticipationIntervalMs() {
+  const n = Number(process.env.FUTURE_INTENT_INTERVAL_MIN ?? 15);
+  return Number.isFinite(n) && n >= 1 ? n * 60 * 1000 : 15 * 60 * 1000;
+}
+const anticipationFlag = String(process.env.ANTICIPATION_ENABLED ?? '').toLowerCase();
+const anticipationOn = anticipationFlag !== '0' && anticipationFlag !== 'false';
+let anticipationTimer = null;
+let anticipationInFlight = false;
+const anticipationScheduler = anticipationOn
+  ? createAnticipationScheduler({
+    store: createFutureIntentStore({ db: discoveryCache.db }),
+    cache: discoveryCache,
+    controlPlaneStore,
+    baseUrl: `http://127.0.0.1:${port}`,
+    dataPlaneBaseUrl: process.env.DATA_PLANE_URL ?? 'http://data-plane:3001',
+    checkTorBoxCachedFn: async (hashes) => {
+      const r = await checkTorBoxCached(hashes);
+      return hashes.map((h) => ({
+        infoHash: h,
+        state: r.cached.has(String(h).toLowerCase()) ? 'cached' : (r.failed.has(String(h).toLowerCase()) ? 'unknown' : 'uncached'),
+      }));
+    },
+  })
+  : null;
+function armAnticipationTimer(delayMs) {
+  anticipationTimer = setTimeout(async () => {
+    try {
+      if (anticipationScheduler && !anticipationInFlight) {
+        anticipationInFlight = true;
+        try {
+          const result = await anticipationScheduler.tickOnce();
+          if (result.acted) {
+            console.log(`media-search: anticipation tick intent=${result.intentId} ${result.from || ''}->${result.to || result.reason || ''} (${result.ms ?? 0}ms)`);
+          }
+        } finally {
+          anticipationInFlight = false;
+        }
+      }
+    } catch (error) {
+      console.warn('media-search: anticipation tick failed', error?.message);
+    } finally {
+      armAnticipationTimer(anticipationIntervalMs());
+    }
+  }, delayMs);
+  if (anticipationTimer.unref) anticipationTimer.unref();
+}
+if (anticipationOn) {
+  armAnticipationTimer(2 * 60_000);
 }
 
 const durabilityMode = resolveDurabilityMode(process.env);

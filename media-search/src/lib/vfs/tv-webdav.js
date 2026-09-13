@@ -930,7 +930,10 @@ export function createTvWebDav({
     if (!Number.isSafeInteger(season) || !Number.isSafeInteger(episode)) {
       throw new VfsError('Episode coordinates are required for VFS hydration', 400, 'HYDRATE_INVALID');
     }
-    getCatalog();
+    // Build the catalog so the state map is populated without depending on
+    // a prior WebDAV request (mirrors the movie hydrator; a missing await
+    // here races freshly materialized episodes).
+    await getCatalog();
     const stateKey = mediaId + ':' + season + ':' + episode;
     const state = states.get(stateKey);
     if (!state) {
