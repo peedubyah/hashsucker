@@ -216,3 +216,47 @@ test('intent backoff steps are bounded', async () => {
   assert.equal(intentBackoffMs(2), 4 * 60 * 60 * 1000);
   assert.equal(intentBackoffMs(99), 24 * 60 * 60 * 1000);
 });
+
+test('far-future expectations sleep to window without provider calls', async () => {
+  const store = createFutureIntentStore({ db: memDb() });
+  const nowMs = 1_000_000_000;
+  const day = 86400 * 1000;
+  const { intent } = store.seed({ mediaType: 'movie', mediaId: 'ttW', source: 'window-test' });
+  store.transition(intent.id, 'anticipated', {});
+  // Simulate a far-future expected_at via direct update (seed takes it too).
+  const db2store = store;
+  void db2store;
+  const { sched, calls } = scheduler({ store });
+  void sched;
+  // Drive processIntent directly with window params.
+  const { createAnticipationScheduler: mk } = await import('../src/lib/anticipation/scheduler.js');
+  const s2 = mk({
+    store, baseUrl: 'http://t', dataPlaneBaseUrl: 'http://d',
+    fetchFn: async () => { throw new Error('must not call'); },
+    clock: () => nowMs, log: () => {}, prepareDays: 30, publishDays: 7,
+  });
+  const row = store.list({}).find((r) => r.media_id === 'ttW');
+  const r = await s2.processIntent({ ...row, expected_at: nowMs + 60 * day, arr_satisfied: 0 });
+  assert.equal(r.to, 'anticipated');
+  assert.equal(r.acted, true);
+  const after = store.list({}).find((x) => x.media_id === 'ttW');
+  assert.equal(after.next_check_at, nowMs + 60 * day - 30 * day, 'pushed to prepare window start');
+});
+
+test('satisfied intents park without fulfillment action', async () => {
+  const store = createFutureIntentStore({ db: memDb() });
+  store.seed({ mediaType: 'movie', mediaId: 'ttS', source: 'radarr:movie:9' });
+  const row = store.list({})[0];
+  store.refreshArr(row.id, { expectedAt: null, satisfied: true, nextCheckAt: 0 });
+  const { createAnticipationScheduler: mk } = await import('../src/lib/anticipation/scheduler.js');
+  let called = false;
+  const s2 = mk({
+    store, baseUrl: 'http://t', dataPlaneBaseUrl: 'http://d',
+    fetchFn: async () => { called = true; throw new Error('must not call'); },
+    clock: () => 2_000_000_000, log: () => {}, prepareDays: 30, publishDays: 7,
+  });
+  const fresh = store.list({}).find((x) => x.media_id === 'ttS');
+  const r = await s2.processIntent({ ...fresh });
+  assert.equal(called, false, 'no provider calls for satisfied intent');
+  assert.equal(store.list({})[0].state, 'anticipated');
+});
