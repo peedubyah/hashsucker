@@ -234,6 +234,38 @@ export {
   checkPlex,
 };
 
+/**
+ * Prepared-but-unpublished items (preparation tranche): distinct media
+ * items whose LATEST playback handoff names a TorrentFile but which have
+ * no VFS row (movie or episode). Pure durable-truth distinction — no new
+ * model, no human approval. Returns { state, count }.
+ */
+function countPreparedRows(cache) {
+  try {
+    const db = cache?.db;
+    if (!db) return { state: 'error', detail: 'handoff store unavailable' };
+    const row = db.prepare(`
+      SELECT COUNT(*) AS n FROM (
+        SELECT h.media_id AS media_id, h.season AS season, h.episode AS episode, MAX(h.id) AS hid
+        FROM playback_handoffs h
+        GROUP BY h.media_id, h.season, h.episode
+      ) latest
+      JOIN playback_handoffs h2 ON h2.id = latest.hid
+      WHERE h2.torrent_file_id IS NOT NULL AND h2.torrent_file_id != ''
+        AND NOT EXISTS (
+          SELECT 1 FROM vfs_movie_entries v
+          WHERE v.media_id = latest.media_id AND latest.season IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM vfs_tv_entries t
+          WHERE t.media_id = latest.media_id
+            AND t.season = latest.season AND t.episode = latest.episode)
+    `).get();
+    return { state: 'ok', count: row?.n ?? 0 };
+  } catch {
+    return { state: 'error', detail: 'prepared count unreadable' };
+  }
+}
+
 function countVfsRows(cache) {
   try {
     const db = cache?.db;
@@ -261,6 +293,7 @@ function lifecycleSummary({ cache, controlPlaneStore, listLibraryFn, retirementP
     return {
       state: 'ok',
       library: { total: items.length, ...states },
+      prepared: countPreparedRows(cache).count ?? 0,
       retirement: {
         enabled: retirementPolicy.enabled,
         absenceGraceMs: retirementPolicy.absenceGraceMs,

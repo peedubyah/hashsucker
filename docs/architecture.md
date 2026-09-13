@@ -167,6 +167,7 @@ routes; host binding and the trusted Compose/reverse-proxy boundary are the acce
 | `POST /api/library/reconcile` | Record consumer-library presence/absence/UNKNOWN observations for published items; retires ELIGIBLE items only when the retirement policy enables it (default OFF) |
 | `GET /api/library/retirement` | Dry-run retirement planner: per-item presence, absence age, eligibility, exact ineligibility reason; read-only |
 | `GET /api/diagnostics` | Rollout readiness: storage, data-plane, providers, consumers, publication, lifecycle in one payload (`ready|degraded|not_ready`); cheap checks only, no secrets |
+| `POST /api/media-prepare` | Fulfillment preparation: discovery/ranking/selection/binding persisted as reusable durable truth with no presentation (no VFS, no STRM, no notifications); idempotent |
 
 ### Rollout readiness
 
@@ -268,7 +269,19 @@ regardless of TorBox vs Real-Debrid execution
 | `POST /api/attributes/run` | Attribute parsing pass |
 | `POST /api/requests` | Physical acquisition: queue + virtual fulfilment |
 | `POST /api/media-request` | `searchByMedia` — the canonical request pipeline |
+| `POST /api/media-prepare` | `searchByMedia` with preparation only: discovery/ranking/selection/binding persisted, no presentation |
 | `POST /api/ingress/seerr` | Seerr webhook ingress (bearer token) |
+
+**Prepared vs published.** A *prepared* item has durable fulfillment truth —
+playback handoff (exact Release + TorrentFile) + positive-size TorrentFile row
++ at least one present mapped provider coordinate — but no VFS row, no STRM,
+no library desired-state, and no consumer notification. Preparation
+(`POST /api/media-prepare`, or `prepareOnly` on `searchByMedia`) pays the
+expensive provider proof off the human path; the next normal request
+recognizes the prepared state and republishes locally in milliseconds with
+zero provider work. Identity rows are immutable and carry no TTL; placement
+liveness is re-proven at serve time, and stale truth falls back safely into
+the normal path. `GET /api/diagnostics` reports the prepared count.
 
 ### Control plane
 

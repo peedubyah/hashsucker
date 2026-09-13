@@ -2948,6 +2948,42 @@ export function createRequestHandler(dependencies = {}) {
           return sendJson(response, 400, { error: err.message });
         }
       }
+      // Media preparation: run discovery/ranking/selection/binding and
+      // persist reusable durable truth WITHOUT presentation (no VFS, no
+      // STRM, no consumer notification, no library desired-state change).
+      // A later normal request recognizes the prepared state and proceeds
+      // directly to publication with zero provider work. Idempotent:
+      // preparing an already-prepared item is a local no-op.
+      if (request.method === 'POST' && url.pathname === '/api/media-prepare') {
+        const startedAt = performance.now();
+        const body = await readBody(request);
+        try {
+          const requestEnsureFn = buildRequestScopedEnsureFn({
+            fallbackFn: ensureTorBoxFileIdentityFn,
+            explicitFn: hasExplicitEnsureFn,
+            controlPlaneStore,
+            torBoxProvider,
+            apiKey: env.TORBOX_API_KEY,
+            apiBase: env.TORBOX_API_URL,
+            clock,
+            scope: 'media-prepare',
+          });
+          const result = await searchByMedia(searchCache, {
+            ...body,
+            prepareOnly: true,
+            source: body.source || 'prepare',
+            sourceType: body.sourceType || 'operator',
+            controlPlaneStore,
+            ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
+          });
+          return sendJson(response, 200, {
+            ...result,
+            timings: { totalMs: Math.round(performance.now() - startedAt) },
+          });
+        } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
+      }
       // Playback handoff: retrieve handoff by request ID
       const handoffMatch = request.method === 'GET'
         && url.pathname.match(/^\/api\/media-request\/(\d+)\/handoff$/);

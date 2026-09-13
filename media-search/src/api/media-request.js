@@ -37,6 +37,93 @@ import { DEMAND_PRIORITY } from '../lib/discovery/cache.js';
 const DEFAULT_LIVE_DISCOVERY_THRESHOLD = 1;
 
 /**
+ * Prepared durable truth (preparation tranche).
+ *
+ * Returns the durable fulfillment identity for a media item WITHOUT
+ * touching presentation: stored playback handoff (full shape with
+ * torrentFileId) + matching TorrentFile row (positive size) + at least
+ * one data-plane coordinate (present, mapped provider file on a
+ * non-removed placement).
+ *
+ * This is the shared predicate behind both the reuse fast path (which
+ * proceeds to republish presentation) and preparation (which stops
+ * here). Identity rows are immutable; placement liveness is re-proven
+ * at serve time, so no TTL is applied here.
+ *
+ * @returns {{ handoff, torrentFileId, torrentFile } | null}
+ */
+export function getPreparedDurableState({
+  cache,
+  controlPlaneStore,
+  mediaId,
+  mediaType,
+  season = null,
+  episode = null,
+  canonicalTitle = null,
+  canonicalYear = null,
+}) {
+  const hasEpisodeCoords = Number.isSafeInteger(season) && season >= 1
+    && Number.isSafeInteger(episode) && episode >= 1;
+  const isEpisode = mediaType === 'episode' || hasEpisodeCoords;
+  if (!isEpisode && mediaType !== 'movie') {
+    return null;
+  }
+  const stored = isEpisode
+    ? cache.getTvPlaybackHandoff?.(mediaId, season, episode)
+    : cache.getPlaybackHandoffByMediaId?.(mediaId);
+  if (!stored) {
+    return null;
+  }
+  if (!isEpisode && (stored.season != null || stored.episode != null)) {
+    return null;
+  }
+  const infoHash = stored.infoHash ?? stored.selectedHash;
+  const torrentFileId = stored.torrentFileId ?? null;
+  if (!infoHash || !stored.releaseKey || !torrentFileId || !stored.filename || !stored.provider) {
+    return null;
+  }
+  if (isEpisode && (stored.season !== season || stored.episode !== episode)) {
+    return null;
+  }
+  if (!controlPlaneStore
+    || typeof controlPlaneStore.getTorrentFile !== 'function'
+    || typeof controlPlaneStore.listDataPlaneCoordinates !== 'function') {
+    return null;
+  }
+  const torrentFile = controlPlaneStore.getTorrentFile(torrentFileId);
+  if (!torrentFile
+    || String(torrentFile.infoHash || '').toLowerCase() !== String(infoHash).toLowerCase()
+    || !(Number.isSafeInteger(torrentFile.size) && torrentFile.size > 0)) {
+    return null;
+  }
+  const coords = controlPlaneStore.listDataPlaneCoordinates(torrentFileId) || [];
+  if (coords.length === 0) {
+    return null;
+  }
+  const handoff = {
+    requestId: stored.requestId,
+    mediaId: stored.mediaId,
+    mediaType: stored.mediaType,
+    season: stored.season ?? null,
+    episode: stored.episode ?? null,
+    releaseKey: stored.releaseKey,
+    infoHash,
+    fileIndex: stored.fileIndex ?? null,
+    filename: stored.filename,
+    provider: stored.provider,
+    providerState: stored.providerState,
+    identityTier: stored.identityTier,
+    resolutionState: stored.resolutionState,
+    selectionReason: stored.selectionReason || stored.reason,
+    selectedAt: stored.selectedAt,
+    torrentFileId,
+    ...(typeof canonicalTitle === 'string' && canonicalTitle.trim() ? { canonicalTitle: canonicalTitle.trim() } : {}),
+    ...(Number.isSafeInteger(canonicalYear) ? { canonicalYear } : {}),
+  };
+  return { handoff, torrentFileId, torrentFile };
+}
+
+/**
  * Ensure the canonical STRM is materialized for an existing durable handoff.
  *
  * Idempotence invariant:
@@ -247,83 +334,27 @@ async function tryReuseHealthyPublication({
   canonicalYear = null,
 }) {
   try {
-    // Episode scope is determined by explicit season+episode coordinates
-    // (series/TV fan-out children, S:E mediaIds), not by the mediaType
-    // string alone: production TV requests arrive as mediaType 'series'
-    // with season/episode params. Series requests without coordinates
-    // never qualify for episode reuse.
+    // Prepared durable truth (shared with preparation): stored handoff +
+    // matching TorrentFile + serving coordinates. Anything insufficient
+    // falls through to full discovery below.
+    const prepared = getPreparedDurableState({
+      cache,
+      controlPlaneStore,
+      mediaId,
+      mediaType,
+      season,
+      episode,
+      canonicalTitle,
+      canonicalYear,
+    });
+    if (!prepared) {
+      return null;
+    }
+    const { handoff, torrentFileId, torrentFile } = prepared;
+    const infoHash = handoff.infoHash;
     const hasEpisodeCoords = Number.isSafeInteger(season) && season >= 1
       && Number.isSafeInteger(episode) && episode >= 1;
     const isEpisode = mediaType === 'episode' || hasEpisodeCoords;
-    if (!isEpisode && mediaType !== 'movie') {
-      return null;
-    }
-    // Full-shape handoff rows (rowToPlaybackHandoff), which carry
-    // torrentFileId. getExistingSelection omits it, so it cannot serve
-    // this predicate.
-    const stored = isEpisode
-      ? cache.getTvPlaybackHandoff?.(mediaId, season, episode)
-      : cache.getPlaybackHandoffByMediaId?.(mediaId);
-    if (!stored) {
-      return null;
-    }
-    // Scope hygiene: a movie request must never reuse an episode row and
-    // vice versa. Episode lookup is already keyed by (mediaId, season,
-    // episode); the movie branch additionally requires a seasonless row.
-    if (!isEpisode && (stored.season != null || stored.episode != null)) {
-      return null;
-    }
-    const infoHash = stored.infoHash ?? stored.selectedHash;
-    const torrentFileId = stored.torrentFileId ?? null;
-    // A stored row is a durable selection only when it names the full
-    // physical identity (same substance as the persisted-selection check).
-    if (!infoHash || !stored.releaseKey || !torrentFileId || !stored.filename || !stored.provider) {
-      return null;
-    }
-    if (isEpisode && (stored.season !== season || stored.episode !== episode)) {
-      return null;
-    }
-    if (!controlPlaneStore
-      || typeof controlPlaneStore.getTorrentFile !== 'function'
-      || typeof controlPlaneStore.listDataPlaneCoordinates !== 'function') {
-      return null;
-    }
-    const torrentFile = controlPlaneStore.getTorrentFile(torrentFileId);
-    if (!torrentFile
-      || String(torrentFile.infoHash || '').toLowerCase() !== String(infoHash).toLowerCase()
-      || !(Number.isSafeInteger(torrentFile.size) && torrentFile.size > 0)) {
-      return null;
-    }
-    const coords = controlPlaneStore.listDataPlaneCoordinates(torrentFileId) || [];
-    if (coords.length === 0) {
-      return null;
-    }
-
-    // Rebuild the handoff shape from durable truth (original requestId is
-    // preserved: this returns the existing result, it does not mint a new
-    // publication). Request-supplied canonical presentation (Seerr detail
-    // body) is honored exactly like the full path; it affects only the
-    // human-facing VFS/STRM path, never identity.
-    const handoff = {
-      requestId: stored.requestId,
-      mediaId: stored.mediaId,
-      mediaType: stored.mediaType,
-      season: stored.season ?? null,
-      episode: stored.episode ?? null,
-      releaseKey: stored.releaseKey,
-      infoHash,
-      fileIndex: stored.fileIndex ?? null,
-      filename: stored.filename,
-      provider: stored.provider,
-      providerState: stored.providerState,
-      identityTier: stored.identityTier,
-      resolutionState: stored.resolutionState,
-      selectionReason: stored.selectionReason || stored.reason,
-      selectedAt: stored.selectedAt,
-      torrentFileId,
-      ...(typeof canonicalTitle === 'string' && canonicalTitle.trim() ? { canonicalTitle: canonicalTitle.trim() } : {}),
-      ...(Number.isSafeInteger(canonicalYear) ? { canonicalYear } : {}),
-    };
 
     const noopSelected = () => ({
       infoHash,
@@ -661,6 +692,12 @@ export async function searchByMedia(cache, request) {
     : DEFAULT_LIVE_DISCOVERY_THRESHOLD;
   const skipLiveDiscovery = request.skipLiveDiscovery === true;
   const skipAvailability = request.skipAvailability === true;
+  // Preparation tranche: run discovery/ranking/selection/binding and persist
+  // reusable durable truth WITHOUT presentation (no VFS, no STRM, no
+  // consumer notification, no library desired-state change). A later normal
+  // request recognizes the prepared state via getPreparedDurableState and
+  // proceeds directly to publication with zero provider work.
+  const prepareOnly = request.prepareOnly === true;
   // Slice 1.75: optional identity-binding seam. When provided by the caller,
   // the selected candidate's exact per-file size is matched against the
   // current TorBox inventory BEFORE a playback handoff is persisted, and
@@ -723,19 +760,48 @@ export async function searchByMedia(cache, request) {
   // or unhealthy falls through to the full path below. Never substitutes a
   // different Release: identity comes from the stored handoff itself, and
   // provider liveness is not stricter than S-1 serving semantics.
-  const reuseResult = await tryReuseHealthyPublication({
-    cache,
-    controlPlaneStore: request.controlPlaneStore ?? null,
-    hydrateVfs,
-    mediaId,
-    mediaType,
-    season,
-    episode,
-    canonicalTitle,
-    canonicalYear,
-  });
-  if (reuseResult) {
-    return reuseResult;
+  // Preparation mode never publishes: when durable truth already proves
+  // this item prepared, return it with zero provider work and zero
+  // presentation. Otherwise fall through to the full pipeline, which
+  // persists preparation but stops before VFS/STRM/notification.
+  if (prepareOnly) {
+    const already = getPreparedDurableState({
+      cache,
+      controlPlaneStore: request.controlPlaneStore ?? null,
+      mediaId,
+      mediaType,
+      season,
+      episode,
+    });
+    if (already) {
+      return {
+        requestId: already.handoff.requestId ?? null,
+        intent,
+        results: [],
+        total: 0,
+        query: { mediaId, mediaType, season, episode },
+        selection: { selected: null, reason: 'already-prepared', alternates: [] },
+        handoff: already.handoff,
+        prepared: true,
+        alreadyPrepared: true,
+        published: false,
+      };
+    }
+  } else {
+    const reuseResult = await tryReuseHealthyPublication({
+      cache,
+      controlPlaneStore: request.controlPlaneStore ?? null,
+      hydrateVfs,
+      mediaId,
+      mediaType,
+      season,
+      episode,
+      canonicalTitle,
+      canonicalYear,
+    });
+    if (reuseResult) {
+      return reuseResult;
+    }
   }
 
   // Stage 1: Retrieve candidates by media association
@@ -999,6 +1065,7 @@ export async function searchByMedia(cache, request) {
       if (handoff) {
         try {
           cache.persistPlaybackHandoff(handoff);
+          if (!prepareOnly) {
           let vfsEntry = null;
           try {
             vfsEntry = await materializeVfsEntry(
@@ -1104,6 +1171,7 @@ export async function searchByMedia(cache, request) {
             // STRM publication failure must not fail the request
             console.error(`STRM publication failed: ${strmError.message}`);
           }
+          } // end presentation gate (prepareOnly stops after handoff persist)
         } catch (error) {
           console.error(`Handoff persistence failed: ${error.message}`);
         }
@@ -1149,6 +1217,10 @@ export async function searchByMedia(cache, request) {
         enrichmentPromoted: promotion.enrichmentPromoted,
         probePromoted: promotion.probePromoted,
       },
+      // Preparation tranche: preparation persists reusable durable truth
+      // (handoff + TorrentFile + coordinates) without presentation.
+      prepared: prepareOnly && handoff != null,
+      published: !prepareOnly,
     };
   }
 
@@ -1606,6 +1678,10 @@ export async function searchByMedia(cache, request) {
       enrichmentPromoted: promotion.enrichmentPromoted,
       probePromoted: promotion.probePromoted,
     },
+    // Preparation tranche: the corpus path never presents, so a prepared
+    // run through it only needs the marker.
+    prepared: prepareOnly && handoff != null,
+    published: !prepareOnly,
   };
 }
 
