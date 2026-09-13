@@ -320,7 +320,7 @@ function corpusSummary(cache) {
     if (!tbl) return { state: 'absent', detail: 'no corpus baseline imported' };
     const row = db.prepare('SELECT * FROM corpus_state WHERE id = 1').get();
     if (!row) return { state: 'absent', detail: 'no corpus baseline imported' };
-    return {
+    const out = {
       state: row.state ?? 'unknown',
       revision: row.imported_revision ?? null,
       revisionCommit: row.imported_commit ?? null,
@@ -332,6 +332,33 @@ function corpusSummary(cache) {
       candidates: row.candidate_count ?? null,
       fragments: row.fragment_count ?? null,
     };
+    // Association intelligence (cheap indexed counts on small tables).
+    try {
+      out.associated = db.prepare('SELECT COUNT(*) AS n FROM candidate_media').get()?.n ?? 0;
+      out.associatedMedia = db.prepare('SELECT COUNT(DISTINCT media_id) AS n FROM candidate_media').get()?.n ?? 0;
+    } catch {
+      out.associated = 0;
+      out.associatedMedia = 0;
+    }
+    try {
+      out.enrichmentQueued = db.prepare("SELECT COUNT(*) AS n FROM identity_enrichment_queue WHERE status = 'pending'").get()?.n ?? 0;
+    } catch {
+      out.enrichmentQueued = 0;
+    }
+    // Live progress while a run is in flight.
+    if (row.state === 'bootstrapping' || row.state === 'updating') {
+      try {
+        const run = db.prepare(`SELECT id, fragments_discovered AS total FROM dmm_ingestion_runs
+          WHERE status = 'running' ORDER BY id DESC LIMIT 1`).get();
+        if (run) {
+          const done = db.prepare(`SELECT COUNT(*) AS n FROM dmm_fragments WHERE run_id = ? AND status = 'complete'`).get(run.id)?.n ?? 0;
+          out.progress = { complete: done, total: run.total ?? null };
+        }
+      } catch {
+        // Progress is best-effort.
+      }
+    }
+    return out;
   } catch {
     return { state: 'unknown', detail: 'corpus state unreadable' };
   }

@@ -18,6 +18,7 @@ import { evaluateObservationFreshness } from '../lib/providers/observations.js';
 import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
 import { createAvailabilityChecker } from '../lib/intents/availability.js';
 import { selectBestCandidate, selectBindableCandidate } from '../lib/discovery/selection.js';
+import { lookupCorpusByTitle, resolveWantedIdentity, IDENTITY_TIERS } from '../lib/discovery/corpus-identity.js';
 import { computeHistoricalAvailabilityPrior } from '../lib/discovery/confidence-projection.js';
 import { resolveTvTorrentFile } from '../lib/resolver/tv-episode-resolver.js';
 import { buildPlaybackHandoff } from '../lib/discovery/playback-handoff.js';
@@ -152,6 +153,71 @@ export function backfillRequestMediaAssociations(cache, intent, explainable, req
     }
   }
   return associated;
+}
+
+/**
+ * Corpus title-index collection (corpus intelligence tranche): resolve the
+ * wanted identity once per request and return STRUCTURED-tier ranking
+ * inputs plus their eligibility map. Same ranker, same weights, same
+ * eligibility gate as every other source — the title index is a new
+ * input, not a new rule. Never throws (empty on any failure).
+ */
+async function collectTitleIndexCandidates({
+  cache, mediaId, mediaType, season, episode, mediaTitle, canonicalYear,
+}) {
+  const inputs = [];
+  const eligibilityByHash = new Map();
+  try {
+    const wanted = await resolveWantedIdentity({ mediaId, mediaType, mediaTitle, canonicalYear });
+    if (!wanted.title) return { inputs, eligibilityByHash };
+    const rows = lookupCorpusByTitle(cache, {
+      title: wanted.title, year: wanted.year, season, episode, mediaType,
+    });
+    for (const row of rows) {
+      const key = `${row.infoHash}:${row.fileIndex ?? 'torrent'}`;
+      const releaseAttrs = {
+        title: row.title,
+        year: row.year ?? undefined,
+        season: row.season ?? undefined,
+        episode: row.episode ?? undefined,
+        episodeRange: undefined,
+        seasonOnly: false,
+        mediaType,
+        resolution: row.resolution ?? undefined,
+        source: row.sourceType ?? undefined,
+        codec: row.codec ?? undefined,
+        hdr: row.hdr ?? undefined,
+        audio: row.audio ?? undefined,
+      };
+      const eligibility = evaluateIdentityEligibility(
+        { releaseAttributes: releaseAttrs },
+        { season, episode, mediaType, mediaTitle: wanted.title },
+      );
+      eligibilityByHash.set(key, eligibility);
+      inputs.push({
+        hash: row.infoHash,
+        fileIndex: row.fileIndex,
+        releaseKey: key,
+        filename: row.filename,
+        relevance: 0.75,
+        releaseAttributes: releaseAttrs,
+        parserConfidence: 0.75,
+        mediaAssociations: [],
+        providerObservations: [],
+        providerEvidence: [],
+        sources: [{ origin: 'corpus-title-index', evidence: ['exact-normalized-title-match', `tier:${IDENTITY_TIERS.STRUCTURED}`], confidence: 0.75 }],
+        selectedMediaId: mediaId,
+        hasLiveDiscovery: false,
+        hasTitleIndex: true,
+        exactFileSize: row.size,
+        selectedFileSize: row.size,
+        historicalPrior: 0,
+      });
+    }
+  } catch {
+    // Title lookup is best-effort enrichment, never fatal.
+  }
+  return { inputs, eligibilityByHash };
 }
 
 /**
@@ -835,6 +901,14 @@ export async function searchByMedia(cache, request) {
     }
   }
 
+  // Corpus title-index inputs, collected once per request and merged
+  // into whichever ranking path runs (live, corpus, or title-only).
+  // One FTS query plus at most one cached metadata lookup.
+  const { inputs: titleInputs, eligibilityByHash: titleEligibilityByHash } =
+    await collectTitleIndexCandidates({
+      cache, mediaId, mediaType, season, episode, mediaTitle, canonicalYear,
+    });
+
   // Stage 1: Retrieve candidates by media association
   const candidates = cache.queryCandidatesByMedia(mediaId);
 
@@ -936,6 +1010,19 @@ export async function searchByMedia(cache, request) {
         selection: { selected: null, reason: 'no candidates', alternates: [] },
         strmPath,
       };
+    }
+
+    // Corpus title-index merge: STRUCTURED-tier candidates join ranking
+    // under normal rules (deduped, eligibility-gated). Runs before the
+    // empty check so title-index hits alone can carry a request with
+    // zero live results.
+    for (const t of titleInputs) {
+      if (seenLiveKeys.has(t.releaseKey)) continue;
+      seenLiveKeys.add(t.releaseKey);
+      liveCandidates.push(t);
+      if (!liveEligibilityByHash.has(t.releaseKey)) {
+        liveEligibilityByHash.set(t.releaseKey, titleEligibilityByHash.get(t.releaseKey));
+      }
     }
 
     // Rank live candidates
@@ -1262,9 +1349,10 @@ export async function searchByMedia(cache, request) {
     };
   }
 
-  if (candidates.length === 0) {
-    // No corpus candidates — but an existing durable handoff may still need
-    // its STRM materialized (idempotence invariant).
+  if (candidates.length === 0 && titleInputs.length === 0) {
+    // No corpus candidates and no title-index hits — but an existing
+    // durable handoff may still need its STRM materialized (idempotence
+    // invariant).
     const { strmPath } = await ensureStrmForExistingHandoff(cache, mediaId, mediaType, season, episode);
     return {
       requestId: null,
@@ -1470,7 +1558,16 @@ export async function searchByMedia(cache, request) {
 
   // Stage 3: Rank within tier (with eligibility overrides)
   // Merge eligibility maps for ranking
-  const allEligibilityByHash = new Map([...eligibilityByHash, ...liveEligibilityByHash]);
+  const allEligibilityByHash = new Map([...eligibilityByHash, ...liveEligibilityByHash, ...titleEligibilityByHash]);
+  // Corpus title-index merge (same mechanism as the live path).
+  {
+    const haveKeys = new Set(rankingInputs.map((i) => i?.releaseKey).filter(Boolean));
+    for (const t of titleInputs) {
+      if (haveKeys.has(t.releaseKey)) continue;
+      haveKeys.add(t.releaseKey);
+      rankingInputs.push(t);
+    }
+  }
   const { ranked, tierMeta } = rankHitsTiered(rankingInputs, { season, episode, mediaTitle }, mediaId, allEligibilityByHash);
 
   // Stage 4: Paginate

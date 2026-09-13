@@ -25,6 +25,28 @@ are backfilled as candidate→media associations, so the corpus incrementally
 learns to serve previously-requested media. See `architecture.md` (Discovery
 and requests) and `corpus` in `GET /api/diagnostics`.
 
+## 1b. Corpus identity (media-addressable corpus)
+
+Raw DMM records carry almost no explicit identity (~0.1% embed IMDb/TMDB
+markers; the rest is release names). Parsed release attributes give exact
+title/year for ~41% of rows and exact season/episode for ~36%; ~23% are
+effectively unidentifiable. Identity confidence tiers:
+
+- **STRONG** — explicit upstream IDs or high-confidence request-outcome
+  associations (served via `candidate_media`).
+- **STRUCTURED** — exact normalized title (+year for movies, +S/E for
+  episodes) resolved against the local FTS title index. The only fuzzy-free
+  automatic tier besides STRONG.
+- **WEAK** — release-name-only inference. Never auto-populates; diagnostic only.
+
+For a wanted identity, `discovery/corpus-identity.js` resolves title/year
+(caller-supplied canonical identity, else one cached metadata lookup — never
+a fanout) and returns STRUCTURED candidates into the normal ranking pipeline
+under unchanged weights. The 4,446-row `identity_enrichment_queue` (per-row
+external enrichment, no consumer) is deliberately not finished: feeding it
+would be an external-call fanout, and the title index answers the same need
+with zero network calls.
+
 ## 2. Canonicalization and merge
 
 Local and live candidates are normalized into one evidence shape
