@@ -27,11 +27,64 @@ step, no dashboard — startup logs and one diagnostics URL tell you everything.
   immutable deploys. `main` is the dev channel — don't use it here.
 - Point Plex/Jellyfin at `HASHSUCKER_MEDIA_PATH` (`.../media/hashsucker`);
   published `.strm` files appear under `<path>/strm`.
-- Back up the appdata path (DBs, queue, importer state). The media path
-  holds regenerable STRM files only.
+- Back up the two SQLite DBs under the appdata path (see below). The
+  media path holds regenerable STRM files only.
 
 ## Later
 
 Add Seerr (requests), Sonarr/Radarr (upcoming monitoring), Prowlarr
 (candidates), or Plex/Jellyfin (refresh) by uncommenting their lines in
 `.env` and recreating the stack. Nothing else is required.
+
+## Backup and restore
+
+Back up physical files, not logical tables. The two SQLite DB files are
+backed up whole; individual tables inside may still be logically
+regenerable (they just ride along in the file). Queue files, STRM
+output, and `hy4-cache` are explicitly not required.
+
+**Back up (physical units):**
+
+- `<data>/discovery/discovery-cache.db` — whole file via
+  `sqlite3 … ".backup …"` or with the stack stopped; never copy `-wal`
+  files alone. Holds authoritative state (handoffs, intents, VFS
+  entries, request history) plus regenerable tables (corpus candidates,
+  observations, enrichment/probe queues) that rebuild on their own.
+- `<data>/discovery/control-plane.db` — same discipline. Holds
+  authoritative state (placements, TorrentFiles, bindings, library).
+
+**Safe to discard (transient transport, not authoritative):**
+
+- `<data>/queue/` (`incoming/`, `processing/`, `done/`, `failed/`) —
+  file transport from media-search to the torbox-importer
+  (`incoming/<requestId>.json`, claimed into `processing/`, settled
+  into `done/`/`failed/`). Nothing durable lives only in a queue
+  file: any fulfilled outcome is already a DB handoff. A stranded
+  `incoming/`/`processing/` file at backup time is an importer job
+  that simply won't resume — restore without it loses no library
+  truth (verified: restore with an empty queue kept all 104
+  handoffs, 27 intents, 65 VFS entries). `done/`/`failed/` are
+  terminal history; `.actions.log` is audit history.
+- `<data>/torbox-importer/`, `<data>/downloads/` — importer state and
+  staging; rescanned/recreated.
+- `*-shm` / `*-wal` files, `test.sqlite`, stale `*.backup.*` copies.
+
+**Do not back up (proven regenerable/disposable):**
+
+- `<media>/strm/` — republished deterministically from handoffs on
+  next request (verified: restore without it, rerequest, STRM returns).
+- `hy4-cache` volume — grid chunk cache; a miss re-fetches from the
+  provider and serves correctly (verified on an empty cache).
+
+**Restore procedure:**
+
+1. Fresh install per above (empty dirs are fine).
+2. Stop the stack. Copy the two `.db` files into
+   `<data>/discovery/` (that sub-path matters: the container derives
+   its DB path by appending `/discovery` to the data root).
+3. Start the stack. Diagnostics should report `ready` with the corpus
+   `usable` immediately — no bootstrap.
+4. Rerequest anything: handoffs, intents, and VFS entries survive
+   verbatim (verified identical counts); first rerequest republishes
+   STRM files in milliseconds.
+5. First playback re-fills `hy4-cache` transparently.
