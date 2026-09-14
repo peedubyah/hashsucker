@@ -72,25 +72,32 @@ services:
     ports:
       - "${MEDIA_SEARCH_BIND_ADDRESS:-127.0.0.1}:${MEDIA_SEARCH_PORT:-3000}:3000"
     volumes:
-      # Collapsed host-path contract (first-run tranche): two roots cover
-      # everything. Legacy single-purpose vars still win when explicitly
-      # set; otherwise each mount derives from its root.
+      # Host-path contract: two roots cover the normal case; explicit
+      # HASHSUCKER_*_HOST_PATH overrides cover separate storage
+      # destinations. Precedence per mount:
+      #   explicit HASHSUCKER_*_HOST_PATH > legacy alias (when retained)
+      #   > HASHSUCKER_DATA_PATH / HASHSUCKER_MEDIA_PATH-derived default
+      #   > repo-local fallback.
       #   HASHSUCKER_DATA_PATH  private state: discovery DBs, queue,
-      #                         importer state, download staging
+      #                         importer state
       #   HASHSUCKER_MEDIA_PATH consumer-visible media: STRM files
       #                         (this is the path Plex/Jellyfin must see)
+      # Generic download staging (./hy4-downloads) and owned permanent
+      # output (./hy4-permanent) are deliberately NOT derived from the
+      # two roots: they are separate storage decisions (byte destinations),
+      # not state and not STRM publication.
       # hy4-cache stays a named volume: container-managed cache bytes with
       # no host-sharing need (avoids bind copy-up surprises).
-      - ${DISCOVERY_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/discovery}:/data
-      - ${REQUESTS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/queue}:/requests
-      - ${STRM_HOST_PATH:-${HASHSUCKER_MEDIA_PATH:-./hy4-media}/strm}:/strm
+      - ${HASHSUCKER_DISCOVERY_HOST_PATH:-${DISCOVERY_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/discovery}}:/data
+      - ${HASHSUCKER_QUEUE_HOST_PATH:-${REQUESTS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/queue}}:/requests
+      - ${HASHSUCKER_STRM_HOST_PATH:-${STRM_HOST_PATH:-${HASHSUCKER_MEDIA_PATH:-./hy4-media}/strm}}:/strm
       # Owned media root (promotion output). Always mounted so enabling
       # promotion is one env var; empty and inert until
       # HASHSUCKER_PERMANENT_PATH points here.
-      - ${PERMANENT_HOST_PATH:-./hy4-permanent}:/permanent
+      - ${HASHSUCKER_PERMANENT_HOST_PATH:-${PERMANENT_HOST_PATH:-./hy4-permanent}}:/permanent
       # Download staging root (generic download intents). Same deal:
       # mounted always, inert until HASHSUCKER_DOWNLOAD_PATH is set.
-      - ${DOWNLOAD_HOST_PATH:-./hy4-downloads}:/download
+      - ${HASHSUCKER_DOWNLOAD_HOST_PATH:-${DOWNLOAD_HOST_PATH:-./hy4-downloads}}:/download
     group_add:
       - "${MEDIA_SEARCH_QUEUE_GID:-100}"
     security_opt:
@@ -125,10 +132,10 @@ services:
       SONARR_URL: ${SONARR_URL:-}
       SONARR_API_KEY: ${SONARR_API_KEY:-}
     volumes:
-      - ${TORBOX_IMPORTER_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/torbox-importer}:/config
-      - ${REQUESTS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/queue}:/requests
-      - ${DOWNLOADS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/downloads}:/downloads
-      - ${STRM_HOST_PATH:-${HASHSUCKER_MEDIA_PATH:-./hy4-media}/strm}:/strm
+      - ${HASHSUCKER_TORBOX_IMPORTER_HOST_PATH:-${TORBOX_IMPORTER_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/torbox-importer}}:/config
+      - ${HASHSUCKER_QUEUE_HOST_PATH:-${REQUESTS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/queue}}:/requests
+      - ${HASHSUCKER_TORBOX_IMPORTER_DOWNLOADS_HOST_PATH:-${DOWNLOADS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/downloads}}:/downloads
+      - ${HASHSUCKER_STRM_HOST_PATH:-${STRM_HOST_PATH:-${HASHSUCKER_MEDIA_PATH:-./hy4-media}/strm}}:/strm
     security_opt:
       - no-new-privileges:true
 

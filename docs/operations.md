@@ -31,8 +31,12 @@ placeholders for every secret.
 
 ### Required — compose will not start without these
 
-`TORBOX_API_KEY`, `REQUESTS_HOST_PATH`, `TORBOX_IMPORTER_HOST_PATH`, `DOWNLOADS_HOST_PATH`,
-`RADARR_URL`, `RADARR_API_KEY`, `SONARR_URL`, `SONARR_API_KEY`.
+`TORBOX_API_KEY`, `HASHSUCKER_QUEUE_HOST_PATH` (legacy alias
+`REQUESTS_HOST_PATH`), `HASHSUCKER_TORBOX_IMPORTER_HOST_PATH` (legacy
+alias `TORBOX_IMPORTER_HOST_PATH`),
+`HASHSUCKER_TORBOX_IMPORTER_DOWNLOADS_HOST_PATH` (legacy alias
+`DOWNLOADS_HOST_PATH`), `RADARR_URL`, `RADARR_API_KEY`, `SONARR_URL`,
+`SONARR_API_KEY`.
 
 ### Secrets
 
@@ -231,8 +235,13 @@ planned repairs are computed and never applied.
 
 ### Configuration discrepancies to fix
 
-- `STRM_HOST_PATH` defaults differ between `media-search` and `torbox-importer` — the two services
-  can end up writing to different directories.
+- Host bind paths use the canonical `HASHSUCKER_*_HOST_PATH` names in
+  `compose.yaml` (legacy `DISCOVERY_HOST_PATH`, `REQUESTS_HOST_PATH`,
+  `STRM_HOST_PATH`, `DOWNLOAD_HOST_PATH`, `PERMANENT_HOST_PATH`,
+  `TORBOX_IMPORTER_HOST_PATH`, `DOWNLOADS_HOST_PATH` remain honored as
+  aliases; the new names win when both are set). Both `media-search`
+  and `torbox-importer` derive shared mounts from the same expression,
+  so the two services cannot diverge.
 - `RESOLVER_BASE_URL` defaults to `http://localhost:8080` for `media-search`, while
   `torbox-importer` is given `http://media-search:3000` for the same variable. Set it explicitly.
 - `CINEMETA_BASE_URL` appears (commented out) in `.env.example` but is not referenced by
