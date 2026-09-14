@@ -90,6 +90,34 @@ import { providerAccounting, formatProviderAccounting } from '../lib/providers/p
 import { discoveryAccounting, formatDiscoveryAccounting } from '../lib/discovery/discovery-accounting.js';
 import { createRealDebridClient, RdCooldownError } from '../lib/providers/realdebrid/client.js';
 import { attemptRdResolution, getRdPlaybackUrl } from '../lib/providers/realdebrid/resolve.js';
+import { createRdEnsure } from '../lib/providers/realdebrid/ensure.js';
+
+/**
+ * Build a request-scoped Real-Debrid ensure function (RD-only tranche).
+ * One createRdEnsure instance per request: its internal memo makes
+ * repeated ensure calls for the same infoHash within one request free,
+ * and request end drops the memo. Returns null when RD is unavailable
+ * so callers fall back to TorBox-only behavior bit-for-bit.
+ */
+function buildRequestRdEnsureFn({ rdClient, controlPlaneStore, clock = () => Date.now() } = {}) {
+  if (!rdClient || !controlPlaneStore) return null;
+  try {
+    const { ensure } = createRdEnsure({ store: controlPlaneStore, client: rdClient, now: clock });
+    return (params) => ensure(params);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Spread-ready RD ensure for searchByMedia calls. Builds one memoized
+ * ensure per call site invocation (request-scoped lifetime); empty
+ * object when RD is unavailable so TorBox-only behavior is bit-for-bit.
+ */
+function rdEnsureForRequest({ rdClient, controlPlaneStore, clock = () => Date.now() } = {}) {
+  const fn = buildRequestRdEnsureFn({ rdClient, controlPlaneStore, clock });
+  return fn ? { ensureRealDebridFileIdentity: fn } : {};
+}
 import { getRdResolutionCache } from '../lib/providers/realdebrid/rd-resolution-cache.js';
 import { createMovieWebDav } from '../lib/vfs/movie-webdav.js';
 import { createTvWebDav } from '../lib/vfs/tv-webdav.js';
@@ -585,7 +613,8 @@ async function handleSeerrIngress(
   { controlPlaneStore = null, ensureTorBoxFileIdentityFn = null,
     torBoxProvider = null, torBoxApiKey = null, torBoxApiBase = undefined,
     clock = () => Date.now(), hasExplicitEnsureFn = false,
-    futureIntentStore = null, availabilityWakeLog = null, schedulingNudge = null } = {},
+    futureIntentStore = null, availabilityWakeLog = null, schedulingNudge = null,
+    rdClient = null, ensureRealDebridFileIdentity = null } = {},
 ) {
   // 1. Auth
   const authHeader = request.headers && typeof request.headers.authorization === 'string'
@@ -830,10 +859,13 @@ async function handleSeerrIngress(
         clock,
         scope: 'seerr-ingress',
       });
+      const requestRdEnsureFn = ensureRealDebridFileIdentity
+        ?? buildRequestRdEnsureFn({ rdClient, controlPlaneStore, clock });
       return await runSingleSearchByMedia({
         searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, canonicalReleaseDate, intentId,
         identityStatus, notificationType, response, hydrateVfs,
         ensureTorBoxFileIdentity: requestEnsureFn,
+        ensureRealDebridFileIdentity: requestRdEnsureFn,
         controlPlaneStore,
         futureIntentStore,
         clock,
@@ -996,6 +1028,10 @@ async function handleSeerrIngress(
           // inventory and threads the resulting torrentFileId into
           // the handoff.
           ...(childEnsureFn ? { ensureTorBoxFileIdentity: childEnsureFn } : {}),
+          // RD ensure: explicit injection wins (tests), else per-request build.
+          ...(ensureRealDebridFileIdentity
+            ? { ensureRealDebridFileIdentity }
+            : rdEnsureForRequest({ rdClient, controlPlaneStore, clock })),
           // TV series don't currently use the canonical title/year for
           // the VFS path (TV materializer uses its own filename-derived
           // identity — unchanged in this slice). Forwarding them is
@@ -1241,7 +1277,8 @@ function unfulfilledTvDeferral({ store, mediaId, season, episode, airDate, child
 async function runSingleSearchByMedia({
   searchCache, operationalIntent, canonicalMediaTitle, canonicalMediaYear, canonicalReleaseDate = null, intentId,
   identityStatus, notificationType, response, hydrateVfs = null,
-  ensureTorBoxFileIdentity = null, controlPlaneStore = null, futureIntentStore = null, clock = () => Date.now(),
+  ensureTorBoxFileIdentity = null, ensureRealDebridFileIdentity = null,
+  controlPlaneStore = null, futureIntentStore = null, clock = () => Date.now(),
 }) {
   try {
     const result = await searchByMedia(searchCache, {
@@ -1269,6 +1306,7 @@ async function runSingleSearchByMedia({
       // a real TorBox account, e.g. tests), the search path persists
       // legacy handoffs with torrentFileId=null.
       ...(ensureTorBoxFileIdentity ? { ensureTorBoxFileIdentity } : {}),
+      ...(ensureRealDebridFileIdentity ? { ensureRealDebridFileIdentity } : {}),
       // Forward the canonical Seerr detail identity (originalTitle +
       // releaseDate) so the VFS materializer builds a clean Plex-facing
       // path like Movies/Dune Part Two (2024)/Dune Part Two (2024).mkv
@@ -2196,8 +2234,12 @@ export function createRequestHandler(dependencies = {}) {
           // Accept both 'selected' and 'debug' status — 'debug' means the handoff exists
           // but provider state is not usable, which triggers revalidation and potential fallback
           if (existingSelection && (existingSelection.status === 'selected' || existingSelection.status === 'debug')) {
-            // 1a. Selected candidate must be TorBox-resolvable for redirect
-            if (existingSelection.provider !== 'torbox') {
+            // 1a. Selected candidate must be resolvable for redirect.
+            // TorBox handoffs go through the TorBox sections below; RD
+            // handoffs resolve via the RD block above (preferred delivery)
+            // and must never enter TorBox revalidation/delivery. Anything
+            // else is not resolvable by this route.
+            if (existingSelection.provider !== 'torbox' && existingSelection.provider !== 'realdebrid') {
               recordTelemetry(RESOLVER_OUTCOME.FAILED, 'PROVIDER_NOT_TORBOX', null, {
                 provider: existingSelection.provider,
               });
@@ -2317,6 +2359,24 @@ export function createRequestHandler(dependencies = {}) {
                 profiler.mark('rd-resolution-failed');
                 // RD failure must never block TorBox fallback
               }
+            }
+
+            // 1b-RD terminal: an RD handoff whose RD resolution failed
+            // above has no TorBox sections to fall into (wrong provider,
+            // and TorBox calls would be noise). Typed failure, no TorBox
+            // traffic. TorBox handoffs continue to 1c below unchanged.
+            if (existingSelection.provider === 'realdebrid') {
+              recordTelemetry(RESOLVER_OUTCOME.FAILED, 'RD_UNRESOLVABLE', null, {
+                infoHash: existingSelection.selectedHash,
+                releaseKey: existingSelection.releaseKey,
+                provider: 'realdebrid',
+              });
+              return sendJson(response, 502, {
+                error: 'Real-Debrid could not resolve a playable URL for this release',
+                code: 'RD_UNRESOLVABLE',
+                mediaId: rawId,
+                mediaType,
+              });
             }
 
             // 1c. Revalidate availability before redirect
@@ -2994,6 +3054,7 @@ export function createRequestHandler(dependencies = {}) {
           futureIntentStore: getFutureIntentStore(),
           availabilityWakeLog: getAvailabilityWakeLog(),
           schedulingNudge,
+          rdClient,
         });
       }
       // Library unpublish: remove VFS/STRM presentation for an exact movie
@@ -3384,6 +3445,7 @@ export function createRequestHandler(dependencies = {}) {
             hydrateVfs: hydrateVfsForRequest,
             controlPlaneStore,
             ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
+            ...rdEnsureForRequest({ rdClient, controlPlaneStore, clock }),
           });
           return sendJson(response, 200, {
             ...result,
@@ -3420,6 +3482,7 @@ export function createRequestHandler(dependencies = {}) {
             sourceType: body.sourceType || 'operator',
             controlPlaneStore,
             ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
+            ...rdEnsureForRequest({ rdClient, controlPlaneStore, clock }),
           });
           return sendJson(response, 200, {
             ...result,

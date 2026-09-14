@@ -44,8 +44,10 @@ export function buildPlaybackHandoff(selection, request) {
   }
 
   // Determine provider from availability observation
-  // Default to 'torbox' if no specific provider info available
-  const provider = sel.torboxState ? 'torbox' : 'unknown';
+  // Default to 'torbox' if no specific provider info available.
+  // RD-bound selections carry rdState === 'cached' (set by selection
+  // PATH C); they resolve to realdebrid rather than unknown.
+  const provider = sel.rdState === 'cached' ? 'realdebrid' : (sel.torboxState ? 'torbox' : 'unknown');
 
   // Build release key from infoHash and fileIndex
   // Preserve fileIndex = null distinctly from 0

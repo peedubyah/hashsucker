@@ -807,6 +807,12 @@ export async function searchByMedia(cache, request) {
   const ensureTorBoxFileIdentityFn = typeof request.ensureTorBoxFileIdentity === 'function'
     ? request.ensureTorBoxFileIdentity
     : null;
+  // RD-only tranche: Real-Debrid binding seam, threaded to selection
+  // exactly like the TorBox seam. Absent by default (TorBox-only behavior
+  // bit-for-bit); present when the operator configured RD.
+  const ensureRealDebridFileIdentityFn = typeof request.ensureRealDebridFileIdentity === 'function'
+    ? request.ensureRealDebridFileIdentity
+    : null;
   // Optional hydrators: when provided, must be { hydrateMovie, hydrateTv }.
   // They are called between publishStrm and notifyPlex so that PROPFIND
   // advertises the real file size before the Plex partial refresh fires.
@@ -1134,6 +1140,7 @@ export async function searchByMedia(cache, request) {
       : null;
     const selection = await selectBindableCandidate(explainable, {
       ensureTorBoxFileIdentityFn,
+      ensureRealDebridFileIdentityFn,
       resolveTvTorrentFileFn: resolveTvTorrentFile,
       tvCoordinates,
       controlPlaneStore: request.controlPlaneStore ?? null,
@@ -1757,6 +1764,7 @@ export async function searchByMedia(cache, request) {
     : null;
   const selection = await selectBindableCandidate(explainable, {
     ensureTorBoxFileIdentityFn,
+    ensureRealDebridFileIdentityFn,
     resolveTvTorrentFileFn: resolveTvTorrentFile,
     tvCoordinates,
     controlPlaneStore: request.controlPlaneStore ?? null,

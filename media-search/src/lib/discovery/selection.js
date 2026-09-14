@@ -169,6 +169,7 @@ function formatSelection(candidate) {
 export async function selectBindableCandidate(results, options = {}) {
   const {
     ensureTorBoxFileIdentityFn,
+    ensureRealDebridFileIdentityFn = null,
     resolveTvTorrentFileFn,
     tvCoordinates,
     controlPlaneStore,
@@ -187,6 +188,10 @@ export async function selectBindableCandidate(results, options = {}) {
   const skipped = [];
   let selected = null;
   let reason = '';
+  // RD-only tranche: when no RD ensure seam is configured, every early
+  // exit below behaves exactly as before this change (zero behavior
+  // delta for TorBox-only deployments).
+  const hasRdSeam = typeof ensureRealDebridFileIdentityFn === 'function';
 
   // Two-phase traversal: candidates the fresh availability batch proved
   // uncached are deferred to a fallback pass. Under static provider truth
@@ -272,8 +277,8 @@ export async function selectBindableCandidate(results, options = {}) {
         torboxState: candidate.availability?.torbox?.state || 'unknown',
         reason: tvCoordinates ? 'TorBox placement failed' : 'movie-cached-placement-failed',
       });
-      continue;
-    }
+      if (!hasRdSeam) continue;
+      }
 
     // ---- PATH B (movie): cached-only single-file binding fallback ----
     // Slice 2.7: when discovery did not provide a trustworthy exact
@@ -318,7 +323,7 @@ export async function selectBindableCandidate(results, options = {}) {
           torboxState: candidate.availability?.torbox?.state || 'unknown',
           reason: 'movie-cached-placement-failed',
         });
-        continue;
+        if (!hasRdSeam) continue;
       }
 
       if (!Array.isArray(placementTorrentFiles) || placementTorrentFiles.length === 0) {
@@ -328,7 +333,7 @@ export async function selectBindableCandidate(results, options = {}) {
           torboxState: candidate.availability?.torbox?.state || 'unknown',
           reason: 'movie-no-torrent-files',
         });
-        continue;
+        if (!hasRdSeam) continue;
       }
 
       // Use the same playable-video filter as TV PATH B so the project
@@ -342,7 +347,7 @@ export async function selectBindableCandidate(results, options = {}) {
           torboxState: candidate.availability?.torbox?.state || 'unknown',
           reason: playable.length === 0 ? 'movie-no-playable' : 'movie-ambiguous',
         });
-        continue;
+        if (!hasRdSeam) continue;
       }
 
       // Cardinality == 1 → bind authoritatively. Map the chosen
@@ -387,7 +392,7 @@ export async function selectBindableCandidate(results, options = {}) {
             torboxState: candidate.availability?.torbox?.state || 'unknown',
             reason: 'no TorBox integration',
           });
-          continue;
+          if (!hasRdSeam) continue;
         }
         let placementTorrentFiles;
         let placementId = null;
@@ -407,7 +412,7 @@ export async function selectBindableCandidate(results, options = {}) {
             torboxState: candidate.availability?.torbox?.state || 'unknown',
             reason: 'TorBox placement failed',
           });
-          continue;
+          if (!hasRdSeam) continue;
         }
 
         // STEP 2: Resolve requested S/E from the now-persisted TorrentFiles.
@@ -447,6 +452,57 @@ export async function selectBindableCandidate(results, options = {}) {
             reason: err?.code || 'tv-resolution-failed',
           });
         }
+      }
+    }
+
+    // ---- PATH C: Real-Debrid durable ensure (RD-only tranche) ----
+    // Runs per candidate AFTER the TorBox paths, in traversal order, so
+    // existing TorBox-first policy is preserved bit-for-bit and RD-only
+    // mode (where A/B skip for lack of a TorBox seam) still binds.
+    // The RD ensure is cached-only by construction: uncached probes are
+    // cleaned up inside the ensure and reported here as skips.
+    if (!selected && typeof ensureRealDebridFileIdentityFn === 'function') {
+      try {
+        const rdResult = await ensureRealDebridFileIdentityFn({
+          infoHash: candidate.infoHash,
+          filename: candidate.filename,
+          fileIndex: candidate.fileIndex,
+          size: Number.isSafeInteger(candidate.exactFileSize) && candidate.exactFileSize > 0
+            ? candidate.exactFileSize
+            : (Number.isSafeInteger(candidate.selectedFileSize) && candidate.selectedFileSize > 0
+              ? candidate.selectedFileSize : null),
+          season: tvCoordinates?.season ?? candidate.season ?? null,
+          episode: tvCoordinates?.episode ?? candidate.episode ?? null,
+        });
+        if (rdResult?.status === 'ready' && rdResult.torrentFileId) {
+          selected = formatSelection(candidate);
+          selected._torrentFileId = rdResult.torrentFileId;
+          selected.rdState = 'cached';
+          selected._binding = {
+            status: 'rd-cached',
+            torrentFileId: rdResult.torrentFileId,
+            placementId: rdResult.placementId ?? null,
+            providerFileId: rdResult.providerFileId ?? null,
+            size: rdResult.size ?? null,
+            provider: 'realdebrid',
+            source: rdResult.source ?? null,
+          };
+          reason = `rd-cached bound (${rdResult.source ?? 'probe'})`;
+          break;
+        }
+        skipped.push({
+          infoHash: candidate.infoHash,
+          rank: candidate.rank,
+          torboxState: candidate.availability?.torbox?.state || 'unknown',
+          reason: `rd-${rdResult?.status ?? 'failed'}:${String(rdResult?.reason || 'unknown').slice(0, 80)}`,
+        });
+      } catch (err) {
+        skipped.push({
+          infoHash: candidate.infoHash,
+          rank: candidate.rank,
+          torboxState: candidate.availability?.torbox?.state || 'unknown',
+          reason: `rd-error:${String(err?.message || err).slice(0, 80)}`,
+        });
       }
     }
 
