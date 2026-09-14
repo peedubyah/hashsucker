@@ -58,6 +58,46 @@
 export const QUALITY_FEATURES_VERSION = 1;
 
 // ---------------------------------------------------------------------------
+// Theatrical-capture tokens (ranker V2 fix 3 + anticipation quality floor).
+//
+// Single shared vocabulary: CAM/TS/TC/screener classes that must never
+// read as home-quality. Matched as whole tokens AFTER stripping the
+// extension and the trailing -GROUP suffix (a group named "TC" must not
+// condemn a clean WEB-DL). Tokenization keeps dashes so multiword tags
+// (hd-ts, web-dl) survive intact.
+export const THEATRICAL_SOURCE_TOKENS = Object.freeze([
+  'cam', 'hd-cam', 'hdcam',
+  'ts', 'hd-ts', 'hdts', 'telesync',
+  'tc', 'hd-tc', 'hdtc', 'telecine',
+  'scr', 'dvd-scr', 'dvdscr', 'screener',
+]);
+
+function stripMediaExtension(name) {
+  return String(name || '').replace(/\.(mkv|mp4|avi|mov|m4v|mpg|mpeg|wmv|flv|webm|ts|iso|img)$/i, '');
+}
+
+function stripTrailingGroup(name) {
+  return String(name || '').replace(/-[A-Za-z0-9]{1,12}$/, '');
+}
+
+function qualityTokensOf(name) {
+  return String(name || '').toLowerCase().split(/[\.\s_\[\]\(\)]+/).filter(Boolean);
+}
+
+/**
+ * Detect theatrical-capture/screener class from a release filename.
+ * Returns 'cam' (the canonical low-quality source class) or null.
+ * Pure string scan — not a title parser (no title/year/season parsing).
+ */
+export function detectTheatricalSource(filename) {
+  const toks = new Set(qualityTokensOf(stripTrailingGroup(stripMediaExtension(filename))));
+  for (const t of THEATRICAL_SOURCE_TOKENS) {
+    if (toks.has(t)) return 'cam';
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Slice 8: Quality Contribution Model (SHADOW ONLY — zero ranking influence)
 // ---------------------------------------------------------------------------
 

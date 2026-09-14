@@ -12,6 +12,7 @@
  */
 
 import { parseEpisodeRange } from './episode-coverage.js';
+import { detectTheatricalSource } from './quality-features.js';
 
 /**
  * Normalize a title for comparison.
@@ -166,8 +167,41 @@ export function titlesMatch(requestedTitle, parsedTitle) {
  * @param {string} [queryIntent.mediaType] - 'movie' or 'series'
  * @returns {{ eligible: boolean, reason: string|null, code: string|null }}
  */
+/**
+ * Filename season-token helpers for the Prowlarr scope guard (ranker V2
+ * fix 7). Dumb token scans over the release name — not a parser (no
+ * title/year/group extraction). Extension and trailing -GROUP suffix are
+ * stripped by callers before invoking. Seasons extract numerically so
+ * S01, S1, S01E01, "Season 1" and 1x02 forms all compare correctly.
+ */
+function filenameSeasons(bare) {
+  const norm = String(bare || '').replace(/[.\s_-]+/g, ' ');
+  const found = new Set();
+  let m;
+  const reS = /\bS(\d{1,2})(?![0-9])/gi;
+  while ((m = reS.exec(norm)) !== null) found.add(Number(m[1]));
+  const reWord = /\bseason\s*(\d{1,2})\b/gi;
+  while ((m = reWord.exec(norm)) !== null) found.add(Number(m[1]));
+  const reX = /\b(\d{1,2})x\d{1,3}\b/gi;
+  while ((m = reX.exec(norm)) !== null) found.add(Number(m[1]));
+  found.delete(0);
+  return found;
+}
+
+function seasonTokenPresent(bare, season) {
+  return filenameSeasons(bare).has(Number(season));
+}
+
+/** Lowest explicit non-query season token, or null when none contradicts. */
+function extractOtherSeasonToken(bare, querySeason) {
+  const found = filenameSeasons(bare);
+  found.delete(Number(querySeason));
+  if (found.size === 0) return null;
+  return Math.min(...found);
+}
+
 export function evaluateIdentityEligibility(hit, queryIntent = {}) {
-  const { season: querySeason, episode: queryEpisode, mediaType, mediaTitle: requestedMediaTitle } = queryIntent;
+  const { season: querySeason, episode: queryEpisode, mediaType, mediaTitle: requestedMediaTitle, year: requestedYear } = queryIntent;
   const releaseAttributes = hit.releaseAttributes || {};
   const parsedSeason = releaseAttributes.season ?? null;
   const parsedEpisode = releaseAttributes.episode ?? null;
@@ -175,6 +209,7 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
   const seasonOnly = releaseAttributes.seasonOnly ?? false;
   const parsedMediaType = releaseAttributes.mediaType || null;
   const parsedTitle = releaseAttributes.title || null;
+  const parsedYear = releaseAttributes.year ?? null;
   const filename = releaseAttributes.filename || hit.filename || null;
 
   // Title cross-check: if requested title and parsed title both exist,
@@ -222,11 +257,70 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
 
   // Movies: no episode constraints possible
   if (mediaType === 'movie' || !querySeason) {
+    // Year disambiguation (ranker V2 fix 4, movies only): remakes share
+    // titles, so a confidently-known conflicting year is an identity
+    // mismatch, not a relevance penalty. Missing/unknown years on either
+    // side never reject; absurd values are treated as unknown. TV is
+    // excluded: series span years and season identity already gates.
+    if (mediaType === 'movie' && requestedYear != null && parsedYear != null) {
+      const req = Number(requestedYear);
+      const got = Number(parsedYear);
+      const sane = (y) => Number.isSafeInteger(y) && y >= 1900 && y <= 2100;
+      if (sane(req) && sane(got) && req !== got) {
+        return {
+          eligible: false,
+          reason: `year_mismatch: parsed year ${got} but requested ${req}`,
+          code: 'year_mismatch',
+        };
+      }
+    }
     return { eligible: true, reason: null, code: null };
   }
 
   // Series with specific season+episode requested
   if (querySeason != null && queryEpisode != null) {
+    // Prowlarr scope guard (ranker V2 fix 7): Prowlarr season/episode
+    // query hints are unenforced by indexers (observed live: majority
+    // wrong-S/E responses, plus ~40% with no parseable S/E at all).
+    // Two cheap filename rules for Prowlarr-sourced rows on exact-episode
+    // queries — never positional inference, only contradiction and
+    // evidence-presence:
+    //  1. season contradiction: an explicit S<NN>/Season <NN>/<NN>x<EE>
+    //     token for a season other than the query (with no query-season
+    //     token present) rejects. Multi-season packs containing the query
+    //     season pass; wrong-season packs fail closed correctly.
+    //  2. anonymous rows: no parseable S/E, not pack-shaped (parser flags
+    //     or COMPLETE keyword), and no query-season token either — zero
+    //     episode evidence from an unenforced source — rejects. Torrentio
+    //     and other scoped sources keep scope trust (not prowlarr-origin).
+    // Pack-shaped rows stay eligible (PATH B resolves the episode file);
+    // binding still fails closed when the file is absent.
+    const hitSources = hit.sources || [];
+    const prowlarrSourced = hitSources.some((s) => s && s.origin === 'prowlarr');
+    if (prowlarrSourced) {
+      const bare = String(filename || '')
+        .replace(/\.(mkv|mp4|avi|mov|m4v|mpg|mpeg|wmv|flv|webm|ts|iso|img|torrent)$/i, '')
+        .replace(/-[A-Za-z0-9]{1,12}$/, '');
+      const hasQuerySeasonToken = seasonTokenPresent(bare, querySeason);
+      const parsedMissing = parsedSeason == null && parsedEpisode == null && episodeRange == null;
+      const packShaped = seasonOnly === true || parsedMediaType === 'season'
+        || /complete/i.test(bare);
+      const otherSeason = extractOtherSeasonToken(bare, querySeason);
+      if (otherSeason != null && !hasQuerySeasonToken) {
+        return {
+          eligible: false,
+          reason: `prowlarr-season-contradiction: filename carries S${String(otherSeason).padStart(2, '0')} but requested S${String(querySeason).padStart(2, '0')}`,
+          code: 'prowlarr_season_contradiction',
+        };
+      }
+      if (parsedMissing && !packShaped && !hasQuerySeasonToken) {
+        return {
+          eligible: false,
+          reason: 'prowlarr-episode-unverifiable: no parseable S/E, not pack-shaped, no query-season token',
+          code: 'prowlarr_episode_unverifiable',
+        };
+      }
+    }
     // Wrong season → ineligible
     if (parsedSeason != null && parsedSeason !== querySeason) {
       return {
@@ -303,7 +397,34 @@ const SOURCE_QUALITY = {
   'HDTV': 0.6,
   'DSRip': 0.5,
   'DVD': 0.4,
+  // Theatrical captures (ranker V2 fix 3): negative contribution so a
+  // high-resolution CAM can never outrank legitimate home-quality (or
+  // even unknown-but-plausible) releases on resolution alone. This is a
+  // ranking penalty, not an eligibility ban: explicit human requests may
+  // still bind CAM when nothing else is fulfillable.
+  'cam': -0.5,
 };
+
+/**
+ * Canonicalize a source-class token to the SOURCE_QUALITY vocabulary
+ * (ranker V2 fix 1 companion). Live discovery emits SCREAMING-CASE
+ * classes ('REMUX', 'WEB-DL') while corpus rows carry parser-normalized
+ * case ('Remux', 'BluRay'); scoring must not depend on which upstream
+ * produced the token. Case folding only — no new source classes.
+ */
+function canonicalSourceQualityKey(src) {
+  if (src == null) return null;
+  const t = String(src).trim().toLowerCase().replace(/[\s._-]+/g, '');
+  if (t === 'cam') return 'cam';
+  if (t === 'remux') return 'Remux';
+  if (t === 'bluray' || t === 'bdrip' || t === 'brrip') return 'BluRay';
+  if (t === 'webdl' || t === 'web') return 'WEB-DL';
+  if (t === 'webrip') return 'WEBRip';
+  if (t === 'hdtv') return 'HDTV';
+  if (t === 'dsrip' || t === 'dsr') return 'DSRip';
+  if (t === 'dvd') return 'DVD';
+  return null;
+}
 
 // Codec bonus (HEVC/x265 preferred for 4K)
 const CODEC_BONUS = {
@@ -341,8 +462,8 @@ export function qualityScore(attrs = {}) {
   const resScore = RESOLUTION_QUALITY[attrs.resolution] || 0;
   score += resScore * 0.4;
 
-  // Source contributes 30%
-  const srcScore = SOURCE_QUALITY[attrs.sourceType] || 0;
+  // Source contributes 30% (canonicalized across upstream vocabularies)
+  const srcScore = SOURCE_QUALITY[canonicalSourceQualityKey(attrs.sourceType)] || 0;
   score += srcScore * 0.3;
 
   // Codec bonus (up to 15%)
@@ -1378,7 +1499,20 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
 
   // Compute component scores using semantic confidence functions.
   // Each component measures evidence quality, not data availability.
-  const quality = qualityScore(releaseAttributes);
+  // Theatrical-capture floor (ranker V2 fix 3): when no recognized
+  // source class is present but the filename carries CAM/TS/TC/SCR
+  // tokens, score as cam-class (negative contribution) rather than
+  // unknown-zero — otherwise a 1080p CAM outranks a 720p REMUX on
+  // resolution alone. Garbage-first: an explicit capture token always
+  // wins over an absent/unknown class, but never overrides a recognized
+  // home-quality class.
+  const releaseAttrs = { ...releaseAttributes };
+  if (canonicalSourceQualityKey(releaseAttrs.sourceType) == null
+    && canonicalSourceQualityKey(releaseAttrs.source) == null) {
+    const theatrical = detectTheatricalSource(filename);
+    if (theatrical) releaseAttrs.sourceType = theatrical;
+  }
+  const quality = qualityScore(releaseAttrs);
   const releaseConfidence = Math.min(1.0, Math.max(0.0, parserConfidence));
 
   // Relevance: text-based for corpus, identity-derived for live
@@ -1458,6 +1592,9 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
       sourceScore: Math.round(releaseConfidence * 1000) / 1000,
       metadataScore: Math.round(identityConfidence * 1000) / 1000,
       popularityScore: Math.round(effectiveRelevance * 1000) / 1000,
+      // Ranker V2 fix 5: episodeMatch contributes 10% but was invisible
+      // in persisted/debug explanations. All six components now present.
+      episodeMatchScore: Math.round(episodeMatch * 1000) / 1000,
     }),
     weights: Object.freeze({ ...WEIGHTS }),
     historicalPrior: Math.round((historicalPrior || 0) * 1000) / 1000,
@@ -1479,7 +1616,9 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
       episodeMatch: Math.round(episodeMatch * 1000) / 1000,
     },
     contributions,
-    releaseAttributes,
+    // Effective attributes: carries the theatrical sourceType override
+    // (if any) so explanations show what was actually scored.
+    releaseAttributes: releaseAttrs,
     mediaAssociations,
     providerObservations,
     providerEvidence,

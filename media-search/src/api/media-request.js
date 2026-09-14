@@ -186,13 +186,16 @@ async function collectTitleIndexCandidates({
         mediaType,
         resolution: row.resolution ?? undefined,
         source: row.sourceType ?? undefined,
+        // Canonical scoring key (ranker V2 fix 1): qualityScore reads
+        // sourceType; mirror it like the other ranking-input builders.
+        sourceType: row.sourceType ?? undefined,
         codec: row.codec ?? undefined,
         hdr: row.hdr ?? undefined,
         audio: row.audio ?? undefined,
       };
       const eligibility = evaluateIdentityEligibility(
-        { releaseAttributes: releaseAttrs },
-        { season, episode, mediaType, mediaTitle: wanted.title },
+        { releaseAttributes: releaseAttrs, sources: [{ origin: 'corpus-title-index' }] },
+        { season, episode, mediaType, mediaTitle: wanted.title, year: wanted.year ?? canonicalYear },
       );
       eligibilityByHash.set(key, eligibility);
       inputs.push({
@@ -958,6 +961,10 @@ export async function searchByMedia(cache, request) {
           mediaType: live.mediaType,
           resolution: live.resolution,
           source: live.source,
+          // Canonical scoring key (ranker V2 fix 1): qualityScore reads
+          // sourceType. Mirror the live class so source contribution is
+          // not silently zeroed.
+          sourceType: live.source,
           codec: live.codec,
           hdr: live.hdr,
           audio: live.audio,
@@ -965,8 +972,8 @@ export async function searchByMedia(cache, request) {
         };
 
         const eligibility = evaluateIdentityEligibility(
-          { releaseAttributes: releaseAttrs },
-          { season, episode, mediaType, mediaTitle }
+          { releaseAttributes: releaseAttrs, sources: live.sources ?? null },
+          { season, episode, mediaType, mediaTitle, year: wantedIdentity?.year ?? canonicalYear }
         );
         liveEligibilityByHash.set(key, eligibility);
         if (eligibility.eligible) liveEligibleCount++;
@@ -1415,6 +1422,9 @@ export async function searchByMedia(cache, request) {
       mediaType: attrs.mediaType,
       resolution: attrs.resolution,
       source: attrs.sourceType,
+      // Canonical scoring key (ranker V2 fix 1): qualityScore reads
+      // sourceType; mirror the corpus class for the same reason.
+      sourceType: attrs.sourceType,
       codec: attrs.codec,
       hdr: attrs.hdr,
       audio: attrs.audio,
@@ -1423,8 +1433,8 @@ export async function searchByMedia(cache, request) {
 
     // Evaluate identity eligibility for this candidate
     const eligibility = evaluateIdentityEligibility(
-      { releaseAttributes: releaseAttrs },
-      { season, episode, mediaType }
+      { releaseAttributes: releaseAttrs, sources: candidate.sources ?? null },
+      { season, episode, mediaType, year: wantedIdentity?.year ?? canonicalYear }
     );
     eligibilityByHash.set(key, eligibility);
 
@@ -1519,6 +1529,8 @@ export async function searchByMedia(cache, request) {
           mediaType: live.mediaType,
           resolution: live.resolution,
           source: live.source,
+          // Canonical scoring key (ranker V2 fix 1): see live-map above.
+          sourceType: live.source,
           codec: live.codec,
           hdr: live.hdr,
           audio: live.audio,
@@ -1527,8 +1539,8 @@ export async function searchByMedia(cache, request) {
 
         // Same identity eligibility gate as corpus
         const eligibility = evaluateIdentityEligibility(
-          { releaseAttributes: releaseAttrs },
-          { season, episode, mediaType, mediaTitle }
+          { releaseAttributes: releaseAttrs, sources: live.sources ?? null },
+          { season, episode, mediaType, mediaTitle, year: wantedIdentity?.year ?? canonicalYear }
         );
         liveEligibilityByHash.set(key, eligibility);
 

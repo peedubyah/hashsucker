@@ -25,33 +25,12 @@ export const ANTICIPATION_QUALITY = Object.freeze({
   UNKNOWN: 'unknown',
 });
 
-// Theatrical captures + screeners. Matched as whole tokens AFTER
-// stripping the extension and the trailing -GROUP suffix (a group named
-// "TC" must not condemn an otherwise clean WEB-DL). Tokenization keeps
-// dashes so multiword tags (hd-ts, web-dl) survive intact.
-const GARBAGE_TOKENS = [
-  'cam', 'hd-cam', 'hdcam',
-  'ts', 'hd-ts', 'hdts', 'telesync',
-  'tc', 'hd-tc', 'hdtc', 'telecine',
-  'scr', 'dvd-scr', 'dvdscr', 'screener',
-];
+import { THEATRICAL_SOURCE_TOKENS, detectTheatricalSource } from '../discovery/quality-features.js';
 
-function stripExtension(filename) {
-  return String(filename || '').replace(/\.(mkv|mp4|avi|mov|m4v|mpg|mpeg|wmv|flv|webm|ts|iso|img)$/i, '');
-}
-
-function stripReleaseGroup(name) {
-  // Trailing -GROUP suffix (1-12 alphanumerics after the last dash).
-  // Only the final dash-component is removed, so mid-name quality
-  // tokens are never affected.
-  return String(name || '').replace(/-[A-Za-z0-9]{1,12}$/, '');
-}
-
-function tokensOf(name) {
-  // Dashes are KEPT so multiword tags (hd-ts, web-dl, blu-ray) survive
-  // as single tokens. Dots/spaces/brackets separate tokens.
-  return String(name || '').toLowerCase().split(/[\.\s_\[\]\(\)]+/).filter(Boolean);
-}
+// Theatrical captures + screeners share one vocabulary with the
+// interactive ranker (THEATRICAL_SOURCE_TOKENS); only the verdict
+// differs (hard park here, score penalty there). Extension/group
+// stripping lives in the shared detector.
 
 // Normalized acceptable source classes, covering both the filename
 // parser's vocabulary (BluRay/WEB-DL/WEBRip/HDTV/DVD/Remux/…) and the
@@ -63,6 +42,15 @@ const ACCEPTABLE_SOURCES = new Set([
   'webrip',
   'hdtv',
 ]);
+
+function acceptableTokensOf(filename) {
+  // Same normalization as the shared theatrical scan (extension + group
+  // stripped) so `WEB-DL-G` still reads as an acceptable token.
+  const bare = String(filename || '')
+    .replace(/\.(mkv|mp4|avi|mov|m4v|mpg|mpeg|wmv|flv|webm|ts|iso|img)$/i, '')
+    .replace(/-[A-Za-z0-9]{1,12}$/, '');
+  return bare.toLowerCase().split(/[\.\s_\[\]\(\)]+/).filter(Boolean);
+}
 
 function normalizeSourceClass(source) {
   if (source == null) return null;
@@ -79,10 +67,7 @@ function normalizeSourceClass(source) {
  * @returns {'acceptable'|'garbage'|'unknown'}
  */
 export function judgeReleaseQuality({ filename = null, sourceType = null } = {}) {
-  const toks = new Set(tokensOf(stripReleaseGroup(stripExtension(filename))));
-  for (const g of GARBAGE_TOKENS) {
-    if (toks.has(g)) return ANTICIPATION_QUALITY.GARBAGE;
-  }
+  if (detectTheatricalSource(filename)) return ANTICIPATION_QUALITY.GARBAGE;
   // 'cam' is also caught above as a token; this covers a parser that
   // already classified the source as cam-class without token residue.
   const norm = normalizeSourceClass(sourceType);
@@ -93,6 +78,7 @@ export function judgeReleaseQuality({ filename = null, sourceType = null } = {})
   // Filename-level acceptable tokens rescue candidates whose parsed
   // source class is missing but whose release line is explicit. Bare
   // 'web' (not theatrical) and 'blu-ray' (dashes kept) included.
+  const toks = new Set(acceptableTokensOf(filename));
   for (const t of ['remux', 'bluray', 'blu-ray', 'web-dl', 'webdl', 'web', 'webrip', 'hdtv', 'bdrip', 'brrip']) {
     if (toks.has(t)) return ANTICIPATION_QUALITY.ACCEPTABLE;
   }

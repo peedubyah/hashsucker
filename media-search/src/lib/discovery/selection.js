@@ -196,16 +196,31 @@ export async function selectBindableCandidate(results, options = {}) {
   // order within its phase. A TorBox cached-set flip mid-request is the
   // only divergence source, and it can only swap between equally-ranked
   // bindable releases. Unknown/missing states always attempt normally.
+  //
+  // Ranker V2 fix 2 (tier-aware fulfillability): traversal is tier-major,
+  // availability-minor. Strong identity tiers (Verified, ProviderConfirmed,
+  // Probable) are attempted before weak ones (ProviderScoped, TextOnly,
+  // Rejected) regardless of cache state, so a cached weak row can no
+  // longer silently outrank a stronger-identity candidate. Within a tier
+  // class the existing cached/unknown-before-uncached preference holds.
+  // Tierless rows keep legacy relative order (strong side). Stable sort
+  // preserves rank order inside each phase.
+  const STRONG_TIERS = new Set(['Verified', 'ProviderConfirmed', 'Probable']);
+  const tierClass = (c) => {
+    const t = c.identity?.tier;
+    if (!t) return 0;
+    return STRONG_TIERS.has(t) ? 0 : 1;
+  };
+  const availClass = (c) => (c.availability?.torbox?.state === 'uncached' ? 1 : 0);
   const immediate = [];
   const deferred = [];
   for (const candidate of eligible) {
-    if (candidate.availability?.torbox?.state === 'uncached') {
-      deferred.push(candidate);
-    } else {
-      immediate.push(candidate);
-    }
+    (availClass(candidate) === 0 ? immediate : deferred).push(candidate);
   }
-  const ordered = [...immediate, ...deferred];
+  const ordered = [...immediate, ...deferred]
+    .map((c, i) => [c, i])
+    .sort((a, b) => (tierClass(a[0]) - tierClass(b[0])) || (a[1] - b[1]))
+    .map(([c]) => c);
 
   for (const candidate of ordered) {
     // ---- PATH A: exact-file-size binding (existing Slice 1.75 fast path) ----

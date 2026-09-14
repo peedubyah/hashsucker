@@ -12,7 +12,7 @@
  *     winning_release_key TEXT,
  *     winner_source TEXT,
  *     winner_score REAL,
- *     score_breakdown TEXT,  -- JSON: { cacheScore, qualityScore, sourceScore, metadataScore, popularityScore }
+ *     score_breakdown TEXT,  -- JSON: { cacheScore, qualityScore, sourceScore, metadataScore, popularityScore, episodeMatchScore }
  *     cache_state TEXT,       -- 'cached', 'uncached', 'unknown'
  *     rejected_count INTEGER NOT NULL DEFAULT 0,
  *     media_id TEXT,
