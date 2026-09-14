@@ -91,6 +91,11 @@ import { discoveryAccounting, formatDiscoveryAccounting } from '../lib/discovery
 import { createRealDebridClient, RdCooldownError } from '../lib/providers/realdebrid/client.js';
 import { attemptRdResolution, getRdPlaybackUrl } from '../lib/providers/realdebrid/resolve.js';
 import { createRdEnsure } from '../lib/providers/realdebrid/ensure.js';
+import { createPromotionStore, PROMOTION_STATUS } from '../lib/promotion/store.js';
+import { resolvePromotionTarget } from '../lib/promotion/resolve.js';
+import { resolvePermanentTarget, isWithinRoot } from '../lib/promotion/paths.js';
+import { createPromotionWorker } from '../lib/promotion/worker.js';
+import { serveLocalFile } from '../lib/promotion/serve-local.js';
 
 /**
  * Build a request-scoped Real-Debrid ensure function (RD-only tranche).
@@ -1829,6 +1834,45 @@ export function createRequestHandler(dependencies = {}) {
     return availabilityWakeLogInstance;
   }
 
+  // Promotion store (permanent-storage tranche). Table lives in
+  // control-plane.db beside the TorrentFile truth; injectable for
+  // tests via dependencies.promotionStore.
+  let promotionStoreInstance = dependencies.promotionStore ?? null;
+  function getPromotionStore() {
+    if (!promotionStoreInstance) {
+      if (!controlPlaneStore?.db) return null;
+      try {
+        promotionStoreInstance = createPromotionStore({ db: controlPlaneStore.db, clock });
+      } catch {
+        return null;
+      }
+    }
+    return promotionStoreInstance;
+  }
+
+  // Owned-storage root for permanent promotion output. Unset = the
+  // promote API refuses with an exact reason; nothing else changes.
+  function getPermanentRoot() {
+    const root = (env.HASHSUCKER_PERMANENT_PATH ?? '').trim();
+    return root || null;
+  }
+
+  // Promotion worker single-flight per process (vergelijk corpus
+  // lifecycle): one instance, in-flight set inside. Injectable.
+  let promotionWorkerInstance = dependencies.promotionWorker ?? null;
+  function getPromotionWorker() {
+    if (promotionWorkerInstance) return promotionWorkerInstance;
+    const store = getPromotionStore();
+    const root = getPermanentRoot();
+    if (!store || !root) return null;
+    promotionWorkerInstance = createPromotionWorker({
+      promotionStore: store,
+      dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://data-plane:3001',
+      permanentRoot: root,
+    });
+    return promotionWorkerInstance;
+  }
+
   // Scheduler nudge hook (availability tranche). The process owner
   // (index.js) may inject a callback that pulls the next anticipation
   // tick forward; absent in tests and minimal embeddings.
@@ -2201,6 +2245,10 @@ export function createRequestHandler(dependencies = {}) {
           });
 
           /* FOREGROUND RESOLUTION LADDER
+           * 0. Permanent local file (promotion tranche) — same URL, owned
+           *    bytes, zero provider calls. STRM content never changes;
+           *    only the backing does, so no republication, no duplicate
+           *    consumer items, no refresh.
            * 1. Existing selection → if provider !== 'torbox' → 400
            * 2. RD warm capability (rdResolutionCache hit) → 307 RD
            * 3. RD stale capability → bounded attemptRdResolution → if resolved → 307 RD
@@ -2211,6 +2259,34 @@ export function createRequestHandler(dependencies = {}) {
            *    b. Persisted ranked candidates (other candidate) → TorBox seam → 307
            * 7. All fail → typed failure
            */
+          try {
+            const promoStore = getPromotionStore();
+            if (promoStore) {
+              const promoMediaType = mediaType === 'series' ? 'episode' : 'movie';
+              const promo = promoStore.getByMedia({
+                mediaId: rawId,
+                mediaType: promoMediaType,
+                season: identity.season ?? null,
+                episode: identity.episode ?? null,
+              });
+              if (promo && promo.status === PROMOTION_STATUS.PERMANENT && promo.permanentPath) {
+                const served = serveLocalFile(response, promo.permanentPath, request.headers?.range);
+                if (served) {
+                  recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, response.statusCode, {
+                    provider: 'permanent',
+                    availabilitySource: 'owned-storage',
+                    providerCheckOccurred: false,
+                  });
+                  profiler.mark('permanent-served');
+                  return;
+                }
+                // Permanent row but bytes unreadable: fall through to the
+                // provider ladder so playback survives storage trouble.
+              }
+            }
+          } catch {
+            // Promotion lookup never blocks provider-backed playback.
+          }
 
           // 1. Check for existing persisted selection first
           // Series requests MUST be keyed on (mediaId, season, episode) because
@@ -2692,6 +2768,7 @@ export function createRequestHandler(dependencies = {}) {
           const result = listLibrary({
             cache: searchCache,
             controlPlaneStore,
+            promotionStore: getPromotionStore(),
             limit,
             mediaType,
           });
@@ -2719,7 +2796,7 @@ export function createRequestHandler(dependencies = {}) {
         requireControlPlaneStore(controlPlaneStore);
         try {
           const policy = readRetirementPolicy();
-          const { items } = listLibrary({ cache: searchCache, controlPlaneStore, limit: 500 });
+          const { items } = listLibrary({ cache: searchCache, controlPlaneStore, promotionStore: getPromotionStore(), limit: 500 });
           const now = clock();
           const evaluations = items
             .filter((item) => item.state === 'published')
@@ -3073,6 +3150,87 @@ export function createRequestHandler(dependencies = {}) {
             episode: body.episode ?? null,
           });
           return sendJson(response, 200, result);
+        } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
+      }
+      // Permanent-storage promotion: one explicit human decision that
+      // turns a provider-backed library item into owned bytes.
+      // POST /api/library/:id/promote — :id is a library item id,
+      // resolved to exactly one TorrentFile via the active binding.
+      // Idempotent: permanent → no-op success; active → current
+      // state; failed → reset to requested. No title matching, no
+      // search, no ranking. See lib/promotion/.
+      const promoteMatch = request.method === 'POST'
+        && url.pathname.match(/^\/api\/library\/([^/]+)\/promote$/);
+      if (promoteMatch) {
+        requireControlPlaneStore(controlPlaneStore);
+        const libraryItemId = promoteMatch[1];
+        const store = getPromotionStore();
+        if (!store) {
+          return sendJson(response, 503, { error: 'promotion store unavailable' });
+        }
+        const root = getPermanentRoot();
+        if (!root) {
+          return sendJson(response, 409, {
+            error: 'permanent storage not configured',
+            code: 'PERMANENT_ROOT_UNSET',
+            hint: 'Set HASHSUCKER_PERMANENT_PATH to an owned-storage root.',
+          });
+        }
+        let resolved;
+        try {
+          resolved = resolvePromotionTarget(controlPlaneStore, libraryItemId);
+        } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
+        if (resolved.status !== 'ok') {
+          const status = resolved.status === 'unknown-library-item' ? 404 : 409;
+          return sendJson(response, status, { error: resolved.status, ...resolved });
+        }
+        const { item, torrentFile } = resolved;
+        const episodeScoped = item.season != null && item.episode != null;
+        let permanentPath;
+        try {
+          permanentPath = resolvePermanentTarget({
+            root,
+            mediaType: episodeScoped ? 'episode' : 'movie',
+            title: item.title,
+            year: item.year,
+            season: item.season,
+            episode: item.episode,
+            internalPath: torrentFile.internalPath,
+          });
+        } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
+        if (!isWithinRoot(root, permanentPath)) {
+          return sendJson(response, 400, { error: 'permanent path escapes owned root' });
+        }
+        try {
+          const { promotion, created, reset } = store.request({
+            torrentFileId: torrentFile.id,
+            libraryItemId: item.id,
+            mediaId: item.mediaId,
+            mediaType: episodeScoped ? 'episode' : 'movie',
+            season: item.season ?? null,
+            episode: item.episode ?? null,
+            size: torrentFile.size,
+            permanentPath,
+          });
+          // Nudge the worker so promotion starts without waiting for
+          // the next tick; the tick remains the durability backstop.
+          try { getPromotionWorker()?.tick().catch(() => {}); } catch { /* backstop covers */ }
+          return sendJson(response, 200, {
+            status: promotion.status,
+            created: !!created,
+            reset: !!reset,
+            torrentFileId: promotion.torrentFileId,
+            permanentPath: promotion.permanentPath,
+            bytesComplete: promotion.bytesComplete,
+            size: promotion.size,
+            lastError: promotion.lastError,
+          });
         } catch (err) {
           return sendJson(response, 400, { error: err.message });
         }

@@ -82,7 +82,7 @@ function hasActiveBinding(controlPlaneStore, libraryItemId) {
  *
  * @returns {{ items: Object[], total: number }}
  */
-export function listLibrary({ cache, controlPlaneStore, limit = 100, mediaType = null } = {}) {
+export function listLibrary({ cache, controlPlaneStore, promotionStore = null, limit = 100, mediaType = null } = {}) {
   if (!cache || !controlPlaneStore) {
     throw new Error('cache and controlPlaneStore are required');
   }
@@ -113,6 +113,7 @@ export function listLibrary({ cache, controlPlaneStore, limit = 100, mediaType =
     const tfId = handoff?.torrentFileId ?? null;
     const tf = torrentFileFor(controlPlaneStore, tfId);
     const desiredAbsent = item.desiredState === 'absent';
+    const storage = storageFor(promotionStore, item, episodeScoped);
     return {
       mediaId: item.mediaId,
       mediaType: episodeScoped ? 'episode' : 'movie',
@@ -127,7 +128,44 @@ export function listLibrary({ cache, controlPlaneStore, limit = 100, mediaType =
       size: tf?.size ?? null,
       hasServingCoordinates: hasCoords(controlPlaneStore, tfId),
       hasActiveBinding: hasActiveBinding(controlPlaneStore, item.id),
+      ...storage,
     };
   });
   return { items: listed, total: listed.length };
+}
+
+/**
+ * Promotion storage state for diagnostics (promotion tranche).
+ * provider = provider-backed (no promotion row); promoting = requested /
+ * materializing / verifying with live progress; permanent = owned bytes;
+ * failed = retryable failure with lastError. Absent promotionStore (or
+ * lookup failure) degrades to provider, never to an error.
+ */
+function storageFor(promotionStore, item, episodeScoped) {
+  const base = { storage: 'provider' };
+  if (!promotionStore || typeof promotionStore.getByMedia !== 'function') return base;
+  let promo = null;
+  try {
+    promo = promotionStore.getByMedia({
+      mediaId: item.mediaId,
+      mediaType: episodeScoped ? 'episode' : 'movie',
+      season: item.season ?? null,
+      episode: item.episode ?? null,
+    });
+  } catch {
+    return base;
+  }
+  if (!promo) return base;
+  if (promo.status === 'permanent') {
+    return {
+      storage: 'permanent',
+      permanentPath: promo.permanentPath,
+      bytesComplete: promo.bytesComplete,
+      size: promo.size,
+    };
+  }
+  if (promo.status === 'failed') {
+    return { storage: 'failed', lastError: promo.lastError, bytesComplete: promo.bytesComplete, size: promo.size };
+  }
+  return { storage: 'promoting', bytesComplete: promo.bytesComplete, size: promo.size };
 }

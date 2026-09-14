@@ -56,6 +56,12 @@ services:
       ARR_SYNC_INTERVAL_HOURS: ${ARR_SYNC_INTERVAL_HOURS:-}
       ANTICIPATION_PREPARE_DAYS: ${ANTICIPATION_PREPARE_DAYS:-}
       ANTICIPATION_PUBLISH_DAYS: ${ANTICIPATION_PUBLISH_DAYS:-}
+      # Owned-storage root for permanent promotion output (promotion
+      # tranche). Unset = promotion API refuses, everything else
+      # unchanged. Deliberately NOT derived from HASHSUCKER_MEDIA_PATH:
+      # that root is STRM publication only and must never silently
+      # become a gigabyte byte-storage destination.
+      HASHSUCKER_PERMANENT_PATH: ${HASHSUCKER_PERMANENT_PATH:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -73,6 +79,10 @@ services:
       - ${DISCOVERY_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/discovery}:/data
       - ${REQUESTS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/queue}:/requests
       - ${STRM_HOST_PATH:-${HASHSUCKER_MEDIA_PATH:-./hy4-media}/strm}:/strm
+      # Owned media root (promotion output). Always mounted so enabling
+      # promotion is one env var; empty and inert until
+      # HASHSUCKER_PERMANENT_PATH points here.
+      - ${PERMANENT_HOST_PATH:-./hy4-permanent}:/permanent
     group_add:
       - "${MEDIA_SEARCH_QUEUE_GID:-100}"
     security_opt:

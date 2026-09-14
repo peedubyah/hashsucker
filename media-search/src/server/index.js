@@ -34,6 +34,8 @@ import {
   bootstrapSessionPolicy,
 } from '../lib/discovery/corpus-lifecycle.js';
 import { createFutureIntentStore } from '../lib/anticipation/future-intents.js';
+import { createPromotionStore } from '../lib/promotion/store.js';
+import { createPromotionWorker } from '../lib/promotion/worker.js';
 import { createAnticipationScheduler } from '../lib/anticipation/scheduler.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
 import { createArrClient } from '../lib/anticipation/arr-client.js';
@@ -201,6 +203,68 @@ function armAnticipationTimer(delayMs) {
 }
 if (anticipationOn) {
   armAnticipationTimer(2 * 60_000);
+}
+
+// ─── permanent-storage promotion worker ─────────────────────────────
+// Human-decision promotion only: POST /api/library/:id/promote enqueues
+// one exact TorrentFile; this ticker materializes bytes through the
+// data plane's existing exact-byte authority (GET /files/:tfId, TorBox
+// + RD abstracted in Rust). Unset HASHSUCKER_PERMANENT_PATH = fully
+// inert: the promote API refuses and no timer is armed.
+//
+// Boot recovery (Phase 9): rows stranded in transient states return to
+// requested and stale .staging partials are discarded, so a dead run
+// re-fetches cleanly and never leaves a corrupt final file. Failure is
+// additive-only: provider-backed playback is untouched throughout.
+const permanentRoot = (process.env.HASHSUCKER_PERMANENT_PATH ?? '').trim() || null;
+const promotionStore = permanentRoot ? createPromotionStore({ db: controlPlaneStore.db }) : null;
+const promotionWorker = promotionStore
+  ? createPromotionWorker({
+    promotionStore,
+    dataPlaneBaseUrl: process.env.DATA_PLANE_URL ?? 'http://data-plane:3001',
+    permanentRoot,
+    log: (msg) => console.log(`media-search: ${msg}`),
+  })
+  : null;
+if (promotionWorker) {
+  (async () => {
+    try {
+      const reset = promotionStore.resetStale();
+      const purged = await promotionWorker.discardPartials();
+      if (reset > 0 || purged > 0) {
+        console.log(`media-search: promotion recovery reset=${reset} partials=${purged}`);
+      }
+    } catch (error) {
+      console.warn('media-search: promotion recovery failed', error?.message);
+    }
+  })();
+}
+let promotionTimer = null;
+let promotionInFlight = false;
+function armPromotionTimer(delayMs) {
+  promotionTimer = setTimeout(async () => {
+    try {
+      if (promotionWorker && !promotionInFlight) {
+        promotionInFlight = true;
+        try {
+          const result = await promotionWorker.tick();
+          if (result.status !== 'idle') {
+            console.log(`media-search: promotion tick ${result.torrentFileId ?? ''} ${result.status}`);
+          }
+        } finally {
+          promotionInFlight = false;
+        }
+      }
+    } catch (error) {
+      console.warn('media-search: promotion tick failed', error?.message);
+    } finally {
+      armPromotionTimer(30_000);
+    }
+  }, delayMs);
+  if (promotionTimer.unref) promotionTimer.unref();
+}
+if (promotionWorker) {
+  armPromotionTimer(15_000);
 }
 
 // ─── Arr intent sync ────────────────────────────────────────────────

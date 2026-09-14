@@ -76,6 +76,21 @@ output, and `hy4-cache` are explicitly not required.
 - `hy4-cache` volume — grid chunk cache; a miss re-fetches from the
   provider and serves correctly (verified on an empty cache).
 
+**Permanent promotion output (only if you enabled promotion):**
+
+- The `HASHSUCKER_PERMANENT_PATH` root (`/permanent` by default)
+  contains media bytes you own — NOT cache, NOT regenerable. Protect
+  it under your normal media backup policy, like any other owned
+  movie/show folder.
+- HashSucker DB state remains the authoritative metadata (what is
+  permanent lives in the `promotions` table inside `control-plane.db`,
+  covered by the DB backup above). Restoring DBs without the
+  permanent files degrades gracefully: the provider-backed ladder
+  serves the item again until you re-promote.
+- `hy4-cache` stays disposable and `<media>/strm/` stays regenerable
+  whether or not promotion is enabled: promoting an item never
+  changes what those two stores mean.
+
 **Restore procedure:**
 
 1. Fresh install per above (empty dirs are fine).
