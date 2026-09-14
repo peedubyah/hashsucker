@@ -1,20 +1,25 @@
-# Minimal image publishing (packaging tranche).
+# Image delivery channels (CI/CD channels tranche).
 #
-# Builds the three first-party services with docker/buildx and pushes to
-# GHCR. No tests here (unit suites run separately, if at all); no
-# provenance beyond OCI revision labels baked at build time; no secrets
-# except the automatic GITHUB_TOKEN used only for registry auth.
+# Three separated channels, one workflow:
+#   pull_request  -> validate only: amd64 builds for all four services,
+#                    nothing published (arm64 QEMU stays out of PRs).
+#   push to main  -> continuous: amd64 only, publishes :main + :sha-<short>.
+#                    Never touches :latest. Stale runs cancel.
+#   push v* tag   -> release: amd64 + arm64, immutable exact version +
+#                    semver aliases (0.1.1, 0.1) + :latest. Always completes.
 #
-# Tags:
-#   - version tags (v1.2.3): `v1.2.3` + `latest`
-#   - main branch pushes: `latest` + `sha-<short>`
-# Platforms: amd64 + arm64 (all bases and builds are arch-clean:
-#   pinned Alpine/Node/Rust toolchains, source-compiled native modules).
-# Users pin via HASHSUCKER_VERSION in .env (a tag, a SHA tag, or latest).
+# No per-service path filtering (deliberate): :sha-<commit> tags must be
+# complete sets, and native amd64 builds are cheap enough that skipping
+# buys risk instead of time. arm64 stays release-only (QEMU cost) and
+# published-but-field-unproven.
+#
+# Secrets: only the automatic GITHUB_TOKEN (registry auth). No provider,
+# Arr, Seerr, or Prowlarr credentials anywhere in this file.
 
 name: images
 
 on:
+  pull_request:
   push:
     branches: [main]
     tags: ['v*']
@@ -29,7 +34,75 @@ env:
   OWNER: peedubyah
 
 jobs:
-  build:
+  # PRs: prove the images still build. No registry writes.
+  validate:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [media-search, data-plane, torbox-importer, edge]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          platforms: linux/amd64
+          push: false
+          build-args: |
+            REVISION=${{ github.sha }}
+            VERSION=pr-${{ github.event.pull_request.number || github.run_number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Continuous dogfood channel: every main commit, amd64 only.
+  publish-main:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: hashsucker-images-main
+      cancel-in-progress: true
+    strategy:
+      matrix:
+        service: [media-search, data-plane, torbox-importer, edge]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.OWNER }}/hashsucker-${{ matrix.service }}
+          tags: |
+            type=raw,value=main
+            type=sha,prefix=sha-,format=short
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            REVISION=${{ github.sha }}
+            VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Stable release channel: version tags only, both architectures.
+  # Runs to completion (no cancellation): releases are immutable.
+  publish-release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -53,8 +126,9 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.OWNER }}/hashsucker-${{ matrix.service }}
           tags: |
             type=ref,event=tag
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=sha,prefix=sha-,format=short,enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
 
       - uses: docker/build-push-action@v6
         with:
