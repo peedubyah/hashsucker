@@ -91,6 +91,17 @@ output, and `hy4-cache` are explicitly not required.
   whether or not promotion is enabled: promoting an item never
   changes what those two stores mean.
 
+**Download staging (only if you enabled download intents):**
+
+- The `HASHSUCKER_DOWNLOAD_PATH` root (`/download` by default) is
+  HashSucker-owned staging for external importers — do NOT back it
+  up as HashSucker state. Anything your importer hasn't moved yet can
+  always be re-staged with another `POST /api/download-request`;
+  anything it moved is its own business.
+- Download intent rows live in `control-plane.db` (covered by the DB
+  backup above) and are small. A `staged` row whose file was moved
+  stays `staged` and is never re-created automatically.
+
 **Restore procedure:**
 
 1. Fresh install per above (empty dirs are fine).

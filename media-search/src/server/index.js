@@ -36,6 +36,9 @@ import {
 import { createFutureIntentStore } from '../lib/anticipation/future-intents.js';
 import { createPromotionStore } from '../lib/promotion/store.js';
 import { createPromotionWorker } from '../lib/promotion/worker.js';
+import { createDownloadStore } from '../lib/download/store.js';
+import { createDownloadWorker } from '../lib/download/worker.js';
+import { getPreparedDurableState } from '../api/media-request.js';
 import { createAnticipationScheduler } from '../lib/anticipation/scheduler.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
 import { createArrClient } from '../lib/anticipation/arr-client.js';
@@ -265,6 +268,118 @@ function armPromotionTimer(delayMs) {
 }
 if (promotionWorker) {
   armPromotionTimer(15_000);
+}
+
+// ─── generic download-intent worker ─────────────────────────────────
+// External systems name the media; HashSucker stages verified bytes.
+// Same shared byte primitive as promotion; different intent policy.
+// Resolution is two-tier (mirroring the anticipation scheduler's
+// baseUrl pattern): fast path reads durable truth in-process (zero
+// provider work); the fresh path drives the NORMAL pipeline over HTTP
+// POST /api/media-prepare so request-scoped ensure fns (TorBox/RD
+// identity seams) are built server-side exactly once, with no
+// duplicated provider wiring here. Unset HASHSUCKER_DOWNLOAD_PATH =
+// fully inert.
+const downloadRoot = (process.env.HASHSUCKER_DOWNLOAD_PATH ?? '').trim() || null;
+const downloadStore = downloadRoot ? createDownloadStore({ db: controlPlaneStore.db }) : null;
+const downloadWorker = downloadStore
+  ? createDownloadWorker({
+    downloadStore,
+    // Two-tier resolution: fast path reads durable truth in-process
+    // (zero provider work); the fresh path drives the NORMAL pipeline
+    // over HTTP POST /api/media-prepare so request-scoped ensure fns
+    // (TorBox/RD identity seams) are built server-side, with no
+    // duplicated provider wiring here. Same pattern as the
+    // anticipation scheduler's baseUrl.
+    resolveFn: async ({ mediaId, mediaType, season = null, episode = null }) => {
+      if (!mediaId) return { status: 'invalid-input', reason: 'mediaId is required' };
+      const readPrepared = () => getPreparedDurableState({
+        cache: discoveryCache,
+        controlPlaneStore,
+        mediaId,
+        mediaType,
+        season,
+        episode,
+      });
+      const fast = readPrepared();
+      if (fast) {
+        return {
+          status: 'ok', reused: true, torrentFile: fast.torrentFile,
+          torrentFileId: fast.torrentFileId, handoff: fast.handoff,
+        };
+      }
+      try {
+        const prepareResponse = await fetch(`http://127.0.0.1:${port}/api/media-prepare`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          // The pipeline's native TV type is 'series'; never send 'episode'.
+          body: JSON.stringify({
+            mediaId,
+            mediaType: mediaType === 'episode' ? 'series' : mediaType,
+            season,
+            episode,
+          }),
+        });
+        if (!prepareResponse.ok) {
+          return { status: 'unresolvable', reason: `prepare failed: HTTP ${prepareResponse.status}` };
+        }
+      } catch (error) {
+        return { status: 'unresolvable', reason: error?.message ?? 'prepare failed' };
+      }
+      const fresh = readPrepared();
+      if (!fresh) {
+        return { status: 'unresolvable', reason: 'no healthy TorrentFile after discovery' };
+      }
+      return {
+        status: 'ok', reused: false, torrentFile: fresh.torrentFile,
+        torrentFileId: fresh.torrentFileId, handoff: fresh.handoff,
+      };
+    },
+    stagingRoot: downloadRoot,
+    dataPlaneBaseUrl: process.env.DATA_PLANE_URL ?? 'http://data-plane:3001',
+    log: (msg) => console.log(`media-search: ${msg}`),
+  })
+  : null;
+if (downloadWorker) {
+  (async () => {
+    try {
+      const reset = downloadStore.resetStale();
+      const purged = await downloadWorker.discardPartials();
+      if (reset > 0 || purged > 0) {
+        console.log(`media-search: download recovery reset=${reset} partials=${purged}`);
+      }
+    } catch (error) {
+      console.warn('media-search: download recovery failed', error?.message);
+    }
+  })();
+}
+let downloadTimer = null;
+let downloadInFlight = false;
+function armDownloadTimer(delayMs) {
+  downloadTimer = setTimeout(async () => {
+    try {
+      if (downloadWorker && !downloadInFlight) {
+        downloadInFlight = true;
+        try {
+          const result = await downloadWorker.tick();
+          if (result.status !== 'idle') {
+            console.log(`media-search: download tick ${result.downloadRequestId ?? ''} ${result.status}`
+              + (result.reused ? ' (reused TorrentFile)' : ''));
+          }
+        } finally {
+          downloadInFlight = false;
+        }
+      }
+    } catch (error) {
+      console.warn('media-search: download tick failed', error?.message);
+    } finally {
+      armDownloadTimer(30_000);
+    }
+  }, delayMs);
+  if (downloadTimer.unref) downloadTimer.unref();
+}
+if (downloadWorker) {
+  armDownloadTimer(15_000);
 }
 
 // ─── Arr intent sync ────────────────────────────────────────────────

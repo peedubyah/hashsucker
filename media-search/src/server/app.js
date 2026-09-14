@@ -96,6 +96,10 @@ import { resolvePromotionTarget } from '../lib/promotion/resolve.js';
 import { resolvePermanentTarget, isWithinRoot } from '../lib/promotion/paths.js';
 import { createPromotionWorker } from '../lib/promotion/worker.js';
 import { serveLocalFile } from '../lib/promotion/serve-local.js';
+import { createDownloadStore } from '../lib/download/store.js';
+import { createDownloadResolver } from '../lib/download/resolve.js';
+import { createDownloadWorker } from '../lib/download/worker.js';
+import { isWithinRoot as isWithinDownloadRoot } from '../lib/download/paths.js';
 
 /**
  * Build a request-scoped Real-Debrid ensure function (RD-only tranche).
@@ -1873,6 +1877,94 @@ export function createRequestHandler(dependencies = {}) {
     return promotionWorkerInstance;
   }
 
+  // Generic download intents (download-intent tranche). Same getters
+  // shape as promotion: store over control-plane.db, root-gated
+  // worker. No library item required — media identity in, staged file
+  // out. Injectable for tests via dependencies.downloadStore /
+  // dependencies.downloadWorker.
+  let downloadStoreInstance = dependencies.downloadStore ?? null;
+  function getDownloadStore() {
+    if (!downloadStoreInstance) {
+      if (!controlPlaneStore?.db) return null;
+      try {
+        downloadStoreInstance = createDownloadStore({ db: controlPlaneStore.db, clock });
+      } catch {
+        return null;
+      }
+    }
+    return downloadStoreInstance;
+  }
+
+  function getDownloadRoot() {
+    const root = (env.HASHSUCKER_DOWNLOAD_PATH ?? '').trim();
+    return root || null;
+  }
+
+  let downloadWorkerInstance = dependencies.downloadWorker ?? null;
+  function getDownloadWorker() {
+    if (downloadWorkerInstance) return downloadWorkerInstance;
+    const store = getDownloadStore();
+    const root = getDownloadRoot();
+    if (!store || !root) return null;
+    const resolver = createDownloadResolver({
+      searchCache,
+      controlPlaneStore,
+      searchByMediaFn: searchByMedia,
+      buildEnsureFns: async () => {
+        const scoped = buildRequestScopedEnsureFn({
+          fallbackFn: ensureTorBoxFileIdentityFn,
+          explicitFn: hasExplicitEnsureFn,
+          controlPlaneStore,
+          torBoxProvider,
+          apiKey: env.TORBOX_API_KEY,
+          apiBase: env.TORBOX_API_URL,
+          clock,
+          scope: 'download-request',
+        });
+        return {
+          ...(scoped ? { ensureTorBoxFileIdentity: scoped } : {}),
+          ...rdEnsureForRequest({ rdClient, controlPlaneStore, clock }),
+        };
+      },
+    });
+    downloadWorkerInstance = createDownloadWorker({
+      downloadStore: store,
+      resolveFn: (params) => resolver.resolve(params),
+      stagingRoot: root,
+      dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://data-plane:3001',
+    });
+    return downloadWorkerInstance;
+  }
+
+  /**
+   * Normalize a download-request identity body. No fuzzy title
+   * matching: mediaId is required; TV demands exact S/E; movies must
+   * not carry S/E. Title/year are descriptive-only (staging names).
+   */
+  function normalizeDownloadIdentity(body) {
+    const mediaId = String(body?.mediaId ?? '').trim();
+    if (!mediaId) return { error: 'mediaId is required' };
+    const rawType = String(body?.mediaType ?? 'movie').trim().toLowerCase();
+    const seasonRaw = body?.season ?? null;
+    const episodeRaw = body?.episode ?? null;
+    const season = seasonRaw == null || seasonRaw === '' ? null : parseInt(seasonRaw, 10);
+    const episode = episodeRaw == null || episodeRaw === '' ? null : parseInt(episodeRaw, 10);
+    if (rawType === 'movie') {
+      if (season != null || episode != null) {
+        return { error: 'movie download must not carry season/episode' };
+      }
+      return { mediaId, mediaType: 'movie', season: null, episode: null };
+    }
+    if (rawType === 'episode' || rawType === 'series' || rawType === 'tv' || rawType === 'show') {
+      if (!Number.isSafeInteger(season) || season < 1
+        || !Number.isSafeInteger(episode) || episode < 1) {
+        return { error: 'TV download requires exact season and episode (>= 1)' };
+      }
+      return { mediaId, mediaType: 'episode', season, episode };
+    }
+    return { error: 'mediaType must be movie or episode (series/tv accepted with season+episode)' };
+  }
+
   // Scheduler nudge hook (availability tranche). The process owner
   // (index.js) may inject a callback that pulls the next anticipation
   // tick forward; absent in tests and minimal embeddings.
@@ -3234,6 +3326,117 @@ export function createRequestHandler(dependencies = {}) {
         } catch (err) {
           return sendJson(response, 400, { error: err.message });
         }
+      }
+      // Generic download intents (download-intent tranche). Any external
+      // system (Requestrr, Discord, CLI, Home Assistant) names the media;
+      // HashSucker resolves one exact TorrentFile (reuse or fresh
+      // prepare) and stages verified bytes for an external importer.
+      // No library item required — the caller never needs internal IDs.
+      if (request.method === 'POST' && url.pathname === '/api/download-request') {
+        const body = await readBody(request);
+        const identity = normalizeDownloadIdentity(body);
+        if (identity.error) {
+          return sendJson(response, 400, { error: identity.error });
+        }
+        const store = getDownloadStore();
+        if (!store) {
+          return sendJson(response, 503, { error: 'download store unavailable' });
+        }
+        const root = getDownloadRoot();
+        if (!root) {
+          return sendJson(response, 409, {
+            error: 'download staging not configured',
+            code: 'DOWNLOAD_ROOT_UNSET',
+            hint: 'Set HASHSUCKER_DOWNLOAD_PATH to a staging root.',
+          });
+        }
+        const title = typeof body?.title === 'string' && body.title.trim()
+          ? body.title.trim().slice(0, 300)
+          : null;
+        const year = Number.isSafeInteger(body?.year) && body.year > 0 ? body.year : null;
+        try {
+          const { download, created, reset } = store.request({
+            mediaId: identity.mediaId,
+            mediaType: identity.mediaType,
+            season: identity.season,
+            episode: identity.episode,
+            title,
+            year,
+          });
+          // Nudge the worker so staging starts without waiting for the
+          // next tick; the tick remains the durability backstop.
+          try { getDownloadWorker()?.tick().catch(() => {}); } catch { /* backstop covers */ }
+          return sendJson(response, 200, {
+            downloadRequestId: download.downloadRequestId,
+            state: download.status,
+            created: !!created,
+            reset: !!reset,
+            media: {
+              mediaId: download.mediaId,
+              mediaType: download.mediaType,
+              season: download.season,
+              episode: download.episode,
+              title: download.title,
+              year: download.year,
+            },
+            torrentFileId: download.torrentFileId,
+            expectedSize: download.expectedSize,
+            bytesComplete: download.bytesComplete,
+            stagedPath: download.stagedPath,
+            lastError: download.lastError,
+          });
+        } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
+      }
+      // Download intent status for thin clients. filePresent reports
+      // whether the staged file is still where HashSucker left it; a
+      // downstream importer may have moved it, which is tolerated and
+      // never triggers re-creation.
+      const downloadStatusMatch = request.method === 'GET'
+        && url.pathname.match(/^\/api\/download-request\/([^/]+)$/);
+      if (downloadStatusMatch) {
+        const store = getDownloadStore();
+        if (!store) {
+          return sendJson(response, 503, { error: 'download store unavailable' });
+        }
+        let downloadId = downloadStatusMatch[1];
+        try {
+          downloadId = decodeURIComponent(downloadId);
+        } catch {
+          // Fall through with the raw segment; the lookup misses cleanly.
+        }
+        const download = store.get(downloadId);
+        if (!download) {
+          return sendJson(response, 404, { error: 'unknown download request' });
+        }
+        let filePresent = null;
+        if (download.status === 'staged' && download.stagedPath) {
+          try {
+            const stat = await fs.stat(download.stagedPath);
+            filePresent = stat.isFile() && stat.size === download.expectedSize;
+          } catch {
+            filePresent = false;
+          }
+        }
+        return sendJson(response, 200, {
+          downloadRequestId: download.downloadRequestId,
+          state: download.status,
+          media: {
+            mediaId: download.mediaId,
+            mediaType: download.mediaType,
+            season: download.season,
+            episode: download.episode,
+            title: download.title,
+            year: download.year,
+          },
+          torrentFileId: download.torrentFileId,
+          expectedSize: download.expectedSize,
+          bytesComplete: download.bytesComplete,
+          stagedPath: download.stagedPath,
+          filePresent,
+          lastError: download.lastError,
+        });
       }
       if (request.method === 'GET' && url.pathname === '/api/search') {
         const startedAt = performance.now();

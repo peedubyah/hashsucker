@@ -62,6 +62,11 @@ services:
       # that root is STRM publication only and must never silently
       # become a gigabyte byte-storage destination.
       HASHSUCKER_PERMANENT_PATH: ${HASHSUCKER_PERMANENT_PATH:-}
+      # Staging/output root for generic download intents
+      # (download-intent tranche). Unset = download API refuses,
+      # everything else unchanged. HashSucker-owned staging only:
+      # <root>/movies/ and <root>/tv/ for external importers.
+      HASHSUCKER_DOWNLOAD_PATH: ${HASHSUCKER_DOWNLOAD_PATH:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -83,6 +88,9 @@ services:
       # promotion is one env var; empty and inert until
       # HASHSUCKER_PERMANENT_PATH points here.
       - ${PERMANENT_HOST_PATH:-./hy4-permanent}:/permanent
+      # Download staging root (generic download intents). Same deal:
+      # mounted always, inert until HASHSUCKER_DOWNLOAD_PATH is set.
+      - ${DOWNLOAD_HOST_PATH:-./hy4-downloads}:/download
     group_add:
       - "${MEDIA_SEARCH_QUEUE_GID:-100}"
     security_opt:
@@ -175,6 +183,9 @@ services:
       CACHE_ROOT: "/data/cache"
       TORBOX_API_KEY: ${TORBOX_API_KEY:-}
       REALDEBRID_API_KEY: ${REALDEBRID_API_KEY:-}
+      # Test-only per-TorrentFile provider allowlist (data-plane P13-A).
+      # Empty (default) = disabled. NEVER set in production.
+      DATA_PLANE_FORCE_PROVIDER: ${DATA_PLANE_FORCE_PROVIDER:-}
       # DIAGNOSTIC: disable prefetch so demand reads are not coalesced into prefetch fills
       PREFETCH_ENABLED: "0"
     depends_on:

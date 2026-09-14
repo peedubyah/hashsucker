@@ -19,7 +19,7 @@ import path from 'node:path';
 export const STAGING_DIRNAME = '.staging';
 export const PARTIAL_SUFFIX = '.partial';
 
-function sanitizeSegment(value, fallback) {
+export function sanitizeSegment(value, fallback) {
   const cleaned = String(value ?? '')
     .replace(/[<>:"/\\|?*\x00-\x1f]/g, '')
     .replace(/\s+$/g, '')
@@ -27,7 +27,7 @@ function sanitizeSegment(value, fallback) {
   return cleaned || fallback;
 }
 
-function extensionOf(internalPath) {
+export function extensionOf(internalPath) {
   const base = path.posix.basename(String(internalPath ?? ''));
   const dot = base.lastIndexOf('.');
   if (dot <= 0 || dot === base.length - 1) return '.bin';
