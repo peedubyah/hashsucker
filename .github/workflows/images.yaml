@@ -29,6 +29,16 @@ permissions:
   contents: read
   packages: write
 
+# Obsolete-run cancellation lives HERE (run granularity), never inside a
+# matrix job: per-job concurrency groups coincided with schedule-time
+# cancellation of matrix legs across three runs (victim sets rotated;
+# already-started jobs always survived), while runs without it went
+# green. A newer push to the same ref cancels the whole obsolete run;
+# tags and PRs evaluate in isolated groups.
+concurrency:
+  group: hashsucker-images-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REGISTRY: ghcr.io
   OWNER: peedubyah
@@ -58,13 +68,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   # Continuous dogfood channel: every main commit, amd64 only.
-  # NOTE (CI debug 2026-09-14): job-level `concurrency` (with AND without
-  # cancel-in-progress) coincided with schedule-time cancellation of
-  # matrix legs across three runs (victim sets rotated; jobs that had
-  # already started always survived). Removed entirely to isolate: if
-  # this run goes 4/4 green, concurrency stays out — overlapping mains
-  # are rare, amd64 builds are minutes, and :main is last-writer-wins
-  # by design while :sha tags never conflict.
+  # (Obsolete-run cancellation is workflow-level above, never per-job:
+  # per-job groups killed matrix legs at schedule time. Verified green.)
   publish-main:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
