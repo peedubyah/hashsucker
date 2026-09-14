@@ -188,14 +188,13 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
   }
 
   /**
-   * Boot recovery: transient states return to requested so the worker
-   * re-resolves/re-fetches cleanly. Returns reset count. Staged rows
-   * are never touched (a moved file is the importer's business).
+   * Boot recovery: transient states return to requested so the worker can
+   * resume its named partial. The materializer validates the file and
+   * corrects durable progress on its first callback. Returns reset count.
    */
   function resetStale() {
     const result = db.prepare(`
-      UPDATE download_requests SET status = 'requested', bytes_complete = 0,
-        last_error = NULL, updated_at = ?
+      UPDATE download_requests SET status = 'requested', last_error = NULL, updated_at = ?
       WHERE status IN ('resolving', 'materializing')
     `).run(now());
     return result.changes;

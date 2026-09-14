@@ -7,16 +7,15 @@
  * (GET /files/:tfId; TorBox + Real-Debrid abstracted in Rust), verify,
  * and atomically place the result.
  *
- * Flow: stream response into `<stagingDir>/<tfId>.partial` → count
- * bytes → exact-count gate → size/sparseness verification → atomic
- * rename to the final path. The final path is written ONLY after all
- * checks hold. Partials from a dead run are discarded, never resumed,
- * so a corrupt prefix cannot survive a restart.
+ * Flow: preserve a contiguous `<stagingDir>/<tfId>.partial` prefix → request
+ * the remaining bytes with an exact HTTP Range → exact-count gate →
+ * size/sparseness verification → atomic rename to the final path. The
+ * final path is written ONLY after all checks hold.
  *
- * Verification (no invented checksums — no authoritative file hash
- * exists for the exact file): exact positive size match against the
- * durable TorrentFile size, complete streamed byte count, and a
- * non-sparse staged candidate (allocated blocks cover the size).
+ * Verification (no invented checksums — no authoritative file hash exists
+ * for the exact file): exact positive size match against the durable
+ * TorrentFile size, complete streamed byte count, and a non-sparse staged
+ * candidate (allocated blocks cover the size).
  */
 
 import fsp from 'node:fs/promises';
@@ -90,40 +89,81 @@ export async function materializeTorrentFile({
   if (!dataPlaneBaseUrl) throw new Error('data plane base URL is required');
   const stagingPath = stagingPathFor(stagingDir, torrentFileId, stagingName);
   let bytesComplete = 0;
-  const fail = async (error) => {
-    try { await fsp.unlink(stagingPath); } catch { /* best effort */ }
-    return { ok: false, error: String(error?.message ?? error), bytesComplete };
+  let lastProgress = 0;
+  const reportProgress = () => {
+    if (typeof onProgress !== 'function') return;
+    if (bytesComplete !== size && bytesComplete - lastProgress < 1024 * 1024) return;
+    lastProgress = bytesComplete;
+    try { onProgress(bytesComplete); } catch { /* progress never fails the run */ }
   };
+  const fail = async (error) => ({
+    ok: false,
+    error: String(error?.message ?? error),
+    bytesComplete,
+  });
   try {
     await fsp.mkdir(stagingDir, { recursive: true });
-    // Fresh fetch every attempt: partials from a dead run are
-    // discarded, never resumed, so a corrupt prefix cannot survive.
-    try { await fsp.unlink(stagingPath); } catch { /* absent is fine */ }
+    let partialStat;
+    try {
+      partialStat = await fsp.stat(stagingPath);
+      if (!partialStat.isFile()) {
+        await fsp.unlink(stagingPath);
+        partialStat = null;
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') return fail(error);
+    }
+    bytesComplete = partialStat?.size ?? 0;
+    if (bytesComplete > size) {
+      await fsp.unlink(stagingPath);
+      bytesComplete = 0;
+    }
+    if (bytesComplete > 0 && Number(partialStat?.blocks ?? 0) * 512 < bytesComplete) {
+      await fsp.unlink(stagingPath);
+      bytesComplete = 0;
+    }
+    reportProgress();
+    if (bytesComplete === size) {
+      const verdict = await verifyStagedFile(stagingPath, size);
+      if (!verdict.ok) {
+        await fsp.unlink(stagingPath);
+        return fail(`verification failed: ${verdict.reason}`);
+      }
+      await fsp.mkdir(path.dirname(finalPath), { recursive: true });
+      await fsp.rename(stagingPath, finalPath);
+      log(`[materialize] ${torrentFileId} (${size} bytes) -> ${finalPath}`);
+      return { ok: true, bytesComplete };
+    }
 
     const url = `${dataPlaneBaseUrl.replace(/\/+$/, '')}/files/${encodeURIComponent(torrentFileId)}`;
-    const response = await fetchFn(url, { headers: { accept: '*/*' } });
-    if (!response.ok) {
-      return fail(`data-plane fetch failed: HTTP ${response.status}`);
+    const headers = { accept: '*/*' };
+    if (bytesComplete > 0) headers.range = `bytes=${bytesComplete}-`;
+    const response = await fetchFn(url, { headers });
+    if (!response.ok) return fail(`data-plane fetch failed: HTTP ${response.status}`);
+    if (bytesComplete > 0) {
+      if (response.status !== 206) return fail(`range resume requires HTTP 206, got ${response.status}`);
+      const contentRange = response.headers?.get?.('content-range') ?? response.headers?.['content-range'];
+      const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(String(contentRange ?? ''));
+      if (!match || Number(match[1]) !== bytesComplete || Number(match[3]) !== size) {
+        return fail(`invalid Content-Range for resume at ${bytesComplete}: ${contentRange ?? 'missing'}`);
+      }
     }
-    const handle = await fsp.open(stagingPath, 'w');
+    if (!response.body) return fail('data-plane response has no body');
+    const handle = await fsp.open(stagingPath, bytesComplete > 0 ? 'a' : 'w');
     try {
       for await (const chunk of response.body) {
+        const remaining = size - bytesComplete;
+        if (chunk.length > remaining) return fail(`response exceeds expected size: got chunk ${chunk.length}, remaining ${remaining}`);
         await handle.write(chunk);
         bytesComplete += chunk.length;
-        if (typeof onProgress === 'function') {
-          try { onProgress(bytesComplete); } catch { /* progress never fails the run */ }
-        }
-        if (bytesComplete > size) break;
+        reportProgress();
       }
     } finally {
       await handle.close();
     }
-    if (bytesComplete !== size) {
-      return fail(`incomplete stream: got ${bytesComplete}, want ${size}`);
-    }
+    if (bytesComplete !== size) return fail(`incomplete stream: got ${bytesComplete}, want ${size}`);
     const verdict = await verifyStagedFile(stagingPath, size);
     if (!verdict.ok) return fail(`verification failed: ${verdict.reason}`);
-
     await fsp.mkdir(path.dirname(finalPath), { recursive: true });
     await fsp.rename(stagingPath, finalPath);
     log(`[materialize] ${torrentFileId} (${size} bytes) -> ${finalPath}`);
@@ -133,19 +173,17 @@ export async function materializeTorrentFile({
   }
 }
 
-/** Discard all orphan partials in a staging dir. Returns removed count. */
-export async function discardStagingPartials(stagingDir) {
-  let entries = [];
-  try {
-    entries = await fsp.readdir(stagingDir);
-  } catch {
-    return 0;
-  }
+/**
+ * Remove only explicitly identified orphan partials. Callers must supply
+ * names that are not associated with a durable intent; an empty allowlist
+ * intentionally preserves all restart residue for later association.
+ */
+export async function discardStagingPartials(stagingDir, { orphanNames = [] } = {}) {
   let removed = 0;
-  for (const entry of entries) {
-    if (!entry.endsWith(PARTIAL_SUFFIX)) continue;
+  for (const name of orphanNames) {
+    if (!String(name).endsWith(PARTIAL_SUFFIX)) continue;
     try {
-      await fsp.unlink(path.join(stagingDir, entry));
+      await fsp.unlink(path.join(stagingDir, String(name)));
       removed += 1;
     } catch { /* best effort */ }
   }

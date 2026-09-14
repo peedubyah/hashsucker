@@ -173,12 +173,12 @@ export function createPromotionStore({ db, now = () => Date.now() } = {}) {
 
   /**
    * Boot recovery: anything stranded in a transient state goes back to
-   * requested so the worker re-fetches cleanly. Returns reset count.
+   * requested. The shared materializer validates and resumes its named
+   * partial, so durable progress is not reset here. Returns reset count.
    */
   function resetStale() {
     const result = db.prepare(`
-      UPDATE promotions SET status = 'requested', bytes_complete = 0,
-        last_error = NULL, updated_at = ?
+      UPDATE promotions SET status = 'requested', last_error = NULL, updated_at = ?
       WHERE status IN ('materializing', 'verifying')
     `).run(now());
     return result.changes;

@@ -2,10 +2,9 @@
  * Promotion worker (promotion tranche, Phases 5/6/9).
  *
  * Byte acquisition reuses the SHARED materialization primitive
- * (lib/materialize/materialize.js): one full sequential read of the
- * data plane's GET /files/:tfId — no Range games, no provider-specific
- * download code, no second downloader. Promotion is one
- * intent/destination policy over that primitive; download intents are
+ * (lib/materialize/materialize.js): one sequential data-plane read with
+ * exact Range resume, verification, and atomic placement. Promotion is
+ * one intent/destination policy over that primitive; download intents are
  * the other. Do not fork this implementation.
  *
  * Failure leaves provider-backed playback untouched: promotion is

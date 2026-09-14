@@ -216,9 +216,9 @@ if (anticipationOn) {
 // inert: the promote API refuses and no timer is armed.
 //
 // Boot recovery (Phase 9): rows stranded in transient states return to
-// requested and stale .staging partials are discarded, so a dead run
-// re-fetches cleanly and never leaves a corrupt final file. Failure is
-// additive-only: provider-backed playback is untouched throughout.
+// requested; the shared materializer validates and resumes their named
+// .staging partial. Unknown/orphan partials are still discarded. Failure
+// is additive-only: provider-backed playback is untouched throughout.
 const permanentRoot = (process.env.HASHSUCKER_PERMANENT_PATH ?? '').trim() || null;
 const promotionStore = permanentRoot ? createPromotionStore({ db: controlPlaneStore.db }) : null;
 const promotionWorker = promotionStore

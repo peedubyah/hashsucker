@@ -230,3 +230,111 @@ test('materialize primitive: stagingName isolates concurrent same-TorrentFile ru
   assert.equal((await fsp.stat(path.join(dir, 'b.bin'))).size, 16);
   await fsp.rm(dir, { recursive: true, force: true });
 });
+
+function rangedFetch(payload, calls, { status = 206, start = 0, total = payload.length } = {}) {
+  return async (_url, options) => {
+    calls.push(options);
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: new Headers({ 'content-range': `bytes ${start}-${start + payload.length - 1}/${total}` }),
+      body: (async function* stream() { yield Buffer.from(payload); })(),
+    };
+  };
+}
+
+async function writePartial(dir, name, bytes) {
+  const staging = path.join(dir, '.staging');
+  await fsp.mkdir(staging, { recursive: true });
+  await fsp.writeFile(path.join(staging, name), bytes);
+  return staging;
+}
+
+test('materialize primitive: no partial uses normal full-body acquisition', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'mat-resume-'));
+  const calls = [];
+  const result = await materializeTorrentFile({
+    torrentFileId: 'tf-new', size: 4, finalPath: path.join(dir, 'out'), stagingDir: path.join(dir, '.staging'),
+    dataPlaneBaseUrl: 'http://dp:3001', fetchFn: rangedFetch(Buffer.from('abcd'), calls, { status: 200, start: 0 }),
+  });
+  assert.ok(result.ok);
+  assert.equal(calls[0].headers.range, undefined);
+  assert.equal(await fsp.readFile(path.join(dir, 'out'), 'utf8'), 'abcd');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('materialize primitive: valid partial sends exact Range and appends', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'mat-resume-'));
+  const calls = [];
+  await writePartial(dir, 'tf-resume.partial', Buffer.from('abc'));
+  const result = await materializeTorrentFile({
+    torrentFileId: 'tf-resume', size: 6, finalPath: path.join(dir, 'out'), stagingDir: path.join(dir, '.staging'),
+    dataPlaneBaseUrl: 'http://dp:3001', fetchFn: rangedFetch(Buffer.from('def'), calls, { start: 3, total: 6 }),
+  });
+  assert.ok(result.ok);
+  assert.equal(calls[0].headers.range, 'bytes=3-');
+  assert.equal(await fsp.readFile(path.join(dir, 'out'), 'utf8'), 'abcdef');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+for (const [name, response] of [
+  ['mismatched start', { start: 2, total: 6 }],
+  ['mismatched total', { start: 3, total: 7 }],
+  ['200 on nonzero resume', { status: 200, start: 0, total: 6 }],
+]) {
+  test(`materialize primitive: rejects ${name} without appending`, async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'mat-resume-'));
+    await writePartial(dir, 'tf-invalid.partial', Buffer.from('abc'));
+    const result = await materializeTorrentFile({
+      torrentFileId: 'tf-invalid', size: 6, finalPath: path.join(dir, 'out'), stagingDir: path.join(dir, '.staging'),
+      dataPlaneBaseUrl: 'http://dp:3001', fetchFn: rangedFetch(Buffer.from('def'), [], response),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(await fsp.readFile(path.join(dir, '.staging/tf-invalid.partial'), 'utf8'), 'abc');
+    await fsp.rm(dir, { recursive: true, force: true });
+  });
+}
+
+test('materialize primitive: interrupted stream preserves bytes and next attempt resumes new length', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'mat-resume-'));
+  const calls = [];
+  let first = true;
+  const fetchFn = async (_url, options) => {
+    calls.push(options);
+    if (!first) return rangedFetch(Buffer.from('f'), calls, { start: 5, total: 6 })();
+    first = false;
+    return { ok: true, status: 206, headers: new Headers({ 'content-range': 'bytes 3-5/6' }), body: (async function* () { yield Buffer.from('de'); throw new Error('connection reset'); })() };
+  };
+  await writePartial(dir, 'tf-drop.partial', Buffer.from('abc'));
+  const firstResult = await materializeTorrentFile({ torrentFileId: 'tf-drop', size: 6, finalPath: path.join(dir, 'out'), stagingDir: path.join(dir, '.staging'), dataPlaneBaseUrl: 'http://dp:3001', fetchFn });
+  assert.equal(firstResult.ok, false);
+  assert.equal(firstResult.bytesComplete, 5);
+  assert.equal((await fsp.stat(path.join(dir, '.staging/tf-drop.partial'))).size, 5);
+  const secondResult = await materializeTorrentFile({ torrentFileId: 'tf-drop', size: 6, finalPath: path.join(dir, 'out'), stagingDir: path.join(dir, '.staging'), dataPlaneBaseUrl: 'http://dp:3001', fetchFn });
+  assert.ok(secondResult.ok);
+  assert.equal(calls[1].headers.range, 'bytes=5-');
+  assert.equal(await fsp.readFile(path.join(dir, 'out'), 'utf8'), 'abcdef');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('materialize primitive: exact-size partial verifies and finalizes without fetch', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'mat-resume-'));
+  await writePartial(dir, 'tf-complete.partial', Buffer.from('abcdef'));
+  let called = false;
+  const result = await materializeTorrentFile({ torrentFileId: 'tf-complete', size: 6, finalPath: path.join(dir, 'out'), stagingDir: path.join(dir, '.staging'), dataPlaneBaseUrl: 'http://dp:3001', fetchFn: async () => { called = true; } });
+  assert.ok(result.ok);
+  assert.equal(called, false);
+  assert.equal(await fsp.readFile(path.join(dir, 'out'), 'utf8'), 'abcdef');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('materialize primitive: oversized partial resets safely', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'mat-resume-'));
+  const calls = [];
+  await writePartial(dir, 'tf-over.partial', Buffer.from('toolong'));
+  const result = await materializeTorrentFile({ torrentFileId: 'tf-over', size: 3, finalPath: path.join(dir, 'out'), stagingDir: path.join(dir, '.staging'), dataPlaneBaseUrl: 'http://dp:3001', fetchFn: rangedFetch(Buffer.from('xyz'), calls, { status: 200, start: 0, total: 3 }) });
+  assert.ok(result.ok);
+  assert.equal(calls[0].headers.range, undefined);
+  assert.equal(await fsp.readFile(path.join(dir, 'out'), 'utf8'), 'xyz');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
