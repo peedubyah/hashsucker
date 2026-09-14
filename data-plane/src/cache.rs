@@ -1142,6 +1142,17 @@ impl ChunkStager {
                 *cur = Some(self.open_chunk(idx, expected)?);
             }
             let c = cur.as_mut().unwrap();
+            // Serve-window-first fills stage the client window before the
+            // chunk prefix, so intra-chunk staging order is not always
+            // ascending. Position explicitly: contiguous appends land where
+            // the cursor already is; out-of-order prefix backfills land
+            // exactly. `written` accounting stays exact because every staged
+            // offset is written exactly once per fill (the reader never
+            // replays an offset, and the two spans of a split fill are
+            // disjoint by construction).
+            c.file
+                .seek(SeekFrom::Start(off - cstart))
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
             c.file
                 .write_all(&rest[..n])
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;

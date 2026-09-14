@@ -3064,6 +3064,18 @@ impl Drop for OwnedFillGuard {
     }
 }
 
+/// Serve-window-first split threshold: minimum mid-chunk prefix gap (bytes)
+/// that justifies executing a fetch span as serve-span + sequential prefix
+/// backfill (two CDN range requests instead of one). Below this the extra
+/// request costs more than the gap wait it would skip. Overridable via
+/// `DATA_PLANE_SERVE_FIRST_MIN_GAP_BYTES` (0 = always split).
+fn serve_first_min_gap_bytes() -> u64 {
+    std::env::var("DATA_PLANE_SERVE_FIRST_MIN_GAP_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(256 * 1024)
+}
+
 pub async fn fill_chunk_run(
     cache: Arc<CacheEngine>,
     metrics: Arc<Metrics>,
@@ -3287,99 +3299,155 @@ async fn fill_chunk_run_inner(
         })
     };
 
-    // ---- Slice 4.5 T1: capability acquisition requested. ----
-    // The SAME Slice 3 scheduling entry point the no-cache path uses. That is
-    // the whole of the A.4 safety contract: the cache may reshape demand but
-    // never opens a second concurrency domain.
-    let acquire_start = Instant::now();
-    if let Some(s) = stage.as_ref() {
-        s.set_t1(acquire_start);
-    }
-    // P5/T22: the `cap` parameter selects how the transport reader is
-    // constructed. `Owned` carries the single permit and reuses the
-    // pre-acquired reservation; `Shared` borrows from a `CapabilityLease`
-    // (no permit, no acquisition); `None` acquires a fresh reservation.
-    // Second client handle for a hedge reader (the construction below
-    // moves `client`).
-    let client_hedge = client.clone();
-    let mut reader = match cap {
-        Some(ReaderCapability::Owned(reserved)) => {
-            let acquire_ms = acquire_start.elapsed();
-            if let Some(s) = stage.as_ref() {
-                s.set_t2(Instant::now());
-            }
-            if cold {
-                *metrics.cold_acquire_ms.lock().unwrap() = Some(acquire_ms.as_millis() as u64);
-            }
-            ResilientRangeReader::new_with_chunk_cb(
-                client,
-                metrics.clone(),
-                manager.clone(),
-                reserved,
-                priority,
-                f_start,
-                f_end,
-                tf.size,
-                false,
-                faults,
-                Some(cb),
-            )
-        }
-        Some(ReaderCapability::Shared(child)) => {
-            if let Some(s) = stage.as_ref() {
-                s.set_t2(Instant::now());
-            }
-            ResilientRangeReader::new_shared_child_with_chunk_cb(
-                client,
-                metrics.clone(),
-                manager.clone(),
-                child,
-                priority,
-                f_start,
-                f_end,
-                tf.size,
-                false,
-                faults,
-                Some(cb),
-            )
-        }
-        None => {
-            let reserved = match manager.acquire_for_read(priority).await {
-                Ok(r) => r,
-                Err(_) => {
-                    stager.abort();
-                    guard.finish_failure();
-                    if let Some(tx) = sink.as_ref() {
-                        let _ = tx.send(SpanMsg::Failed).await;
-                    }
-                    // T12: no reservation was ever held here.
-                    return None;
-                }
-            };
-            let acquire_ms = acquire_start.elapsed();
-            if let Some(s) = stage.as_ref() {
-                s.set_t2(Instant::now());
-            }
-            if cold {
-                *metrics.cold_acquire_ms.lock().unwrap() = Some(acquire_ms.as_millis() as u64);
-            }
-            ResilientRangeReader::new_with_chunk_cb(
-                client,
-                metrics.clone(),
-                manager.clone(),
-                reserved,
-                priority,
-                f_start,
-                f_end,
-                tf.size,
-                false,
-                faults,
-                Some(cb),
-            )
-        }
+    // ---- Serve-window-first (seek-latency optimization) ----
+    //
+    // A mid-chunk seek window [w_start..] inside a chunk-start fetch span
+    // [f_start..f_end] used to wait for the whole unwanted chunk prefix
+    // (up to ~8 MiB at CDN speed: measured 52-623 ms of TTFB penalty)
+    // before the first client byte. When the prefix gap is material, this
+    // fill executes TWO sequential upstream ranges with one stager: the
+    // serve span [w_start..f_end] first (streams to the client AND stages),
+    // then the prefix backfill [f_start..w_start-1] (staged only — the
+    // client-window clamp delivers nothing outside [w_start..w_end]).
+    //
+    // Durability is unchanged: a chunk publishes only when complete, and a
+    // failed backfill aborts staging exactly like any failed fill, while
+    // the already-served client still receives a clean Eof.
+    //
+    // Skipped for sink-less fills (prefetch/stage-only: no TTFB to save and
+    // no extra CDN request wanted), for shared-child readers (no
+    // reservation to thread into a second reader), and for small gaps.
+    let serve_first_gap = w_start.saturating_sub(f_start);
+    let split_serve_first = sink.is_some()
+        && !matches!(cap, Some(ReaderCapability::Shared(_)))
+        && serve_first_gap >= serve_first_min_gap_bytes();
+    // Execution order: serve span, then prefix backfill. The single-span
+    // case keeps the exact historical [f_start..f_end] shape.
+    let spans: [(u64, u64); 2] = if split_serve_first {
+        [(w_start, f_end), (f_start, w_start - 1)]
+    } else {
+        [(f_start, f_end), (f_start, f_end)]
     };
+    let span_count = if split_serve_first { 2 } else { 1 };
+    // Reservation threading: the first span consumes `cap`; each later
+    // span reuses the previous span's hand-back (same warm lane, zero
+    // acquisition). `next_lane` always holds the latest hand-back so the
+    // function tail can return it exactly as before.
+    let mut next_lane: Option<ReaderCapability> = cap;
+    // Whether the serve span delivered its window: steers Eof-vs-Failed
+    // and waiter resolution if the backfill span fails afterwards.
+    let mut serve_done_ok = false;
+    let mut ok = true;
+    let mut client_gone = false;
+
+    for (span_no, &(span_start, span_end)) in spans.iter().take(span_count).enumerate() {
+        let first_span = span_no == 0;
+        // ---- Slice 4.5 T1: capability acquisition requested. ----
+        // The SAME Slice 3 scheduling entry point the no-cache path uses. That is
+        // the whole of the A.4 safety contract: the cache may reshape demand but
+        // never opens a second concurrency domain.
+        let acquire_start = Instant::now();
+        if first_span {
+            if let Some(s) = stage.as_ref() {
+                s.set_t1(acquire_start);
+            }
+        }
+        // P5/T22: the `cap` parameter selects how the transport reader is
+        // constructed. `Owned` carries the single permit and reuses the
+        // pre-acquired reservation; `Shared` borrows from a `CapabilityLease`
+        // (no permit, no acquisition); `None` acquires a fresh reservation.
+        // Later spans reuse the previous span's hand-back reservation.
+        // Second client handle for a hedge reader (the construction below
+        // moves `client`, so every span takes its own clone).
+        let client_hedge = client.clone();
+        let mut reader = match next_lane.take() {
+            Some(ReaderCapability::Owned(reserved)) => {
+                let acquire_ms = acquire_start.elapsed();
+                if first_span {
+                    if let Some(s) = stage.as_ref() {
+                        s.set_t2(Instant::now());
+                    }
+                    if cold {
+                        *metrics.cold_acquire_ms.lock().unwrap() =
+                            Some(acquire_ms.as_millis() as u64);
+                    }
+                }
+                ResilientRangeReader::new_with_chunk_cb(
+                    client.clone(),
+                    metrics.clone(),
+                    manager.clone(),
+                    reserved,
+                    priority,
+                    span_start,
+                    span_end,
+                    tf.size,
+                    false,
+                    faults,
+                    Some(cb.clone()),
+                )
+            }
+            Some(ReaderCapability::Shared(child)) => {
+                if first_span {
+                    if let Some(s) = stage.as_ref() {
+                        s.set_t2(Instant::now());
+                    }
+                }
+                ResilientRangeReader::new_shared_child_with_chunk_cb(
+                    client.clone(),
+                    metrics.clone(),
+                    manager.clone(),
+                    child,
+                    priority,
+                    span_start,
+                    span_end,
+                    tf.size,
+                    false,
+                    faults,
+                    Some(cb.clone()),
+                )
+            }
+            None => {
+                let reserved = match manager.acquire_for_read(priority).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        stager.abort();
+                        guard.finish_failure();
+                        if let Some(tx) = sink.as_ref() {
+                            let _ = tx.send(SpanMsg::Failed).await;
+                        }
+                        // T12: no reservation was ever held here.
+                        return None;
+                    }
+                };
+                let acquire_ms = acquire_start.elapsed();
+                if first_span {
+                    if let Some(s) = stage.as_ref() {
+                        s.set_t2(Instant::now());
+                    }
+                    if cold {
+                        *metrics.cold_acquire_ms.lock().unwrap() =
+                            Some(acquire_ms.as_millis() as u64);
+                    }
+                }
+                ResilientRangeReader::new_with_chunk_cb(
+                    client.clone(),
+                    metrics.clone(),
+                    manager.clone(),
+                    reserved,
+                    priority,
+                    span_start,
+                    span_end,
+                    tf.size,
+                    false,
+                    faults,
+                    Some(cb.clone()),
+                )
+            }
+        };
     // Hand the stage clock to the transport so T3/T4 are stamped at the real
-    // dispatch / first-body-byte instants.
+    // dispatch / first-body-byte instants. T3/T4 fire once (first span);
+    // later spans append their attempts to the same clock, told apart by
+    // started_at_ms.
     if let Some(s) = stage.as_ref() {
         reader.set_stage_clock(s.clone());
     }
@@ -3418,28 +3486,36 @@ async fn fill_chunk_run_inner(
 
     let sub_open = Instant::now();
     if reader.ensure_open().await.is_err() {
-        stager.abort();
-        guard.finish_failure();
-        if let Some(tx) = sink.as_ref() {
-            let _ = tx.send(SpanMsg::Failed).await;
+        if first_span {
+            stager.abort();
+            guard.finish_failure();
+            if let Some(tx) = sink.as_ref() {
+                let _ = tx.send(SpanMsg::Failed).await;
+            }
+            // T12: hand back the live reservation. Shared children hold none,
+            // so into_reserved() returns None for them.
+            return reader.into_reserved();
         }
-        // T12: hand back the live reservation. Shared children hold none,
-        // so into_reserved() returns None for them.
-        return reader.into_reserved();
+        // Backfill span failed after the serve span delivered: durability
+        // fails exactly like any failed fill, but the client is already
+        // whole — fall through to the shared tail, where serve_done_ok
+        // steers a clean Eof and waiter resolution against what actually
+        // reached durable.
+        ok = false;
+        next_lane = reader.into_reserved().map(ReaderCapability::Owned);
+        break;
     }
-    if cold {
+    if cold && first_span {
         *metrics.cold_cdn_first_byte_ms.lock().unwrap() =
             Some(sub_open.elapsed().as_millis() as u64);
     }
 
-    let mut ok = true;
-    let mut client_gone = false;
-    // The resilient reader delivers [f_start, f_end] contiguously and in
+    // The resilient reader delivers [span_start, span_end] contiguously and in
     // ascending order, including across internal recovery (a mid-body resume
     // restarts at mid+1, so no byte is delivered twice). Tracking `pos` here
     // therefore gives the authoritative offset of every chunk without the
     // transport having to expose one.
-    let mut pos = f_start;
+    let mut pos = span_start;
     // T17: an elected hedge winner's Step is processed through the normal
     // arm below (its bytes were staged manually exactly once during the
     // election; the arm itself never stages).
@@ -3535,7 +3611,7 @@ async fn fill_chunk_run_inner(
                     //
                     // Single-round race REPLACING abandon-and-promote this
                     // iteration: the already-reserved warm standby opens the
-                    // same `[pos, f_end]` as a second execution attempt
+                    // same `[pos, span_end]` as a second execution attempt
                     // under this fill's single logical claim. The first
                     // producer to return its next body chunk becomes the
                     // SOLE producer for the remainder. Gates, in order: low
@@ -3552,7 +3628,7 @@ async fn fill_chunk_run_inner(
                     // below; the loser's never. The elected winner's Step is
                     // processed through the normal arm above (via `pending`).
                     let mut elected: Option<Step> = None;
-                    if hedge_enabled() && !hedge_consumed && pos <= f_end {
+                    if hedge_enabled() && !hedge_consumed && pos <= span_end {
                         match manager.reserve_standby(&slow_cap) {
                             Some((hedge_reserved, hedge_slot_key))
                                 if hedge_slot_key == tf.durable_key =>
@@ -3562,7 +3638,7 @@ async fn fill_chunk_run_inner(
                                 let hedge_provider =
                                     hedge_reserved.cap.provider.clone();
                                 eprintln!(
-                                    "[t17] hedge_race_started: tf={} span={f_start}-{f_end} race_offset={race_pos} primary={} hedge={hedge_provider}",
+                                    "[t17] hedge_race_started: tf={} span={span_start}-{span_end} race_offset={race_pos} primary={} hedge={hedge_provider}",
                                     tf.durable_key,
                                     slow_cap.provider,
                                 );
@@ -3575,7 +3651,7 @@ async fn fill_chunk_run_inner(
                                         hedge_reserved,
                                         priority,
                                         pos,
-                                        f_end,
+                                        span_end,
                                         tf.size,
                                         false,
                                         faults,
@@ -3606,7 +3682,7 @@ async fn fill_chunk_run_inner(
                                     stage_gate_primary.store(true, Ordering::SeqCst);
                                     low_policy.reset_sequence();
                                     eprintln!(
-                                        "[t17] hedge_elected: winner=primary tf={} span={f_start}-{f_end} race_offset={race_pos}",
+                                        "[t17] hedge_elected: winner=primary tf={} span={span_start}-{span_end} race_offset={race_pos}",
                                         tf.durable_key,
                                     );
                                     elected = Some(s);
@@ -3640,7 +3716,7 @@ async fn fill_chunk_run_inner(
                                             }
                                             low_policy.reset_sequence();
                                             eprintln!(
-                                                "[t17] hedge_elected: winner=hedge tf={} span={f_start}-{f_end} race_offset={race_pos} hedge={}",
+                                                "[t17] hedge_elected: winner=hedge tf={} span={span_start}-{span_end} race_offset={race_pos} hedge={}",
                                                 tf.durable_key,
                                                 hcap.provider,
                                             );
@@ -3659,7 +3735,7 @@ async fn fill_chunk_run_inner(
                                                 hedge_slot_key,
                                             ));
                                             eprintln!(
-                                                "[t17] hedge_failed: tf={} span={f_start}-{f_end} race_offset={race_pos} (primary continues into promotion)",
+                                                "[t17] hedge_failed: tf={} span={span_start}-{span_end} race_offset={race_pos} (primary continues into promotion)",
                                                 tf.durable_key,
                                             );
                                         }
@@ -3703,7 +3779,7 @@ async fn fill_chunk_run_inner(
                             // re-arm needs two new independent windows.
                             low_policy.reset_sequence();
                             eprintln!(
-                                "[t16] promoted: tf={} span={f_start}-{f_end} slow={} new={new_provider} at_pos={pos}",
+                                "[t16] promoted: tf={} span={span_start}-{span_end} slow={} new={new_provider} at_pos={pos}",
                                 tf.durable_key,
                                 slow_cap.provider,
                             );
@@ -3715,7 +3791,7 @@ async fn fill_chunk_run_inner(
                             drop(other);
                             low_policy.reset_sequence();
                             eprintln!(
-                                "[t16] standby_miss: tf={} span={f_start}-{f_end} (no warm standby; serving current producer, no budget spent)",
+                                "[t16] standby_miss: tf={} span={span_start}-{span_end} (no warm standby; serving current producer, no budget spent)",
                                 tf.durable_key,
                             );
                         }
@@ -3730,6 +3806,17 @@ async fn fill_chunk_run_inner(
             }
         }
     }
+
+        // Hand the warm lane to the next span (or the caller): this consumes
+        // the span's reader, mirroring the historical tail return.
+        next_lane = reader.into_reserved().map(ReaderCapability::Owned);
+        if first_span && ok {
+            serve_done_ok = true;
+        }
+        if !ok {
+            break;
+        }
+    } // end per-span loop (serve span, then prefix backfill)
 
     // ---- Publication ----
     //
@@ -3747,15 +3834,35 @@ async fn fill_chunk_run_inner(
         p
     } else {
         stager.abort();
-        guard.finish_failure();
+        if serve_done_ok {
+            // Split fill whose backfill span failed after the serve span
+            // delivered exact bytes: resolve waiters against what actually
+            // reached durable instead of failing everything. Identical to
+            // finish_failure() when nothing was published (the non-split
+            // failure shape), and waiter arms re-check the cache anyway.
+            guard.finish_success(&stager.promoted());
+        } else {
+            guard.finish_failure();
+        }
         Vec::new()
     };
     if let Some(tx) = sink.as_ref() {
-        let _ = tx.send(if ok { SpanMsg::Eof } else { SpanMsg::Failed }).await;
+        // A served-then-backfill-failed fill still ends the client stream
+        // cleanly: every delivered byte was exact, and partial chunks are
+        // never durable. Only a fill that never served sends Failed.
+        let _ = tx.send(if ok || serve_done_ok {
+            SpanMsg::Eof
+        } else {
+            SpanMsg::Failed
+        }).await;
     }
     // T12: return the final reservation (post any in-fill replacement) so
-    // a stripe worker threads the same warm lane across chunk fills.
-    reader.into_reserved()
+    // a stripe worker threads the same warm lane across chunk fills. This
+    // is the last span's hand-back, exactly as before.
+    next_lane.and_then(|c| match c {
+        ReaderCapability::Owned(r) => Some(r),
+        ReaderCapability::Shared(_) => None,
+    })
 
 }
 
