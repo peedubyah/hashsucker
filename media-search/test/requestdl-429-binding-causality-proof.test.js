@@ -219,15 +219,25 @@ test('a 429 does not enroll a durability_due_state row (binding-activation is th
 
   const seeded = seedAuthoritativeFulfillment(store);
 
-  // The durability_due_state table is created on demand by the
-  // durability scheduler. We can't use a real scheduler here (it
-  // requires a registered executor and would introduce noise), so we
-  // install the schema via the same createDurabilityScheduler path
-  // and immediately dispose the runtime. The wrapper cannot enroll
-  // because it has no scheduler to call into.
-  const { createDurabilityScheduler } = await import('../src/lib/control-plane/durability-scheduler.js');
-  const scheduler = createDurabilityScheduler({ controlPlaneStore: store, mode: 'observe' });
-  // No runtime created -> no providerAdapters -> no enroller seam.
+  // The durability_due_state table used to be created on demand by the
+  // (now deleted) durability scheduler. Create the historical shape
+  // directly: the table remains for DB compatibility, but nothing in
+  // production writes to it anymore.
+  store.db.exec(`
+    CREATE TABLE IF NOT EXISTS durability_due_state (
+      library_item_id TEXT PRIMARY KEY,
+      enrollment_key TEXT NOT NULL,
+      source TEXT NOT NULL,
+      enrolled_at INTEGER NOT NULL,
+      next_due_at INTEGER NOT NULL,
+      last_run_at INTEGER,
+      last_outcome TEXT NOT NULL DEFAULT 'pending',
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      disabled INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL
+    );
+  `);
 
   const wrapped = wrapTorBoxDownloadUrlCacheWithAccounting({
     getByCapability() { return null; },
@@ -256,8 +266,4 @@ test('a 429 does not enroll a durability_due_state row (binding-activation is th
     'SELECT * FROM durability_due_state WHERE library_item_id = ?',
   ).all(seeded.itemId);
   assert.equal(dueRows.length, 0, 'a 429 must never create a durability_due_state row');
-  // scheduler instance is intentionally retained only to trigger the schema
-  // migration; it has no registered enroller shim, so this confirms the
-  // accounting wrapper cannot reach the durability enroller.
-  assert.equal(scheduler.mode, 'observe');
 });

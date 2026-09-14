@@ -166,10 +166,9 @@ export function createTorBoxInventoryProvider(options = {}) {
           });
         },
       },
-      // Background durability seam: the snapshot itself, with no per-infoHash
-      // filtering. The caller (background-durability-executor) fetches ONE
-      // snapshot per (provider, accountScope, scope) and evaluates every due
-      // placement locally. Read-only; never mutates upstream state.
+      // Snapshot seam (formerly consumed by the retired background
+      // durability executor): the snapshot itself, with no per-infoHash
+      // filtering. Read-only; never mutates upstream state.
       [PROVIDER_CAPABILITIES.MYLIST_SNAPSHOT]: {
         async getMylistSnapshot(context = {}) {
           const snapshot = await getSnapshot(context.signal);

@@ -1,14 +1,8 @@
 # Local operator overrides (optional, UNTRACKED semantics documented here).
 #
-# This file was previously shadowing test settings; it now ships as a
-# commented template so a fresh clone boots the base compose.yaml as-is.
-# Effective production today: background durability DISABLED (the default),
-# which is why this file sets nothing active.
-#
-# To enable the background durability observer (records intent without
-# making provider calls; see src/lib/control-plane/durability-runtime.js):
-#   services:
-#     media-search:
-#       environment:
-#         BACKGROUND_DURABILITY_MODE: observe
+# This file intentionally sets nothing active: there are currently no
+# operator override knobs that belong here. The background durability
+# observer (BACKGROUND_DURABILITY_MODE) was retired — setting it has no
+# effect. Kept as a documented placeholder so local experiments have a
+# home that never collides with the base compose file.
 services: {}

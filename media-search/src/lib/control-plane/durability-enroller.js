@@ -1,8 +1,19 @@
 /**
- * Background Durability V1 — durable-enrollment registry.
+ * Background Durability enrollment registry — RETIRED (durability
+ * verdict tranche), retained as an inert compatibility registry.
  *
- * The runtime seam (durability-runtime.js) registers a scheduler with
- * this module when the BACKGROUND_DURABILITY_MODE flag requests
+ * The scheduler/runtime/executor consumer is deleted: nothing ever
+ * registers here in production, so every notify* call below is a
+ * documented no-op. The module is kept (rather than deleting it and
+ * touching the hot VFS-materialize / TorBox-delivery / reconciler call
+ * sites) precisely because those paths must not change for this verdict.
+ * New code must not register schedulers here; staleness is covered by
+ * request-time verification and playback-time recovery instead.
+ *
+ * (Original design below preserved for archaeology.)
+ *
+ * The runtime seam (durability-runtime.js) registered a scheduler with
+ * this module when the BACKGROUND_DURABILITY_MODE flag requested
  * 'observe' or 'execute'. Existing fulfillment/repair seams
  * (reconciler, torbox-delivery) call into this module when an
  * authoritative binding is activated or a stale-placement-repaired
