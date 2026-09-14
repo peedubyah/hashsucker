@@ -452,7 +452,8 @@ const NEUTRAL = 0.5;
  * @param {string} [attrs.resolution] - Resolution (e.g., '1080p')
  * @param {string} [attrs.sourceType] - Source type (e.g., 'BluRay')
  * @param {string} [attrs.codec] - Codec (e.g., 'x264', 'x265')
- * @param {boolean} [attrs.hdr] - HDR flag
+ * @param {boolean|string} [attrs.hdr] - HDR flag or class
+ * @param {string} [attrs.audio] - Audio class
  * @returns {number} 0.0-1.0
  */
 export function qualityScore(attrs = {}) {
@@ -462,18 +463,64 @@ export function qualityScore(attrs = {}) {
   const resScore = RESOLUTION_QUALITY[attrs.resolution] || 0;
   score += resScore * 0.4;
 
-  // Source contributes 30% (canonicalized across upstream vocabularies)
+  // Source contributes 30%
   const srcScore = SOURCE_QUALITY[canonicalSourceQualityKey(attrs.sourceType)] || 0;
   score += srcScore * 0.3;
 
-  // Codec bonus (up to 15%)
+  // Codec bonus (up to 10%)
   const codecBonus = CODEC_BONUS[attrs.codec] || 0;
   score += codecBonus;
 
-  // HDR bonus (up to 15%)
-  if (attrs.hdr) score += 0.15;
+  // Graded HDR contribution (premium tranche): DV > HDR10+ > HDR10 and
+  // generic HDR > HLG > SDR. Bounded so worse-source+DV never beats
+  // better-source+HDR10 on HDR alone (max swing 0.125 < source steps).
+  score += hdrQualityBonus(attrs.hdr);
+
+  // Bounded audio contribution (premium tranche): lossless-object tiers
+  // down to lossy stereo. Max swing 0.025 stays below the smallest
+  // resolution step (0.04) and source step (0.03), so audio only ever
+  // decides close comparisons — never manufactures premium status.
+  score += audioQualityBonus(attrs.audio);
 
   return Math.min(1.0, score);
+}
+
+/**
+ * Graded HDR bonus (premium tranche). Inputs arrive in mixed shapes:
+ * boolean true, 1, generic strings ('HDR'), or flavor strings
+ * ('DV', 'HDR10', 'HDR10+', 'HLG', Dolby Vision variants).
+ */
+export function hdrQualityBonus(hdr) {
+  if (hdr == null || hdr === false || hdr === 0 || hdr === '0') return 0;
+  if (hdr === true || hdr === 1 || hdr === '1') return 0.10;
+  const t = String(hdr).trim().toLowerCase().replace(/[\s._-]+/g, '');
+  if (!t || t === 'false' || t === 'no' || t === 'sdr') return 0;
+  if (t.includes('dolbyvision') || t === 'dv' || t === 'dovi') return 0.125;
+  if (t === 'hdr10plus' || t === 'hdr10+') return 0.11;
+  if (t === 'hdr10' || t === 'hdr') return 0.10;
+  if (t === 'hlg') return 0.05;
+  return 0;
+}
+
+/**
+ * Bounded audio bonus (premium tranche). Compound strings
+ * ('TrueHD Atmos', 'DDP Atmos 5', 'DTS-HD MA') classify by best tier
+ * present. Case-insensitive; unrecognized/missing audio scores 0.
+ */
+export function audioQualityBonus(audio) {
+  if (audio == null) return 0;
+  const t = String(audio).trim().toLowerCase().replace(/[\s._-]+/g, '');
+  if (!t) return 0;
+  const has = (...needles) => needles.some((n) => t.includes(n));
+  // Tier A: lossless object (TrueHD Atmos, DTS:X).
+  if ((has('truehd') && has('atmos')) || has('dtsx') || has('dts:x')) return 0.025;
+  // Tier B: lossless (TrueHD, DTS-HD MA/HDMA, FLAC, PCM).
+  if (has('truehd') || has('dtshdma') || has('dtshd') || has('flac') || t === 'pcm') return 0.018;
+  // Tier C: lossy object (any Atmos not already classified lossless).
+  if (has('atmos')) return 0.012;
+  // Tier D: discrete multichannel lossy (DD+/E-AC-3/DD/AC-3).
+  if (has('eac3') || has('ddp') || has('ddplus') || has('dd+') || has('ac3') || has('dd')) return 0.006;
+  return 0;
 }
 
 /**
@@ -1595,6 +1642,17 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
       // Ranker V2 fix 5: episodeMatch contributes 10% but was invisible
       // in persisted/debug explanations. All six components now present.
       episodeMatchScore: Math.round(episodeMatch * 1000) / 1000,
+      // Premium tranche: quality sub-inputs so a DV-vs-HDR10 or
+      // TrueHD-vs-AAC decision is auditable without recomputation.
+      qualityDetails: Object.freeze({
+        resolution: releaseAttrs.resolution ?? null,
+        source: releaseAttrs.source ?? releaseAttrs.sourceType ?? null,
+        codec: releaseAttrs.codec ?? null,
+        hdr: releaseAttrs.hdr ?? null,
+        audio: releaseAttrs.audio ?? null,
+        hdrBonus: hdrQualityBonus(releaseAttrs.hdr),
+        audioBonus: audioQualityBonus(releaseAttrs.audio),
+      }),
     }),
     weights: Object.freeze({ ...WEIGHTS }),
     historicalPrior: Math.round((historicalPrior || 0) * 1000) / 1000,

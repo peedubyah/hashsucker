@@ -56,14 +56,14 @@ test('v2: source class is case-insensitive across upstream vocabularies', () => 
   const q = (sourceType) => qualityScore({ resolution: '2160p', sourceType, codec: 'x265', hdr: true });
   assert.equal(q('REMUX'), q('Remux'));
   assert.equal(q('Remux'), q('remux'));
-  assert.ok(q('REMUX') > 0.9, 'REMUX scores premium in any case');
+  assert.ok(q('REMUX') > 0.89, 'REMUX scores premium in any case');
   const d = qualityScore({ resolution: '1080p', sourceType: 'blu-ray' });
   assert.ok(d > 0.6, 'hyphenated bluray resolves');
 });
 
 test('v2: corpus canonical classes unchanged', () => {
   // Parser-normalized vocabulary must score exactly as before.
-  assert.equal(qualityScore({ resolution: '2160p', sourceType: 'Remux', codec: 'x265', hdr: true }), 0.95);
+  assert.equal(qualityScore({ resolution: '2160p', sourceType: 'Remux', codec: 'x265', hdr: true }).toFixed(2), '0.90');
   assert.equal(qualityScore({ resolution: '1080p', sourceType: 'BluRay', codec: 'x264', hdr: false }).toFixed(3), '0.695');
   assert.equal(qualityScore({}), 0, 'unknown still zero, not negative');
 });
@@ -184,7 +184,7 @@ test('v2: persisted breakdown carries all six components', () => {
     { season: 1, episode: 1 }, 'ttS',
   );
   const keys = Object.keys(r.justification.scoreBreakdown).sort();
-  assert.deepEqual(keys, ['cacheScore', 'episodeMatchScore', 'metadataScore', 'popularityScore', 'qualityScore', 'sourceScore']);
+  assert.deepEqual(keys, ['cacheScore', 'episodeMatchScore', 'metadataScore', 'popularityScore', 'qualityDetails', 'qualityScore', 'sourceScore']);
 });
 
 // ---------------------------------------------------------------------------
@@ -238,4 +238,55 @@ test('v2: Prowlarr null-S/E rows fail closed, scoped rows keep scope trust', () 
     evaluateIdentityEligibility(wrong, { season: 1, episode: 1, mediaType: 'series' }).eligible,
     false,
   );
+});
+
+test('v2: premium audio orders losslessly without dominating', () => {
+  const q = (audio) => qualityScore({ resolution: '2160p', sourceType: 'WEB-DL', codec: 'x265', audio });
+  const atmos = q('TrueHD Atmos');
+  const dtsx = q('DTS:X');
+  const truehd = q('TrueHD');
+  const dtshd = q('DTS-HD MA');
+  const ddAtmos = q('DDP Atmos 5.1');
+  const dd = q('DDP 5.1');
+  const ac3 = q('AC-3');
+  const aac = q('AAC');
+  const none = q(null);
+  assert.ok(atmos >= dtsx && dtsx >= truehd, `lossless object first: ${atmos} ${dtsx} ${truehd}`);
+  assert.ok(truehd >= dtshd && dtshd > ddAtmos, `lossless above lossy: ${truehd} ${dtshd} ${ddAtmos}`);
+  assert.ok(ddAtmos >= dd && dd >= ac3 && ac3 >= aac && aac >= none, `lossy order: ${ddAtmos} ${dd} ${ac3} ${aac} ${none}`);
+  assert.ok(atmos - none < 0.03, 'audio swing stays below source/resolution steps');
+});
+
+test('v2: source class dominates minor HDR/audio bonuses', () => {
+  const q = (at) => qualityScore(at);
+  // REMUX HDR10 beats WEBRip DV (source gap > HDR gap).
+  assert.ok(
+    q({ resolution: '2160p', sourceType: 'Remux', codec: 'x265', hdr: 'HDR10' })
+    > q({ resolution: '2160p', sourceType: 'WEBRip', codec: 'x265', hdr: 'DV' }),
+    'REMUX HDR10 > WEBRip DV',
+  );
+  // BluRay HDR10 beats WEB-DL DV.
+  assert.ok(
+    q({ resolution: '2160p', sourceType: 'BluRay', codec: 'x265', hdr: 'HDR10' })
+    > q({ resolution: '2160p', sourceType: 'WEB-DL', codec: 'x265', hdr: 'DV' }),
+    'BluRay HDR10 > WEB-DL DV',
+  );
+  // 2160p WEB-DL AAC beats 1080p WEB-DL TrueHD (resolution > audio).
+  assert.ok(
+    q({ resolution: '2160p', sourceType: 'WEB-DL', codec: 'x265', audio: 'AAC' })
+    > q({ resolution: '1080p', sourceType: 'WEB-DL', codec: 'x265', audio: 'TrueHD Atmos' }),
+    '2160p AAC > 1080p TrueHD Atmos',
+  );
+});
+
+test('v2: quality breakdown exposes hdr/audio inputs', () => {
+  const r = rankHit(
+    liveHit('e1', 'M.2020.2160p.BluRay.DV.TrueHD.mkv', { resolution: '2160p', source: 'BluRay', codec: 'x265', hdr: 'DV', audio: 'TrueHD Atmos' }),
+    {}, 'ttX',
+  );
+  const det = r.justification.scoreBreakdown.qualityDetails;
+  assert.equal(det.hdr, 'DV');
+  assert.equal(det.audio, 'TrueHD Atmos');
+  assert.equal(det.hdrBonus, 0.125);
+  assert.equal(det.audioBonus, 0.025);
 });

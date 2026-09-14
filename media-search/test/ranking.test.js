@@ -53,8 +53,22 @@ test('qualityScore: 2160p BluRay HDR x265 gets highest score', () => {
     codec: 'x265',
     hdr: true,
   });
-  assert.ok(score >= 0.9);
+  // Generic (boolean) HDR maps to the HDR10 bucket, not the DV top.
+  assert.ok(score >= 0.88);
   assert.ok(score <= 1.0);
+});
+
+test('qualityScore: DV outranks HDR10+ outranks HDR10, HLG trails', () => {
+  const base = { resolution: '2160p', sourceType: 'BluRay', codec: 'x265' };
+  const dv = qualityScore({ ...base, hdr: 'DV' });
+  const plus = qualityScore({ ...base, hdr: 'HDR10+' });
+  const ten = qualityScore({ ...base, hdr: 'HDR10' });
+  const generic = qualityScore({ ...base, hdr: true });
+  const hlg = qualityScore({ ...base, hdr: 'HLG' });
+  const sdr = qualityScore({ ...base, hdr: false });
+  assert.ok(dv > plus && plus > ten, `DV ${dv} > HDR10+ ${plus} > HDR10 ${ten}`);
+  assert.equal(generic, ten, 'unknown HDR flavor ties generic HDR10');
+  assert.ok(ten > hlg && hlg > sdr, `HDR10 ${ten} > HLG ${hlg} > SDR ${sdr}`);
 });
 
 test('qualityScore: 480p DVD gets low score', () => {
