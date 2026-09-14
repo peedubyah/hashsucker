@@ -10,9 +10,10 @@
 // only (§12/§15: no TTFB optimization this slice); we preserve stage timing so a future TTFB
 // waterfall can explain where first-byte time goes.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Monotonic correlation-ID counter. Each StageClock gets a unique corr_id at
 /// construction so a single demand/fill can be followed through its StageReport
@@ -51,6 +52,20 @@ pub struct Metrics {
     pub cdn_latency_ms: AtomicU64,
     pub cdn_latency_n: AtomicU64,
     pub final_cdn_host: Mutex<Option<String>>,
+    // Layer C demand-kind split (Slice A/B: which ranges served the player
+    // now vs warmed the cache). serve = span covering the client window;
+    // backfill = prefix span staged only. In-span retries keep counting
+    // under cdn_requests/recovery_attempts, so
+    // cdn_requests - serve_ranges - backfill_ranges == retry resends.
+    pub cdn_serve_ranges: AtomicU64,
+    pub cdn_backfill_ranges: AtomicU64,
+    // Optional backfill spans skipped because the provider showed recent
+    // throttle pressure. The foreground serve span always runs.
+    pub backfill_suppressed: AtomicU64,
+    // Wall-clock ms of the most recent 429/recovery throttle per provider.
+    // Lets a later fill ask "is this provider hot right now" without new
+    // machinery. Written on the 429 path only; read on backfill launch.
+    pub provider_last_throttle_ms: Mutex<HashMap<String, u64>>,
 
     // Capability lifecycle
     pub capability_acquisitions: AtomicU64,
@@ -514,6 +529,11 @@ pub struct CdnAttempt {
     /// - "dead_capability_reacquire": 401/403/404/410, reacquire fresh capability
     /// - "mid_body_resume": transport failure mid-body, resume at current offset
     pub recovery_path: Option<String>,
+    /// Demand kind for this attempt: "serve" (span covering the client
+    /// window: foreground bytes + suffix fill) or "backfill" (prefix span,
+    /// staged only). Lets a 429 be attributed to foreground vs optional
+    /// work when answering "what burned the provider budget".
+    pub span_kind: String,
 }
 
 /// Shared, interior-mutable stage clock. Created per client request and handed
@@ -530,6 +550,10 @@ pub struct StageClock {
     /// Runtime correlation id. Generated at construction so every StageReport and
     /// CdnAttempt sharing this clock carries the same id. Not persisted.
     corr_id: String,
+    /// Demand kind of the span currently executing on this clock ("serve" or
+    /// "backfill"). Stamped onto each CdnAttempt at record time so a later
+    /// 429 is attributable to foreground vs optional work.
+    span_kind: Arc<Mutex<String>>,
 }
 
 impl Default for StageClock {
@@ -548,7 +572,15 @@ impl StageClock {
             })),
             attempts: Arc::new(Mutex::new(Vec::with_capacity(8))),
             corr_id: format!("corr-{}", CORR_ID_COUNTER.fetch_add(1, Ordering::SeqCst)),
+            span_kind: Arc::new(Mutex::new("serve".to_string())),
         }
+    }
+
+    /// Demand kind of the span about to execute ("serve" or "backfill").
+    /// Called by the fill loop when it moves to the next span; attempts
+    /// recorded afterwards carry the new kind.
+    pub fn set_span_kind(&self, kind: &str) {
+        *self.span_kind.lock().unwrap() = kind.to_string();
     }
 
     /// Returns the T0 of this clock, for computing offsets in the transport layer.
@@ -560,10 +592,20 @@ impl StageClock {
         self.corr_id.clone()
     }
     pub fn set_t1(&self, t: Instant) {
-        self.inner.lock().unwrap().t1_acquire_issued = Some(t);
+        // First stamp wins: get_file stamps at P5 acquire start; fill paths
+        // re-stamp defensively. Keeps T0->T1 == plan work only.
+        let mut g = self.inner.lock().unwrap();
+        if g.t1_acquire_issued.is_none() {
+            g.t1_acquire_issued = Some(t);
+        }
     }
     pub fn set_t2(&self, t: Instant) {
-        self.inner.lock().unwrap().t2_capability_ready = Some(t);
+        // First stamp wins, mirroring T1 (a later span must not rewrite the
+        // acquisition instant with its own reuse).
+        let mut g = self.inner.lock().unwrap();
+        if g.t2_capability_ready.is_none() {
+            g.t2_capability_ready = Some(t);
+        }
     }
     pub fn set_t3(&self, t: Instant) {
         // First dispatch wins: later attempts are recovery retries, and the
@@ -613,6 +655,7 @@ impl StageClock {
     ) {
         let started_at_ms = send_instant.saturating_duration_since(self.t0).as_millis() as u64;
         let headers_received = status != 0;
+        let span_kind = self.span_kind.lock().unwrap().clone();
         let mut g = self.attempts.lock().unwrap();
         if g.len() < 16 {
             // Bound: pathological retry chains don't grow the vec forever.
@@ -632,6 +675,7 @@ impl StageClock {
                 headers_received,
                 outcome,
                 recovery_path: None,
+                span_kind,
             });
         }
     }
@@ -774,6 +818,11 @@ pub struct StageReport {
     /// Observability-only: runtime correlation id linking this report to its
     /// CdnAttempt(s). Not persisted; not part of cache/TorrentFile identity.
     pub corr_id: String,
+    /// Observability-only: the S-1 durable TorrentFile id this demand served.
+    /// Lets a provider stall be tied back to a title in production debugging.
+    /// Never used for routing, keying, or byte identity (same precedent as
+    /// the provider/cap_id fields above).
+    pub tf_id: String,
 }
 
 impl StageReport {
@@ -820,6 +869,8 @@ impl StageReport {
             "cap_id": self.cap_id,
             "account_scope": self.account_scope,
             "corr_id": self.corr_id,
+            // Observability-only: which TorrentFile this demand served.
+            "tf_id": self.tf_id,
         })
     }
 }
@@ -877,6 +928,54 @@ impl Metrics {
 
     pub fn set_final_cdn_host(&self, host: &str) {
         *self.final_cdn_host.lock().unwrap() = Some(host.to_string());
+    }
+
+    /// A span covering the client window issued its upstream range (serves
+    /// the player now AND stages the suffix). Call once per serve span
+    /// after its connection opens.
+    pub fn record_cdn_serve_range(&self) {
+        self.cdn_serve_ranges.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A prefix backfill span issued its upstream range (staged only; never
+    /// delivered). Call once per backfill span after its connection opens.
+    pub fn record_cdn_backfill_range(&self) {
+        self.cdn_backfill_ranges.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A backfill span was skipped because the provider showed recent
+    /// throttle pressure. Foreground correctness is unaffected: the serve
+    /// span already delivered exact bytes; the chunk simply stays partial
+    /// and is discarded like any incomplete fill.
+    pub fn record_backfill_suppressed(&self) {
+        self.backfill_suppressed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wall_ms_now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Remember that `provider` throttled right now (called on the 429 /
+    /// recovery path). Lets a later fill ask whether the provider is hot
+    /// without any new shared machinery.
+    pub fn note_provider_throttle(&self, provider: &str) {
+        self.provider_last_throttle_ms
+            .lock()
+            .unwrap()
+            .insert(provider.to_string(), Self::wall_ms_now());
+    }
+
+    /// Milliseconds since `provider` last throttled, or None if it never
+    /// has (in this process lifetime). Saturates at u64::MAX on clock skew.
+    pub fn provider_throttle_age_ms(&self, provider: &str) -> Option<u64> {
+        self.provider_last_throttle_ms
+            .lock()
+            .unwrap()
+            .get(provider)
+            .map(|t| Self::wall_ms_now().saturating_sub(*t))
     }
 
     pub fn record_cap_reuse(&self) {

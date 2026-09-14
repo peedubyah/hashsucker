@@ -498,6 +498,11 @@ impl ResilientRangeReader {
         self.enter_recovery();
         self.cap_ref().throttle(Instant::now() + effective);
         self.metrics.record_recovery_attempt();
+        // Slice B pressure gauge: remember that this provider throttled now
+        // so a later fill can defer optional work (backfill) while the
+        // account budget is hot. Observability + policy input only; the
+        // cooldown itself is still honored per-capability below.
+        self.metrics.note_provider_throttle(&self.cap_ref().provider);
         self.recovery.same_cap_retries += 1;
         // Record the enforced wait on the FAILING attempt BEFORE incrementing,
         // so the timeline reads: "attempt N failed -> waited W ms -> attempt N+1".

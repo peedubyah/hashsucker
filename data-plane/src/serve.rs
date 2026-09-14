@@ -1512,6 +1512,12 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         || plan
             .as_ref()
             .map_or(true, |p| p.runs().iter().any(|r| matches!(r.kind, RunKind::Fetch)));
+    // Slice B: stamp T1 (acquire issued) here so the stage clock separates
+    // plan work (T0->T1) from acquisition work (T1->T2, incl. permit and
+    // throttle waits). Fill paths re-stamp defensively; first stamp wins.
+    if needs_provider {
+        stage.set_t1(Instant::now());
+    }
     let first_reserved: Option<manager::ReservedCapability> = if needs_provider {
         match state.manager.acquire_for_read(priority).await {
             Ok(r) => Some(r),
@@ -1607,6 +1613,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                 cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
                 account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
                 corr_id: corr_id.clone(),
+                tf_id: state.tf_id_durable.clone(),
             });
             return;
         }
@@ -1654,6 +1661,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
                     account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
                     corr_id: corr_id.clone(),
+                    tf_id: state.tf_id_durable.clone(),
                 });
                 return;
             }
@@ -1824,6 +1832,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         cap_id: pf_provider.1.clone(),
                         account_scope: pf_provider.2.clone(),
                         corr_id: pf_stage.corr_id(),
+                        tf_id: t.tf_id_durable.clone(),
                     });
                 });
             }
@@ -2695,6 +2704,7 @@ else if stripe_wanted(sub.len())
                                     cap_id: String::new(),
                                     account_scope: String::new(),
                                     corr_id: join_clock.corr_id(),
+                                    tf_id: tf_id.tf_id_durable.clone(),
                                 };
                                 metrics.record_stage_report(join_report);
                                 // `notify_waiters()` stores NO permit, so a
@@ -2887,6 +2897,7 @@ else if stripe_wanted(sub.len())
             cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
             account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
             corr_id: corr_id.clone(),
+            tf_id: state.tf_id_durable.clone(),
         });
     });
 
@@ -3074,6 +3085,46 @@ fn serve_first_min_gap_bytes() -> u64 {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(256 * 1024)
+}
+
+/// Backfill suppression window: seconds after a provider 429 during which
+/// optional prefix backfills are skipped. Foreground serve spans always run.
+/// Overridable via `DATA_PLANE_BACKFILL_SUPPRESS_SECS` (0 = never suppress).
+fn backfill_suppress_window_secs() -> u64 {
+    std::env::var("DATA_PLANE_BACKFILL_SUPPRESS_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(60)
+}
+
+/// True when launching a prefix backfill would spend provider budget
+/// unwisely: this lane is inside a live throttle window, or this provider
+/// throttled anything within the suppression window. Inspects only; never
+/// mutates cooldown/breaker state and never bypasses it. The serve span
+/// already delivered exact bytes, so skipping only defers warming: the
+/// partial chunk is discarded and a later demand re-fills it whole.
+fn backfill_under_pressure(
+    metrics: &Metrics,
+    next_lane: &Option<ReaderCapability>,
+) -> bool {
+    if backfill_suppress_window_secs() == 0 {
+        return false;
+    }
+    let now = Instant::now();
+    if let Some(ReaderCapability::Owned(r)) = next_lane {
+        // Own lane hot: a range now would likely 429 behind the same cooldown.
+        if r.cap.status() == CapabilityStatus::Throttled && now < r.cap.throttle_until() {
+            return true;
+        }
+        // Provider hot (another lane/title saw a 429 recently): the account
+        // budget — not any local gate — is the constraint. Defer warming.
+        if let Some(age_ms) = metrics.provider_throttle_age_ms(&r.cap.provider) {
+            if age_ms < backfill_suppress_window_secs() * 1000 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub async fn fill_chunk_run(
@@ -3342,6 +3393,21 @@ async fn fill_chunk_run_inner(
 
     for (span_no, &(span_start, span_end)) in spans.iter().take(span_count).enumerate() {
         let first_span = span_no == 0;
+        // Throttle-sensitive backfill suppression (Slice A): the prefix
+        // backfill is optional cache warming, not foreground bytes. Under
+        // provider pressure skip it: break with ok=true so the tail
+        // publishes what the serve span completed, ends the client stream
+        // cleanly, and hands the still-held reservation back. The partial
+        // chunk is discarded; a later demand re-fills it whole.
+        if !first_span && backfill_under_pressure(&metrics, &next_lane) {
+            metrics.record_backfill_suppressed();
+            break;
+        }
+        // Attempts recorded on this clock from here carry the span kind, so
+        // a later 429 attributes to foreground vs optional work.
+        if let Some(s) = stage.as_ref() {
+            s.set_span_kind(if first_span { "serve" } else { "backfill" });
+        }
         // ---- Slice 4.5 T1: capability acquisition requested. ----
         // The SAME Slice 3 scheduling entry point the no-cache path uses. That is
         // the whole of the A.4 safety contract: the cache may reshape demand but
@@ -3508,6 +3574,15 @@ async fn fill_chunk_run_inner(
     if cold && first_span {
         *metrics.cold_cdn_first_byte_ms.lock().unwrap() =
             Some(sub_open.elapsed().as_millis() as u64);
+    }
+    // Demand-kind accounting (Slice B): this span's connection is open, so
+    // its upstream range counts as foreground (serve) or optional
+    // (backfill). In-span retries keep counting under cdn_requests and
+    // recovery budgets; cdn_requests - serve - backfill == retry resends.
+    if first_span {
+        metrics.record_cdn_serve_range();
+    } else {
+        metrics.record_cdn_backfill_range();
     }
 
     // The resilient reader delivers [span_start, span_end] contiguously and in
@@ -4206,6 +4281,23 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
             "429": m.cdn_429.load(Ordering::SeqCst),
             "latency_ms_avg": cdn_avg,
             "final_cdn_host": m.final_cdn_host.lock().unwrap().clone(),
+            // Demand-kind split: foreground serve ranges vs optional prefix
+            // backfills vs suppressed backfills. In-span retries keep
+            // counting under requests/recovery; requests - serve - backfill
+            // == retry resends.
+            "serve_ranges": m.cdn_serve_ranges.load(Ordering::SeqCst),
+            "backfill_ranges": m.cdn_backfill_ranges.load(Ordering::SeqCst),
+            "backfill_suppressed": m.backfill_suppressed.load(Ordering::SeqCst),
+            // Milliseconds since each provider last throttled (429/recovery),
+            // absent when it never has in this process lifetime.
+            "provider_pressure_ms": m.provider_last_throttle_ms.lock().unwrap().iter().map(|(p, t)| {
+                let age = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(*t)
+                    .saturating_sub(*t);
+                serde_json::json!({"provider": p, "ms_since_throttle": age})
+            }).collect::<Vec<_>>(),
         },
         // Capability lifecycle (§3 reuse / §5 reacquire / §7 negative)
         "capability": {
