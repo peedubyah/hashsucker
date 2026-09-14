@@ -39,3 +39,27 @@ test('refuses Comet TorBox infoHash when bingeGroup and playback URL disagree', 
   assert.equal(stream.infoHash, null);
   assert.match(stream.key, /^url:/);
 });
+
+test('normalizeStream extracts infoHash from Torrentio RD resolve URLs', () => {
+  const hash = 'a'.repeat(40);
+  const raw = {
+    name: '[RD+] test',
+    behaviorHints: { filename: 'Test.2024.1080p.mkv' },
+    url: `https://torrentio.strem.fun/resolve/realdebrid/KEYGOESHERE/${hash}/null/2/Test.2024.1080p.mkv`,
+  };
+  const out = normalizeStream(raw, {});
+  assert.ok(out, 'RD resolve stream normalizes');
+  assert.equal(out.infoHash, hash);
+});
+
+test('normalizeStream keeps extracting TorBox resolve URLs', () => {
+  const hash = 'b'.repeat(40);
+  const raw = {
+    name: '[TB] test',
+    behaviorHints: { filename: 'Test.2024.1080p.mkv' },
+    url: `https://torrentio.strem.fun/resolve/torbox/123e4567-e89b-12d3-a456-426614174000/${hash}/null/2/Test.2024.1080p.mkv`,
+  };
+  const out = normalizeStream(raw, {});
+  assert.ok(out, 'TorBox resolve stream normalizes');
+  assert.equal(out.infoHash, hash);
+});

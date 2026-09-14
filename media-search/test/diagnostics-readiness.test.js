@@ -216,3 +216,73 @@ test('summarizeForStartup renders one compact block without secrets', () => {
   assert.ok(!text.includes(SECRET));
   assert.ok(text.split('\n').length <= 14, 'compact, got: ' + text);
 });
+
+test('diagnostics: provider matrix - one healthy provider is ready', async () => {
+  const { default: fs } = await import('node:fs');
+  const { default: os } = await import('node:os');
+  const { default: path } = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'diag-prov-'));
+  try {
+    const healthyCore = (overrides = {}) => ({
+      ...baseEnv({ STRM_OUTPUT_PATH: dir }),
+      ...overrides,
+    });
+    const run = (env, fetchFn, factory = null) => buildDiagnostics({
+      cache: emptyCache,
+      controlPlaneStore: emptyStore,
+      env,
+      fetchFn,
+      listLibraryFn: emptyListing,
+      retirementPolicy: disabledPolicy,
+      realDebridClientFactory: factory,
+    });
+    const okFetch = stubFetch([
+      ['http://dp.test:3001/metrics', {}],
+      ['https://api.torbox.app/v1/api/torrents/checkcached', {}],
+    ]);
+    const okRdFactory = () => ({ validateAccount: async () => ({}) });
+
+    // TorBox only.
+    const tb = await run(healthyCore({ TORBOX_API_KEY: SECRET }), okFetch, null);
+    assert.equal(tb.status, 'ready');
+    assert.equal(tb.providers.torbox.state, 'ok');
+    assert.equal(tb.providers.realdebrid.state, 'skipped');
+    assert.ok(!tb.warnings.some((w) => w.includes('debrid provider')), 'no scary warning for absent RD');
+
+    // RD only.
+    const rd = await run(healthyCore({ REALDEBRID_API_KEY: SECRET }), okFetch, okRdFactory);
+    assert.equal(rd.status, 'ready');
+    assert.equal(rd.providers.torbox.state, 'skipped');
+    assert.equal(rd.providers.realdebrid.state, 'ok');
+    assert.ok(!rd.warnings.some((w) => w.includes('debrid provider')));
+
+    // Both.
+    const both = await run(
+      healthyCore({ TORBOX_API_KEY: SECRET, REALDEBRID_API_KEY: SECRET }), okFetch, okRdFactory,
+    );
+    assert.equal(both.status, 'ready');
+
+    // Neither: not_ready with an actionable warning.
+    const neither = await run(healthyCore({}), okFetch, null);
+    assert.equal(neither.status, 'not_ready');
+    assert.equal(neither.providers.torbox.state, 'skipped');
+    assert.equal(neither.providers.realdebrid.state, 'skipped');
+    assert.ok(neither.warnings.some((w) => w.includes('No debrid provider configured')));
+
+    // Broken TorBox + healthy RD: degraded, errors stay provider-specific.
+    const badTbFetch = stubFetch([
+      ['http://dp.test:3001/metrics', {}],
+      ['https://api.torbox.app/v1/api/torrents/checkcached', {}, 401],
+    ]);
+    const broken = await run(
+      healthyCore({ TORBOX_API_KEY: 'bad', REALDEBRID_API_KEY: SECRET }), badTbFetch, okRdFactory,
+    );
+    assert.equal(broken.status, 'degraded');
+    assert.equal(broken.providers.torbox.reason, 'TORBOX_AUTH_FAILED');
+    assert.equal(broken.providers.realdebrid.state, 'ok');
+    const flat = JSON.stringify(broken);
+    assert.ok(!flat.includes(SECRET), 'no secret material in output');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

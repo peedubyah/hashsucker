@@ -514,5 +514,12 @@ export async function selectBindableCandidate(results, options = {}) {
       torboxState: c.availability?.torbox?.state || 'unknown',
     }));
 
+  // An empty reason means eligible candidates existed but none could be
+  // bound (e.g. RD-only deploys have no TorBox binding seam yet — see the
+  // RD-only tranche report). Say so explicitly instead of returning "".
+  if (!selected && !reason) {
+    reason = eligible.length > 0 ? 'no-bindable-candidate' : 'no candidates';
+  }
+
   return { selected, reason, alternates, skipped };
 }

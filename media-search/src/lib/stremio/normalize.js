@@ -251,10 +251,13 @@ function extractTorrentioTorBoxInfoHash(raw) {
     return null;
   }
 
-  // Look for Torrentio TorBox resolve URL pattern
+  // Look for Torrentio resolve URL pattern (RD-only tranche: TorBox
+  // and Real-Debrid manifests both use /resolve/<provider>/... — the
+  // middle segment differs (uuid vs key) so it is not matched literally).
   // Pattern: /resolve/torbox/{uuid}/{infoHash}/...
+  //          /resolve/realdebrid/{key}/{infoHash}/...
   const pathMatch = url.pathname.match(
-    /\/resolve\/torbox\/[a-f0-9-]+\/([a-f0-9]{40})(?:\/|$)/i
+    /\/resolve\/(?:torbox|realdebrid)\/[^/]+\/([a-f0-9]{40})(?:\/|$)/i
   );
 
   if (pathMatch) {

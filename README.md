@@ -3,7 +3,7 @@
 ## Quick start (5 minutes)
 
 ```bash
-cp .env.example .env        # then edit: TORBOX_API_KEY + two HOST PATHS
+cp .env.example .env        # then edit: one provider key + two HOST PATHS
 docker compose pull         # prebuilt images, no toolchain needed
 docker compose up -d
 curl localhost:3000/api/diagnostics | head -c 600

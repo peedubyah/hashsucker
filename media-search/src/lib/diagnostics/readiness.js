@@ -640,7 +640,18 @@ export async function buildDiagnostics({
   const fatal = [discoveryDb, controlDb, strm, dataPlane].filter((c) => c.state === 'error');
   const soft = [torbox, realdebrid, jellyfin, plex, vfs]
     .filter((c) => c.state === 'error');
-  const status = fatal.length > 0 ? 'not_ready' : (soft.length > 0 ? 'degraded' : 'ready');
+  // Provider symmetry (RD-only tranche): one healthy configured provider
+  // is a usable system. Zero configured providers is not_ready (nothing
+  // can be fulfilled); a single broken provider is degraded, never fatal
+  // for the other. Absent-by-choice providers report skipped, never scary.
+  const providersConfigured = [torbox, realdebrid]
+    .filter((p) => p.state !== 'skipped').length;
+  const status = (fatal.length > 0 || providersConfigured === 0)
+    ? 'not_ready'
+    : (soft.length > 0 ? 'degraded' : 'ready');
+  if (providersConfigured === 0) {
+    warnings.push('No debrid provider configured (set TORBOX_API_KEY and/or REALDEBRID_API_KEY).');
+  }
 
   return {
     status,

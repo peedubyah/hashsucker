@@ -26,6 +26,18 @@ else
     log "Arr not configured; physical import dispatch disabled (queue + inventory polling continue)"
 fi
 
+# TorBox-less operation (RD-only tranche): the inventory scan and everything
+# downstream of it are TorBox-specific. Without a key the worker still
+# processes the explicit request queue above, but never enters the scan
+# loop — otherwise every iteration would loudly fail (`TORBOX_API_KEY is
+# required`) forever. Jobs dispatch resumes after TorBox is configured.
+TORBOX_SCAN_ENABLED=0
+if [ -n "${TORBOX_API_KEY:-}" ]; then
+    TORBOX_SCAN_ENABLED=1
+else
+    log "TorBox not configured; inventory scan disabled (request queue processing continues)"
+fi
+
 "$SCRIPTS_DIR/db-init.sh" >/dev/null
 
 while :; do
@@ -68,12 +80,14 @@ while :; do
     fi
 
     #
-    # Refresh TorBox inventory.
+    # Refresh TorBox inventory (TorBox-configured only; see top).
     #
-    if ! "$SCRIPTS_DIR/scan-torbox.sh"; then
-        log "TorBox scan failed"
-        sleep "$POLL_INTERVAL"
-        continue
+    if [ "$TORBOX_SCAN_ENABLED" -eq 1 ]; then
+        if ! "$SCRIPTS_DIR/scan-torbox.sh"; then
+            log "TorBox scan failed"
+            sleep "$POLL_INTERVAL"
+            continue
+        fi
     fi
 
     #

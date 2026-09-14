@@ -22,7 +22,7 @@ services:
       REQUESTS_ROOT: /requests
       DISCOVERY_DB: /data/discovery-cache.db
       CONTROL_PLANE_DB: /data/control-plane.db
-      TORBOX_API_KEY: ${TORBOX_API_KEY:?Set TORBOX_API_KEY in .env}
+      TORBOX_API_KEY: ${TORBOX_API_KEY:-}
       REALDEBRID_API_KEY: ${REALDEBRID_API_KEY:-}
       COMET_TORBOX_MANIFEST_URL: ${COMET_TORBOX_MANIFEST_URL:-}
       COMET_REALDEBRID_MANIFEST_URL: ${COMET_REALDEBRID_MANIFEST_URL:-}
@@ -88,7 +88,7 @@ services:
     restart: unless-stopped
     user: "${PUID:-99}:${PGID:-100}"
     environment:
-      TORBOX_API_KEY: ${TORBOX_API_KEY:?Set TORBOX_API_KEY in .env}
+      TORBOX_API_KEY: ${TORBOX_API_KEY:-}
       TORBOX_API_URL: ${TORBOX_API_URL:-https://api.torbox.app/v1/api}
       TORBOX_DB: /config/state/torbox-importer.db
       POLL_INTERVAL: "${POLL_INTERVAL:-10}"
@@ -163,7 +163,7 @@ services:
       LISTEN: "0.0.0.0:3001"
       CONTROL_URL: "http://media-search:3000/api"
       CACHE_ROOT: "/data/cache"
-      TORBOX_API_KEY: ${TORBOX_API_KEY:?Set TORBOX_API_KEY in .env}
+      TORBOX_API_KEY: ${TORBOX_API_KEY:-}
       REALDEBRID_API_KEY: ${REALDEBRID_API_KEY:-}
       # DIAGNOSTIC: disable prefetch so demand reads are not coalesced into prefetch fills
       PREFETCH_ENABLED: "0"
