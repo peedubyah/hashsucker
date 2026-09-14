@@ -58,15 +58,16 @@ jobs:
           cache-to: type=gha,mode=max
 
   # Continuous dogfood channel: every main commit, amd64 only.
-  # NOTE (CI debug 2026-09-14): `cancel-in-progress: true` here caused
-  # every publish-main run to be cancelled at schedule time (twice
-  # reproduced, edge escaping only by finishing in <30s). Temporarily
-  # removed to isolate; will restore in scoped form once green is proven.
+  # NOTE (CI debug 2026-09-14): job-level `concurrency` (with AND without
+  # cancel-in-progress) coincided with schedule-time cancellation of
+  # matrix legs across three runs (victim sets rotated; jobs that had
+  # already started always survived). Removed entirely to isolate: if
+  # this run goes 4/4 green, concurrency stays out — overlapping mains
+  # are rare, amd64 builds are minutes, and :main is last-writer-wins
+  # by design while :sha tags never conflict.
   publish-main:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    concurrency:
-      group: hashsucker-images-main
     strategy:
       matrix:
         service: [media-search, data-plane, torbox-importer, edge]
