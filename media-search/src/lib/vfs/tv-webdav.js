@@ -283,6 +283,31 @@ export function createTvWebDav({
 }) {
   const states = new Map();
 
+  // Catalog memoization (mirrors the movie catalog): getCatalog runs on
+  // every WebDAV request and its per-handoff materialize+finalize loop
+  // costs ~90ms of blocking event-loop time. The TV tables only change
+  // through paths that move this watermark — all vfs_tv_entries UPDATEs
+  // set updated_at, inserts move COUNT/created, deletes move COUNT, and
+  // playback_handoffs is append-only — so a stable watermark with a
+  // populated states map means serving the cached tree is identical to
+  // rebuilding. A 60s sweep cap keeps background RD-realization kicks and
+  // binding replay fresh even when the tables are quiet. Concurrent
+  // rebuilds are harmless (idempotent).
+  let catalogCache = null;
+  const CATALOG_SWEEP_MS = 60_000;
+  function catalogWatermark(handoffs, entries) {
+    let handoffMark = 0;
+    for (const h of handoffs) {
+      if (h.createdAt > handoffMark) handoffMark = h.createdAt;
+      if (h.selectedAt > handoffMark) handoffMark = h.selectedAt;
+    }
+    let entryMark = 0;
+    for (const e of entries) {
+      if (e.updatedAt > entryMark) entryMark = e.updatedAt;
+    }
+    return `${handoffs.length}:${handoffMark}|${entries.length}:${entryMark}`;
+  }
+
   // T8: per-request serving-primary reporter bound to one durable
   // TorrentFile id. streamFromDataPlane invokes it at header time with
   // that response's attribution (or null); each response is keyed by its
@@ -298,13 +323,25 @@ export function createTvWebDav({
   }
 
   async function getCatalog() {
-    for (const handoff of searchCache.listTvPlaybackHandoffs()) {
+    const handoffs = searchCache.listTvPlaybackHandoffs();
+    const entries = searchCache.listVfsTvEntries();
+    const watermark = catalogWatermark(handoffs, entries);
+    const nowMs = now();
+    if (
+      catalogCache
+      && catalogCache.watermark === watermark
+      && catalogCache.statesSize === states.size
+      && nowMs - catalogCache.sweptAt < CATALOG_SWEEP_MS
+    ) {
+      return catalogCache.tree;
+    }
+    for (const handoff of handoffs) {
       // Same anti-resurrection rule as the movie catalog.
       if (isUnpublishedHandoff(controlPlaneStore, handoff)) continue;
       await materializeVfsEntry(searchCache, handoff, controlPlaneStore, now, { allowLegacy: true });
     }
     const nextStates = [];
-    for (const entry of searchCache.listVfsTvEntries()) {
+    for (const entry of entries) {
       const stateKey = entry.mediaId + ':' + entry.season + ':' + entry.episode;
       let state = states.get(stateKey);
       if (!state) {
@@ -337,7 +374,9 @@ export function createTvWebDav({
       }
       nextStates.push(state);
     }
-    return buildTree(nextStates);
+    const tree = buildTree(nextStates);
+    catalogCache = { watermark, tree, sweptAt: nowMs, statesSize: states.size };
+    return tree;
   }
 
   async function resolveBacking(state, { forceFresh = false } = {}) {
