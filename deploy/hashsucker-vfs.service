@@ -18,13 +18,17 @@
 #
 # Flag provenance (do not tune blindly; each is measured):
 #   --allow-other            Plex (different uid) must traverse the mount.
-#   --dir-cache-time 30s     Directory membership freshness. New/removed
-#                            publications appear within ~30s. Unchanged.
+#   --dir-cache-time 60s     Directory membership freshness. New/removed
+#                            publications appear within ~60s. Re-listing fires
+#                            on expiry (verified); entry attrs stay on the
+#                            60s attr cache and opens always live-GET, so a
+#                            longer dir window cannot serve stale bytes.
 #   --vfs-cache-mode minimal Streams ranges without full-file download.
 #   --attr-timeout 60s       Entry-attr cache. Sizes are immutable per
-#                            published path and membership stays on the
-#                            30s dir cache, so 60s removes revalidation
-#                            churn with no freshness regression (measured).
+#                            published path; membership and negative misses
+#                            stay on the dir cache, so 60s removes
+#                            revalidation churn with no freshness regression
+#                            (measured).
 #   --log-level INFO + --log-file /tmp/rclone-mount.log
 #                            Canonical logging. DEBUG only on scratch mounts.
 # Deliberately NOT set (matches live, verified): --read-only (backend is
@@ -38,7 +42,7 @@ Wants=network-online.target
 [Service]
 Type=notify
 ExecStartPre=-/usr/bin/fusermount3 -uz /mnt/hashsucker-vfs
-ExecStart=/usr/bin/rclone mount webdav-local: /mnt/hashsucker-vfs --allow-other --dir-cache-time 30s --vfs-cache-mode minimal --attr-timeout 60s --log-level INFO --log-file /tmp/rclone-mount.log
+ExecStart=/usr/bin/rclone mount webdav-local: /mnt/hashsucker-vfs --allow-other --dir-cache-time 60s --vfs-cache-mode minimal --attr-timeout 60s --log-level INFO --log-file /tmp/rclone-mount.log
 ExecStop=-/usr/bin/fusermount3 -uz /mnt/hashsucker-vfs
 Restart=on-failure
 RestartSec=2
