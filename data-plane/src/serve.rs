@@ -3645,6 +3645,20 @@ async fn fill_chunk_run_inner(
             metrics.record_backfill_suppressed();
             break;
         }
+        // Cancelled-consumer backfill skip: the prefix backfill is optional
+        // cache warming, not foreground bytes. When the consumer is proven
+        // gone -- a failed sink send already observed (client_gone), or the
+        // response receiver dropped -- staging a prefix nobody will read
+        // only burns provider budget and holds the lane. Break with ok=true
+        // exactly like pressure suppression: the tail publishes what the
+        // serve span completed, and the partial first chunk is discarded.
+        if !first_span
+            && (client_gone
+                || sink.as_ref().is_some_and(|stx| stx.is_closed()))
+        {
+            metrics.record_backfill_no_consumer();
+            break;
+        }
         // Attempts recorded on this clock from here carry the span kind, so
         // a later 429 attributes to foreground vs optional work.
         if let Some(s) = stage.as_ref() {
@@ -4558,6 +4572,7 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
             "serve_ranges": m.cdn_serve_ranges.load(Ordering::SeqCst),
             "backfill_ranges": m.cdn_backfill_ranges.load(Ordering::SeqCst),
             "backfill_suppressed": m.backfill_suppressed.load(Ordering::SeqCst),
+            "backfill_no_consumer": m.backfill_no_consumer.load(Ordering::SeqCst),
             // Milliseconds since each provider last throttled (429/recovery),
             // absent when it never has in this process lifetime.
             "provider_pressure_ms": m.provider_last_throttle_ms.lock().unwrap().iter().map(|(p, t)| {

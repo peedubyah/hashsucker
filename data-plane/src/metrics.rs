@@ -68,6 +68,10 @@ pub struct Metrics {
     // Optional backfill spans skipped because the provider showed recent
     // throttle pressure. The foreground serve span always runs.
     pub backfill_suppressed: AtomicU64,
+    // Optional backfill spans not run because the consumer was already gone
+    // (proven by a failed sink send or a dropped receiver): prefix bytes for
+    // nobody. The serve span's durable chunks are unaffected.
+    pub backfill_no_consumer: AtomicU64,
     // Wall-clock ms of the most recent 429/recovery throttle per provider.
     // Lets a later fill ask "is this provider hot right now" without new
     // machinery. Written on the 429 path only; read on backfill launch.
@@ -992,6 +996,14 @@ impl Metrics {
     /// and is discarded like any incomplete fill.
     pub fn record_backfill_suppressed(&self) {
         self.backfill_suppressed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A backfill span was skipped or aborted because its consumer was
+    /// already gone (failed sink send or dropped receiver): prefix staging
+    /// for nobody. Serve-span durability is unaffected; a later demand
+    /// re-fills the chunk whole if ever needed.
+    pub fn record_backfill_no_consumer(&self) {
+        self.backfill_no_consumer.fetch_add(1, Ordering::SeqCst);
     }
 
     fn wall_ms_now() -> u64 {
