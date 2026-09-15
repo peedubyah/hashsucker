@@ -1512,13 +1512,55 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         || plan
             .as_ref()
             .map_or(true, |p| p.runs().iter().any(|r| matches!(r.kind, RunKind::Fetch)));
+    // Duplicate-acquire avoidance: if every chunk this demand would fetch
+    // is already being filled (claimed in the coalescer), skip the
+    // pre-acquire and join those fills below. A joined demand never touches
+    // its own reservation -- it serves locally (P11 recheck) or waits on the
+    // same records -- so the outcome is identical with or without acquiring,
+    // minus one requestdl. Races resolve safely: fills completing turn joins
+    // into local reads; fills failing resolve waiters to the same
+    // UpstreamFailed the acquiring path yields; and a fill that never
+    // started leaves nothing inflight, so acquisition proceeds normally
+    // (which also preserves the pre-commit exhaustion path: no inflight
+    // work means no skip). Narrow corner: skipping forgoes pre-commit
+    // AllSameTfFailed classification for doomed fills (surfaces as
+    // read-time failure); acceptable, as it needs providers down precisely
+    // across an already-inflight fill of these exact chunks.
+    let skip_acquire = match (state.cache.as_ref(), plan.as_ref()) {
+        (Some(cache), Some(plan)) => {
+            let tf_id = fill_torrent_file_id(
+                state.tf_id_durable.clone(),
+                state.info_hash.clone(),
+                state.canonical_path.clone(),
+                size,
+            );
+            let key = tf_id.cache_key();
+            let mut missing = 0u32;
+            let mut inflight = 0u32;
+            for run in plan.runs() {
+                if !matches!(run.kind, RunKind::Fetch) {
+                    continue;
+                }
+                for s in &plan.segments[run.seg_from..run.seg_to] {
+                    if s.present {
+                        continue;
+                    }
+                    missing += 1;
+                    if cache.inflight().has(&key, s.index) {
+                        inflight += 1;
+                    }
+                }
+            }
+            missing > 0 && inflight == missing
+        }
+        _ => false,
+    };
     // Slice B: stamp T1 (acquire issued) here so the stage clock separates
     // plan work (T0->T1) from acquisition work (T1->T2, incl. permit and
     // throttle waits). Fill paths re-stamp defensively; first stamp wins.
-    if needs_provider {
+    // Skipped demands stamp nothing (no acquisition issued).
+    let first_reserved: Option<manager::ReservedCapability> = if needs_provider && !skip_acquire {
         stage.set_t1(Instant::now());
-    }
-    let first_reserved: Option<manager::ReservedCapability> = if needs_provider {
         match state.manager.acquire_for_read(priority).await {
             Ok(r) => Some(r),
             Err(manager::DeliveryError::AllSameTfFailed { retry_after, .. }) => {
