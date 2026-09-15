@@ -27,6 +27,12 @@ pub struct Metrics {
     pub bytes_streamed: AtomicU64,
     pub client_cancellations: AtomicU64,
     pub upstream_errors: AtomicU64,
+    // Downstream-progress watchdog: committed-206 responses torn down after
+    // the watchdog bound with zero body progress (dead/zero-window consumer,
+    // abandoned seek). Cumulative bytes that HAD been delivered before those
+    // stalls. Never a provider signal: provider state is untouched.
+    pub downstream_stalls: AtomicU64,
+    pub downstream_stall_bytes: AtomicU64,
 
     // Layer A — requestdl / TorBox API acquisition
     pub api_requests: AtomicU64,
@@ -823,6 +829,13 @@ pub struct StageReport {
     /// Never used for routing, keying, or byte identity (same precedent as
     /// the provider/cap_id fields above).
     pub tf_id: String,
+    /// How the response producer finished: "complete", "cancelled",
+    /// "downstream_stall", "upstream_failed", or "error". A stalled or
+    /// cancelled downstream is a consumer outcome, never a provider one.
+    pub termination: String,
+    /// Body bytes accepted downstream before termination. Exact on
+    /// "complete" (== requested length); partial on stall/cancel.
+    pub bytes_delivered: u64,
 }
 
 impl StageReport {
@@ -871,6 +884,10 @@ impl StageReport {
             "corr_id": self.corr_id,
             // Observability-only: which TorrentFile this demand served.
             "tf_id": self.tf_id,
+            // Response-producer outcome + delivered total: distinguishes a
+            // dead downstream (stall/cancel) from an upstream failure.
+            "termination": self.termination,
+            "bytes_delivered": self.bytes_delivered,
         })
     }
 }
@@ -1088,6 +1105,15 @@ impl Metrics {
     /// Count a client GET at request start (includes GETs that later fail before any byte).
     pub fn record_request(&self) {
         self.requests.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The downstream-progress watchdog fired: a committed response made zero
+    /// body progress for the watchdog bound, so the producer exited instead
+    /// of wedging forever. `delivered` = bytes accepted downstream before the
+    /// stall. Provider/breaker/cooldown state is untouched by definition.
+    pub fn record_downstream_stall(&self, delivered: u64) {
+        self.downstream_stalls.fetch_add(1, Ordering::SeqCst);
+        self.downstream_stall_bytes.fetch_add(delivered, Ordering::SeqCst);
     }
 
     /// Record first-byte TTFB for the cold/warm request (observational; does NOT touch the

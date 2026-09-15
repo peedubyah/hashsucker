@@ -1585,7 +1585,9 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         // writes to the cache. It still goes through the SAME Slice 3 scheduler
         // (`manager.acquire_for_read`), so A.4 is not affected.
         if is_single {
-            let _ = serve_upstream_only(
+            // Single-byte demands always report (even when the upstream
+            // could not serve): the waterfall carries the termination.
+            let (_, outcome, delivered) = serve_upstream_only(
                 tx.clone(),
                 metrics.clone(),
                 manager_clone.clone(),
@@ -1614,6 +1616,8 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                 account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
                 corr_id: corr_id.clone(),
                 tf_id: state.tf_id_durable.clone(),
+                termination: outcome.as_str().to_string(),
+                bytes_delivered: delivered,
             });
             return;
         }
@@ -1629,8 +1633,10 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             None => {
                 // No cache. (A 1-byte single returned above.) Stream upstream
                 // directly with no staging — identical to the Slice 4.5
-                // no-cache fallback.
-                let ok = serve_upstream_only(
+                // no-cache fallback. The waterfall publishes on every exit
+                // (even when the upstream could not serve) so cancelled or
+                // wedged demands stop being invisible.
+                let (ok, outcome, delivered) = serve_upstream_only(
                     tx.clone(),
                     metrics.clone(),
                     manager_clone.clone(),
@@ -1646,9 +1652,6 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                 Some(stage.clone()),
             )
             .await;
-            if !ok {
-                return;
-                }
                 metrics.record_stage_report(StageReport {
                     instants: stage.snapshot(),
                     request: (start, end),
@@ -1662,8 +1665,13 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
                     corr_id: corr_id.clone(),
                     tf_id: state.tf_id_durable.clone(),
+                    termination: outcome.as_str().to_string(),
+                    bytes_delivered: delivered,
                 });
+            if !ok {
                 return;
+            }
+            return;
             }
         };
 
@@ -1833,6 +1841,8 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         account_scope: pf_provider.2.clone(),
                         corr_id: pf_stage.corr_id(),
                         tf_id: t.tf_id_durable.clone(),
+                        termination: if ok { "complete" } else { "error" }.to_string(),
+                        bytes_delivered: 0,
                     });
                 });
             }
@@ -1865,6 +1875,15 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
 
         let mut first_byte = true;
         let mut first_consumed = false;
+        // Response outcome + downstream-progress watchdog (see
+        // send_body_bounded): request-scoped like first_byte. Every
+        // consume-loop exit breaks (never returns) so the tail always
+        // joins workers and publishes the waterfall with its
+        // termination -- cancelled, wedged, failed, or complete
+        // demands are all visible instead of only the clean path.
+        let mut outcome = ResponseOutcome::Complete;
+        let mut delivered: u64 = 0;
+        let mut last_progress = Instant::now();
         // T12 steal-path worker handles (joined on the normal path before
         // the stage report) plus a shutdown guard covering EVERY early
         // return: dropping it stops assignment so workers exit between
@@ -1880,7 +1899,8 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         Ok(b) => b,
                         Err(e) => {
                             eprintln!("[rust-proxy] cache pread failed: {e}");
-                            return;
+                            outcome = ResponseOutcome::Error;
+                            break;
                         }
                     };
                     if first_byte {
@@ -1891,9 +1911,24 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         stage.set_t5(Instant::now());
                         metrics.record_first_byte(open_start.elapsed().as_millis() as u64);
                     }
-                    if tx.send(Ok(bytes::Bytes::from(bytes))).await.is_err() {
-                        metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
-                        return;
+                    match send_body_bounded(
+                        &tx,
+                        bytes::Bytes::from(bytes),
+                        &mut last_progress,
+                        &mut delivered,
+                    )
+                    .await
+                    {
+                        None => {}
+                        Some(ResponseOutcome::Cancelled) => {
+                            metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
+                            outcome = ResponseOutcome::Cancelled;
+                            break;
+                        }
+                        Some(o) => {
+                            outcome = o;
+                            break;
+                        }
                     }
                 }
                 RunKind::Fetch => {
@@ -2628,7 +2663,14 @@ else if stripe_wanted(sub.len())
                     // offset order, and spans are consumed in index order, so
                     // the client sees ONE ordered byte stream even though the
                     // fills run concurrently.
-                    for item in items {
+                    //
+                    // Response outcome + downstream-progress watchdog (see
+                    // send_body_bounded): every exit below breaks out of the
+                    // consume loop (never returns) so the tail always joins
+                    // workers and publishes the waterfall with its
+                    // termination -- cancelled, wedged, failed, or complete
+                    // demands are all visible instead of only the clean path.
+                    'consume: for item in items {
                         match item {
                             FetchItem::Owned { mut rx } => loop {
                                 match rx.recv().await {
@@ -2646,11 +2688,30 @@ else if stripe_wanted(sub.len())
                                                 open_start.elapsed().as_millis() as u64,
                                             );
                                         }
-                                        if tx.send(Ok(b)).await.is_err() {
-                                            metrics
-                                                .client_cancellations
-                                                .fetch_add(1, Ordering::SeqCst);
-                                            return;
+                                        // Bounded downstream send: refreshes the
+                                        // watchdog clock on success, records
+                                        // cancellation, or trips the stall
+                                        // terminator on zero progress.
+                                        match send_body_bounded(
+                                            &tx,
+                                            b,
+                                            &mut last_progress,
+                                            &mut delivered,
+                                        )
+                                        .await
+                                        {
+                                            None => {}
+                                            Some(ResponseOutcome::Cancelled) => {
+                                                metrics
+                                                    .client_cancellations
+                                                    .fetch_add(1, Ordering::SeqCst);
+                                                outcome = ResponseOutcome::Cancelled;
+                                                break 'consume;
+                                            }
+                                            Some(o) => {
+                                                outcome = o;
+                                                break 'consume;
+                                            }
                                         }
                                     }
                                     Some(SpanMsg::Eof) => break,
@@ -2672,9 +2733,13 @@ else if stripe_wanted(sub.len())
                                                 let _ = h.await;
                                             }
                                         }
-                                        return;
+                                        outcome = ResponseOutcome::UpstreamFailed;
+                                        break 'consume;
                                     }
-                                    None => return,
+                                    None => {
+                                        outcome = ResponseOutcome::Error;
+                                        break 'consume;
+                                    }
                                 }
                             },
                             FetchItem::Waiter { index, record } => {
@@ -2705,6 +2770,11 @@ else if stripe_wanted(sub.len())
                                     account_scope: String::new(),
                                     corr_id: join_clock.corr_id(),
                                     tf_id: tf_id.tf_id_durable.clone(),
+                                    // Arrival attribution only; the demand's
+                                    // own report at task end carries its real
+                                    // termination.
+                                    termination: "joined".to_string(),
+                                    bytes_delivered: 0,
                                 };
                                 metrics.record_stage_report(join_report);
                                 // `notify_waiters()` stores NO permit, so a
@@ -2721,20 +2791,26 @@ else if stripe_wanted(sub.len())
                                     // stripe workers so the survivor (and a
                                     // warm replacement) drains the remainder
                                     // durably. Cancel paths (client gone)
-                                    // return at once exactly as before.
+                                    // break out exactly as before (now to the
+                                    // shared tail, which publishes the
+                                    // waterfall with its termination).
                                     if !tx.is_closed() {
                                         for h in stripe_workers.drain(..) {
                                             let _ = h.await;
                                         }
                                     }
-                                    return;
+                                    outcome = ResponseOutcome::UpstreamFailed;
+                                    break 'consume;
                                 }
                                 // The chunk is PRESENT and durable now; read just
                                 // the part of it this request needs.
                                 let cs = grid.chunk_start(index);
                                 let ce = match grid.chunk_end(index) {
                                     Some(e) => e,
-                                    None => return,
+                                    None => {
+                                        outcome = ResponseOutcome::Error;
+                                        break 'consume;
+                                    }
                                 };
                                 let s = run.start.max(cs);
                                 let e = run.end.min(ce);
@@ -2744,7 +2820,8 @@ else if stripe_wanted(sub.len())
                                         eprintln!(
                                             "[rust-proxy] cache pread failed on joined chunk {index}: {err}"
                                         );
-                                        return;
+                                        outcome = ResponseOutcome::Error;
+                                        break 'consume;
                                     }
                                 };
                                 if first_byte {
@@ -2754,9 +2831,24 @@ else if stripe_wanted(sub.len())
                                         open_start.elapsed().as_millis() as u64,
                                     );
                                 }
-                                if tx.send(Ok(bytes::Bytes::from(bytes))).await.is_err() {
-                                    metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
-                                    return;
+                                match send_body_bounded(
+                                    &tx,
+                                    bytes::Bytes::from(bytes),
+                                    &mut last_progress,
+                                    &mut delivered,
+                                )
+                                .await
+                                {
+                                    None => {}
+                                    Some(ResponseOutcome::Cancelled) => {
+                                        metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
+                                        outcome = ResponseOutcome::Cancelled;
+                                        break 'consume;
+                                    }
+                                    Some(o) => {
+                                        outcome = o;
+                                        break 'consume;
+                                    }
                                 }
                             }
                             FetchItem::Staged { index, record } => {
@@ -2787,14 +2879,18 @@ else if stripe_wanted(sub.len())
                                             // T19: same join-on-terminal rule
                                             // as the Waiter arm above
                                             // (failed record, client
-                                            // present); cancel paths return
-                                            // at once exactly as before.
+                                            // present); cancel paths break
+                                            // out exactly as before (now to
+                                            // the shared tail, which
+                                            // publishes the waterfall with
+                                            // its termination).
                                             if !tx.is_closed() {
                                                 for h in stripe_workers.drain(..) {
                                                     let _ = h.await;
                                                 }
                                             }
-                                            return;
+                                            outcome = ResponseOutcome::UpstreamFailed;
+                                            break 'consume;
                                         }
                                     }
                                 }
@@ -2803,7 +2899,10 @@ else if stripe_wanted(sub.len())
                                 let cs = grid.chunk_start(index);
                                 let ce = match grid.chunk_end(index) {
                                     Some(e) => e,
-                                    None => return,
+                                    None => {
+                                        outcome = ResponseOutcome::Error;
+                                        break 'consume;
+                                    }
                                 };
                                 let s = run.start.max(cs);
                                 let e = run.end.min(ce);
@@ -2813,7 +2912,8 @@ else if stripe_wanted(sub.len())
                                         eprintln!(
                                             "[rust-proxy] cache pread failed on staged chunk {index}: {err}"
                                         );
-                                        return;
+                                        outcome = ResponseOutcome::Error;
+                                        break 'consume;
                                     }
                                 };
                                 if first_byte {
@@ -2823,9 +2923,24 @@ else if stripe_wanted(sub.len())
                                         open_start.elapsed().as_millis() as u64,
                                     );
                                 }
-                                if tx.send(Ok(bytes::Bytes::from(bytes))).await.is_err() {
-                                    metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
-                                    return;
+                                match send_body_bounded(
+                                    &tx,
+                                    bytes::Bytes::from(bytes),
+                                    &mut last_progress,
+                                    &mut delivered,
+                                )
+                                .await
+                                {
+                                    None => {}
+                                    Some(ResponseOutcome::Cancelled) => {
+                                        metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
+                                        outcome = ResponseOutcome::Cancelled;
+                                        break 'consume;
+                                    }
+                                    Some(o) => {
+                                        outcome = o;
+                                        break 'consume;
+                                    }
                                 }
                             }
                             FetchItem::Local { index } => {
@@ -2836,7 +2951,10 @@ else if stripe_wanted(sub.len())
                                 let cs = grid.chunk_start(index);
                                 let ce = match grid.chunk_end(index) {
                                     Some(e) => e,
-                                    None => return,
+                                    None => {
+                                        outcome = ResponseOutcome::Error;
+                                        break 'consume;
+                                    }
                                 };
                                 let s = run.start.max(cs);
                                 let e = run.end.min(ce);
@@ -2846,7 +2964,8 @@ else if stripe_wanted(sub.len())
                                         eprintln!(
                                             "[rust-proxy] cache pread failed on prefetch-durable chunk {index}: {err}"
                                         );
-                                        return;
+                                        outcome = ResponseOutcome::Error;
+                                        break 'consume;
                                     }
                                 };
                                 if first_byte {
@@ -2855,26 +2974,57 @@ else if stripe_wanted(sub.len())
                                     metrics
                                         .record_first_byte(open_start.elapsed().as_millis() as u64);
                                 }
-                                if tx.send(Ok(bytes::Bytes::from(bytes))).await.is_err() {
-                                    metrics
-                                        .client_cancellations
-                                        .fetch_add(1, Ordering::SeqCst);
-                                    return;
+                                match send_body_bounded(
+                                    &tx,
+                                    bytes::Bytes::from(bytes),
+                                    &mut last_progress,
+                                    &mut delivered,
+                                )
+                                .await
+                                {
+                                    None => {}
+                                    Some(ResponseOutcome::Cancelled) => {
+                                        metrics
+                                            .client_cancellations
+                                            .fetch_add(1, Ordering::SeqCst);
+                                        outcome = ResponseOutcome::Cancelled;
+                                        break 'consume;
+                                    }
+                                    Some(o) => {
+                                        outcome = o;
+                                        break 'consume;
+                                    }
                                 }
                             }
                         }
+                    }
+                    // A non-complete consume outcome aborts remaining runs,
+                    // matching the historical return-from-task behavior; the
+                    // shared tail below publishes the waterfall once.
+                    if outcome != ResponseOutcome::Complete {
+                        break;
                     }
                 }
             }
         }
 
-        // T12: join steal-path workers on the normal path -- every chunk
+        // T12: join steal-path workers. On the normal path every chunk
         // channel hit EOF, hence every fill returned, so the joins are
-        // immediate. (Early exits above return without joining; the
-        // shutdown guard stops assignment and permits free on
-        // worker/fill drops either way.)
+        // immediate. Exits that break out of the consume loop above also
+        // land here (the shutdown guard stops assignment and permits free
+        // on worker/fill drops either way); the joins stay bounded because
+        // workers exit at queue exhaustion.
         for h in stripe_workers {
             let _ = h.await;
+        }
+
+        // Downstream-stall terminal accounting: the consumer made zero body
+        // progress for the watchdog bound, so the response is torn down
+        // here instead of wedging the task forever. Provider state is
+        // untouched (no retry, no reacquire, no breaker/cooldown change);
+        // detached fills keep staging durably exactly as before.
+        if outcome == ResponseOutcome::DownstreamStall {
+            metrics.record_downstream_stall(delivered);
         }
 
         // ---- Slice 4.5: publish this request's stage waterfall.
@@ -2884,6 +3034,11 @@ else if stripe_wanted(sub.len())
         // read locally, so "came from disk" would wrongly report nearly every
         // request as a hit. Every segment durable is the real definition, and it
         // is exactly "zero provider work".
+        //
+        // The report publishes on EVERY consumer exit (complete, cancelled,
+        // stalled, failed, error) so abandoned/dead consumers stop being
+        // invisible: termination + bytes_delivered tell how the response
+        // ended downstream, independent of the provider-side stages above.
         let cache_hit = plan.is_full_hit();
         metrics.record_stage_report(StageReport {
             instants: stage.snapshot(),
@@ -2898,6 +3053,8 @@ else if stripe_wanted(sub.len())
             account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
             corr_id: corr_id.clone(),
             tf_id: state.tf_id_durable.clone(),
+            termination: outcome.as_str().to_string(),
+            bytes_delivered: delivered,
         });
     });
 
@@ -2921,6 +3078,82 @@ else if stripe_wanted(sub.len())
         }
     }
     builder.body(body).unwrap()
+}
+
+/// How a response producer finished delivering to the downstream body
+/// channel. Reported on the stage waterfall so an abandoned/dead consumer
+/// is distinguishable from provider/upstream outcomes. A stalled downstream
+/// never retries provider reads, never reacquires, and never touches
+/// breaker/cooldown state: the bytes were already correct, only the
+/// consumer is gone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ResponseOutcome {
+    Complete,
+    Cancelled,
+    DownstreamStall,
+    UpstreamFailed,
+    Error,
+}
+
+impl ResponseOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            ResponseOutcome::Complete => "complete",
+            ResponseOutcome::Cancelled => "cancelled",
+            ResponseOutcome::DownstreamStall => "downstream_stall",
+            ResponseOutcome::UpstreamFailed => "upstream_failed",
+            ResponseOutcome::Error => "error",
+        }
+    }
+}
+
+/// Downstream-progress watchdog bound: seconds of zero successful body
+/// sends after which a committed-206 response is torn down instead of
+/// wedging its task forever on a dead/zero-window consumer (abandoned
+/// seek, vanished player, unpropagated close). The timer covers one send.
+/// every success resets it, so a legitimately slow-but-reading client never
+/// trips it. Overridable via `DATA_PLANE_DOWNSTREAM_STALL_SECS`
+/// (0 = disable, restoring unbounded sends).
+fn downstream_stall_secs() -> u64 {
+    std::env::var("DATA_PLANE_DOWNSTREAM_STALL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(60)
+}
+
+/// Bounded downstream send for the response producer. Returns None when
+/// the bytes were accepted (progress timestamp and delivered total
+/// updated), or the terminal outcome when the consumer is gone
+/// (cancelled) or has made zero progress for the watchdog bound
+/// (stalled). Never touches provider state: on stall the caller tears
+/// down the response while detached fills keep staging durably.
+async fn send_body_bounded(
+    tx: &mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
+    b: bytes::Bytes,
+    progress: &mut Instant,
+    delivered: &mut u64,
+) -> Option<ResponseOutcome> {
+    let n = b.len() as u64;
+    let bound = downstream_stall_secs();
+    if bound == 0 {
+        return match tx.send(Ok(b)).await {
+            Ok(()) => {
+                *progress = Instant::now();
+                *delivered += n;
+                None
+            }
+            Err(_) => Some(ResponseOutcome::Cancelled),
+        };
+    }
+    match tokio::time::timeout(Duration::from_secs(bound), tx.send(Ok(b))).await {
+        Ok(Ok(())) => {
+            *progress = Instant::now();
+            *delivered += n;
+            None
+        }
+        Ok(Err(_)) => Some(ResponseOutcome::Cancelled),
+        Err(_) => Some(ResponseOutcome::DownstreamStall),
+    }
 }
 
 /// One item of a fetch run, in ascending chunk order.
@@ -3943,7 +4176,10 @@ async fn fill_chunk_run_inner(
 
 
 /// Legacy upstream-only serve (used by the 1-byte single path and the no-cache fallback).
-/// Returns true on clean EOF, false on terminal failure.
+/// Returns (served_to_eof, outcome, bytes_delivered): the downstream-progress
+/// watchdog applies here exactly as on the cached path, and the outcome lets
+/// callers publish the waterfall with its termination instead of leaving
+/// cancelled/stalled demands invisible.
 pub async fn serve_upstream_only(
     tx: tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
     metrics: Arc<Metrics>,
@@ -3960,7 +4196,7 @@ pub async fn serve_upstream_only(
     existing_cap: Option<manager::ReservedCapability>,
     on_chunk: Option<Arc<dyn Fn(u64, &[u8]) + Send + Sync>>,
     stage: Option<StageClock>,
-) -> bool {
+) -> (bool, ResponseOutcome, u64) {
     let acquire_start = Instant::now();
     // Slice 4.5 T1 — capability acquisition requested, through the same Slice 3
     // scheduler the cache path uses.
@@ -3973,7 +4209,7 @@ pub async fn serve_upstream_only(
         Some(cap) => cap,
         None => match manager.acquire_for_read(priority).await {
             Ok(r) => r,
-            Err(_) => return false,
+            Err(_) => return (false, ResponseOutcome::Error, 0),
         },
     };
     let acquire_ms = acquire_start.elapsed();
@@ -4017,13 +4253,18 @@ pub async fn serve_upstream_only(
                 metrics.client_416.fetch_add(1, Ordering::SeqCst);
             }
         }
-        return false;
+        return (false, ResponseOutcome::Error, 0);
     }
     if cold {
         *metrics.cold_cdn_first_byte_ms.lock().unwrap() =
             Some(open_start.elapsed().as_millis() as u64);
     }
     let mut first_byte = true;
+    // Downstream-progress watchdog state, same contract as the cached
+    // consumer loop: every accepted send refreshes progress; zero progress
+    // for the bound tears the response down with an explicit outcome.
+    let mut delivered: u64 = 0;
+    let mut last_progress = Instant::now();
     loop {
         match reader.next_chunk().await {
             Step::Chunk(b) => {
@@ -4035,15 +4276,27 @@ pub async fn serve_upstream_only(
                     }
                     metrics.record_first_byte(open_start.elapsed().as_millis() as u64);
                 }
-                if tx.send(Ok(b)).await.is_err() {
-                    metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
-                    return true;
+                match send_body_bounded(&tx, b, &mut last_progress, &mut delivered).await {
+                    None => {}
+                    Some(ResponseOutcome::Cancelled) => {
+                        metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
+                        return (true, ResponseOutcome::Cancelled, delivered);
+                    }
+                    Some(o) => {
+                        // Watchdog stall (or future terminal send outcome):
+                        // record it here; the caller publishes the waterfall
+                        // with this termination.
+                        if o == ResponseOutcome::DownstreamStall {
+                            metrics.record_downstream_stall(delivered);
+                        }
+                        return (false, o, delivered);
+                    }
                 }
             }
-            Step::Eof => return true,
+            Step::Eof => return (true, ResponseOutcome::Complete, delivered),
             Step::Terminal(_) => {
                 metrics.client_truncated.fetch_add(1, Ordering::SeqCst);
-                return false;
+                return (false, ResponseOutcome::UpstreamFailed, delivered);
             }
         }
     }
@@ -4306,6 +4559,14 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
             "evictions": m.capability_evictions.load(Ordering::SeqCst),
             "reacquisitions": m.capability_reacquisitions.load(Ordering::SeqCst),
             "negative_hits": m.capability_negative_hits.load(Ordering::SeqCst),
+        },
+        // Downstream response outcomes: committed-206 responses torn down
+        // by the progress watchdog (dead/zero-window consumer) plus the
+        // standing cancellation count. Never a provider signal.
+        "downstream": {
+            "stalls": m.downstream_stalls.load(Ordering::SeqCst),
+            "stall_bytes": m.downstream_stall_bytes.load(Ordering::SeqCst),
+            "cancelled": m.client_cancellations.load(Ordering::SeqCst),
         },
         // §10 — recovery budgets (reported SEPARATELY, never collapsed)
         "recovery": {
