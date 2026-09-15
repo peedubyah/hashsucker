@@ -87,6 +87,9 @@ struct Recovery {
     recovery_started_at: Option<Instant>,
     /// Monotonic attempt counter for per-attempt CDN telemetry.
     attempt: u32,
+    /// Same-TF provider lane switches on this reader. Budget: exactly one
+    /// (two lanes max per read, never bouncing back within the read).
+    failovers: u32,
 }
 
 /// How this reader holds its capability. `Owned` is the normal reservation
@@ -128,6 +131,14 @@ pub struct ResilientRangeReader {
     stage: Option<StageClock>,
     /// Instant when the most recent CDN response headers were received.
     last_headers_at: Option<Instant>,
+    /// Reactive same-TF failover arming: when true, an objective hard
+    /// failure (429/5xx/transport-doom/dead-link) first tries a warm
+    /// usable FREE cap from a different provider slot for the same
+    /// TorrentFile before falling back to same-cap recovery. Set only for
+    /// foreground reads (demand serve spans, single/no-cache path); hedge
+    /// children, stripe children, and prefetch/stage-only fills stay
+    /// single-lane. Default false so all existing callers keep behavior.
+    failover_allowed: bool,
 }
 
 impl ResilientRangeReader {
@@ -135,6 +146,13 @@ impl ResilientRangeReader {
     /// transport instants.
     pub fn set_stage_clock(&mut self, c: StageClock) {
         self.stage = Some(c);
+    }
+
+    /// Arm reactive same-TF provider failover for this reader. Foreground
+    /// paths call it right after construction; everything else keeps the
+    /// default single-lane behavior.
+    pub fn set_failover_allowed(&mut self, v: bool) {
+        self.failover_allowed = v;
     }
 
     /// T12 (proven as HY4 P2P on m3-north-db): hand back the fill's final
@@ -246,6 +264,7 @@ impl ResilientRangeReader {
             recovery: Recovery {
                 same_cap_retries: 0,
                 reacquires: 0,
+                failovers: 0,
                 wall_ms: 0,
                 recovery_started_at: None,
                 attempt: 1,
@@ -256,6 +275,7 @@ impl ResilientRangeReader {
             on_chunk,
             stage: None,
             last_headers_at: None,
+            failover_allowed: false,
         }
     }
     #[allow(clippy::too_many_arguments)]
@@ -306,6 +326,7 @@ impl ResilientRangeReader {
             recovery: Recovery {
                 same_cap_retries: 0,
                 reacquires: 0,
+                failovers: 0,
                 wall_ms: 0,
                 recovery_started_at: None,
                 attempt: 1,
@@ -316,6 +337,7 @@ impl ResilientRangeReader {
             on_chunk,
             stage: None,
             last_headers_at: None,
+            failover_allowed: false,
         }
     }
 
@@ -392,7 +414,15 @@ impl ResilientRangeReader {
                         // errors (connection refused, DNS failure, etc.) keep the existing 30s
                         // throttle policy. The timeout carries no provider-load signal, so the
                         // generic cooldown over-penalizes.
+                        // Reactive failover BEFORE any same-cap retry: a 25s
+                        // headerless timeout carries no provider-load signal, so
+                        // neither lane is throttled; the alternate simply gets
+                        // the first chance when one exists warm.
                         if e.is_timeout() {
+                            if self.try_failover().await {
+                                forced_status = None;
+                                continue;
+                            }
                             match self.apply_transient_headerless_timeout().await {
                                 Action::RetrySameCap => {
                                     forced_status = None;
@@ -482,6 +512,57 @@ impl ResilientRangeReader {
         }
     }
 
+    /// Reactive same-TF alternate-provider failover. After an objective hard
+    /// failure on the current lane, try a warm usable FREE capability from a
+    /// DIFFERENT provider slot for the same exact TorrentFile. One-way, once
+    /// per read (two lanes max, never bouncing back): `recovery.failovers`
+    /// gates it. The failed lane keeps its real state (throttled/dead) --
+    /// failover never clears or bypasses it. Reservation permits transfer
+    /// cleanly: the old reservation drops (permit freed) exactly as its
+    /// replacement is installed, so maxInFlight=1 holds on both lanes.
+    /// Staging needs no change: the new lane reopens at the same `pos`, so
+    /// bytes stay contiguous with no replay and no gap. Returns true when
+    /// the lane switched (caller reopens immediately with zero sleep).
+    async fn try_failover(&mut self) -> bool {
+        if !self.failover_allowed || self.recovery.failovers >= 1 {
+            return false;
+        }
+        if !matches!(self.current, ReaderCapability::Owned(_)) {
+            // Shared children must not switch lanes independently (same
+            // reason they must not reacquire): the lease owner decides.
+            return false;
+        }
+        let old = self.current_cap();
+        // Warm first, else one bounded cold acquire on the alternate slot.
+        // Never blocks: unavailable means keep existing recovery.
+        match self.manager.acquire_failover_lane(&old).await {
+            Some(reserved) => {
+                let from = old.provider.clone();
+                let to = reserved.cap.provider.clone();
+                // Label the failing attempt BEFORE bumping the counter so
+                // the timeline reads "attempt N failed over -> attempt N+1
+                // on the new lane".
+                if let Some(s) = self.stage.as_ref() {
+                    s.set_attempt_recovery_path(self.recovery.attempt, "failover_alternate_provider");
+                    s.note_failover();
+                }
+                self.metrics.record_provider_failover(&from, &to);
+                eprintln!(
+                    "[failover] tf_lane_switch: {} -> {} (same TorrentFile, immediate, no cooldown wait)",
+                    from, to,
+                );
+                self.recovery.attempt += 1;
+                self.recovery.failovers += 1;
+                // Old reservation drops on assignment (permit freed) only
+                // after the replacement is fully constructed; the failed
+                // cap's throttle/dead state persists on its shared Arc.
+                self.current = ReaderCapability::Owned(reserved);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Class B: CDN 429 / 5xx / transport drop. Throttle the SAME capability (cooldown only —
     /// never expire), wait behind the shared limiter, and signal a retry at the SAME offset.
     /// No requestdl re-acquire (that would amplify API calls). Bounded by MAX_SAME_CAP_RETRIES.
@@ -503,6 +584,21 @@ impl ResilientRangeReader {
         // account budget is hot. Observability + policy input only; the
         // cooldown itself is still honored per-capability below.
         self.metrics.note_provider_throttle(&self.cap_ref().provider);
+        // The throttle above is real state for the old lane (later waiters
+        // honor it) however this read proceeds, so record the decision even
+        // when failover skips the sleep below.
+        let applied_ms = effective.as_millis() as u64;
+        self.metrics
+            .record_retry_after(provider_ra.map(|d| d.as_secs()), effective.as_secs());
+        self.metrics.add_internal_recovery_ms(applied_ms);
+        // Reactive failover BEFORE any sleep or attempt bump: a warm
+        // alternate same-TF lane reopens immediately with zero cooldown
+        // wait. Only a read with no alternate waits out the failed lane.
+        // try_failover labels the failing attempt, bumps the counter for
+        // the new lane, and swaps the reservation.
+        if self.try_failover().await {
+            return Action::RetrySameCap;
+        }
         self.recovery.same_cap_retries += 1;
         // Record the enforced wait on the FAILING attempt BEFORE incrementing,
         // so the timeline reads: "attempt N failed -> waited W ms -> attempt N+1".
@@ -514,10 +610,6 @@ impl ResilientRangeReader {
             s.set_attempt_recovery_path(self.recovery.attempt, "generic_transient_cooldown");
         }
         self.recovery.attempt += 1;
-        let applied_ms = effective.as_millis() as u64;
-        self.metrics
-            .record_retry_after(provider_ra.map(|d| d.as_secs()), effective.as_secs());
-        self.metrics.add_internal_recovery_ms(applied_ms);
         if self.recovery.same_cap_retries <= MAX_SAME_CAP_RETRIES {
             if !effective.is_zero() {
                 self.metrics.add_limiter_wait_ms(applied_ms);
@@ -577,6 +669,12 @@ impl ResilientRangeReader {
             .upstream_errors
             .fetch_add(1, Ordering::SeqCst);
         self.metrics.record_recovery_attempt();
+        // Reactive failover BEFORE single-flight reacquire: a warm alternate
+        // same-TF lane reopens immediately with zero new API calls. Only a
+        // read with no alternate pays for a fresh requestdl on this slot.
+        if self.try_failover().await {
+            return Action::Reacquire;
+        }
         // Record retry wait on the failing attempt BEFORE incrementing.
         // Class C reacquires fresh caps: no throttle wait, but still record
         // on the failing attempt so the timeline is complete.

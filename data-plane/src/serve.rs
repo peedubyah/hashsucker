@@ -1611,6 +1611,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                 cdn_requests_delta: metrics.cdn_requests.load(Ordering::SeqCst) - cdn_before,
                 work_class: WorkClass::Demand,
                 cdn_attempts: stage.take_attempts(),
+                provider_failovers: stage.failover_count(),
                 provider: provider_attribution.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_default(),
                 cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
                 account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
@@ -1660,6 +1661,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     cdn_requests_delta: metrics.cdn_requests.load(Ordering::SeqCst) - cdn_before,
                     work_class: WorkClass::Demand,
                     cdn_attempts: stage.take_attempts(),
+                    provider_failovers: stage.failover_count(),
                     provider: provider_attribution.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_default(),
                     cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
                     account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
@@ -1836,6 +1838,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         cdn_requests_delta: 1,
                         work_class: WorkClass::Prefetch,
                         cdn_attempts: pf_stage.take_attempts(),
+                        provider_failovers: pf_stage.failover_count(),
                         provider: pf_provider.0.clone(),
                         cap_id: pf_provider.1.clone(),
                         account_scope: pf_provider.2.clone(),
@@ -2770,6 +2773,7 @@ else if stripe_wanted(sub.len())
                                     account_scope: String::new(),
                                     corr_id: join_clock.corr_id(),
                                     tf_id: tf_id.tf_id_durable.clone(),
+                                    provider_failovers: 0,
                                     // Arrival attribution only; the demand's
                                     // own report at task end carries its real
                                     // termination.
@@ -3048,6 +3052,7 @@ else if stripe_wanted(sub.len())
             cdn_requests_delta: metrics.cdn_requests.load(Ordering::SeqCst) - cdn_before,
             work_class: WorkClass::Demand,
             cdn_attempts: stage.take_attempts(),
+            provider_failovers: stage.failover_count(),
             provider: provider_attribution.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_default(),
             cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
             account_scope: provider_attribution.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default(),
@@ -3618,6 +3623,10 @@ async fn fill_chunk_run_inner(
     // acquisition). `next_lane` always holds the latest hand-back so the
     // function tail can return it exactly as before.
     let mut next_lane: Option<ReaderCapability> = cap;
+    // Failover arming is decided per reader below: foreground spans on an
+    // owned lane may switch providers after a hard failure; shared-child
+    // readers never switch independently (lease owner decides).
+    let lane_is_shared = matches!(&next_lane, Some(ReaderCapability::Shared(_)));
     // Whether the serve span delivered its window: steers Eof-vs-Failed
     // and waiter resolution if the backfill span fails afterwards.
     let mut serve_done_ok = false;
@@ -3749,6 +3758,12 @@ async fn fill_chunk_run_inner(
     // started_at_ms.
     if let Some(s) = stage.as_ref() {
         reader.set_stage_clock(s.clone());
+    }
+    // Reactive same-TF failover: armed only for foreground serve spans on
+    // owned lanes. Backfill spans stay single-lane (optional bytes must not
+    // open a second provider), as do shared children and sink-less fills.
+    if sink.is_some() && first_span && !lane_is_shared {
+        reader.set_failover_allowed(true);
     }
     // ---- T16 sustained-low-throughput warm promotion (proven as HY4 P2M
     // on m3-north-db). Loop-local estimator beside the read loop: same
@@ -4239,6 +4254,8 @@ pub async fn serve_upstream_only(
     if let Some(s) = stage.as_ref() {
         reader.set_stage_clock(s.clone());
     }
+    // Upstream-only reads are always foreground demand: arm failover.
+    reader.set_failover_allowed(true);
     let open_start = Instant::now();
     if let Err(e) = reader.ensure_open().await {
         match e {
@@ -4580,6 +4597,15 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
             "client_502": m.client_502.load(Ordering::SeqCst),
             "client_416": m.client_416.load(Ordering::SeqCst),
             "client_truncated": m.client_truncated.load(Ordering::SeqCst),
+        },
+        // Reactive same-TF provider failovers: foreground reads that left
+        // a hard-failed lane for a warm alternate same-TF lane (max one per
+        // read). pairs count from->to switches.
+        "failovers": {
+            "total": m.provider_failovers.load(Ordering::SeqCst),
+            "pairs": m.provider_failover_pairs.lock().unwrap().iter().map(|((f, t), n)| {
+                serde_json::json!({"from": f, "to": t, "n": n})
+            }).collect::<Vec<_>>(),
         },
         // §11 — Retry-After observability (surface BOTH)
         "retry_after": {

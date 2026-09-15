@@ -827,6 +827,26 @@ impl CapabilityManager {
         let now = Instant::now();
         let mut last_err: Option<String> = None;
         let mut retry_after: Option<Duration> = None;
+        // Failover-aware fast path: a slot whose cap is usable AND free
+        // right now wins immediately, in Node-supplied preference order,
+        // before any slot is asked to grow, acquire, or wait out a
+        // throttle cooldown. A demand arriving while its preferred lane
+        // cools down therefore takes a healthy warm lane instead of
+        // sleeping behind the failed one; nothing changes when no lane is
+        // instantly free (the full path below still grows/waits/acquires).
+        // Open breakers are skipped here exactly as below.
+        for slot in &self.slots {
+            if slot.breaker.is_open(now) {
+                continue;
+            }
+            if let Some(cap) = self.first_usable_free(slot, now) {
+                if let Some(r) = self.try_reserve(&cap) {
+                    slot.breaker.record_success();
+                    self.metrics.record_cap_reuse();
+                    return Ok(r);
+                }
+            }
+        }
         // iterate slots in Node-supplied preference order
         for slot in &self.slots {
             if slot.breaker.is_open(now) {
@@ -1231,6 +1251,76 @@ impl CapabilityManager {
             if let Some(r) = self.try_reserve(&cap) {
                 self.metrics.record_cap_reuse();
                 return Some(r);
+            }
+        }
+        None
+    }
+
+    /// Reactive same-TF alternate-provider lane for hard-failure failover.
+    ///
+    /// After an objective hard failure (429/5xx/transport-doom/dead-link) on
+    /// the active lane, hand back a usable capability from a DIFFERENT
+    /// provider slot for the same exact TorrentFile (durable_key anchor).
+    /// Warm first (usable now + free permit, zero API); otherwise ONE bounded
+    /// cold acquire through the existing single-flight path, reserved
+    /// without waiting. Open-breaker slots are skipped, and the caller never
+    /// blocks on a permit or a throttle window here: anything unavailable
+    /// means "no alternate right now" and the read keeps its existing
+    /// same-cap recovery. One-way by construction: callers budget a single
+    /// failover per read and never switch back within that read.
+    ///
+    /// No env gate, deliberately: unlike speculative standby, this fires
+    /// only after a hard failure on the primary lane, so healthy reads never
+    /// touch a second provider. Same-provider other slots are skipped: they
+    /// share the throttled account and cannot escape provider pressure.
+    pub async fn acquire_failover_lane(
+        &self,
+        failed_cap: &Arc<DeliveryCapability>,
+    ) -> Option<ReservedCapability> {
+        let now = Instant::now();
+        let failed_provider = failed_cap.provider.clone();
+        let anchor = self.slots.iter().find_map(|slot| {
+            slot.caps
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| Arc::ptr_eq(c, failed_cap))
+                .then(|| slot.durable_key.clone())
+        })?;
+        for slot in &self.slots {
+            if slot.coord.provider == failed_provider || slot.durable_key != anchor {
+                continue;
+            }
+            if slot.breaker.is_open(now) {
+                continue;
+            }
+            // Warm: usable + free, zero API (same criteria as standby).
+            if let Some(r) = self.reserve_free_in_slot_excluding(slot, failed_cap, &[], now) {
+                return Some(r);
+            }
+            // Cold, bounded: prune dead weight, then a single acquire up to
+            // the slot's existing target through the shared single-flight
+            // (concurrent demands coalesce; no API storm). Reserve without
+            // waiting: a busy lane means "no alternate right now", never a
+            // blocking wait inside failover.
+            {
+                let mut caps = slot.caps.lock().unwrap();
+                caps.retain(|c| !c.prunable(now));
+            }
+            if slot.caps.lock().unwrap().len() >= slot.target.load(Ordering::SeqCst) {
+                continue;
+            }
+            let idx = slot.caps.lock().unwrap().len();
+            match self.resolve_internal(slot, idx).await {
+                Ok(cap) => {
+                    slot.caps.lock().unwrap().push(cap.clone());
+                    if let Some(r) = self.try_reserve(&cap) {
+                        return Some(r);
+                    }
+                }
+                Err(_) => {
+                    slot.breaker.record_failure();
+                }
             }
         }
         None

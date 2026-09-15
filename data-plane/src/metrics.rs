@@ -79,6 +79,10 @@ pub struct Metrics {
     pub capability_evictions: AtomicU64,
     pub capability_reacquisitions: AtomicU64,
     pub capability_negative_hits: AtomicU64,
+    // Reactive same-TF provider failovers (hard failure -> alternate
+    // provider lane, max one per read). by_pair counts from->to switches.
+    pub provider_failovers: AtomicU64,
+    pub provider_failover_pairs: Mutex<HashMap<(String, String), u64>>,
 
     // rate-limit / failover (client-visible 503 count; internal retries are counted separately)
     pub rate_limited: AtomicU64,
@@ -560,6 +564,10 @@ pub struct StageClock {
     /// "backfill"). Stamped onto each CdnAttempt at record time so a later
     /// 429 is attributable to foreground vs optional work.
     span_kind: Arc<Mutex<String>>,
+    /// Same-TF provider failovers on this clock (0 normally, 1 after a
+    /// hard-failure lane switch). Attempts after the switch carry the new
+    /// provider/cap, so the count plus attempt timeline fully describes it.
+    failovers: Arc<AtomicU64>,
 }
 
 impl Default for StageClock {
@@ -579,6 +587,7 @@ impl StageClock {
             attempts: Arc::new(Mutex::new(Vec::with_capacity(8))),
             corr_id: format!("corr-{}", CORR_ID_COUNTER.fetch_add(1, Ordering::SeqCst)),
             span_kind: Arc::new(Mutex::new("serve".to_string())),
+            failovers: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -587,6 +596,17 @@ impl StageClock {
     /// recorded afterwards carry the new kind.
     pub fn set_span_kind(&self, kind: &str) {
         *self.span_kind.lock().unwrap() = kind.to_string();
+    }
+
+    /// Record a same-TF provider lane switch on this clock. Attempts
+    /// recorded afterwards carry the new provider/capability.
+    pub fn note_failover(&self) {
+        self.failovers.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Same-TF provider lane switches on this clock.
+    pub fn failover_count(&self) -> u64 {
+        self.failovers.load(Ordering::SeqCst)
     }
 
     /// Returns the T0 of this clock, for computing offsets in the transport layer.
@@ -836,6 +856,11 @@ pub struct StageReport {
     /// Body bytes accepted downstream before termination. Exact on
     /// "complete" (== requested length); partial on stall/cancel.
     pub bytes_delivered: u64,
+    /// Same-TF provider failovers during this demand (0 normally). The
+    /// per-attempt provider/cap timeline shows the lanes; failover latency
+    /// reads off attempt started_at_ms deltas (no sleep precedes the
+    /// alternate dispatch by construction).
+    pub provider_failovers: u64,
 }
 
 impl StageReport {
@@ -888,6 +913,7 @@ impl StageReport {
             // dead downstream (stall/cancel) from an upstream failure.
             "termination": self.termination,
             "bytes_delivered": self.bytes_delivered,
+            "provider_failovers": self.provider_failovers,
         })
     }
 }
@@ -997,6 +1023,18 @@ impl Metrics {
 
     pub fn record_cap_reuse(&self) {
         self.capability_reuses.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A foreground read switched provider lanes after a hard failure
+    /// (from -> to, same TorrentFile). Bounded: at most one per read.
+    pub fn record_provider_failover(&self, from: &str, to: &str) {
+        self.provider_failovers.fetch_add(1, Ordering::SeqCst);
+        *self
+            .provider_failover_pairs
+            .lock()
+            .unwrap()
+            .entry((from.to_string(), to.to_string()))
+            .or_insert(0) += 1;
     }
     pub fn record_cap_eviction(&self) {
         self.capability_evictions.fetch_add(1, Ordering::SeqCst);
