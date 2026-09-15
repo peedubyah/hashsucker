@@ -24,6 +24,18 @@
 #                            60s attr cache and opens always live-GET, so a
 #                            longer dir window cannot serve stale bytes.
 #   --vfs-cache-mode minimal Streams ranges without full-file download.
+#   --vfs-read-chunk-size 64M  WebDAV GET window (default 128M). Proven:
+#                            abandonment is pervasive (Plex seeks/cancels
+#                            constantly), and per-abandon upstream waste,
+#                            permit occupancy, retry-storm surface and
+#                            eviction blast radius all scale with the window
+#                            (128MiB worst case vs 64MiB). Demand rate stays
+#                            sane (16 GETs/GiB clean); 16M tested churnier
+#                            with no benefit.
+#   --vfs-read-chunk-size-limit 64M
+#                            Cap the window: rclone otherwise doubles chunk
+#                            size past the base on sustained reads
+#                            (128MiB ranges observed on a 64M setting).
 #   --attr-timeout 60s       Entry-attr cache. Sizes are immutable per
 #                            published path; membership and negative misses
 #                            stay on the dir cache, so 60s removes
@@ -42,7 +54,7 @@ Wants=network-online.target
 [Service]
 Type=notify
 ExecStartPre=-/usr/bin/fusermount3 -uz /mnt/hashsucker-vfs
-ExecStart=/usr/bin/rclone mount webdav-local: /mnt/hashsucker-vfs --allow-other --dir-cache-time 60s --vfs-cache-mode minimal --attr-timeout 60s --log-level INFO --log-file /tmp/rclone-mount.log
+ExecStart=/usr/bin/rclone mount webdav-local: /mnt/hashsucker-vfs --allow-other --dir-cache-time 60s --vfs-cache-mode minimal --vfs-read-chunk-size 64M --vfs-read-chunk-size-limit 64M --attr-timeout 60s --log-level INFO --log-file /tmp/rclone-mount.log
 ExecStop=-/usr/bin/fusermount3 -uz /mnt/hashsucker-vfs
 Restart=on-failure
 RestartSec=2
