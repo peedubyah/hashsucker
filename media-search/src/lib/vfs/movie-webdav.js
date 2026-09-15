@@ -275,6 +275,32 @@ export function createMovieWebDav({
 }) {
   const states = new Map();
 
+  // Catalog memoization: getCatalog runs on EVERY WebDAV request and its
+  // per-handoff materialize+finalize loop (binding replays, RD kicks) costs
+  // ~150ms of blocking event-loop time at current library size. The VFS
+  // tables only change through paths that move this watermark — all three
+  // vfs_movie_entries UPDATEs set updated_at, inserts move COUNT/created,
+  // deletes move COUNT, and playback_handoffs is append-only (created_at /
+  // selected_at advance on insert) — so a stable watermark with a populated
+  // states map means serving the cached tree is identical to rebuilding.
+  // A 60s sweep cap keeps background RD-realization kicks and binding
+  // replay fresh even when the tables are quiet. Concurrent rebuilds are
+  // harmless (idempotent, same as uncached behavior today).
+  let catalogCache = null;
+  const CATALOG_SWEEP_MS = 60_000;
+  function catalogWatermark(handoffs, entries) {
+    let handoffMark = 0;
+    for (const h of handoffs) {
+      if (h.createdAt > handoffMark) handoffMark = h.createdAt;
+      if (h.selectedAt > handoffMark) handoffMark = h.selectedAt;
+    }
+    let entryMark = 0;
+    for (const e of entries) {
+      if (e.updatedAt > entryMark) entryMark = e.updatedAt;
+    }
+    return `${handoffs.length}:${handoffMark}|${entries.length}:${entryMark}`;
+  }
+
   // T8: per-request serving-primary reporter bound to one durable
   // TorrentFile id. streamFromDataPlane invokes it at header time with
   // that response's attribution (or null); each response is keyed by its
@@ -290,14 +316,26 @@ export function createMovieWebDav({
   }
 
   async function getCatalog() {
-    for (const handoff of searchCache.listMoviePlaybackHandoffs()) {
+    const handoffs = searchCache.listMoviePlaybackHandoffs();
+    const entries = searchCache.listVfsMovieEntries();
+    const watermark = catalogWatermark(handoffs, entries);
+    const nowMs = now();
+    if (
+      catalogCache
+      && catalogCache.watermark === watermark
+      && catalogCache.statesSize === states.size
+      && nowMs - catalogCache.sweptAt < CATALOG_SWEEP_MS
+    ) {
+      return catalogCache.tree;
+    }
+    for (const handoff of handoffs) {
       // Unpublished items stay unpublished: catalog traffic must not
       // resurrect removed VFS rows (re-request reactivates explicitly).
       if (isUnpublishedHandoff(controlPlaneStore, handoff)) continue;
       await materializeVfsEntry(searchCache, handoff, controlPlaneStore, now, { allowLegacy: true });
     }
     const nextStates = [];
-    for (const entry of searchCache.listVfsMovieEntries()) {
+    for (const entry of entries) {
       let state = states.get(entry.releaseKey);
       if (!state) {
         const handoff = searchCache.getPlaybackHandoffByReleaseKey(entry.mediaId, entry.releaseKey);
@@ -317,7 +355,9 @@ export function createMovieWebDav({
       }
       nextStates.push(state);
     }
-    return buildTree(nextStates);
+    const tree = buildTree(nextStates);
+    catalogCache = { watermark, tree, sweptAt: nowMs, statesSize: states.size };
+    return tree;
   }
 
   async function resolveBacking(state, { forceFresh = false } = {}) {
