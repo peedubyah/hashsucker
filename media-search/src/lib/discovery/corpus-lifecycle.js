@@ -39,7 +39,12 @@ export const CORPUS_STATES = Object.freeze({
 const BOOTSTRAP_SESSION_FRAGMENTS = 1000;
 const BOOTSTRAP_SESSION_MAX_MS = 8 * 60 * 1000;
 const BOOTSTRAP_SESSION_PAUSE_MS = 2 * 60 * 1000;
-const BOOTSTRAP_ATTRIBUTE_LIMIT = 5000;
+// Attribute pass per session: measured ~4000 rows/s (regex parse +
+// release_attributes upsert incl. FTS trigger), so 100k rows ≈ 25 s —
+// a small fraction of a session while letting searchability converge
+// alongside fragment fetching instead of lagging it by days. Idempotent
+// (skips attributed rows); memory is O(unattributed) regardless of limit.
+const BOOTSTRAP_ATTRIBUTE_LIMIT = 100000;
 
 /** Session policy for first-run bootstrap (single source for ticker + tests). */
 export function bootstrapSessionPolicy() {
