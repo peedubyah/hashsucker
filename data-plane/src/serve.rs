@@ -3030,6 +3030,15 @@ else if stripe_wanted(sub.len())
         if outcome == ResponseOutcome::DownstreamStall {
             metrics.record_downstream_stall(delivered);
         }
+        // Post-commit upstream truncation accounting: the 206 response was
+        // committed, then provider recovery exhausted (or terminally failed)
+        // before the promised bytes completed. The termination + delivered
+        // fields on the report distinguish this from downstream cancellation
+        // (consumer-side), watchdog stall (no progress), and socket error.
+        // serve_upstream_only counts its own terminal path identically.
+        if outcome == ResponseOutcome::UpstreamFailed {
+            metrics.client_truncated.fetch_add(1, Ordering::SeqCst);
+        }
 
         // ---- Slice 4.5: publish this request's stage waterfall.
         //

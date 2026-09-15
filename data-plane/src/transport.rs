@@ -348,8 +348,14 @@ impl ResilientRangeReader {
         let range = format!("bytes={}-{}", self.pos, self.req_end);
 
         // Fault injection on the FIRST attempt of this read only.
+        // fault_429_always forces EVERY attempt (not just the first): it is
+        // the deterministic budget-exhaustion prover (each attempt 429s with
+        // zero cooldown until the retry budget terminally fails the read).
+        // Default OFF; production can never trip it accidentally.
         let forced = if self.first_attempt {
-            if self.faults.fault_429_once {
+            if self.faults.fault_429_always {
+                Some(429u16)
+            } else if self.faults.fault_429_once {
                 Some(429u16)
             } else if self.faults.fault_dead_once {
                 // Fire the stale-link fault only ONCE for the whole process (see DEAD_FAULT_FIRED).
@@ -369,10 +375,24 @@ impl ResilientRangeReader {
 
         let mut forced_status = forced;
         loop {
+            // fault_429_always re-arms every iteration (not just the first):
+            // budget exhaustion needs consecutive failures.
+            if self.faults.fault_429_always {
+                forced_status = Some(429u16);
+            }
             let (status, provider_ra): (u16, Option<Duration>);
             if let Some(f) = forced_status {
                 status = f;
                 provider_ra = None;
+                // Forced faults report like real attempts (zero network
+                // time, synthetic host label) so fault-driven timelines stay
+                // complete: budget exhaustion is otherwise invisible in
+                // per-attempt telemetry. Production never takes this branch
+                // (fault env unset means forced_status is always None here).
+                let attempt = self.recovery.attempt;
+                if let Some(s) = self.stage.as_ref() {
+                    s.record_attempt_headers(attempt, "fault-injected".to_string(), status, Instant::now(), 0, None, self.cap_ref().provider.clone(), self.cap_ref().cap_id.clone(), s.corr_id(), crate::metrics::AttemptOutcome::Pending);
+                }
             } else {
                 let url = self.cap_ref().runtime_url.clone();
                 let cdn_start = Instant::now();
