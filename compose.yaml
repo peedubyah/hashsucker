@@ -24,6 +24,11 @@ services:
       CONTROL_PLANE_DB: /data/control-plane.db
       TORBOX_API_KEY: ${TORBOX_API_KEY:-}
       REALDEBRID_API_KEY: ${REALDEBRID_API_KEY:-}
+      # TorBox API base override (primarily isolated testing). The runtime
+      # provider AND the readiness probe both honor it — a typo here must
+      # fail loudly in diagnostics, never report healthy against the
+      # default endpoint while the runtime uses the broken one.
+      TORBOX_API_URL: ${TORBOX_API_URL:-https://api.torbox.app/v1/api}
       COMET_TORBOX_MANIFEST_URL: ${COMET_TORBOX_MANIFEST_URL:-}
       COMET_REALDEBRID_MANIFEST_URL: ${COMET_REALDEBRID_MANIFEST_URL:-}
       TORZNAB_URLS: ${TORZNAB_URLS:-}
@@ -31,6 +36,9 @@ services:
       PROWLARR_API_KEY: ${PROWLARR_API_KEY:-}
       STRM_OUTPUT_PATH: "${STRM_OUTPUT_PATH:-/strm}"
       RESOLVER_BASE_URL: "${HASHSUCKER_BASE_URL:-http://localhost:8080}"
+      # Share-group mediation for the queue/STRM entrypoint repair
+      # (mirrors group_add below; entrypoints cannot see group_add).
+      MEDIA_SEARCH_QUEUE_GID: ${MEDIA_SEARCH_QUEUE_GID:-100}
       JELLYFIN_URL: ${JELLYFIN_URL:-}
       JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
       JELLYFIN_MEDIA_ROOT: ${JELLYFIN_MEDIA_ROOT:-}
@@ -88,9 +96,9 @@ services:
       # not state and not STRM publication.
       # hy4-cache stays a named volume: container-managed cache bytes with
       # no host-sharing need (avoids bind copy-up surprises).
-      - ${HASHSUCKER_DISCOVERY_HOST_PATH:-${DISCOVERY_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/discovery}}:/data
-      - ${HASHSUCKER_QUEUE_HOST_PATH:-${REQUESTS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/queue}}:/requests
-      - ${HASHSUCKER_STRM_HOST_PATH:-${STRM_HOST_PATH:-${HASHSUCKER_MEDIA_PATH:-./hy4-media}/strm}}:/strm
+      - ${HASHSUCKER_DISCOVERY_HOST_PATH:-${HASHSUCKER_DATA_PATH:-${DISCOVERY_HOST_PATH:-./hy4-data}}/discovery}:/data
+      - ${HASHSUCKER_QUEUE_HOST_PATH:-${HASHSUCKER_DATA_PATH:-${REQUESTS_HOST_PATH:-./hy4-data}}/queue}:/requests
+      - ${HASHSUCKER_STRM_HOST_PATH:-${HASHSUCKER_MEDIA_PATH:-${STRM_HOST_PATH:-./hy4-media}}/strm}:/strm
       # Owned media root (promotion output). Always mounted so enabling
       # promotion is one env var; empty and inert until
       # HASHSUCKER_PERMANENT_PATH points here.
@@ -111,8 +119,16 @@ services:
         REVISION: ${HASHSUCKER_REVISION:-dev}
         VERSION: ${HASHSUCKER_VERSION:-latest}
     restart: unless-stopped
-    user: "${PUID:-99}:${PGID:-100}"
     environment:
+      # Runtime identity for the entrypoint privilege drop (Unraid: 99/100).
+      # The container starts as root to repair host bind ownership, then
+      # the entrypoint drops to this user — identical to the old
+      # `user:` stanza, plus first-boot repair.
+      PUID: ${PUID:-99}
+      PGID: ${PGID:-100}
+      # Share-group mediation for the queue/STRM entrypoint repair
+      # (mirrors group_add below; entrypoints cannot see group_add).
+      MEDIA_SEARCH_QUEUE_GID: ${MEDIA_SEARCH_QUEUE_GID:-100}
       TORBOX_API_KEY: ${TORBOX_API_KEY:-}
       TORBOX_API_URL: ${TORBOX_API_URL:-https://api.torbox.app/v1/api}
       TORBOX_DB: /config/state/torbox-importer.db
@@ -132,10 +148,15 @@ services:
       SONARR_URL: ${SONARR_URL:-}
       SONARR_API_KEY: ${SONARR_API_KEY:-}
     volumes:
-      - ${HASHSUCKER_TORBOX_IMPORTER_HOST_PATH:-${TORBOX_IMPORTER_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/torbox-importer}}:/config
-      - ${HASHSUCKER_QUEUE_HOST_PATH:-${REQUESTS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/queue}}:/requests
-      - ${HASHSUCKER_TORBOX_IMPORTER_DOWNLOADS_HOST_PATH:-${DOWNLOADS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-./hy4-data}/downloads}}:/downloads
-      - ${HASHSUCKER_STRM_HOST_PATH:-${STRM_HOST_PATH:-${HASHSUCKER_MEDIA_PATH:-./hy4-media}/strm}}:/strm
+      - ${HASHSUCKER_TORBOX_IMPORTER_HOST_PATH:-${HASHSUCKER_DATA_PATH:-${TORBOX_IMPORTER_HOST_PATH:-./hy4-data}}/torbox-importer}:/config
+      - ${HASHSUCKER_QUEUE_HOST_PATH:-${HASHSUCKER_DATA_PATH:-${REQUESTS_HOST_PATH:-./hy4-data}}/queue}:/requests
+      - ${HASHSUCKER_TORBOX_IMPORTER_DOWNLOADS_HOST_PATH:-${HASHSUCKER_DATA_PATH:-${DOWNLOADS_HOST_PATH:-./hy4-data}}/downloads}:/downloads
+      - ${HASHSUCKER_STRM_HOST_PATH:-${HASHSUCKER_MEDIA_PATH:-${STRM_HOST_PATH:-./hy4-media}}/strm}:/strm
+    # Same queue-group mediation as media-search: on group-mediated hosts
+    # (Unraid users group) both queue writers share access without
+    # fighting over ownership.
+    group_add:
+      - "${MEDIA_SEARCH_QUEUE_GID:-100}"
     security_opt:
       - no-new-privileges:true
 

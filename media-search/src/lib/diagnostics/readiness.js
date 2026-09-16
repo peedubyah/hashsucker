@@ -101,12 +101,16 @@ function classifyHttpError(err, service) {
 
 async function checkTorBox(env, fetchFn) {
   if (!env.TORBOX_API_KEY) return { state: 'skipped', detail: 'TORBOX_API_KEY not set' };
+  // Probe the CONFIGURED base (TORBOX_API_URL override honored exactly
+  // like the runtime provider): a typoed override must fail here loudly
+  // instead of reporting the default endpoint healthy while goes wrong.
+  const base = (env.TORBOX_API_URL || 'https://api.torbox.app/v1/api').replace(/\/+$/, '');
   try {
     const params = new URLSearchParams({ format: 'object', list_files: 'false' });
     params.append('hash', '0'.repeat(40));
     const response = await timedFetch(
       fetchFn,
-      `https://api.torbox.app/v1/api/torrents/checkcached?${params}`,
+      `${base}/torrents/checkcached?${params}`,
       {
         headers: {
           Authorization: `Bearer ${env.TORBOX_API_KEY}`,
