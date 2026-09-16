@@ -36,6 +36,34 @@ Add Seerr (requests), Sonarr/Radarr (upcoming monitoring), Prowlarr
 (candidates), or Plex/Jellyfin (refresh) by uncommenting their lines in
 `.env` and recreating the stack. Nothing else is required.
 
+## Updating
+
+Update the stack atomically (all services together):
+
+1. In the stack directory: `docker compose pull && docker compose up -d`
+   (`latest` tracks stable releases; `main` is the dev channel).
+2. No manual DB migration: schemas are additive and initialize on boot.
+   Corpus checkpoints, library, handoffs, and VFS entries survive;
+   the corpus resumes (never restarts) and first playback re-fills cache.
+3. Verify: `/api/diagnostics` reports `ready`, and every container
+   reports the same `org.opencontainers.image.revision`
+   (`docker inspect <container> --format '{{index .Config.Labels
+   "org.opencontainers.image.revision"}}'`).
+4. The rclone VFS mount and Plex libraries do not need a restart for a
+   backend update; in-flight reads retry and recover.
+
+Rolling one service at a time is safe only while the Node↔Rust wire
+schema matches (a mismatch fails loudly, never silently). Prefer the
+atomic update above.
+
+## Rollback
+
+Image reverts are schema-safe (migrations are additive-only; old code
+ignores newer tables/columns). To roll back: set `HASHSUCKER_VERSION`
+to the previous tag (or `sha-<commit>`) and recreate the stack. If you
+distrust newer rows rather than the images, restore the two `.db`
+backups instead (see below) — normally unnecessary.
+
 ## Backup and restore
 
 Back up physical files, not logical tables. The two SQLite DB files are
