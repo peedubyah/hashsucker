@@ -115,7 +115,7 @@ function armCorpusTimer(delayMs) {
             maxFragments: session.maxFragments,
             maxWallMs: session.maxWallMs,
           });
-          console.log(`media-search: corpus bootstrap session ok=${result.ok} complete=${result.complete ?? 0} failed=${result.failed ?? 0} boundedStop=${result.boundedStop ?? false} remaining=${result.remaining ?? 0}`);
+          console.log(`media-search: corpus bootstrap session ok=${result.ok} complete=${result.complete ?? 0} failed=${result.failed ?? 0} quarantined=${result.quarantined ?? 0} boundedStop=${result.boundedStop ?? false} remaining=${result.remaining ?? 0}`);
           // Bounded sessions continue soon (polite pause); a finished
           // baseline returns to the cheap periodic delta cadence.
           armCorpusTimer(result.boundedStop ? session.pauseMs : corpusUpdateIntervalMs(process.env));

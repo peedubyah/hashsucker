@@ -6,8 +6,12 @@
  * the last-good usable corpus (a failed update never destroys it).
  *
  * Revision model: upstream GitHub tree SHA (what serves) + commit SHA
- * (for the compare API). Revision advances only after a fully successful
- * transaction. Deltas are non-destructive: upstream removals are counted
+ * (for the compare API). Revision advances only after every expected
+ * fragment in the tree is either successfully ingested or explicitly
+ * quarantined under the bounded invalid-fragment policy below (a claimed
+ * revision with quarantines is honestly partial, never silent loss:
+ * quarantine rows name the fragment, reason, and tree).
+ * Deltas are non-destructive: upstream removals are counted
  * and logged, candidate rows are retained (availability checks gate
  * serving, not corpus presence).
  *
@@ -54,6 +58,33 @@ export function bootstrapSessionPolicy() {
     pauseMs: BOOTSTRAP_SESSION_PAUSE_MS,
     attributeLimit: BOOTSTRAP_ATTRIBUTE_LIMIT,
   };
+}
+
+// Quarantine policy (invalid-fragment tranche): a fragment that fails
+// with a DETERMINISTIC content-invalid outcome on several consecutive
+// sessions is quarantined for the current tree instead of retried
+// forever. Observed poison (GitHub 404 pages, empty iframe shells,
+// index.html placeholders served as HTTP 200) failed 11-22 consecutive
+// sessions; 5 is conservative — far above flake runs (1-2), far below
+// observed poison — and each counted failure is a fresh full GET, so a
+// single corrupted transfer can never trip it. Transient transport
+// failures (429/5xx/timeout/network/DB) never count and reset the chain.
+export const QUARANTINE_AFTER_CONSECUTIVE = 5;
+
+/**
+ * Classify a per-fragment failure as deterministic (content-invalid:
+ * safe to count toward tree-scoped quarantine) or transient (retry
+ * with normal backoff; never quarantined). Unknown shapes fail closed
+ * to transient — only positively-identified invalidity quarantines.
+ */
+export function classifyFragmentFailure(err) {
+  const msg = String(err?.message || err || '');
+  if (/No payload in /.test(msg)) return { kind: 'deterministic', reason: 'no-payload' };
+  if (/Decompress failed for /.test(msg)) return { kind: 'deterministic', reason: 'decompress-failed' };
+  const statusMatch = msg.match(/(?:fetch |error: | )(\d{3})\b/);
+  const status = statusMatch ? Number(statusMatch[1]) : null;
+  if (status === 404 || status === 410) return { kind: 'deterministic', reason: `http-${status}` };
+  return { kind: 'transient', reason: status ? `http-${status}` : 'transport-or-unknown' };
 }
 
 const SCHEMA = `
@@ -113,6 +144,24 @@ CREATE TABLE IF NOT EXISTS dmm_fragments (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dmm_fragments_run_name
   ON dmm_fragments(run_id, fragment_name);
+-- Tree-scoped invalid-fragment quarantine (invalid-fragment tranche).
+-- A fragment is quarantined only after QUARANTINE_AFTER_CONSECUTIVE
+-- consecutive DETERMINISTIC failures (fresh GET each session); transient
+-- failures reset the chain and can never trip it. PK includes the tree
+-- SHA so a new upstream tree re-evaluates every path from zero — healed
+-- content is never shadowed by stale quarantine. Quarantined fragments
+-- are skipped (not fetched) and do not block the claim gate, but are
+-- never treated as ingested: claim statistics name them explicitly.
+CREATE TABLE IF NOT EXISTS corpus_fragment_quarantine (
+  tree_sha TEXT NOT NULL,
+  fragment_name TEXT NOT NULL,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  last_reason TEXT,
+  last_error TEXT,
+  quarantined INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (tree_sha, fragment_name)
+);
 `;
 
 function readState(db) {
@@ -277,15 +326,79 @@ export function createCorpusLifecycle({
       WHERE id = ?`).run(now(), complete ?? 0, failed ?? 0, rawRecords ?? 0, accepted ?? 0, status ?? 'complete', runId);
   }
 
-  function recordFragment(runId, { name, url, status, rawRecords, accepted, error }) {
+  function recordFragment(runId, { name, url, status, rawRecords, accepted, error, category }) {
     try {
       db.prepare(`INSERT INTO dmm_fragments
         (run_id, fragment_name, source_url, status, attempt_count, started_at, completed_at,
-         raw_records, accepted_records, error_category, error_message)
+          raw_records, accepted_records, error_category, error_message)
         VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`)
         .run(runId, name, url ?? '', status, now(), now(), rawRecords ?? 0, accepted ?? 0,
-          error ? 'fetch-or-decode' : null, error ? String(error).slice(0, 300) : null);
+          category ?? (error ? 'fetch-or-decode' : null), error ? String(error).slice(0, 300) : null);
     } catch {}
+  }
+
+  /** Quarantined fragment names for one exact tree (skipped, never fetched). */
+  function quarantinedForTree(treeSha) {
+    try {
+      const rows = db.prepare(`SELECT fragment_name, last_reason FROM corpus_fragment_quarantine
+        WHERE tree_sha = ? AND quarantined = 1`).all(treeSha);
+      return new Map(rows.map((r) => [r.fragment_name, r.last_reason]));
+    } catch {
+      return new Map();
+    }
+  }
+
+  function quarantinedCountForTree(treeSha) {
+    try {
+      return db.prepare(`SELECT COUNT(*) AS n FROM corpus_fragment_quarantine
+        WHERE tree_sha = ? AND quarantined = 1`).get(treeSha)?.n ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Record one fragment outcome against the quarantine policy. Returns
+   * { quarantinedNow } — true only on the session that trips the
+   * threshold. Success clears the row (completion always wins over
+   * quarantine); transient failures reset the consecutive chain.
+   */
+  function noteFragmentQuarantine(treeSha, name, { ok, classification, errorMsg }) {
+    try {
+      if (ok) {
+        db.prepare('DELETE FROM corpus_fragment_quarantine WHERE tree_sha = ? AND fragment_name = ?')
+          .run(treeSha, name);
+        return { quarantinedNow: false };
+      }
+      if (!classification || classification.kind !== 'deterministic') {
+        db.prepare(`INSERT INTO corpus_fragment_quarantine
+            (tree_sha, fragment_name, consecutive_failures, last_reason, last_error, quarantined, updated_at)
+          VALUES (?, ?, 0, ?, ?, 0, ?)
+          ON CONFLICT(tree_sha, fragment_name) DO UPDATE SET
+            consecutive_failures = 0, last_reason = excluded.last_reason,
+            last_error = excluded.last_error, updated_at = excluded.updated_at`)
+          .run(treeSha, name, classification?.reason ?? 'transient', String(errorMsg || '').slice(0, 300), now());
+        return { quarantinedNow: false };
+      }
+      const row = db.prepare(`SELECT consecutive_failures, quarantined FROM corpus_fragment_quarantine
+        WHERE tree_sha = ? AND fragment_name = ?`).get(treeSha, name);
+      const consecutive = (row?.consecutive_failures ?? 0) + 1;
+      const already = row?.quarantined === 1;
+      const trip = !already && consecutive >= QUARANTINE_AFTER_CONSECUTIVE;
+      db.prepare(`INSERT INTO corpus_fragment_quarantine
+          (tree_sha, fragment_name, consecutive_failures, last_reason, last_error, quarantined, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tree_sha, fragment_name) DO UPDATE SET
+          consecutive_failures = excluded.consecutive_failures, last_reason = excluded.last_reason,
+          last_error = excluded.last_error, quarantined = excluded.quarantined, updated_at = excluded.updated_at`)
+        .run(treeSha, name, consecutive, classification.reason, String(errorMsg || '').slice(0, 300), trip || already ? 1 : 0, now());
+      if (trip) {
+        log(`corpus fragment quarantined tree=${String(treeSha).slice(0, 8)} name=${name} reason=${classification.reason} consecutive=${consecutive}`);
+      }
+      return { quarantinedNow: trip };
+    } catch {
+      return { quarantinedNow: false };
+    }
   }
 
   function completedForTree(treeSha) {
@@ -319,8 +432,10 @@ export function createCorpusLifecycle({
      * per call and maxWallMs caps wall time; reaching either stops the
      * session WITHOUT claiming the revision (boundedStop=true) so the
      * scheduler can checkpoint, yield, and resume. Only a session that
-     * covers every remaining fragment with zero failures advances the
-     * revision to usable. Partial progress advertises usable-partial
+     * covers every remaining fragment with zero unresolved failures
+     * advances the revision to usable (deterministic-invalid fragments
+     * quarantined under the tree-scoped policy count as resolved, and
+     * are named in the claim — never silent). Partial progress advertises usable-partial
      * (serving) rather than wedging on bootstrapping or crying degraded.
      */
     async bootstrap({ maxFragments = null, maxWallMs = null, onProgress = null } = {}) {
@@ -354,15 +469,26 @@ export function createCorpusLifecycle({
         let fragments = listing.fragments || [];
         const done = completedForTree(treeSha);
         fragments = fragments.filter((f) => !done.has(f.name || f.url));
+        // Tree-scoped quarantine: invalid fragments are skipped (not
+        // fetched) and do not consume session budget. New trees start
+        // clean — healed content is re-evaluated, never shadowed.
+        const quarantined = quarantinedForTree(treeSha);
+        let skippedQuarantined = 0;
+        if (quarantined.size > 0) {
+          const before = fragments.length;
+          fragments = fragments.filter((f) => !quarantined.has(f.name || f.url));
+          skippedQuarantined = before - fragments.length;
+        }
         const remainingTotal = fragments.length;
         if (maxFragments != null) fragments = fragments.slice(0, maxFragments);
-        log(`corpus bootstrap tree=${String(treeSha).slice(0, 8)} fragments=${fragments.length} skipped=${done.size}`);
+        log(`corpus bootstrap tree=${String(treeSha).slice(0, 8)} fragments=${fragments.length} skipped=${done.size}${skippedQuarantined > 0 ? ` quarantined-skipped=${skippedQuarantined}` : ''}`);
         // Record the session-start backlog (pre-slice) as the run total so
         // progress displays against the tree, not the session slice.
         runId = openRun({ treeSha, discovered: remainingTotal });
         const failures = [];
         const baseFragmentCount = prior.fragment_count ?? 0;
         let cappedByWall = false;
+        let quarantinedNew = 0;
         for (const fragment of fragments) {
           if (maxWallMs != null && now() - t0 >= maxWallMs) {
             cappedByWall = true;
@@ -375,16 +501,26 @@ export function createCorpusLifecycle({
             const r = ingestJson(json);
             rawRecords += r.raw; accepted += r.accepted;
             recordFragment(runId, { name, url: fragment.url, status: 'complete', rawRecords: r.raw, accepted: r.accepted });
+            noteFragmentQuarantine(treeSha, name, { ok: true });
             try {
               db.prepare('INSERT INTO corpus_fragment_shas (fragment_name, tree_sha, blob_sha, bytes, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(fragment_name) DO UPDATE SET tree_sha=excluded.tree_sha, bytes=excluded.bytes, updated_at=excluded.updated_at')
                 .run(name, treeSha, fragment.sha ?? null, html.length, now());
             } catch {}
             complete++;
           } catch (err) {
-            failed++;
             const msg = String(err?.message || err).slice(0, 120);
-            failures.push(`${name}: ${msg}`);
-            recordFragment(runId, { name, url: fragment.url, status: 'failed', error: msg });
+            const classification = classifyFragmentFailure(err);
+            const note = noteFragmentQuarantine(treeSha, name, { ok: false, classification, errorMsg: msg });
+            recordFragment(runId, {
+              name, url: fragment.url, status: 'failed', error: msg,
+              category: classification.kind === 'deterministic' ? classification.reason : undefined,
+            });
+            if (note.quarantinedNow) {
+              quarantinedNew++;
+            } else {
+              failed++;
+              failures.push(`${name}: ${msg}`);
+            }
           }
           // Periodic durable progress so a kill loses at most the current
           // batch and diagnostics can report between sessions.
@@ -405,12 +541,30 @@ export function createCorpusLifecycle({
           log(`corpus bootstrap attribute pass failed: ${err?.message || err}`);
         }
         const candidateCount = db.prepare('SELECT COUNT(*) AS n FROM candidates').get()?.n ?? null;
-        const coveredAll = !cappedByWall && (complete + failed) >= remainingTotal;
+        // Claim gate (invalid-fragment tranche): a tree claims when every
+        // expected fragment is successfully ingested OR explicitly
+        // quarantined for this exact tree, with zero UNRESOLVED failures.
+        // Newly-quarantined-this-session counts as resolved (named, not
+        // silent); transient/below-threshold failures still block, exactly
+        // as before. Claim statistics distinguish perfect from
+        // quarantine-bearing revisions.
+        const resolved = complete + quarantinedNew;
+        const coveredAll = !cappedByWall && (resolved + failed) >= remainingTotal;
         const status = failed === 0 && coveredAll ? 'complete' : 'incomplete';
         closeRun(runId, { complete, failed, rawRecords, accepted, status });
         const boundedStop = !coveredAll;
         const hasServing = complete > 0 || (candidateCount ?? 0) > 0 || prior.imported_revision;
+        const quarantinedTotal = quarantinedCountForTree(treeSha);
         if (failed === 0 && coveredAll) {
+          const quarantinedNames = [...quarantined.keys()];
+          // Re-read names so fragments quarantined DURING this session are
+          // named too (the pre-session map above predates them).
+          let claimNames = quarantinedNames;
+          try {
+            claimNames = db.prepare(`SELECT fragment_name FROM corpus_fragment_quarantine
+              WHERE tree_sha = ? AND quarantined = 1 ORDER BY fragment_name`).all(treeSha).map((r) => r.fragment_name);
+          } catch {}
+          log(`corpus bootstrap tree=${String(treeSha).slice(0, 8)} claimed complete=${complete} quarantined=${quarantinedTotal}${claimNames.length > 0 ? ` [${claimNames.slice(0, 20).join(', ')}]` : ''}`);
           writeState(db, {
             state: CORPUS_STATES.USABLE, imported_revision: treeSha,
             last_success: now(), last_error: null, consecutive_failures: 0,
@@ -447,7 +601,7 @@ export function createCorpusLifecycle({
             consecutive_failures: (prior.consecutive_failures ?? 0) + 1,
           }, now);
         }
-        return { ok: failed === 0, boundedStop, remaining: Math.max(0, remainingTotal - complete - failed), treeSha, complete, failed, rawRecords, accepted, wallMs: now() - t0, attrStats: attrStats ? true : false };
+        return { ok: failed === 0, boundedStop, remaining: Math.max(0, remainingTotal - complete - failed - quarantinedNew), treeSha, complete, failed, quarantined: quarantinedTotal, quarantinedNew, rawRecords, accepted, wallMs: now() - t0, attrStats: attrStats ? true : false };
       } catch (err) {
         try {
           if (runId != null) closeRun(runId, { complete, failed, rawRecords, accepted, status: 'incomplete' });
@@ -516,23 +670,40 @@ export function createCorpusLifecycle({
         const runId = openRun({ treeSha: headTree, discovered: changed.length });
         let complete = 0, failed = 0, rawRecords = 0, accepted = 0;
         const failures = [];
+        // Tree-scoped quarantine applies to deltas exactly as to
+        // bootstrap: permanently-invalid changed files must not wedge
+        // incremental mode either. New head tree → clean evaluation.
+        const deltaQuarantined = quarantinedForTree(headTree);
+        let quarantinedNew = 0;
         for (const f of changed) {
+          if (deltaQuarantined.has(f.filename)) continue;
           try {
             const html = await fetchRaw(f.filename, branch);
             const json = decodeFragment(html, f.filename);
             const r = ingestJson(json);
             rawRecords += r.raw; accepted += r.accepted;
             recordFragment(runId, { name: f.filename, url: f.filename, status: 'complete', rawRecords: r.raw, accepted: r.accepted });
+            noteFragmentQuarantine(headTree, f.filename, { ok: true });
             try {
               db.prepare('INSERT INTO corpus_fragment_shas (fragment_name, tree_sha, blob_sha, bytes, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(fragment_name) DO UPDATE SET tree_sha=excluded.tree_sha, bytes=excluded.bytes, updated_at=excluded.updated_at')
                 .run(f.filename, headTree, null, html.length, now());
             } catch {}
             complete++;
           } catch (err) {
-            failed++;
             const msg = String(err?.message || err).slice(0, 120);
-            failures.push(`${f.filename}: ${msg}`);
-            recordFragment(runId, { name: f.filename, url: f.filename, status: 'failed', error: msg });
+            const classification = classifyFragmentFailure(err);
+            const note = noteFragmentQuarantine(headTree, f.filename, { ok: false, classification, errorMsg: msg });
+            recordFragment(runId, {
+              name: f.filename, url: f.filename, status: 'failed', error: msg,
+              category: classification.kind === 'deterministic' ? classification.reason : undefined,
+            });
+            if (note.quarantinedNow) {
+              quarantinedNew++;
+              log(`corpus update quarantined ${f.filename} reason=${classification.reason}; delta continues`);
+            } else {
+              failed++;
+              failures.push(`${f.filename}: ${msg}`);
+            }
           }
         }
         try {
@@ -553,7 +724,11 @@ export function createCorpusLifecycle({
           last_success: now(), last_error: null, consecutive_failures: 0,
           candidate_count: candidateCount, fragment_count: (cur.fragment_count ?? 0) + complete,
         }, now);
-        return { ok: true, changed: true, headCommit, headTree, fragments: complete, removed: removed.length, rawRecords, accepted };
+        const deltaQuarantinedTotal = quarantinedCountForTree(headTree);
+        if (deltaQuarantinedTotal > 0 || quarantinedNew > 0) {
+          log(`corpus update claimed head=${String(headTree).slice(0, 8)} complete=${complete} quarantined=${deltaQuarantinedTotal}`);
+        }
+        return { ok: true, changed: true, headCommit, headTree, fragments: complete, removed: removed.length, quarantined: deltaQuarantinedTotal, quarantinedNew, rawRecords, accepted };
       } catch (err) {
         const fails = (cur.consecutive_failures ?? 0) + 1;
         writeState(db, {

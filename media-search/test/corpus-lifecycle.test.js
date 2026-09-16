@@ -502,3 +502,141 @@ test('github outage preserves revision and usable state', async () => {
     cache.close();
   }
 });
+
+test('classifyFragmentFailure: deterministic vs transient', async () => {
+  const { classifyFragmentFailure } = await import('../src/lib/discovery/corpus-lifecycle.js');
+  assert.equal(classifyFragmentFailure(new Error('No payload in x.html')).kind, 'deterministic');
+  assert.equal(classifyFragmentFailure(new Error('Decompress failed for x.html')).kind, 'deterministic');
+  assert.equal(classifyFragmentFailure(new Error('raw fetch 404 for x.html')).kind, 'deterministic');
+  assert.equal(classifyFragmentFailure(new Error('raw fetch 410 for x.html')).kind, 'deterministic');
+  assert.equal(classifyFragmentFailure(new Error('Fragment fetch error: 404 Not Found')).kind, 'deterministic');
+  assert.equal(classifyFragmentFailure(new Error('Fragment fetch error: 429 Too Many Requests')).kind, 'transient');
+  assert.equal(classifyFragmentFailure(new Error('raw fetch 503 for x.html')).kind, 'transient');
+  assert.equal(classifyFragmentFailure(new Error('fetch failed')).kind, 'transient');
+  assert.equal(classifyFragmentFailure(new Error('The operation was aborted')).kind, 'transient');
+  assert.equal(classifyFragmentFailure(null).kind, 'transient');
+});
+
+test('poison fragment quarantines after 5 consecutive deterministic failures, then tree claims', async () => {
+  const cache = createDiscoveryCache();
+  try {
+    const fetchLog = [];
+    const frags = { 'good.html': fragmentHtml([REC_A]), 'poison.html': '<html><body>empty shell</body></html>' };
+    const lc = lifecycle(cache, { source: stubSource(frags, fetchLog) });
+    void lc.getState();
+    let last = null;
+    for (let i = 0; i < 4; i++) {
+      last = await lc.bootstrap();
+      assert.equal(last.complete, i === 0 ? 1 : 0, `session ${i}: good ingested once`);
+      assert.equal(last.failed, 1, `session ${i}: poison unresolved`);
+    }
+    assert.equal(last.ok, false, 'no claim while poison unresolved');
+    assert.equal(lc.getState().imported_revision, null);
+    // 5th consecutive deterministic failure trips the threshold →
+    // quarantined, no longer failed → claim.
+    const r6 = await lc.bootstrap();
+    assert.equal(r6.failed, 0);
+    assert.equal(r6.quarantinedNew, 1);
+    assert.equal(r6.ok, true);
+    const st = lc.getState();
+    assert.equal(st.state, CORPUS_STATES.USABLE);
+    assert.equal(st.imported_revision, TREE_A);
+    const q = cache.db.prepare(`SELECT fragment_name, consecutive_failures, quarantined, last_reason
+      FROM corpus_fragment_quarantine WHERE tree_sha = ?`).all(TREE_A);
+    assert.equal(q.length, 1);
+    assert.equal(q[0].fragment_name, 'poison.html');
+    assert.equal(q[0].quarantined, 1);
+    assert.equal(q[0].last_reason, 'no-payload');
+    assert.ok(q[0].consecutive_failures >= 5);
+    assert.equal(st.candidate_count, 1, 'valid fragment ingested exactly once, no dupe explosion');
+    // 6th session: quarantined fragment is not re-fetched for the same tree.
+    const before = fetchLog.length;
+    const r7 = await lc.bootstrap();
+    assert.ok(!fetchLog.slice(before).some((u) => u.endsWith('poison.html')), 'quarantined path not fetched');
+    assert.equal(r7.quarantined, 1);
+  } finally {
+    cache.close();
+  }
+});
+
+test('transient failures never quarantine and still block the claim', async () => {
+  const cache = createDiscoveryCache();
+  try {
+    const flaky = {
+      listFragments: async () => ({ fragments: [{ name: 'f.html', url: 'https://raw.test/f.html' }], treeSha: TREE_A, branch: 'main' }),
+      fetchFragment: async () => { throw new Error('Fragment fetch error: 503 Service Unavailable'); },
+    };
+    const lc = lifecycle(cache, { source: flaky });
+    void lc.getState();
+    for (let i = 0; i < 6; i++) {
+      const r = await lc.bootstrap();
+      assert.equal(r.ok, false);
+      assert.equal(r.failed, 1);
+      assert.equal(r.quarantined ?? 0, 0);
+    }
+    assert.equal(lc.getState().imported_revision, null, 'no claim with unresolved transient failure');
+    const q = cache.db.prepare('SELECT COUNT(*) AS n FROM corpus_fragment_quarantine WHERE quarantined = 1').get().n;
+    assert.equal(q, 0, 'transient never quarantines');
+  } finally {
+    cache.close();
+  }
+});
+
+test('transient failure resets the deterministic chain (no single-transfer accident)', async () => {
+  const cache = createDiscoveryCache();
+  try {
+    let mode = 'deterministic';
+    const src = {
+      listFragments: async () => ({ fragments: [{ name: 'f.html', url: 'https://raw.test/f.html' }], treeSha: TREE_A, branch: 'main' }),
+      fetchFragment: async () => {
+        if (mode === 'transient') throw new Error('socket hang up');
+        return '<html><body>empty shell</body></html>';
+      },
+    };
+    const lc = lifecycle(cache, { source: src });
+    void lc.getState();
+    await lc.bootstrap(); await lc.bootstrap(); // 2 deterministic
+    mode = 'transient';
+    await lc.bootstrap(); // chain reset
+    mode = 'deterministic';
+    await lc.bootstrap(); await lc.bootstrap(); await lc.bootstrap(); await lc.bootstrap(); // 4 more, chain=4
+    const q = cache.db.prepare(`SELECT consecutive_failures, quarantined FROM corpus_fragment_quarantine
+      WHERE tree_sha = ? AND fragment_name = 'f.html'`).get(TREE_A);
+    assert.equal(q.quarantined, 0, '4 consecutive after a reset must not trip the 5-threshold');
+    assert.equal(q.consecutive_failures, 4);
+  } finally {
+    cache.close();
+  }
+});
+
+test('quarantine is tree-scoped: new tree re-evaluates the same path', async () => {
+  const cache = createDiscoveryCache();
+  try {
+    const fetchLog = [];
+    const poisonOnly = { 'poison.html': '<html><body>empty shell</body></html>' };
+    const srcA = stubSource(poisonOnly, fetchLog);
+    srcA.listFragments = async () => ({
+      fragments: [{ name: 'poison.html', url: 'https://raw.test/poison.html' }], treeSha: TREE_A, branch: 'main',
+    });
+    const lc = lifecycle(cache, { source: srcA });
+    void lc.getState();
+    for (let i = 0; i < 6; i++) void await lc.bootstrap();
+    assert.equal(lc.getState().imported_revision, TREE_A, 'tree A claims with quarantine');
+    // Same path, new tree with healed content: fetched again, ingested, claimed clean.
+    const healed = { 'poison.html': fragmentHtml([REC_B]) };
+    const srcB = stubSource(healed, fetchLog);
+    srcB.listFragments = async () => ({
+      fragments: [{ name: 'poison.html', url: 'https://raw.test/poison.html' }], treeSha: TREE_B, branch: 'main',
+    });
+    const lcB = lifecycle(cache, { source: srcB });
+    const rb = await lcB.bootstrap();
+    assert.ok(fetchLog.some((u) => u.endsWith('poison.html')), 'new tree re-fetches the path');
+    assert.equal(rb.complete, 1);
+    assert.equal(lcB.getState().imported_revision, TREE_B);
+    const q = cache.db.prepare(`SELECT quarantined FROM corpus_fragment_quarantine
+      WHERE tree_sha = ? AND fragment_name = 'poison.html'`).get(TREE_B);
+    assert.equal(q, undefined, 'no stale quarantine row shadows the new tree');
+  } finally {
+    cache.close();
+  }
+});
