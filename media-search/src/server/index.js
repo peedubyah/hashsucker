@@ -208,6 +208,63 @@ if (anticipationOn) {
   armAnticipationTimer(2 * 60_000);
 }
 
+// ─── quality-upgrade watch ──────────────────────────────────────────
+// Published-below-terminal items re-probe the live market on a slow
+// cadence (default hourly, one row per tick) and switch publication to
+// a strictly-higher tier through the existing prepare/publish seams.
+// UPGRADE_WATCH_ENABLED=0 disables. First tick 10 min after boot
+// (staggered past anticipation). No seeded rows = fully inert.
+function upgradeWatchIntervalMs() {
+  return envNumber(process.env, 'UPGRADE_WATCH_INTERVAL_MIN', { fallback: 60, min: 5 }) * 60 * 1000;
+}
+let upgradeWatchTimer = null;
+let upgradeWatchInFlight = false;
+const upgradeWatchOn = (() => {
+  const v = String(process.env.UPGRADE_WATCH_ENABLED ?? '').toLowerCase();
+  return v !== '0' && v !== 'false';
+})();
+let upgradeEvaluator = null;
+function armUpgradeWatchTimer(delayMs) {
+  upgradeWatchTimer = setTimeout(async () => {
+    try {
+      if (upgradeEvaluator && !upgradeWatchInFlight) {
+        upgradeWatchInFlight = true;
+        try {
+          const result = await upgradeEvaluator.tickOnce();
+          if (result.acted || result.seeded) {
+            console.log(`media-search: upgrade tick ${result.rowId ?? ''} ${result.to || result.reason || ''} seeded=${result.seeded ?? 0} (${result.ms ?? 0}ms)`);
+          }
+        } finally {
+          upgradeWatchInFlight = false;
+        }
+      }
+    } catch (error) {
+      console.warn('media-search: upgrade tick failed', error?.message);
+    } finally {
+      armUpgradeWatchTimer(upgradeWatchIntervalMs());
+    }
+  }, delayMs);
+  if (upgradeWatchTimer.unref) upgradeWatchTimer.unref();
+}
+if (upgradeWatchOn) {
+  (async () => {
+    try {
+      const { createUpgradeWatchStore, createUpgradeEvaluator } = await import('../lib/lifecycle/upgrade-watch.js');
+      upgradeEvaluator = createUpgradeEvaluator({
+        store: createUpgradeWatchStore({ db: discoveryCache.db }),
+        cache: discoveryCache,
+        controlPlaneStore,
+        baseUrl: `http://127.0.0.1:${port}`,
+        dataPlaneBaseUrl: process.env.DATA_PLANE_URL ?? 'http://data-plane:3001',
+        log: (msg) => console.log(`media-search: ${msg}`),
+      });
+      armUpgradeWatchTimer(10 * 60_000);
+    } catch (err) {
+      console.warn('media-search: upgrade watch unavailable', err?.message);
+    }
+  })();
+}
+
 // ─── permanent-storage promotion worker ─────────────────────────────
 // Human-decision promotion only: POST /api/library/:id/promote enqueues
 // one exact TorrentFile; this ticker materializes bytes through the

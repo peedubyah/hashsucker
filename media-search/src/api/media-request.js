@@ -871,7 +871,11 @@ export async function searchByMedia(cache, request) {
   // this item prepared, return it with zero provider work and zero
   // presentation. Otherwise fall through to the full pipeline, which
   // persists preparation but stops before VFS/STRM/notification.
-  if (prepareOnly) {
+  // Upgrade sensing opts OUT explicitly (forceDiscovery): re-probing an
+  // already-prepared title must run fresh discovery/ranking, otherwise
+  // the loop could never see a better release for exactly the titles
+  // it watches. Default path unchanged.
+  if (prepareOnly && !request.forceDiscovery) {
     const already = getPreparedDurableState({
       cache,
       controlPlaneStore: request.controlPlaneStore ?? null,
