@@ -15,7 +15,7 @@
  * upgrades are rare events; the loop must cost ~nothing when the
  * market has nothing better.
  */
-import { tierOf, isTerminalTier, compareUpgrade } from './upgrade-policy.js';
+import { tierOf, isTerminalTier, compareUpgrade, durabilityOf, shouldVetoUpgrade, DURABILITY } from './upgrade-policy.js';
 import { intentBackoffMs } from '../anticipation/future-intents.js';
 import { probeByteReady } from '../anticipation/prewarm.js';
 import { createLibraryIdentityKey } from '../control-plane/canonical-path.js';
@@ -213,6 +213,51 @@ export function createUpgradeEvaluator({
     return { ...t, filename: winner.filename ?? null, infoHash: winner.infoHash ?? null };
   }
 
+  function placementHeld(infoHash) {
+    if (!infoHash) return false;
+    try {
+      for (const provider of ['torbox', 'realdebrid']) {
+        const p = controlPlaneStore.findPlacementByInfoHash?.(provider, infoHash);
+        if (p && p.state !== 'removed' && p.state !== 'error') return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  function sightings(infoHash) {
+    const out = { firstSeen: null, lastSeen: null, sourceCount: 1, seeders: null };
+    if (!infoHash) return out;
+    try {
+      const row = cache.db.prepare(`SELECT seeders, first_seen, last_seen, sources FROM candidates
+        WHERE info_hash = ? ORDER BY last_seen DESC LIMIT 1`).get(infoHash);
+      if (!row) return out;
+      out.firstSeen = row.first_seen ?? null;
+      out.lastSeen = row.last_seen ?? null;
+      out.seeders = row.seeders ?? null;
+      try {
+        const srcs = JSON.parse(row.sources || '[]');
+        if (Array.isArray(srcs)) {
+          const ids = new Set(srcs.map((s) => s?.addonId || s?.origin || JSON.stringify(s)));
+          out.sourceCount = Math.max(1, ids.size);
+        }
+      } catch {}
+    } catch {}
+    return out;
+  }
+
+  function durabilityFor({ infoHash, cacheState = null }) {
+    const sight = sightings(infoHash);
+    return durabilityOf({
+      cacheState,
+      placement: placementHeld(infoHash),
+      firstSeen: sight.firstSeen,
+      lastSeen: sight.lastSeen,
+      sourceCount: sight.sourceCount,
+      seeders: sight.seeders,
+      nowMs: now(),
+    });
+  }
+
   async function probeMarket(row) {
     const body = {
       mediaId: row.media_id, mediaType: row.media_type, source: 'upgrade-watch',
@@ -226,7 +271,13 @@ export function createUpgradeEvaluator({
     const r = await post('/api/media-prepare', body, 5 * 60 * 1000);
     if (r.status !== 200) return { ok: false, error: r.json?.error || `probe-http-${r.status}` };
     const results = Array.isArray(r.json?.results) ? r.json.results : [];
-    const sel = r.json?.selection?.selected || results[0] || null;
+    let sel = r.json?.selection?.selected || results[0] || null;
+    if (sel) {
+      // Reattach raw availability (formatted selections carry only
+      // torboxState): match back into ranked rows like pickPrepareWinner.
+      const raw = results.find((x) => String(x.infoHash || '').toLowerCase() === String(sel.infoHash || '').toLowerCase());
+      if (raw?.availability) sel = { ...sel, availability: raw.availability };
+    }
     return { ok: true, winner: sel, total: results.length };
   }
 
@@ -343,6 +394,32 @@ export function createUpgradeEvaluator({
     if (!verdict.upgrade) {
       store.park(row.id, { reason: verdict.reason });
       return done({ acted: false, reason: verdict.reason });
+    }
+    // Durability veto (durability tranche): a fragile winner replaces a
+    // strong current only on a large quality jump. Marginal upgrades
+    // need equal-or-better durability — they park until the winner
+    // proves itself (cached, placed, or seen over time). The byte probe
+    // later still verifies actual servability; this veto guards future
+    // persistence, not present availability.
+    {
+      const av = probe.winner?.availability || {};
+      const tb = av.torbox; const tbState = (tb && typeof tb === 'object' ? tb.state : tb)
+        ?? probe.winner?.torboxState ?? null;
+      const rd = av.realdebrid ?? av.real_debrid ?? av.rd;
+      const rdState = (rd && typeof rd === 'object' ? (rd.state ?? rd.cached) : rd) ?? null;
+      const cacheState = tbState === 'cached' || rdState === 'cached' || rdState === true ? 'cached'
+        : (tbState === 'uncached' ? 'uncached' : 'unknown');
+      const winnerDur = durabilityFor({ infoHash: cand.infoHash, cacheState });
+      const curTf = controlPlaneStore.getTorrentFile?.(row.current_tf);
+      const curDur = durabilityFor({ infoHash: curTf?.infoHash ?? curTf?.info_hash ?? null, cacheState: null });
+      const tierDelta = (pub.tier != null && cand.tier != null) ? cand.tier - pub.tier : null;
+      const veto = shouldVetoUpgrade({ currentDur: curDur.level, winnerDur: winnerDur.level, tierDelta });
+      if (veto.veto) {
+        const reason = `durability-veto:${veto.reason}(winner ${winnerDur.level} [${winnerDur.reasons.join(',')}] vs current ${curDur.level})`;
+        store.park(row.id, { reason });
+        log(`upgrade veto media=${row.media_id} ${row.current_label} -> ${cand.label}: ${reason}`);
+        return done({ acted: false, reason: 'durability-veto' });
+      }
     }
     // 3. Bind the better release through the real prepare seam.
     const prep = await prepareNew(row);

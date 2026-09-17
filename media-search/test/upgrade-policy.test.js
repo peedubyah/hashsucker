@@ -67,3 +67,31 @@ test('compareUpgrade: unknown candidate never upgrades; unknown current needs fl
   assert.equal(low.upgrade, false);
   assert.equal(low.reason, 'below-upgrade-floor');
 });
+
+test('durabilityOf: cached or placed is strong; fresh single-sighting is fragile', async () => {
+  const { durabilityOf, shouldVetoUpgrade, DURABILITY } = await import('../src/lib/lifecycle/upgrade-policy.js');
+  assert.equal(durabilityOf({ cacheState: 'cached' }).level, DURABILITY.STRONG);
+  assert.equal(durabilityOf({ placement: true }).level, DURABILITY.STRONG);
+  assert.equal(durabilityOf({ cacheState: 'uncached' }).level, DURABILITY.FRAGILE);
+  const now = Date.now();
+  const med = durabilityOf({ firstSeen: now - 20 * 86400 * 1000, lastSeen: now });
+  assert.equal(med.level, DURABILITY.MEDIUM);
+  assert.ok(med.reasons.includes('seen-across-weeks'));
+  const fresh = durabilityOf({ cacheState: 'uncached', firstSeen: now - 3600 * 1000, lastSeen: now, sourceCount: 1 });
+  assert.equal(fresh.level, DURABILITY.FRAGILE);
+  // Seeders wired but inert without data (documents the future input).
+  assert.equal(durabilityOf({ seeders: 150 }).level, DURABILITY.STRONG);
+});
+
+test('shouldVetoUpgrade: only fragile-vs-strong on marginal deltas', async () => {
+  const { shouldVetoUpgrade } = await import('../src/lib/lifecycle/upgrade-policy.js');
+  // Marginal bump (1080p->2160p web, +1) with fragile winner vs strong current: veto.
+  assert.ok(shouldVetoUpgrade({ currentDur: 'strong', winnerDur: 'fragile', tierDelta: 1 }).veto);
+  // Large jump ignores durability disadvantage.
+  assert.ok(!shouldVetoUpgrade({ currentDur: 'strong', winnerDur: 'fragile', tierDelta: 30 }).veto);
+  // Equal-or-better durability never vetoed, even marginal.
+  assert.ok(!shouldVetoUpgrade({ currentDur: 'strong', winnerDur: 'strong', tierDelta: 1 }).veto);
+  assert.ok(!shouldVetoUpgrade({ currentDur: 'medium', winnerDur: 'fragile', tierDelta: 1 }).veto);
+  // Unknown delta (unknown current tier) never vetoed: floor rule gated it.
+  assert.ok(!shouldVetoUpgrade({ currentDur: 'fragile', winnerDur: 'fragile', tierDelta: null }).veto);
+});

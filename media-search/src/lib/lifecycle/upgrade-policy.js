@@ -79,6 +79,68 @@ export function isTerminalTier(tier) {
   return tier != null && tier >= TERMINAL_TIER;
 }
 
+/**
+ * Durability confidence (durability tranche): will this release still
+ * be obtainable later, not just servable now? Derived ONLY from signals
+ * with observed variance in this deployment:
+ * - provider cache state / household placement (strong, fresh)
+ * - sighting history spread first_seen..last_seen (medium)
+ * Seeders, multi-source counts, and dual-provider placement are wired
+ * as inputs but currently carry no data here (0 seeder rows, single
+ * source per result, one RD placement) — they contribute nothing today
+ * and activate automatically if those sources ever flow.
+ */
+export const DURABILITY = Object.freeze({
+  STRONG: 'strong',
+  MEDIUM: 'medium',
+  FRAGILE: 'fragile',
+});
+
+export const VETO_MAX_TIER_DELTA = 10;
+
+export function durabilityOf({
+  cacheState = null, placement = false,
+  firstSeen = null, lastSeen = null, sourceCount = 1, seeders = null,
+  nowMs = Date.now(),
+} = {}) {
+  const reasons = [];
+  const cached = cacheState === 'cached';
+  if (cached) reasons.push('cached-now');
+  if (placement) reasons.push('household-placement');
+  if (cached || placement) return { level: DURABILITY.STRONG, reasons };
+  if (seeders != null && seeders >= 100) return { level: DURABILITY.STRONG, reasons: ['deep-swarm'] };
+  const medium = [];
+  if (seeders != null && seeders >= 20) medium.push('healthy-swarm');
+  if (firstSeen != null && lastSeen != null && (lastSeen - firstSeen) >= 7 * 86400 * 1000) {
+    medium.push('seen-across-weeks');
+  }
+  if ((sourceCount | 0) >= 2) medium.push('multi-source');
+  if (medium.length > 0) return { level: DURABILITY.MEDIUM, reasons: medium };
+  const why = [];
+  if (cacheState === 'uncached') why.push('uncached');
+  if (firstSeen == null) why.push('never-sighted');
+  else if ((nowMs - lastSeen) >= 0 && (lastSeen - firstSeen) < 7 * 86400 * 1000) why.push('fresh-single-sighting');
+  if ((sourceCount | 0) < 2) why.push('single-source');
+  return { level: DURABILITY.FRAGILE, reasons: why.length > 0 ? why : ['no-durability-evidence'] };
+}
+
+/**
+ * Veto rule: a fragile winner replaces a strong current ONLY on a
+ * large quality jump (CAM-era → home quality and the like). Marginal
+ * improvements (same band, resolution-only bumps) require
+ * equal-or-better durability — they park until the winner proves
+ * itself (cached, placed, or seen over time). Null delta (unknown
+ * current tier) never vetoes: the upgrade floor already gated it.
+ */
+export function shouldVetoUpgrade({ currentDur = null, winnerDur = null, tierDelta = null } = {}) {
+  if (tierDelta == null) return { veto: false, reason: 'unknown-delta' };
+  if (tierDelta < VETO_MAX_TIER_DELTA
+    && winnerDur === DURABILITY.FRAGILE && currentDur === DURABILITY.STRONG) {
+    return { veto: true, reason: 'fragile-winner-vs-durable-current' };
+  }
+  return { veto: false, reason: 'durability-ok' };
+}
+
 export function compareUpgrade(current, candidate) {
   const c = current?.tier ?? null;
   const n = candidate?.tier ?? null;
