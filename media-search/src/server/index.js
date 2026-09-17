@@ -230,6 +230,24 @@ function armUpgradeWatchTimer(delayMs) {
       if (upgradeEvaluator && !upgradeWatchInFlight) {
         upgradeWatchInFlight = true;
         try {
+          // Temporary publication retirement rides this publication-domain
+          // tick (hourly, bounded, restart-safe): due watch-once items
+          // unpublish via the existing primitive; owned (promoted) items
+          // adopt permanent instead. Runs before upgrade evaluation so
+          // retired items are never seeded.
+          try {
+            const { retireDuePublications } = await import('../lib/library/retirement.js');
+            const retired = await retireDuePublications({
+              cache: discoveryCache, controlPlaneStore,
+              promotionStore: promotionStore ?? null,
+              log: (msg) => console.log(`media-search: ${msg}`),
+            });
+            if (retired.retired > 0 || retired.adopted > 0) {
+              console.log(`media-search: retirement retired=${retired.retired} adopted=${retired.adopted}`);
+            }
+          } catch (error) {
+            console.warn('media-search: retirement sweep failed', error?.message);
+          }
           const result = await upgradeEvaluator.tickOnce();
           if (result.acted || result.seeded) {
             console.log(`media-search: upgrade tick ${result.rowId ?? ''} ${result.to || result.reason || ''} seeded=${result.seeded ?? 0} (${result.ms ?? 0}ms)`);

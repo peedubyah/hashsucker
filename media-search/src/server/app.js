@@ -27,6 +27,7 @@ import { createHandoff, HANDLING_MODES } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
 import { bindPlexMetricsSink, openSeasonFanOutScope } from '../lib/requests/plex-notifier.js';
 import { unpublishMedia } from '../lib/library/unpublish.js';
+import { markTemporaryPublication, clearTemporaryPublication } from '../lib/library/retirement.js';
 import { listLibrary } from '../lib/library/listing.js';
 import { buildDiagnostics } from '../lib/diagnostics/readiness.js';
 import { runReconcile } from '../lib/consumers/reconcile.js';
@@ -3313,6 +3314,14 @@ export function createRequestHandler(dependencies = {}) {
           // Nudge the worker so promotion starts without waiting for
           // the next tick; the tick remains the durability backstop.
           try { getPromotionWorker()?.tick().catch(() => {}); } catch { /* backstop covers */ }
+          // Explicit promotion adopts the publication permanent: a stale
+          // temporary timer must never later unpublish owned media.
+          try {
+            clearTemporaryPublication(controlPlaneStore, {
+              mediaType: episodeScoped ? 'episode' : 'movie', mediaId: item.mediaId,
+              season: item.season ?? null, episode: item.episode ?? null,
+            }, { nowMs: clock() });
+          } catch {}
           return sendJson(response, 200, {
             status: promotion.status,
             created: !!created,
@@ -3813,6 +3822,32 @@ export function createRequestHandler(dependencies = {}) {
             ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
             ...rdEnsureForRequest({ rdClient, controlPlaneStore, clock }),
           });
+          // Temporary publication declaration (watch-once tranche): an
+          // explicit request either marks the published item temporary
+          // (with TTL) or adopts it permanent (default). Internal
+          // republish flows (anticipation scheduler, upgrade watch)
+          // never declare intent, so they never disturb presentation
+          // intent. No-op when nothing published.
+          try {
+            const ho = result?.handoff;
+            const internal = body?.source === 'anticipation' || body?.source === 'upgrade-watch';
+            if (ho?.mediaId && !internal) {
+              const identity = {
+                mediaType: ho.mediaType, mediaId: ho.mediaId,
+                season: ho.season ?? null, episode: ho.episode ?? null,
+              };
+              if (body?.temporary === true) {
+                const ttlHours = Number(body?.ttlHours);
+                markTemporaryPublication(controlPlaneStore, identity, {
+                  ttlMs: Number.isFinite(ttlHours) && ttlHours > 0
+                    ? ttlHours * 3600 * 1000 : undefined,
+                  nowMs: clock(),
+                });
+              } else {
+                clearTemporaryPublication(controlPlaneStore, identity, { nowMs: clock() });
+              }
+            }
+          } catch {}
           return sendJson(response, 200, {
             ...result,
             timings: { totalMs: Math.round(performance.now() - startedAt) },

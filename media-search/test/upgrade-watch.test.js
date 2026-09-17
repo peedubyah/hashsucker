@@ -45,3 +45,30 @@ test('due returns only ripe rows in order; park backs off', () => {
   store.remove(due[0].id);
   assert.equal(store.counts(), 1);
 });
+
+test('evaluate drops watch row when publication retired, without network', async () => {
+  const { createUpgradeWatchStore, createUpgradeEvaluator } =
+    await import('../src/lib/lifecycle/upgrade-watch.js');
+  const { DatabaseSync } = await import('node:sqlite');
+  const { createDiscoveryCache } = await import('../src/lib/discovery/cache.js');
+  const { createControlPlaneStore } = await import('../src/lib/control-plane/store.js');
+  const cache = createDiscoveryCache({ db: new DatabaseSync(':memory:') });
+  const controlPlaneStore = createControlPlaneStore({ database: new DatabaseSync(':memory:') });
+  const store = createUpgradeWatchStore({ db: cache.db });
+  // Published-then-retired: library item absent, VFS row gone.
+  controlPlaneStore.ensureLibraryItem({
+    mediaType: 'movie', mediaId: 'tt-gone', title: 'Gone', desiredState: 'absent',
+  });
+  store.ensure({ mediaType: 'movie', mediaId: 'tt-gone', tf: 'tf-old', tier: 32, label: 'web-dl/1080p' });
+  let fetched = 0;
+  const ev = createUpgradeEvaluator({
+    store, cache, controlPlaneStore, baseUrl: 'http://127.0.0.1:9',
+    fetchFn: async () => { fetched++; throw new Error('must not fetch'); },
+  });
+  const [row] = store.due({ limit: 1 });
+  const out = await ev.evaluate(row);
+  assert.equal(out.to, 'removed');
+  assert.equal(out.reason, 'no-active-publication');
+  assert.equal(fetched, 0, 'no network before confirming publication');
+  assert.equal(store.counts(), 0);
+});

@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS library_items (
   desired_state TEXT NOT NULL CHECK (desired_state IN ('present', 'absent')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  publication_mode TEXT NOT NULL DEFAULT 'permanent',
+  retire_at INTEGER,
   CHECK ((media_type = 'movie' AND season IS NULL AND episode IS NULL)
     OR (media_type = 'episode' AND season IS NOT NULL AND episode IS NOT NULL))
 );
@@ -374,6 +376,19 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   // fresh schema (partial unique index, FK to torrent_files) sees the
   // backfilled columns.
   migrateTorrentFileSchema(db);
+  // Temporary publication columns (watch-once tranche): publication mode
+  // + retirement time. PRAGMA-guarded so existing databases migrate
+  // without rebuild. Background flows never write these; only explicit
+  // requests declare presentation intent.
+  try {
+    const libraryColumns = db.prepare('PRAGMA table_info(library_items)').all().map((c) => c.name);
+    if (libraryColumns.length > 0 && !libraryColumns.includes('publication_mode')) {
+      db.exec("ALTER TABLE library_items ADD COLUMN publication_mode TEXT NOT NULL DEFAULT 'permanent'");
+    }
+    if (libraryColumns.length > 0 && !libraryColumns.includes('retire_at')) {
+      db.exec('ALTER TABLE library_items ADD COLUMN retire_at INTEGER');
+    }
+  } catch {}
   db.exec(CONTROL_PLANE_SCHEMA);
   db.exec(CONSUMER_OBSERVATIONS_SCHEMA);
   migrateExposureSchema(db);
@@ -2060,6 +2075,8 @@ function rowToLibraryItem(row) {
     mediaId: row.media_id, editionKey: row.edition_key, title: row.title,
     year: row.year, season: row.season, episode: row.episode,
     desiredState: row.desired_state, createdAt: row.created_at, updatedAt: row.updated_at,
+    publicationMode: row.publication_mode ?? 'permanent',
+    retireAt: row.retire_at ?? null,
   };
 }
 function rowToLibraryPath(row) {
