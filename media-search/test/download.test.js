@@ -356,3 +356,80 @@ test('materialize primitive: oversized partial resets safely', async () => {
   assert.equal(await fsp.readFile(path.join(dir, 'out'), 'utf8'), 'xyz');
   await fsp.rm(dir, { recursive: true, force: true });
 });
+
+// ─── bounded retry ───
+test('download retry: transient materialize failure schedules; due claimed; exhaustion terminal', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'dl-retry-'));
+  const store = memStore();
+  const { download } = store.request({ mediaId: 'tt-retry', mediaType: 'movie' });
+  const id = download.downloadRequestId;
+  let calls = 0;
+  const worker = createDownloadWorker({
+    downloadStore: store,
+    resolveFn: async () => ({
+      status: 'ok', reused: true, torrentFileId: 'tf-1',
+      torrentFile: { id: 'tf-1', infoHash: 'a'.repeat(40), internalPath: 'T.mkv', size: 32 },
+      handoff: null,
+    }),
+    stagingRoot: root,
+    dataPlaneBaseUrl: 'http://dp:3001',
+    fetchFn: async () => { calls++; throw new Error('socket hang up'); },
+  });
+  const r1 = await worker.tick();
+  assert.equal(r1.status, 'retry_wait');
+  assert.equal(calls, 1);
+  let row = store.get(id);
+  assert.equal(row.attempts, 1);
+  assert.ok(row.nextDueAt > Date.now());
+  assert.equal(row.failCategory, 'transient');
+  // Not claimable before due; claimable once due (no new wait needed).
+  assert.equal(store.listClaimable(5).length, 0);
+  store.scheduleRetry(id, { error: 'socket hang up', category: 'transient', attempts: 1, delayMs: 0 });
+  const due = store.listClaimable(5);
+  assert.equal(due.length, 1);
+  assert.equal(due[0].downloadRequestId, id);
+  // Exhaust the budget: attempt 6 with a transient goes terminal + loud.
+  store.scheduleRetry(id, { error: 'socket hang up', category: 'transient', attempts: 5, delayMs: 0 });
+  const r6 = await worker.tick();
+  assert.equal(r6.status, 'failed');
+  row = store.get(id);
+  assert.equal(row.attempts, 6);
+  assert.equal(row.nextDueAt, null);
+  assert.ok(row.lastError.includes('socket hang up'));
+  assert.equal(store.listClaimable(5).length, 0, 'exhausted rows are never claimed');
+  // Manual re-POST resets the budget intentionally.
+  const reset = store.request({ mediaId: 'tt-retry', mediaType: 'movie' });
+  assert.ok(reset.reset);
+  assert.equal(reset.download.attempts, 0);
+  assert.equal(store.listClaimable(5).length, 1);
+  await fsp.rm(root, { recursive: true, force: true });
+});
+
+test('download retry: permanent failures go terminal immediately; restart preserves schedule', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'dl-perm-'));
+  const store = memStore();
+  const mkWorker = (resolveFn) => createDownloadWorker({
+    downloadStore: store, resolveFn, stagingRoot: root,
+    dataPlaneBaseUrl: 'http://dp:3001', fetchFn: stubFetch(Buffer.alloc(0)),
+  });
+  // No candidate in the market: permanent on first failure, no schedule.
+  const { download: d1 } = store.request({ mediaId: 'tt-empty', mediaType: 'movie' });
+  const w1 = mkWorker(async () => ({ status: 'unresolvable', reason: 'no healthy TorrentFile after discovery' }));
+  const o1 = await w1.tick();
+  assert.equal(o1.status, 'failed');
+  const r1 = store.get(d1.downloadRequestId);
+  assert.equal(r1.attempts, 1);
+  assert.equal(r1.nextDueAt, null);
+  assert.equal(r1.failCategory, 'no-candidate');
+  // Transient schedules; boot recovery preserves attempts + due time.
+  const { download: d2 } = store.request({ mediaId: 'tt-flaky', mediaType: 'movie' });
+  const w2 = mkWorker(async () => { throw new Error('fetch failed'); });
+  const o2 = await w2.tick();
+  assert.equal(o2.status, 'retry_wait');
+  const before = store.get(d2.downloadRequestId);
+  assert.equal(store.resetStale(), 0, 'failed rows are not transient-claimed; nothing stranded');
+  const after = store.get(d2.downloadRequestId);
+  assert.equal(after.attempts, before.attempts);
+  assert.equal(after.nextDueAt, before.nextDueAt);
+  await fsp.rm(root, { recursive: true, force: true });
+});

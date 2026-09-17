@@ -19,6 +19,7 @@ import {
   materializeTorrentFile, discardStagingPartials, PARTIAL_SUFFIX,
 } from '../materialize/materialize.js';
 import { DOWNLOAD_STATUS } from './store.js';
+import { classifyJobFailure, recordJobFailure } from '../lifecycle/job-retry.js';
 import { resolveStagedTarget, isWithinRoot, STAGING_DIRNAME } from './paths.js';
 
 export function createDownloadWorker({
@@ -52,6 +53,18 @@ export function createDownloadWorker({
     });
   }
 
+  /** Record a failure with bounded retry: transient schedules, permanent
+   * (or exhausted budget) goes terminal. Returns the worker outcome. */
+  function failJob(id, classification, error) {
+    const recorded = recordJobFailure(downloadStore, id, classification, error);
+    if (recorded.outcome === 'retry') {
+      log(`[download] retry ${id} attempt=${recorded.row.attempts} next=${new Date(recorded.row.nextDueAt).toISOString()} (${classification.category}: ${String(error?.message ?? error).slice(0, 100)})`);
+      return { status: 'retry_wait', downloadRequestId: id, download: recorded.row };
+    }
+    log(`[download] failed ${id}: ${String(error?.message ?? error).slice(0, 120)}`);
+    return { status: 'failed', downloadRequestId: id, download: recorded.row };
+  }
+
   async function processOne(download) {
     const id = download.downloadRequestId;
     if (inFlight.has(id)) return { status: 'in-flight', downloadRequestId: id };
@@ -60,27 +73,33 @@ export function createDownloadWorker({
     }
     inFlight.add(id);
     try {
-      const resolved = await resolveFn({
-        mediaId: download.mediaId,
-        mediaType: download.mediaType,
-        season: download.season,
-        episode: download.episode,
-      });
+      let resolved;
+      try {
+        resolved = await resolveFn({
+          mediaId: download.mediaId,
+          mediaType: download.mediaType,
+          season: download.season,
+          episode: download.episode,
+        });
+      } catch (error) {
+        // Previously an uncaught throw stranded the row in resolving
+        // until boot recovery. Now it classifies (fail-closed transient)
+        // and retries boundedly.
+        return failJob(id, classifyJobFailure({ stage: 'unexpected', error }), error);
+      }
       if (!resolved || resolved.status !== 'ok') {
-        const failed = downloadStore.markFailed(id, resolved?.reason ?? 'unresolvable');
-        return { status: 'failed', downloadRequestId: id, download: failed };
+        const reason = resolved?.reason ?? 'unresolvable';
+        return failJob(id, classifyJobFailure({ stage: 'resolve', error: reason }), reason);
       }
       const { torrentFile, torrentFileId } = resolved;
       let stagedPath;
       try {
         stagedPath = stagedTargetFor(downloadStore.get(id), torrentFile, resolved.handoff ?? null);
       } catch (error) {
-        const failed = downloadStore.markFailed(id, error?.message);
-        return { status: 'failed', downloadRequestId: id, download: failed };
+        return failJob(id, classifyJobFailure({ stage: 'target', error }), error?.message);
       }
       if (!isWithinRoot(stagingRoot, stagedPath)) {
-        const failed = downloadStore.markFailed(id, 'staged path escapes owned root');
-        return { status: 'failed', downloadRequestId: id, download: failed };
+        return failJob(id, classifyJobFailure({ stage: 'target', error: 'staged path escapes owned root' }), 'staged path escapes owned root');
       }
       const materialized = downloadStore.markMaterializing(id, {
         torrentFileId,
@@ -100,9 +119,7 @@ export function createDownloadWorker({
         log,
       });
       if (!result.ok) {
-        const failed = downloadStore.markFailed(id, result.error);
-        log(`[download] failed ${id}: ${result.error}`);
-        return { status: 'failed', downloadRequestId: id, download: failed };
+        return failJob(id, classifyJobFailure({ stage: 'materialize', error: result.error }), result.error);
       }
       const done = downloadStore.markStaged(id);
       log(`[download] staged ${id} (${torrentFile.size} bytes) -> ${stagedPath}`);

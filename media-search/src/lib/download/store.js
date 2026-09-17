@@ -19,8 +19,9 @@
  *                   requested so the worker re-stages from durable
  *                   TorrentFile truth (matches the UNRAID.md promise that
  *                   anything not yet moved can always be re-staged).
- *   failed        — retryable; re-POST resets to requested (terminal
- *                   until asked again)
+ *   failed        — terminal, or retry-waiting when attempts remain
+ *                   and next_due_at is set (worker claims due rows;
+ *                   re-POST resets the budget intentionally)
  *
  * "Staged" is deliberately NOT "permanent": a downstream barnacle may
  * immediately move/import the file. Table lives in control-plane.db
@@ -29,6 +30,8 @@
 
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+
+import { MAX_JOB_ATTEMPTS } from '../lifecycle/job-retry.js';
 
 /** Same presence semantics as the status endpoint: regular file with the expected size. */
 export function stagedFilePresent(row) {
@@ -94,12 +97,23 @@ function rowToDownload(row) {
     lastError: row.last_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    attempts: row.attempts ?? 0,
+    nextDueAt: row.next_due_at ?? null,
+    failCategory: row.fail_category ?? null,
   };
 }
 
 export function createDownloadStore({ db, now = () => Date.now() } = {}) {
-  if (!db) throw new Error('download store requires a database handle');
+  if (!db) throw new Error('download store requires db');
   db.exec(SCHEMA);
+  // Additive retry columns (job-retry tranche). PRAGMA-guarded so
+  // existing databases migrate without rebuild.
+  try {
+    const cols = db.prepare('PRAGMA table_info(download_requests)').all().map((c) => c.name);
+    if (!cols.includes('attempts')) db.exec('ALTER TABLE download_requests ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0');
+    if (!cols.includes('next_due_at')) db.exec('ALTER TABLE download_requests ADD COLUMN next_due_at INTEGER');
+    if (!cols.includes('fail_category')) db.exec('ALTER TABLE download_requests ADD COLUMN fail_category TEXT');
+  } catch {}
 
   function get(id) {
     const row = db.prepare('SELECT * FROM download_requests WHERE id = ?').get(id);
@@ -138,6 +152,7 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
         UPDATE download_requests SET status = 'requested', last_error = NULL,
           torrent_file_id = NULL, expected_size = NULL, bytes_complete = 0,
           staged_path = NULL, title = COALESCE(?, title), year = COALESCE(?, year),
+          attempts = 0, next_due_at = NULL, fail_category = NULL,
           updated_at = ?
         WHERE id = ?
       `).run(title, year, timestamp, current.downloadRequestId);
@@ -154,12 +169,16 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
     return { download: get(id), created: true };
   }
 
-  /** Atomic claim for the worker single-flight; false when already taken. */
+  /** Atomic claim for the worker single-flight; false when already taken.
+   * Claims fresh requests plus retry-due rows (failed with a future
+   * schedule reached and budget remaining). Terminal failures
+   * (exhausted/never-scheduled) are never claimed. */
   function claimResolving(id) {
     const result = db.prepare(`
       UPDATE download_requests SET status = 'resolving', updated_at = ?
-      WHERE id = ? AND status = 'requested'
-    `).run(now(), id);
+      WHERE id = ? AND (status = 'requested' OR (status = 'failed'
+        AND next_due_at IS NOT NULL AND next_due_at <= ? AND attempts < ?))
+    `).run(now(), id, now(), MAX_JOB_ATTEMPTS);
     return result.changes === 1;
   }
 
@@ -194,19 +213,37 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
     return get(id);
   }
 
-  function markFailed(id, lastError) {
+  /** Terminal failure: preserves reason, clears any retry schedule.
+   * attempts: explicit count from the caller, else increment by one. */
+  function markFailed(id, lastError, { category = null, attempts = null } = {}) {
     db.prepare(`
-      UPDATE download_requests SET status = 'failed', last_error = ?, updated_at = ?
+      UPDATE download_requests SET status = 'failed', last_error = ?,
+        fail_category = COALESCE(?, fail_category),
+        attempts = COALESCE(?, attempts + 1),
+        next_due_at = NULL, updated_at = ?
       WHERE id = ?
-    `).run(String(lastError ?? 'unknown error').slice(0, 2000), now(), id);
+    `).run(String(lastError ?? 'unknown error').slice(0, 2000), category, attempts, now(), id);
+    return get(id);
+  }
+
+  /** Schedule a bounded retry: stays failed, becomes claimable at due time. */
+  function scheduleRetry(id, { error, category, attempts, delayMs }) {
+    db.prepare(`
+      UPDATE download_requests SET status = 'failed', last_error = ?,
+        fail_category = ?, attempts = ?, next_due_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(String(error ?? 'unknown error').slice(0, 2000), category ?? null,
+      attempts ?? 0, now() + (delayMs ?? 0), now(), id);
     return get(id);
   }
 
   function listClaimable(limit = 1) {
     return db.prepare(`
-      SELECT * FROM download_requests WHERE status = 'requested'
+      SELECT * FROM download_requests
+      WHERE status = 'requested' OR (status = 'failed'
+        AND next_due_at IS NOT NULL AND next_due_at <= ? AND attempts < ?)
       ORDER BY created_at ASC LIMIT ?
-    `).all(limit).map(rowToDownload);
+    `).all(now(), MAX_JOB_ATTEMPTS, limit).map(rowToDownload);
   }
 
   /**
@@ -230,6 +267,7 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
     noteProgress,
     markStaged,
     markFailed,
+    scheduleRetry,
     listClaimable,
     resetStale,
   };

@@ -181,11 +181,39 @@ test('promotion worker: exact bytes become permanent; short stream fails clean',
     fetchFn: stubFetch(Buffer.alloc(3)),
   });
   const failed = await worker2.tick();
-  assert.equal(failed.status, 'failed');
-  assert.equal(store2.get('tf-2').status, PROMOTION_STATUS.FAILED);
-  assert.ok(store2.get('tf-2').lastError.includes('incomplete stream'));
+  // Interrupted byte stream is transient: bounded retry, not terminal.
+  assert.equal(failed.status, 'retry_wait');
+  const row = store2.get('tf-2');
+  assert.equal(row.status, PROMOTION_STATUS.FAILED);
+  assert.equal(row.attempts, 1);
+  assert.ok(row.nextDueAt > Date.now());
+  assert.ok(row.lastError.includes('incomplete stream'));
   assert.ok(!(await fsp.stat(badPath).catch(() => null)));
   await fsp.rm(root, { recursive: true, force: true });
+});
+
+test('promotion retry: due rows claimed; exhaustion terminal; re-POST resets', async () => {
+  const store = memStore();
+  store.request({ ...BASE, size: 8, permanentPath: '/x/y.mkv' });
+  // Force the budget to the edge, then fail once more with a transient.
+  store.scheduleRetry('tf-1', { error: 'socket hang up', category: 'transient', attempts: 5, delayMs: 0 });
+  const worker = createPromotionWorker({
+    promotionStore: store, dataPlaneBaseUrl: 'http://dp:3001', permanentRoot: '/x',
+    fetchFn: async () => { throw new Error('socket hang up'); },
+  });
+  const out = await worker.tick();
+  assert.equal(out.status, 'failed', 'attempt 6 exhausts to terminal');
+  const row = store.get('tf-1');
+  assert.equal(row.attempts, 6);
+  assert.equal(row.nextDueAt, null, 'no further schedule when exhausted');
+  // Nothing claimable while terminal...
+  assert.equal(store.listClaimable(5).length, 0);
+  // ...until a human re-POST resets the budget intentionally.
+  const reset = store.request({ ...BASE, size: 8, permanentPath: '/x/y.mkv' });
+  assert.ok(reset.reset);
+  assert.equal(reset.promotion.attempts, 0);
+  assert.equal(reset.promotion.nextDueAt, null);
+  assert.equal(store.listClaimable(5).length, 1);
 });
 
 // ─── local serving: 200 / 206 / 416 ───

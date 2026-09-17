@@ -18,6 +18,7 @@ import {
 } from '../materialize/materialize.js';
 import { isWithinRoot, STAGING_DIRNAME } from './paths.js';
 import { PROMOTION_STATUS } from './store.js';
+import { classifyJobFailure, recordJobFailure } from '../lifecycle/job-retry.js';
 
 export { verifyStagedFile };
 
@@ -40,9 +41,19 @@ export function createPromotionWorker({
 
   async function materializeOne(promotion) {
     const { torrentFileId, size, permanentPath } = promotion;
+    const failJob = (classification, error) => {
+      const recorded = recordJobFailure(promotionStore, torrentFileId, classification, error);
+      if (recorded.outcome === 'retry') {
+        log(`[promotion] retry ${torrentFileId} attempt=${recorded.row.attempts} next=${new Date(recorded.row.nextDueAt).toISOString()} (${classification.category})`);
+        return { status: 'retry_wait', torrentFileId, promotion: recorded.row };
+      }
+      log(`[promotion] failed ${torrentFileId}: ${String(error?.message ?? error).slice(0, 120)}`);
+      return { status: 'failed', torrentFileId, promotion: recorded.row };
+    };
     if (!isWithinRoot(permanentRoot, permanentPath)) {
-      promotionStore.markFailed(torrentFileId, 'permanent path escapes owned root');
-      return { status: 'failed', torrentFileId };
+      return failJob(
+        classifyJobFailure({ stage: 'target', error: 'permanent path escapes owned root' }),
+        'permanent path escapes owned root');
     }
     if (inFlight.has(torrentFileId)) return { status: 'in-flight', torrentFileId };
     if (!promotionStore.claimMaterializing(torrentFileId)) {
@@ -61,9 +72,7 @@ export function createPromotionWorker({
         log,
       });
       if (!result.ok) {
-        const failed = promotionStore.markFailed(torrentFileId, result.error);
-        log(`[promotion] failed ${torrentFileId}: ${result.error}`);
-        return { status: 'failed', torrentFileId, promotion: failed };
+        return failJob(classifyJobFailure({ stage: 'materialize', error: result.error }), result.error);
       }
       promotionStore.markVerifying(torrentFileId, result.bytesComplete);
       const done = promotionStore.markPermanent(torrentFileId);

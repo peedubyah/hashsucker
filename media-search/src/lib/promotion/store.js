@@ -9,13 +9,16 @@
  *                   partials, then re-fetches cleanly)
  *   verifying     — bytes complete; size/completeness/sparseness check
  *   permanent     — atomically placed; owned truth (terminal)
- *   failed        — retryable; re-POST resets to requested (terminal
- *                   until the human asks again)
+ *   failed        — terminal, or retry-waiting when attempts remain
+ *                   and next_due_at is set (worker claims due rows;
+ *                   re-POST resets the budget intentionally)
  *
  * Permanence is this row's status, never hy4-cache or STRM presence.
  * Table lives in control-plane.db beside the TorrentFile truth it
  * references — same backup unit, no new database.
  */
+
+import { MAX_JOB_ATTEMPTS } from '../lifecycle/job-retry.js';
 
 export const PROMOTION_STATUS = Object.freeze({
   REQUESTED: 'requested',
@@ -66,12 +69,23 @@ function rowToPromotion(row) {
     lastError: row.last_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    attempts: row.attempts ?? 0,
+    nextDueAt: row.next_due_at ?? null,
+    failCategory: row.fail_category ?? null,
   };
 }
 
 export function createPromotionStore({ db, now = () => Date.now() } = {}) {
   if (!db) throw new Error('promotion store requires a database handle');
   db.exec(SCHEMA);
+  // Additive retry columns (job-retry tranche). PRAGMA-guarded so
+  // existing databases migrate without rebuild.
+  try {
+    const cols = db.prepare('PRAGMA table_info(promotions)').all().map((c) => c.name);
+    if (!cols.includes('attempts')) db.exec('ALTER TABLE promotions ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0');
+    if (!cols.includes('next_due_at')) db.exec('ALTER TABLE promotions ADD COLUMN next_due_at INTEGER');
+    if (!cols.includes('fail_category')) db.exec('ALTER TABLE promotions ADD COLUMN fail_category TEXT');
+  } catch {}
 
   function get(torrentFileId) {
     const row = db.prepare('SELECT * FROM promotions WHERE torrent_file_id = ?').get(torrentFileId);
@@ -103,9 +117,11 @@ export function createPromotionStore({ db, now = () => Date.now() } = {}) {
     if (existing) {
       if (existing.status === PROMOTION_STATUS.PERMANENT) return { promotion: existing, created: false };
       if (!TERMINAL.has(existing.status)) return { promotion: existing, created: false };
+      // Manual re-POST resets the whole retry budget intentionally.
       db.prepare(`
         UPDATE promotions SET status = 'requested', last_error = NULL,
-          bytes_complete = 0, permanent_path = ?, updated_at = ?
+          bytes_complete = 0, permanent_path = ?,
+          attempts = 0, next_due_at = NULL, fail_category = NULL, updated_at = ?
         WHERE torrent_file_id = ?
       `).run(permanentPath, timestamp, torrentFileId);
       return { promotion: get(torrentFileId), created: false, reset: true };
@@ -121,12 +137,15 @@ export function createPromotionStore({ db, now = () => Date.now() } = {}) {
     return { promotion: get(torrentFileId), created: true };
   }
 
-  /** Atomic claim for the worker single-flight; false when already taken. */
+  /** Atomic claim for the worker single-flight; false when already taken.
+   * Claims fresh requests plus retry-due rows (failed with a reached
+   * schedule and budget remaining). */
   function claimMaterializing(torrentFileId) {
     const result = db.prepare(`
       UPDATE promotions SET status = 'materializing', updated_at = ?
-      WHERE torrent_file_id = ? AND status = 'requested'
-    `).run(now(), torrentFileId);
+      WHERE torrent_file_id = ? AND (status = 'requested' OR (status = 'failed'
+        AND next_due_at IS NOT NULL AND next_due_at <= ? AND attempts < ?))
+    `).run(now(), torrentFileId, now(), MAX_JOB_ATTEMPTS);
     return result.changes === 1;
   }
 
@@ -149,11 +168,26 @@ export function createPromotionStore({ db, now = () => Date.now() } = {}) {
     return get(torrentFileId);
   }
 
-  function markFailed(torrentFileId, lastError) {
+  /** Terminal failure: preserves reason, clears any retry schedule. */
+  function markFailed(torrentFileId, lastError, { category = null, attempts = null } = {}) {
     db.prepare(`
-      UPDATE promotions SET status = 'failed', last_error = ?, updated_at = ?
+      UPDATE promotions SET status = 'failed', last_error = ?,
+        fail_category = COALESCE(?, fail_category),
+        attempts = COALESCE(?, attempts + 1),
+        next_due_at = NULL, updated_at = ?
       WHERE torrent_file_id = ?
-    `).run(String(lastError ?? 'unknown error').slice(0, 2000), now(), torrentFileId);
+    `).run(String(lastError ?? 'unknown error').slice(0, 2000), category, attempts, now(), torrentFileId);
+    return get(torrentFileId);
+  }
+
+  /** Schedule a bounded retry: stays failed, becomes claimable at due time. */
+  function scheduleRetry(torrentFileId, { error, category, attempts, delayMs }) {
+    db.prepare(`
+      UPDATE promotions SET status = 'failed', last_error = ?,
+        fail_category = ?, attempts = ?, next_due_at = ?, updated_at = ?
+      WHERE torrent_file_id = ?
+    `).run(String(error ?? 'unknown error').slice(0, 2000), category ?? null,
+      attempts ?? 0, now() + (delayMs ?? 0), now(), torrentFileId);
     return get(torrentFileId);
   }
 
@@ -166,9 +200,11 @@ export function createPromotionStore({ db, now = () => Date.now() } = {}) {
 
   function listClaimable(limit = 1) {
     return db.prepare(`
-      SELECT * FROM promotions WHERE status = 'requested'
+      SELECT * FROM promotions
+      WHERE status = 'requested' OR (status = 'failed'
+        AND next_due_at IS NOT NULL AND next_due_at <= ? AND attempts < ?)
       ORDER BY created_at ASC LIMIT ?
-    `).all(limit).map(rowToPromotion);
+    `).all(now(), MAX_JOB_ATTEMPTS, limit).map(rowToPromotion);
   }
 
   /**
@@ -192,6 +228,7 @@ export function createPromotionStore({ db, now = () => Date.now() } = {}) {
     markVerifying,
     markPermanent,
     markFailed,
+    scheduleRetry,
     noteProgress,
     listClaimable,
     resetStale,

@@ -3436,6 +3436,11 @@ export function createRequestHandler(dependencies = {}) {
           stagedPath: download.stagedPath,
           filePresent,
           lastError: download.lastError,
+          attempts: download.attempts ?? 0,
+          nextDueAt: download.nextDueAt ?? null,
+          failCategory: download.failCategory ?? null,
+          retryPending: download.status === 'failed'
+            && download.nextDueAt != null && download.nextDueAt > Date.now(),
         });
       }
       if (request.method === 'GET' && url.pathname === '/api/search') {
