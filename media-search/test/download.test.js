@@ -1,7 +1,7 @@
 /**
  * Generic download-intent tranche: intent state, staging contract,
  * resolution (fast reuse vs fresh prepare), worker over the shared
- * byte primitive, no auto-recreation of moved staged files.
+ * byte primitive, re-stage of moved staged files on re-POST.
  */
 import assert from 'node:assert/strict';
 import fsp from 'node:fs/promises';
@@ -52,7 +52,7 @@ test('download paths: movies/ + tv/ namespaces with real extension', () => {
 });
 
 // ─── intent state / idempotency ───
-test('download store: active intent returned; staged kept; failed resets', () => {
+test('download store: active intent returned; staged kept; failed resets', async () => {
   const store = memStore();
   const first = store.request({ mediaId: 'tt1', mediaType: 'movie', title: 'T', year: 2000 });
   assert.ok(first.created);
@@ -68,9 +68,27 @@ test('download store: active intent returned; staged kept; failed resets', () =>
     torrentFileId: 'tf-1', expectedSize: 32, stagedPath: '/dl/movies/T/T.mkv',
   });
   store.markStaged(first.download.downloadRequestId);
-  const staged = store.request({ mediaId: 'tt1', mediaType: 'movie' });
-  assert.ok(!staged.created && !staged.reset);
-  assert.equal(staged.download.status, DOWNLOAD_STATUS.STAGED);
+  // Staged row whose file is gone (moved/consumed downstream): re-POST
+  // resets to requested so the worker re-stages (UNRAID.md promise).
+  const restage = store.request({ mediaId: 'tt1', mediaType: 'movie' });
+  assert.ok(!restage.created && restage.reset);
+  assert.equal(restage.download.status, DOWNLOAD_STATUS.REQUESTED);
+  // Staged row whose file is present: re-POST stays a no-op.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dl-staged-'));
+  try {
+    const present = path.join(dir, 'T.mkv');
+    await fsp.writeFile(present, Buffer.alloc(32));
+    store.claimResolving(restage.download.downloadRequestId);
+    store.markMaterializing(restage.download.downloadRequestId, {
+      torrentFileId: 'tf-1', expectedSize: 32, stagedPath: present,
+    });
+    store.markStaged(restage.download.downloadRequestId);
+    const staged = store.request({ mediaId: 'tt1', mediaType: 'movie' });
+    assert.ok(!staged.created && !staged.reset);
+    assert.equal(staged.download.status, DOWNLOAD_STATUS.STAGED);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
   store.claimResolving(ep.download.downloadRequestId);
   store.markFailed(ep.download.downloadRequestId, 'boom');
   const retry = store.request({ mediaId: 'tt1', mediaType: 'episode', season: 1, episode: 2 });

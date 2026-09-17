@@ -2596,3 +2596,31 @@ test('queryRawCandidatesByTokens matches by filename or title token', () => {
 
   cache.close();
 });
+
+test('request snapshot retention: results older than 30d expire on persist', () => {
+  const cache = createDiscoveryCache();
+  try {
+    const mk = (h, rank) => ({
+      infoHash: h, fileIndex: null, filename: `M${rank}.mkv`, score: 0.9 - rank * 0.01, rank,
+      release: { infoHash: h, fileIndex: null, releaseKey: `${h}:torrent` },
+    });
+    const oldId = cache.persistMediaRequest(
+      { mediaId: 'tt-old', mediaType: 'movie', season: null, episode: null, source: 'test' },
+      [mk('a'.repeat(40), 1), mk('b'.repeat(40), 2)],
+    );
+    // Age the old request 31 days back.
+    cache.db.prepare('UPDATE media_requests SET created_at = ? WHERE id = ?')
+      .run(Date.now() - 31 * 24 * 60 * 60 * 1000, oldId);
+    assert.equal(cache.getMediaRequestResults(oldId).length, 2, 'old results present before prune');
+    const newId = cache.persistMediaRequest(
+      { mediaId: 'tt-new', mediaType: 'movie', season: null, episode: null, source: 'test' },
+      [mk('c'.repeat(40), 1)],
+    );
+    assert.equal(cache.getMediaRequestResults(oldId).length, 0, 'stale snapshots pruned amortized');
+    assert.equal(cache.getMediaRequestResults(newId).length, 1, 'fresh snapshots retained');
+    // Request rows themselves are retained (timeline + handoff lookup).
+    assert.equal(cache.db.prepare('SELECT COUNT(*) AS n FROM media_requests').get().n, 2);
+  } finally {
+    cache.close();
+  }
+});

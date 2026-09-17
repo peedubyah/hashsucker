@@ -13,8 +13,12 @@
  *   materializing — shared byte primitive streaming into .staging
  *                   (transient; same recovery as promotion)
  *   staged        — complete verified bytes in the download output
- *                   tree (terminal; never auto-recreated if a
- *                   downstream importer moves/removes the file)
+ *                   tree. When the staged file is still present, re-POST
+ *                   is a no-op (returns the row as-is). When a downstream
+ *                   importer has moved/consumed it, re-POST resets to
+ *                   requested so the worker re-stages from durable
+ *                   TorrentFile truth (matches the UNRAID.md promise that
+ *                   anything not yet moved can always be re-staged).
  *   failed        — retryable; re-POST resets to requested (terminal
  *                   until asked again)
  *
@@ -24,6 +28,18 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+
+/** Same presence semantics as the status endpoint: regular file with the expected size. */
+export function stagedFilePresent(row) {
+  if (!row || row.status !== DOWNLOAD_STATUS.STAGED || !row.stagedPath || row.expectedSize == null) return false;
+  try {
+    const stat = fs.statSync(row.stagedPath);
+    return stat.isFile() && stat.size === row.expectedSize;
+  } catch {
+    return false;
+  }
+}
 
 export const DOWNLOAD_STATUS = Object.freeze({
   REQUESTED: 'requested',
@@ -110,8 +126,14 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
     `).get(mediaId, mediaType, season, episode);
     const current = rowToDownload(existing);
     if (current) {
-      if (current.status === DOWNLOAD_STATUS.STAGED) return { download: current, created: false };
-      if (current.status !== DOWNLOAD_STATUS.FAILED) return { download: current, created: false };
+      if (current.status === DOWNLOAD_STATUS.STAGED) {
+        // No-op only while the staged file is actually there. A moved /
+        // consumed file resets to requested so the worker re-stages from
+        // durable truth (re-POST === re-stage-when-needed).
+        if (stagedFilePresent(current)) return { download: current, created: false };
+      } else if (current.status !== DOWNLOAD_STATUS.FAILED) {
+        return { download: current, created: false };
+      }
       db.prepare(`
         UPDATE download_requests SET status = 'requested', last_error = NULL,
           torrent_file_id = NULL, expected_size = NULL, bytes_complete = 0,

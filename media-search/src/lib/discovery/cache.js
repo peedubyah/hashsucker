@@ -1331,6 +1331,11 @@ const MEDIA_REQUEST_RESULTS_EVIDENCE_SNAPSHOT = 'media-request-results-evidence-
 // No destructive backfill: historical quality features cannot be
 // reconstructed for rows persisted before this migration.
 export const QUALITY_FEATURES_VERSION = 1;
+
+// Per-candidate request snapshot retention: rows older than this (by
+// parent request age) expire amortized on persist. Request rows and
+// handoffs are retained; only the ballast expires.
+export const MEDIA_REQUEST_RESULTS_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MEDIA_REQUEST_RESULTS_QUALITY_FEATURES = 'media-request-results-quality-features-v1';
 
 // Forbidden fields that must NEVER reach the snapshot. Listed as a
@@ -4944,6 +4949,21 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
           ...(intentId ? [intentId] : []),
         );
       }
+
+      // Lifecycle retention (request-history tranche): per-candidate
+      // result rows are serving evidence only for their own request
+      // (fallback reads the live request's rows; operator visibility
+      // reads recent ones). Without a bound they accumulate forever
+      // (~50 rows/request). Prune snapshots older than the retention
+      // window amortized on every persist — no cron, same transaction
+      // (a prune failure rolls back with the persist, never half-applied).
+      // Request rows and handoffs are retained (timeline + handoff
+      // lookup); only the per-candidate ballast expires.
+      try {
+        db.prepare(`DELETE FROM media_request_results WHERE request_id IN (
+          SELECT id FROM media_requests WHERE created_at < ?
+        )`).run(now - MEDIA_REQUEST_RESULTS_RETENTION_MS);
+      } catch {}
 
       db.exec('COMMIT');
       return requestId;
