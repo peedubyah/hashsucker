@@ -72,3 +72,35 @@ test('evaluate drops watch row when publication retired, without network', async
   assert.equal(fetched, 0, 'no network before confirming publication');
   assert.equal(store.counts(), 0);
 });
+
+test('placementHeld requires a currently-ready placement', async () => {
+  const { placementHeld } = await import('../src/lib/lifecycle/upgrade-watch.js');
+  const storeFor = (rows) => ({
+    findPlacementByInfoHash: (provider, hash) =>
+      rows.find((r) => r.provider === provider && r.infoHash === hash) ?? null,
+  });
+  const H = 'a'.repeat(40);
+  assert.equal(placementHeld(storeFor([]), H), false);
+  assert.equal(placementHeld(storeFor([{ provider: 'torbox', infoHash: H, state: 'ready' }]), H), true);
+  assert.equal(placementHeld(storeFor([{ provider: 'torbox', infoHash: H, state: 'removed' }]), H), false);
+  assert.equal(placementHeld(storeFor([{ provider: 'torbox', infoHash: H, state: 'error' }]), H), false);
+  assert.equal(placementHeld(storeFor([{ provider: 'torbox', infoHash: H, state: 'degraded' }]), H), false);
+  assert.equal(placementHeld(storeFor([{ provider: 'torbox', infoHash: H, state: 'pending' }]), H), false);
+  assert.equal(placementHeld(storeFor([{ provider: 'realdebrid', infoHash: H, state: 'ready' }]), H), true);
+  assert.equal(placementHeld(null, H), false);
+});
+
+test('RD status maps stay within the placements CHECK constraint', async () => {
+  const a = await import('../src/lib/control-plane/second-placement.js');
+  const b = await import('../src/lib/control-plane/rd-placement-realizer.js');
+  const allowed = new Set(['pending', 'ready', 'degraded', 'error', 'removed', 'unknown']);
+  for (const [name, map] of [['second-placement', a.RD_STATE_MAP], ['realizer', b.RD_STATE_MAP]]) {
+    for (const [k, v] of Object.entries(map)) {
+      assert.ok(allowed.has(v), `${name}: ${k} -> ${v} violates CHECK`);
+    }
+    assert.equal(map.error, 'error');
+    assert.equal(map.dead, 'error');
+    assert.equal(map.downloaded, 'ready');
+  }
+  assert.deepEqual(a.RD_STATE_MAP, b.RD_STATE_MAP, 'mirrored maps agree');
+});

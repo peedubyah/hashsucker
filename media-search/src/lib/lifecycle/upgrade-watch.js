@@ -46,6 +46,24 @@ function ensureSchema(db) {
   db.exec(SCHEMA);
 }
 
+/** Household holds this hash iff a currently-ready placement exists
+ * on any provider. Exported for tests; the evaluator calls it below. */
+export function placementHeld(controlPlaneStore, infoHash) {
+  if (!infoHash) return false;
+  try {
+    // Healthy-only bar: pending/unknown/degraded placements are not
+    // evidence the household can serve this hash today. A placement
+    // marked stale therefore reduces durability confidence
+    // immediately (the veto path), and repair success (back to ready)
+    // restores it automatically — no separate signal needed.
+    for (const provider of ['torbox', 'realdebrid']) {
+      const p = controlPlaneStore.findPlacementByInfoHash?.(provider, infoHash);
+      if (p && p.state === 'ready') return true;
+    }
+  } catch {}
+  return false;
+}
+
 export function createUpgradeWatchStore({ db, clock = () => Date.now() } = {}) {
   if (!db) throw new Error('upgrade watch requires db');
   ensureSchema(db);
@@ -213,17 +231,6 @@ export function createUpgradeEvaluator({
     return { ...t, filename: winner.filename ?? null, infoHash: winner.infoHash ?? null };
   }
 
-  function placementHeld(infoHash) {
-    if (!infoHash) return false;
-    try {
-      for (const provider of ['torbox', 'realdebrid']) {
-        const p = controlPlaneStore.findPlacementByInfoHash?.(provider, infoHash);
-        if (p && p.state !== 'removed' && p.state !== 'error') return true;
-      }
-    } catch {}
-    return false;
-  }
-
   function sightings(infoHash) {
     const out = { firstSeen: null, lastSeen: null, sourceCount: 1, seeders: null };
     if (!infoHash) return out;
@@ -249,7 +256,7 @@ export function createUpgradeEvaluator({
     const sight = sightings(infoHash);
     return durabilityOf({
       cacheState,
-      placement: placementHeld(infoHash),
+      placement: placementHeld(controlPlaneStore, infoHash),
       firstSeen: sight.firstSeen,
       lastSeen: sight.lastSeen,
       sourceCount: sight.sourceCount,

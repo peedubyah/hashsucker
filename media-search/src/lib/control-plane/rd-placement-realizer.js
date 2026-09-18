@@ -60,7 +60,7 @@ const DEFAULT_LOOKUP_LIMIT = 100;
 const MAX_LOOKUP_LIMIT = 5000;
 
 /** RD status -> provider_placements.state. Mirrors realdebrid/placement.js. */
-const RD_STATE_MAP = Object.freeze({
+export const RD_STATE_MAP = Object.freeze({
   downloaded: 'ready',
   magnet_conversion: 'pending',
   waiting_files_selection: 'pending',
@@ -68,9 +68,13 @@ const RD_STATE_MAP = Object.freeze({
   downloading: 'pending',
   compressing: 'pending',
   uploading: 'pending',
-  error: 'failed',
-  dead: 'failed',
-  virus: 'failed',
+  // NOTE: 'failed' is NOT a valid provider_placements.state (CHECK
+  // allows pending/ready/degraded/error/removed/unknown). RD terminal
+  // statuses land on 'error' — writing anything else throws
+  // SQLITE_CONSTRAINT_CHECK mid-request instead of failing cleanly.
+  error: 'error',
+  dead: 'error',
+  virus: 'error',
 });
 
 /**
