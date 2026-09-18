@@ -28,6 +28,10 @@ import { createRequestIntent } from '../lib/requests/intent.js';
 import { bindPlexMetricsSink, openSeasonFanOutScope } from '../lib/requests/plex-notifier.js';
 import { unpublishMedia } from '../lib/library/unpublish.js';
 import { markTemporaryPublication, clearTemporaryPublication } from '../lib/library/retirement.js';
+import {
+  buildHandoffManifest, ensureHandoffDirs, writeManifest,
+  parseHandoffRequestId, mirrorManifestState,
+} from '../lib/download/handoff.js';
 import { listLibrary } from '../lib/library/listing.js';
 import { buildDiagnostics } from '../lib/diagnostics/readiness.js';
 import { runReconcile } from '../lib/consumers/reconcile.js';
@@ -3393,7 +3397,67 @@ export function createRequestHandler(dependencies = {}) {
             bytesComplete: download.bytesComplete,
             stagedPath: download.stagedPath,
             lastError: download.lastError,
+            handoffState: download.handoffState ?? 'none',
+            handoffId: download.handoffId ?? null,
+            handoffVersion: download.handoffVersion ?? 0,
           });
+        } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
+      }
+      // Importer handoff (download-handoff tranche): stage a durable
+      // transfer manifest for an external consumer. Explicit only —
+      // staging never auto-handoffs (outbox noise for consumer-less
+      // households). Only staged rows with no live transfer qualify.
+      if (request.method === 'POST' && url.pathname.match(/^\/api\/download-request\/([^/]+)\/handoff$/)) {
+        const downloadId = decodeURIComponent(url.pathname.split('/')[3] || '');
+        try {
+          const store = getDownloadStore();
+          if (!store) return sendJson(response, 503, { error: 'download store unavailable' });
+          const root = getDownloadRoot();
+          if (!root) return sendJson(response, 409, { error: 'download staging not configured', code: 'DOWNLOAD_ROOT_UNSET' });
+          const row = store.get(downloadId);
+          if (!row) return sendJson(response, 404, { error: 'unknown download request' });
+          if (row.status !== 'staged') {
+            return sendJson(response, 409, { error: `handoff requires staged bytes (status=${row.status})` });
+          }
+          const { handoff, active, created } = store.createHandoff(downloadId);
+          const full = store.get(downloadId);
+          const manifest = buildHandoffManifest(full, handoff.version);
+          const dirs = ensureHandoffDirs(root);
+          const file = writeManifest(dirs.outbox, manifest);
+          return sendJson(response, 200, { handoff: manifest, file, active: !!active, created: !!created });
+        } catch (err) {
+          const code = /unknown download request/.test(err.message) ? 404 : 409;
+          return sendJson(response, code, { error: err.message });
+        }
+      }
+      // Consumer transfer ACKs (smart consumers): accepted | completed |
+      // failed, version-guarded and idempotent. Dumb file-drop consumers
+      // are observed by the poll backstop instead; both paths converge
+      // on the same row transition.
+      const handoffAckMatch = request.method === 'POST'
+        && url.pathname.match(/^\/api\/download-handoffs\/([^/]+)\/(accepted|completed|failed)$/);
+      if (handoffAckMatch) {
+        const handoffId = decodeURIComponent(handoffAckMatch[1]);
+        const toState = handoffAckMatch[2];
+        try {
+          const store = getDownloadStore();
+          if (!store) return sendJson(response, 503, { error: 'download store unavailable' });
+          const root = getDownloadRoot();
+          const reqId = parseHandoffRequestId(handoffId);
+          if (!reqId) return sendJson(response, 400, { error: 'malformed handoff id' });
+          const row = store.get(reqId);
+          if (!row || row.handoffId !== handoffId) {
+            return sendJson(response, 404, { error: 'unknown or superseded handoff' });
+          }
+          const body = await readBody(request).catch(() => ({}));
+          const detail = toState === 'completed'
+            ? (typeof body?.completedPath === 'string' ? `completed at ${body.completedPath.slice(0, 300)}` : 'consumer completed')
+            : (toState === 'failed' ? (typeof body?.error === 'string' ? body.error.slice(0, 300) : 'consumer rejected') : null);
+          const res = store.applyHandoffEvent(reqId, handoffId, { state: toState, detail });
+          if (root) mirrorManifestState(root, handoffId, toState);
+          return sendJson(response, 200, { handoffId, state: toState, applied: res.applied, reason: res.reason ?? null });
         } catch (err) {
           return sendJson(response, 400, { error: err.message });
         }
@@ -3450,6 +3514,10 @@ export function createRequestHandler(dependencies = {}) {
           failCategory: download.failCategory ?? null,
           retryPending: download.status === 'failed'
             && download.nextDueAt != null && download.nextDueAt > Date.now(),
+          handoffState: download.handoffState ?? 'none',
+          handoffId: download.handoffId ?? null,
+          handoffVersion: download.handoffVersion ?? 0,
+          handoffAt: download.handoffAt ?? null,
         });
       }
       if (request.method === 'GET' && url.pathname === '/api/search') {

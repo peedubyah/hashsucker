@@ -441,6 +441,20 @@ function armDownloadTimer(delayMs) {
             console.log(`media-search: download tick ${result.downloadRequestId ?? ''} ${result.status}`
               + (result.reused ? ' (reused TorrentFile)' : ''));
           }
+          // Handoff poll backstop (same loop, no new scheduler): observe
+          // dumb-consumer file moves (accepted/done/failed) into rows.
+          // Bounded dir lists, no resubmits, no deletes.
+          try {
+            const { pollHandoffDirs } = await import('../lib/download/handoff.js');
+            const observed = pollHandoffDirs({
+              root: downloadRoot, store: downloadStore,
+              log: (msg) => console.log(`media-search: ${msg}`),
+            });
+            const n = observed.accepted + observed.completed + observed.failed;
+            if (n > 0) console.log(`media-search: handoff poll +${n} transfer events`);
+          } catch (error) {
+            console.warn('media-search: handoff poll failed', error?.message);
+          }
         } finally {
           downloadInFlight = false;
         }

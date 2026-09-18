@@ -433,3 +433,76 @@ test('download retry: permanent failures go terminal immediately; restart preser
   assert.equal(after.nextDueAt, before.nextDueAt);
   await fsp.rm(root, { recursive: true, force: true });
 });
+
+// ─── importer handoff ───
+test('download handoff: create/poll/apply lifecycle with version guard', async () => {
+  const { buildHandoffManifest, writeManifest, listManifests, pollHandoffDirs,
+    ensureHandoffDirs, handoffDirs, parseHandoffRequestId } =
+    await import('../src/lib/download/handoff.js');
+  const store = memStore();
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dl-handoff-'));
+  const root = path.join(dir, 'dl');
+  try {
+    // Only staged rows qualify.
+    const { download } = store.request({ mediaId: 'tt-ho', mediaType: 'movie' });
+    assert.throws(() => store.createHandoff(download.downloadRequestId), /staged/);
+    // Stage it with a real file, then hand off.
+    const id = download.downloadRequestId;
+    store.claimResolving(id);
+    const stagedPath = path.join(root, 'movies', 'T', 'T.mkv');
+    await fsp.mkdir(path.dirname(stagedPath), { recursive: true });
+    await fsp.writeFile(stagedPath, Buffer.alloc(16));
+    store.markMaterializing(id, { torrentFileId: 'tf-1', expectedSize: 16, stagedPath });
+    store.markStaged(id);
+    const c1 = store.createHandoff(id);
+    assert.ok(c1.created);
+    assert.equal(c1.handoff.version, 1);
+    assert.equal(c1.handoff.handoffId, `dl-${id}-v1`);
+    assert.equal(parseHandoffRequestId(c1.handoff.handoffId), id);
+    assert.equal(parseHandoffRequestId('bogus'), null);
+    // Second create while live is idempotent (same version).
+    const c2 = store.createHandoff(id);
+    assert.ok(c2.active && !c2.created);
+    assert.equal(c2.handoff.version, 1);
+    // Manifest round-trips through the outbox.
+    const full = store.get(id);
+    const manifest = buildHandoffManifest(full, 1);
+    assert.equal(manifest.stagedPath, stagedPath);
+    assert.equal(manifest.expectedSize, 16);
+    const dirs = ensureHandoffDirs(root);
+    writeManifest(dirs.outbox, manifest);
+    assert.equal(listManifests(dirs.outbox).length, 1);
+    assert.equal(listManifests(dirs.accepted).length, 0);
+    // Poll sees nothing until the consumer moves it.
+    let polled = pollHandoffDirs({ root, store });
+    assert.deepEqual([polled.accepted, polled.completed, polled.failed], [0, 0, 0]);
+    // Consumer accepts: move manifest, poll advances the row.
+    await fsp.rename(
+      path.join(dirs.outbox, `${manifest.handoffId}.json`),
+      path.join(dirs.accepted, `${manifest.handoffId}.json`));
+    polled = pollHandoffDirs({ root, store });
+    assert.equal(polled.accepted, 1);
+    assert.equal(store.get(id).handoffState, 'accepted');
+    // Consumer completes with a note: row completes, file untouched by us.
+    const doneManifest = { ...manifest, completedPath: '/library/T.mkv', completedAt: Date.now() };
+    await fsp.writeFile(path.join(dirs.accepted, `${manifest.handoffId}.json`), JSON.stringify(doneManifest));
+    await fsp.rename(
+      path.join(dirs.accepted, `${manifest.handoffId}.json`),
+      path.join(dirs.done, `${manifest.handoffId}.json`));
+    polled = pollHandoffDirs({ root, store });
+    assert.equal(polled.completed, 1);
+    assert.equal(store.get(id).handoffState, 'completed');
+    // Terminal: further events ignored; re-handoff versions up.
+    const late = store.applyHandoffEvent(id, manifest.handoffId, { state: 'failed', detail: 'x' });
+    assert.ok(!late.applied);
+    const c3 = store.createHandoff(id);
+    assert.ok(c3.created && c3.handoff.version === 2);
+    // Superseded v1 manifest ignored by poll.
+    await fsp.writeFile(path.join(dirs.done, `${manifest.handoffId}.json`), JSON.stringify(doneManifest));
+    polled = pollHandoffDirs({ root, store });
+    assert.equal(polled.completed, 0, 'superseded version ignored');
+    assert.equal(handoffDirs(root).outbox, path.join(root, '.handoff', 'outbox'));
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

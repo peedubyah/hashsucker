@@ -100,19 +100,28 @@ function rowToDownload(row) {
     attempts: row.attempts ?? 0,
     nextDueAt: row.next_due_at ?? null,
     failCategory: row.fail_category ?? null,
+    handoffVersion: row.handoff_version ?? 0,
+    handoffState: row.handoff_state ?? 'none',
+    handoffId: row.handoff_id ?? null,
+    handoffAt: row.handoff_at ?? null,
   };
 }
 
 export function createDownloadStore({ db, now = () => Date.now() } = {}) {
   if (!db) throw new Error('download store requires db');
   db.exec(SCHEMA);
-  // Additive retry columns (job-retry tranche). PRAGMA-guarded so
-  // existing databases migrate without rebuild.
+  // Additive retry + handoff columns (job-retry / download-handoff
+  // tranches). PRAGMA-guarded so existing databases migrate without
+  // rebuild.
   try {
     const cols = db.prepare('PRAGMA table_info(download_requests)').all().map((c) => c.name);
     if (!cols.includes('attempts')) db.exec('ALTER TABLE download_requests ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0');
     if (!cols.includes('next_due_at')) db.exec('ALTER TABLE download_requests ADD COLUMN next_due_at INTEGER');
     if (!cols.includes('fail_category')) db.exec('ALTER TABLE download_requests ADD COLUMN fail_category TEXT');
+    if (!cols.includes('handoff_version')) db.exec('ALTER TABLE download_requests ADD COLUMN handoff_version INTEGER NOT NULL DEFAULT 0');
+    if (!cols.includes('handoff_state')) db.exec("ALTER TABLE download_requests ADD COLUMN handoff_state TEXT NOT NULL DEFAULT 'none'");
+    if (!cols.includes('handoff_id')) db.exec('ALTER TABLE download_requests ADD COLUMN handoff_id TEXT');
+    if (!cols.includes('handoff_at')) db.exec('ALTER TABLE download_requests ADD COLUMN handoff_at INTEGER');
   } catch {}
 
   function get(id) {
@@ -259,6 +268,60 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
     return result.changes;
   }
 
+  /** Handoff transfer states live beside the bytes truth (no status change). */
+  function activeHandoff(row) {
+    return !!row && (row.handoffState === 'pending' || row.handoffState === 'accepted');
+  }
+
+  /**
+   * Begin a transfer: only from staged rows with no live handoff.
+   * Returns { handoff } with the new deterministic version, or
+   * { active } when a transfer is already in flight (idempotent).
+   */
+  function createHandoff(id) {
+    const row = get(id);
+    if (!row) throw new Error('unknown download request');
+    if (row.status !== 'staged') throw new Error(`handoff requires staged bytes (status=${row.status})`);
+    if (activeHandoff(row)) return { handoff: rowToHandoff(row), active: true };
+    const version = (row.handoffVersion ?? 0) + 1;
+    const handoffId = `dl-${id}-v${version}`;
+    db.prepare(`UPDATE download_requests SET handoff_version = ?, handoff_state = 'pending',
+      handoff_id = ?, handoff_at = ?, updated_at = ? WHERE id = ?`)
+      .run(version, handoffId, now(), now(), id);
+    return { handoff: rowToHandoff(get(id)), created: true };
+  }
+
+  /**
+   * Apply a transfer event (poll observation or consumer ACK).
+   * Version-guarded: superseded manifests are ignored. Terminal
+   * transfer states (completed/failed) never move again except via a
+   * new explicit handoff version.
+   */
+  function applyHandoffEvent(id, handoffId, { state, detail = null } = {}) {
+    const row = get(id);
+    if (!row) return { applied: false, reason: 'unknown-request' };
+    if (row.handoffId !== handoffId) return { applied: false, reason: 'superseded-version' };
+    if (!['pending', 'accepted', 'completed', 'failed'].includes(state)) {
+      return { applied: false, reason: 'bad-state' };
+    }
+    if (row.handoffState === 'completed' || row.handoffState === 'failed') {
+      return { applied: false, reason: 'transfer-terminal' };
+    }
+    db.prepare(`UPDATE download_requests SET handoff_state = ?, last_error = COALESCE(?, last_error),
+      updated_at = ? WHERE id = ?`).run(state, detail, now(), id);
+    return { applied: true, handoff: rowToHandoff(get(id)) };
+  }
+
+  function rowToHandoff(row) {
+    return {
+      handoffId: row.handoffId,
+      version: row.handoffVersion,
+      downloadRequestId: row.downloadRequestId,
+      state: row.handoffState,
+      handoffAt: row.handoffAt,
+    };
+  }
+
   return {
     get,
     request,
@@ -270,5 +333,7 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
     scheduleRetry,
     listClaimable,
     resetStale,
+    createHandoff,
+    applyHandoffEvent,
   };
 }
