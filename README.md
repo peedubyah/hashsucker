@@ -1,6 +1,10 @@
-# HashSucker
+<p align="center">
+  <img src="docs/assets/icon-256.png" width="180" alt="HashSucker logo — a comic-book shop vacuum sucking in hash fragments">
+</p>
 
-**Give it media intent; it finds the best viable release, makes it playable, and keeps the lifecycle healthy automatically.**
+<h1 align="center">HashSucker</h1>
+
+<p align="center"><strong>Give it media intent; it finds the best viable release, makes it playable, and keeps the lifecycle healthy automatically.</strong></p>
 
 HashSucker is a self-hosted media fulfillment layer for debrid-backed Plex/Jellyfin libraries. You request a movie or episode through tools you already use — it discovers releases, ranks them, binds the winner to TorBox and/or Real-Debrid, publishes a stable library entry, streams exact bytes, and then keeps watching: upgrading quality when better releases appear, adding provider redundancy when it matters, and retiring temporary items on its own.
 
