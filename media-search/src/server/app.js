@@ -3224,6 +3224,30 @@ export function createRequestHandler(dependencies = {}) {
           return sendJson(response, 500, { error: err?.message || String(err) });
         }
       }
+      // Storm-escalation trigger (headless operator convention):
+      // one bounded coverage-escalation pass over published
+      // single-provider TFs with recent delivery pain. ?dryRun=1
+      // reports the candidate without touching providers.
+      if (request.method === 'POST' && url.pathname === '/api/internal/coverage-escalate') {
+        try {
+          const { findEscalationCandidate, runCoverageEscalation } =
+            await import('../lib/lifecycle/coverage-escalation.js');
+          if (new URL(request.url, 'http://x').searchParams.get('dryRun') === '1') {
+            const candidate = findEscalationCandidate({ cache: searchCache, controlPlaneStore, nowMs: clock() });
+            return sendJson(response, 200, { ok: true, dryRun: true, candidate });
+          }
+          if (!coverageEnsurer) {
+            return sendJson(response, 200, { ok: false, reason: 'coverage-unavailable' });
+          }
+          const outcome = await runCoverageEscalation({
+            cache: searchCache, controlPlaneStore, ensurer: coverageEnsurer, nowMs: clock(),
+            log: (msg) => console.log(`media-search: ${msg}`),
+          });
+          return sendJson(response, 200, { ok: true, ...outcome });
+        } catch (err) {
+          return sendJson(response, 500, { error: err?.message || String(err) });
+        }
+      }
       // Seerr ingress: webhook → durable intent → TMDB→IMDb translation →
       // existing single-intent discovery pipeline.
       if (request.method === 'POST' && url.pathname === '/api/ingress/seerr') {

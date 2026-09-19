@@ -277,6 +277,22 @@ function armUpgradeWatchTimer(delayMs) {
           if (result.acted || result.seeded) {
             console.log(`media-search: upgrade tick ${result.rowId ?? ''} ${result.to || result.reason || ''} seeded=${result.seeded ?? 0} (${result.ms ?? 0}ms)`);
           }
+          // Storm-escalation pass (same hourly tick, at most one TF):
+          // published single-provider TFs with recent delivery pain get
+          // one bounded second-placement attempt. Quiet when nothing
+          // qualifies (the common case).
+          try {
+            const escRes = await fetch(`http://127.0.0.1:${port}/api/internal/coverage-escalate`, {
+              method: 'POST',
+              signal: AbortSignal.timeout(5 * 60 * 1000),
+            });
+            const esc = await escRes.json().catch(() => null);
+            if (esc?.acted) {
+              console.log(`media-search: coverage escalation ${esc.candidate?.torrentFileId ?? ''} -> ${esc.status} providers=${(esc.providers || []).join(',')}`);
+            }
+          } catch (error) {
+            console.warn('media-search: coverage escalation failed', error?.message);
+          }
         } finally {
           upgradeWatchInFlight = false;
         }
