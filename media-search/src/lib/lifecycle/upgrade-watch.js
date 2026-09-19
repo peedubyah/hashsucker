@@ -46,22 +46,26 @@ function ensureSchema(db) {
   db.exec(SCHEMA);
 }
 
-/** Household holds this hash iff a currently-ready placement exists
- * on any provider. Exported for tests; the evaluator calls it below. */
-export function placementHeld(controlPlaneStore, infoHash) {
-  if (!infoHash) return false;
+/** Count currently-ready placements for a hash across providers.
+ * Exported for tests; the evaluator calls it below. */
+export function countReadyPlacements(controlPlaneStore, infoHash) {
+  if (!infoHash) return 0;
+  let n = 0;
   try {
-    // Healthy-only bar: pending/unknown/degraded placements are not
-    // evidence the household can serve this hash today. A placement
-    // marked stale therefore reduces durability confidence
-    // immediately (the veto path), and repair success (back to ready)
-    // restores it automatically — no separate signal needed.
+    // Healthy-only bar (see placementHeld history): pending/unknown/
+    // degraded placements are not evidence the household can serve
+    // this hash today.
     for (const provider of ['torbox', 'realdebrid']) {
       const p = controlPlaneStore.findPlacementByInfoHash?.(provider, infoHash);
-      if (p && p.state === 'ready') return true;
+      if (p && p.state === 'ready') n++;
     }
   } catch {}
-  return false;
+  return n;
+}
+
+/** Back-compat alias (boolean): household holds this hash iff ≥1 ready. */
+export function placementHeld(controlPlaneStore, infoHash) {
+  return countReadyPlacements(controlPlaneStore, infoHash) >= 1;
 }
 
 export function createUpgradeWatchStore({ db, clock = () => Date.now() } = {}) {
@@ -256,7 +260,7 @@ export function createUpgradeEvaluator({
     const sight = sightings(infoHash);
     return durabilityOf({
       cacheState,
-      placement: placementHeld(controlPlaneStore, infoHash),
+      placements: countReadyPlacements(controlPlaneStore, infoHash),
       firstSeen: sight.firstSeen,
       lastSeen: sight.lastSeen,
       sourceCount: sight.sourceCount,

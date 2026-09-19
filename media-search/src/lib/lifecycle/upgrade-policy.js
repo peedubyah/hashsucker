@@ -99,15 +99,23 @@ export const DURABILITY = Object.freeze({
 export const VETO_MAX_TIER_DELTA = 10;
 
 export function durabilityOf({
-  cacheState = null, placement = false,
+  cacheState = null, placements = 0,
   firstSeen = null, lastSeen = null, sourceCount = 1, seeders = null,
   nowMs = Date.now(),
 } = {}) {
   const reasons = [];
+  const held = Math.max(0, placements | 0);
   const cached = cacheState === 'cached';
   if (cached) reasons.push('cached-now');
-  if (placement) reasons.push('household-placement');
-  if (cached || placement) return { level: DURABILITY.STRONG, reasons };
+  if (held >= 2) reasons.push('dual-provider');
+  else if (held === 1) reasons.push('household-placement');
+  // Two currently-healthy placements is the strongest obtainability
+  // evidence (either may serve); one healthy placement is strong.
+  // The dual flag lets callers distinguish (e.g. upgrade already
+  // covered needs no second-placement attempt).
+  if (cached || held >= 1) {
+    return { level: DURABILITY.STRONG, reasons, dual: held >= 2 };
+  }
   if (seeders != null && seeders >= 100) return { level: DURABILITY.STRONG, reasons: ['deep-swarm'] };
   const medium = [];
   if (seeders != null && seeders >= 20) medium.push('healthy-swarm');

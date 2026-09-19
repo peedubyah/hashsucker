@@ -388,7 +388,7 @@ export function createSecondPlacementEnsurer({
     return { status: 'ok', info };
   }
 
-  async function ensureRealDebrid(torrentFile, infoHash) {
+  async function ensureRealDebrid(torrentFile, infoHash, { discoverOnly = false } = {}) {
     let apiCalls = 0;
     const observedAt = now();
     const expiresAt = observedAt + ttlMs;
@@ -459,6 +459,11 @@ export function createSecondPlacementEnsurer({
 
     // Absent: bounded addMagnet flow. This creates real account state, so
     // only the exact matched file id is ever selected (minimal footprint).
+    // Discover-only callers (background enrichment) stop here instead:
+    // manufacturing an uncached download is never automatic.
+    if (discoverOnly) {
+      return { status: 'unavailable', reason: 'discover-only', apiCalls };
+    }
     let addedId;
     try {
       apiCalls += 1;
@@ -551,8 +556,11 @@ export function createSecondPlacementEnsurer({
    * @param {string} params.torrentFileId - Durable TorrentFile id.
    * @param {string} [params.preferredProvider] - 'torbox'|'realdebrid' when
    *   exactly one side is missing and the caller wants that side first.
-   */
-  async function ensureSecondPlacement({ torrentFileId, preferredProvider = null } = {}) {
+   * @param {boolean} [params.discoverOnly=false] - when true, the RD path
+   *   stops after account discovery instead of addMagnet: background
+   *   enrichment never manufactures an uncached download automatically.
+   *   The TorBox path is unaffected (already cached-gated). */
+  async function ensureSecondPlacement({ torrentFileId, preferredProvider = null, discoverOnly = false } = {}) {
     if (!torrentFileId || typeof torrentFileId !== 'string') {
       return { status: 'invalid-input', reason: 'torrentFileId is required' };
     }
@@ -595,7 +603,7 @@ export function createSecondPlacementEnsurer({
     try {
       outcome = target === 'torbox'
         ? await ensureTorBox(torrentFile, infoHash)
-        : await ensureRealDebrid(torrentFile, infoHash);
+        : await ensureRealDebrid(torrentFile, infoHash, { discoverOnly });
     } catch (error) {
       log(`[second-placement] unexpected failure for ${torrentFile.id}: ${error.message}`);
       return { status: 'error', reason: error.message, torrentFileId, infoHash, providers, targetProvider: target, apiCalls: 0 };
@@ -617,12 +625,12 @@ export function createSecondPlacementEnsurer({
     };
   }
 
-  function ensureSecondPlacementCoalesced({ torrentFileId, preferredProvider = null } = {}) {
-    const key = `${String(torrentFileId ?? '')}`;
-    if (!key) return Promise.resolve({ status: 'invalid-input', reason: 'torrentFileId is required' });
+  function ensureSecondPlacementCoalesced({ torrentFileId, preferredProvider = null, discoverOnly = false } = {}) {
+    const key = `${String(torrentFileId ?? '')}|${preferredProvider ?? ''}|${discoverOnly ? '1' : ''}`;
+    if (!String(torrentFileId ?? '')) return Promise.resolve({ status: 'invalid-input', reason: 'torrentFileId is required' });
     const existing = inFlight.get(key);
     if (existing) return existing;
-    const task = ensureSecondPlacement({ torrentFileId, preferredProvider }).finally(() => {
+    const task = ensureSecondPlacement({ torrentFileId, preferredProvider, discoverOnly }).finally(() => {
       inFlight.delete(key);
     });
     inFlight.set(key, task);

@@ -71,7 +71,7 @@ test('compareUpgrade: unknown candidate never upgrades; unknown current needs fl
 test('durabilityOf: cached or placed is strong; fresh single-sighting is fragile', async () => {
   const { durabilityOf, shouldVetoUpgrade, DURABILITY } = await import('../src/lib/lifecycle/upgrade-policy.js');
   assert.equal(durabilityOf({ cacheState: 'cached' }).level, DURABILITY.STRONG);
-  assert.equal(durabilityOf({ placement: true }).level, DURABILITY.STRONG);
+  assert.equal(durabilityOf({ placements: 1 }).level, DURABILITY.STRONG);
   assert.equal(durabilityOf({ cacheState: 'uncached' }).level, DURABILITY.FRAGILE);
   const now = Date.now();
   const med = durabilityOf({ firstSeen: now - 20 * 86400 * 1000, lastSeen: now });
@@ -81,6 +81,9 @@ test('durabilityOf: cached or placed is strong; fresh single-sighting is fragile
   assert.equal(fresh.level, DURABILITY.FRAGILE);
   // Seeders wired but inert without data (documents the future input).
   assert.equal(durabilityOf({ seeders: 150 }).level, DURABILITY.STRONG);
+  assert.equal(durabilityOf({ placements: 2 }).dual, true);
+  assert.equal(durabilityOf({ placements: 1 }).dual, false);
+  assert.equal(durabilityOf({ placements: 2 }).level, DURABILITY.STRONG);
 });
 
 test('shouldVetoUpgrade: only fragile-vs-strong on marginal deltas', async () => {

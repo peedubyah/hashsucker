@@ -2144,37 +2144,47 @@ export function createRequestHandler(dependencies = {}) {
   // T7 -> T6 chain (refresh/retry runs server-side inside the T5 Rust
   // prewarm endpoint); the Range request itself never awaits it.
   // Injectable via dependencies for deterministic tests.
+  // T7 provider surfaces (shared by the redundancy controller and the
+  // coverage ensurer below). Built once whenever either client exists.
+  const t7Torbox = (torBoxProvider && torBoxInventoryProvider) ? {
+    // T7 TorBox surface adapted from the existing provider stack
+    // (cached-only creation semantics preserved; no new TorBox logic).
+    createPlacement: (input) => torBoxProvider
+      .require(PROVIDER_CAPABILITIES.PLACEMENT_CREATE).createPlacement(input),
+    checkCached: (hashes) => checkTorBoxCached(hashes, { apiKey: env.TORBOX_API_KEY }),
+    lookupPlacement: (input, ctx) => torBoxInventoryProvider
+      .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP).lookupPlacement(input, ctx),
+    getFileInventory: (resource, ctx) => torBoxInventoryProvider
+      .require(PROVIDER_CAPABILITIES.FILE_INVENTORY).getFileInventory(resource, ctx),
+  } : null;
+  // T7 Real-Debrid surface is the existing rdClient verbatim
+  // (listTorrents/getTorrentInfo/addMagnet/selectFiles).
+  const t7RealDebrid = rdClient ? {
+    listTorrents: (args) => rdClient.listTorrents(args),
+    getTorrentInfo: (id, opts) => rdClient.getTorrentInfo(id, opts),
+    addMagnet: (magnet, opts) => rdClient.addMagnet(magnet, opts),
+    selectFiles: (id, ids, opts) => rdClient.selectFiles(id, ids, opts),
+  } : null;
+  // Coverage ensurer (dual-provider enrichment tranche): the same T7
+  // second-placement surfaces, built whenever either client exists —
+  // independent of the T10 flag below. The publish hook and any future
+  // loop call it fire-and-forget; per-TF single-flight coalescing
+  // inside prevents duplicate account-side torrents.
+  const coverageEnsurer = (t7Torbox || t7RealDebrid) && controlPlaneStore
+    ? createSecondPlacementEnsurer({
+      store: controlPlaneStore,
+      torbox: t7Torbox,
+      realdebrid: t7RealDebrid,
+      now: clock,
+    })
+    : null;
   const playbackRedundancy = dependencies.playbackRedundancy !== undefined
     ? dependencies.playbackRedundancy
     : (() => {
       if (!isPlaybackRedundancyEnabled(env)) return null;
       if (!controlPlaneStore) return null;
-      // T7 TorBox surface adapted from the existing provider stack
-      // (cached-only creation semantics preserved; no new TorBox logic).
-      const t7Torbox = (torBoxProvider && torBoxInventoryProvider) ? {
-        createPlacement: (input) => torBoxProvider
-          .require(PROVIDER_CAPABILITIES.PLACEMENT_CREATE).createPlacement(input),
-        checkCached: (hashes) => checkTorBoxCached(hashes, { apiKey: env.TORBOX_API_KEY }),
-        lookupPlacement: (input, ctx) => torBoxInventoryProvider
-          .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP).lookupPlacement(input, ctx),
-        getFileInventory: (resource, ctx) => torBoxInventoryProvider
-          .require(PROVIDER_CAPABILITIES.FILE_INVENTORY).getFileInventory(resource, ctx),
-      } : null;
-      // T7 Real-Debrid surface is the existing rdClient verbatim
-      // (listTorrents/getTorrentInfo/addMagnet/selectFiles).
-      const t7RealDebrid = rdClient ? {
-        listTorrents: (args) => rdClient.listTorrents(args),
-        getTorrentInfo: (id, opts) => rdClient.getTorrentInfo(id, opts),
-        addMagnet: (magnet, opts) => rdClient.addMagnet(magnet, opts),
-        selectFiles: (id, ids, opts) => rdClient.selectFiles(id, ids, opts),
-      } : null;
       if (!t7Torbox && !t7RealDebrid) return null;
-      const ensurer = createSecondPlacementEnsurer({
-        store: controlPlaneStore,
-        torbox: t7Torbox,
-        realdebrid: t7RealDebrid,
-        now: clock,
-      });
+      const ensurer = coverageEnsurer;
       const prewarmCaller = createPrewarmCaller({
         store: controlPlaneStore,
         dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://data-plane:3001',
@@ -3914,6 +3924,12 @@ export function createRequestHandler(dependencies = {}) {
           // republish flows (anticipation scheduler, upgrade watch)
           // never declare intent, so they never disturb presentation
           // intent. No-op when nothing published.
+          //
+          // Dual-provider coverage (enrichment tranche): a freshly
+          // published single-provider TF gets one cheap second-placement
+          // attempt (discover-only: TorBox cached-gate, RD account
+          // discovery, never an uncached addMagnet). Fire-and-forget;
+          // coalesced per TF; quiet when already covered.
           try {
             const ho = result?.handoff;
             const internal = body?.source === 'anticipation' || body?.source === 'upgrade-watch';
@@ -3931,6 +3947,16 @@ export function createRequestHandler(dependencies = {}) {
                 });
               } else {
                 clearTemporaryPublication(controlPlaneStore, identity, { nowMs: clock() });
+              }
+              if (ho?.torrentFileId && coverageEnsurer) {
+                const tfId = ho.torrentFileId;
+                coverageEnsurer.ensureSecondPlacement?.({ torrentFileId: tfId, discoverOnly: true })
+                  ?.then((r) => {
+                    if (r && r.status !== 'already_ready') {
+                      console.log(`media-search: coverage ${tfId} -> ${r.status} providers=${(r.providers || []).join(',')}`);
+                    }
+                  })
+                  ?.catch(() => {});
               }
             }
           } catch {}

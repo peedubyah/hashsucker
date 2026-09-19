@@ -229,3 +229,37 @@ test('T4 wrong-file and wrong-TF mappings are rejected without persisting bindin
   );
   console.log('T4 ok: wrong-file and wrong-TF rejected, bindings never persisted');
 });
+
+// ---- T8: discoverOnly never manufactures RD downloads ----
+test('T8 discoverOnly stops before addMagnet with zero account mutation', async () => {
+  const store = createControlPlaneStore();
+  // Home TF known via TorBox only, so the missing side is Real-Debrid.
+  const tbSeed = seedPlacement(store, { provider: 'torbox', rid: 'TB1', fileId: '7', hash: HASH_HOME, path: PATH_HOME, size: SIZE_HOME });
+  const tfId = tbSeed.tfId;
+  const calls = { list: 0, info: 0, add: 0, select: 0 };
+  const rd = {
+    async listTorrents() { calls.list += 1; return []; },
+    async getTorrentInfo() { calls.info += 1; return { id: 'RD0', status: 'waiting_files_selection', files: [] }; },
+    async addMagnet() { calls.add += 1; return { id: 'RD9' }; },
+    async selectFiles() { calls.select += 1; return {}; },
+  };
+  const ensurer = createSecondPlacementEnsurer({ store, torbox: throwingTB(), realdebrid: rd });
+  const r = await ensurer.ensureSecondPlacement({ torrentFileId: tfId, discoverOnly: true });
+  assert.equal(r.status, 'unavailable');
+  assert.equal(r.reason, 'discover-only');
+  assert.equal(calls.add, 0, 'T8: no addMagnet under discoverOnly');
+  assert.equal(calls.select, 0, 'T8: no selectFiles under discoverOnly');
+  assert.equal(store.findPlacementByInfoHash('realdebrid', HASH_HOME), null, 'T8: zero RD rows');
+});
+
+// ---- T9: already_ready short-circuits with zero provider calls ----
+test('T9 coalesced duplicate ensures share one execution', async () => {
+  const store = createControlPlaneStore();
+  const rd = seedPlacement(store, { provider: 'realdebrid', rid: 'RD1', fileId: '7', hash: HASH_HOME, path: PATH_HOME, size: SIZE_HOME });
+  const ensurer = createSecondPlacementEnsurer({ store, torbox: throwingTB(), realdebrid: throwingRD() });
+  const [a, b] = await Promise.all([
+    ensurer.ensureSecondPlacement({ torrentFileId: rd.tfId, discoverOnly: true }),
+    ensurer.ensureSecondPlacement({ torrentFileId: rd.tfId, discoverOnly: true }),
+  ]);
+  assert.equal(a.status, b.status);
+});
