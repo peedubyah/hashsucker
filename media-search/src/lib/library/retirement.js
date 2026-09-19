@@ -19,6 +19,15 @@ export const PERMANENT_MODE = 'permanent';
 export const DEFAULT_TEMP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const MIN_TEMP_TTL_MS = 3 * 60 * 1000;
 export const MAX_TEMP_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+// Consumption-aware retention (retention tranche): playback sightings
+// adjust (never replace) the TTL. Started playback refreshes the
+// retirement horizon so active watching never loses the publication;
+// observed completion shortens to a grace period (rewatch buffer),
+// never to immediate deletion. No Plex/Jellyfin configured (or no
+// sighting) = TTL stands unchanged.
+export const PLAYBACK_EXTENSION_MS = 7 * 24 * 60 * 60 * 1000;
+export const COMPLETION_PROGRESS = 0.9;
+export const COMPLETED_GRACE_MS = 24 * 60 * 60 * 1000;
 
 function identityKeyFor({ mediaType, mediaId, season = null, episode = null }) {
   const isEpisode = mediaType !== 'movie' && season != null;
@@ -121,4 +130,64 @@ export async function retireDuePublications({ cache, controlPlaneStore, promotio
     }
   }
   return { retired, adopted, details };
+}
+
+/** Count live temporary publications (gate: skip session fetch when zero). */
+export function countTemporaryPublications(controlPlaneStore) {
+  try {
+    return controlPlaneStore.db.prepare(`SELECT COUNT(*) AS n FROM library_items
+      WHERE desired_state = 'present' AND publication_mode = ?`).get(TEMPORARY_MODE)?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Fold playback session sightings into temporary publications. Pure
+ * clock, all state durable. Returns counts; never retires here (the
+ * sweep above owns that). Permanent rows are never touched.
+ */
+export function observePlaybackSessions({ controlPlaneStore, sessions = [], nowMs = Date.now(), limit = 200 } = {}) {
+  if (!controlPlaneStore?.db) throw new Error('observePlaybackSessions requires controlPlaneStore');
+  let rows = [];
+  try {
+    rows = controlPlaneStore.db.prepare(`SELECT * FROM library_items
+      WHERE desired_state = 'present' AND publication_mode = ?
+      ORDER BY retire_at ASC LIMIT ?`).all(TEMPORARY_MODE, limit);
+  } catch {
+    return { observed: 0, extended: 0, completed: 0 };
+  }
+  let observed = 0, extended = 0, completed = 0;
+  for (const row of rows) {
+    const season = row.season ?? null, episode = row.episode ?? null;
+    const hit = (sessions || []).find((s) =>
+      s?.mediaId === row.media_id
+      && (s.season ?? null) === season && (s.episode ?? null) === episode);
+    if (!hit) continue;
+    observed++;
+    const progress = Number.isFinite(hit.progress) ? Math.min(Math.max(hit.progress, 0), 1) : 0;
+    try {
+      controlPlaneStore.db.prepare(`UPDATE library_items
+        SET first_played_at = COALESCE(first_played_at, ?),
+            last_played_at = ?, max_progress = MAX(COALESCE(max_progress, 0), ?),
+            updated_at = ? WHERE id = ?`).run(nowMs, nowMs, progress, nowMs, row.id);
+    } catch { continue; }
+    try {
+      if (progress >= COMPLETION_PROGRESS) {
+        // Completed: shorten to the grace period (never extend, never now).
+        const grace = nowMs + COMPLETED_GRACE_MS;
+        if (row.retire_at == null || grace < row.retire_at) {
+          controlPlaneStore.db.prepare('UPDATE library_items SET retire_at = ?, updated_at = ? WHERE id = ?')
+            .run(grace, nowMs, row.id);
+        }
+        completed++;
+      } else if (row.retire_at != null && row.retire_at < nowMs + PLAYBACK_EXTENSION_MS) {
+        // Started: refresh the horizon so watching never loses the item.
+        controlPlaneStore.db.prepare('UPDATE library_items SET retire_at = ?, updated_at = ? WHERE id = ?')
+          .run(nowMs + PLAYBACK_EXTENSION_MS, nowMs, row.id);
+        extended++;
+      }
+    } catch {}
+  }
+  return { observed, extended, completed };
 }

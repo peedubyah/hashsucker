@@ -105,3 +105,64 @@ test('sweeper never touches permanent rows even with past retire_at', async () =
   assert.equal(item.desiredState, 'present');
   assert.notEqual(cache.getVfsMovieEntry('tt-temp'), null);
 });
+
+test('observePlaybackSessions: started extends, completed shortens, others untouched', async () => {
+  const { observePlaybackSessions, PLAYBACK_EXTENSION_MS, COMPLETED_GRACE_MS } =
+    await import('../src/lib/library/retirement.js');
+  const { DatabaseSync } = await import('node:sqlite');
+  const { createControlPlaneStore } = await import('../src/lib/control-plane/store.js');
+  const cps = createControlPlaneStore({ database: new DatabaseSync(':memory:') });
+  const seed = (id, retireAt) => {
+    cps.ensureLibraryItem({ mediaType: 'movie', mediaId: id, title: id, desiredState: 'present' });
+    cps.db.prepare(`UPDATE library_items SET publication_mode='temporary', retire_at=? WHERE media_id=?`)
+      .run(retireAt, id);
+  };
+  seed('tt-watch', 10_000);
+  seed('tt-done', 8 * 24 * 3600 * 1000);
+  seed('tt-idle', 10_000);
+  seed('tt-perm', 10_000);
+  cps.db.prepare(`UPDATE library_items SET publication_mode='permanent', retire_at=NULL WHERE media_id='tt-perm'`).run();
+  const out = observePlaybackSessions({
+    controlPlaneStore: cps,
+    sessions: [
+      { mediaId: 'tt-watch', mediaType: 'movie', season: null, episode: null, progress: 0.4 },
+      { mediaId: 'tt-done', mediaType: 'movie', season: null, episode: null, progress: 0.95 },
+      { mediaId: 'tt-perm', mediaType: 'movie', season: null, episode: null, progress: 0.95 },
+      { mediaId: 'tt-other', mediaType: 'movie', season: null, episode: null, progress: 0.5 },
+    ],
+    nowMs: 5_000,
+  });
+  assert.equal(out.observed, 2);
+  assert.equal(out.extended, 1);
+  assert.equal(out.completed, 1);
+  const get = (id) => cps.db.prepare('SELECT retire_at,first_played_at,last_played_at,max_progress,publication_mode FROM library_items WHERE media_id=?').get(id);
+  assert.equal(get('tt-watch').retire_at, 5_000 + PLAYBACK_EXTENSION_MS);
+  assert.equal(get('tt-watch').first_played_at, 5_000);
+  assert.equal(get('tt-watch').max_progress, 0.4);
+  assert.equal(get('tt-done').retire_at, 5_000 + COMPLETED_GRACE_MS);
+  assert.equal(get('tt-idle').retire_at, 10_000, 'unseen TTL stands');
+  assert.equal(get('tt-perm').retire_at, null, 'permanent untouched');
+});
+
+test('mapSessionEntry: imdb identity without fuzzy titles', async () => {
+  const { mapSessionEntry } = await import('../src/lib/consumers/plex-sessions.js');
+  const movie = mapSessionEntry({
+    type: 'movie', ratingKey: '42',
+    Guid: [{ id: 'imdb://tt0133093' }, { id: 'tmdb://123' }],
+    viewOffset: 1000, duration: 4000, Player: { state: 'playing' },
+  });
+  assert.equal(movie.mediaId, 'tt0133093');
+  assert.equal(movie.mediaType, 'movie');
+  assert.equal(movie.progress, 0.25);
+  assert.equal(movie.playerState, 'playing');
+  const ep = mapSessionEntry({
+    type: 'episode', ratingKey: '43', grandparentGuid: 'com.plexapp.agents.imdb://tt0903747?lang=en',
+    parentIndex: 1, index: 2, viewOffset: 3600, duration: 4000,
+  });
+  assert.equal(ep.mediaId, 'tt0903747');
+  assert.equal(ep.season, 1);
+  assert.equal(ep.episode, 2);
+  assert.equal(ep.progress, 0.9);
+  assert.equal(mapSessionEntry({ type: 'movie', ratingKey: '44', title: 'Some Title' }), null);
+  assert.equal(mapSessionEntry(null), null);
+});

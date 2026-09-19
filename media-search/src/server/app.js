@@ -3238,6 +3238,17 @@ export function createRequestHandler(dependencies = {}) {
       if (request.method === 'POST' && url.pathname === '/api/library/unpublish') {
         const body = await readBody(request);
         try {
+          // Capture the presentation path first: after removal there is
+          // nothing to point the Plex partial-scan at. Best-effort and
+          // silent when Plex is unconfigured (same contract as publish).
+          let formerPath = null;
+          let formerType = body.mediaType;
+          try {
+            const entry = (body.season != null && body.episode != null)
+              ? searchCache.getVfsTvEntry?.(body.mediaId, body.season, body.episode)
+              : searchCache.getVfsMovieEntry?.(body.mediaId);
+            formerPath = entry?.canonicalPath ?? null;
+          } catch {}
           const result = await unpublishMedia({
             cache: searchCache,
             controlPlaneStore,
@@ -3246,6 +3257,13 @@ export function createRequestHandler(dependencies = {}) {
             season: body.season ?? null,
             episode: body.episode ?? null,
           });
+          if (formerPath) {
+            try {
+              const { notifyPlex } = await import('../lib/requests/plex-notifier.js');
+              notifyPlex({ mediaId: body.mediaId, mediaType: formerType, canonicalPath: formerPath })
+                .catch(() => {});
+            } catch {}
+          }
           return sendJson(response, 200, result);
         } catch (err) {
           return sendJson(response, 400, { error: err.message });

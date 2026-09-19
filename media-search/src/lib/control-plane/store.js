@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS library_items (
   updated_at INTEGER NOT NULL,
   publication_mode TEXT NOT NULL DEFAULT 'permanent',
   retire_at INTEGER,
+  first_played_at INTEGER,
+  last_played_at INTEGER,
+  max_progress REAL,
   CHECK ((media_type = 'movie' AND season IS NULL AND episode IS NULL)
     OR (media_type = 'episode' AND season IS NOT NULL AND episode IS NOT NULL))
 );
@@ -387,6 +390,12 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     }
     if (libraryColumns.length > 0 && !libraryColumns.includes('retire_at')) {
       db.exec('ALTER TABLE library_items ADD COLUMN retire_at INTEGER');
+    }
+    for (const col of ['first_played_at INTEGER', 'last_played_at INTEGER', 'max_progress REAL']) {
+      const name = col.split(' ')[0];
+      if (libraryColumns.length > 0 && !libraryColumns.includes(name)) {
+        db.exec(`ALTER TABLE library_items ADD COLUMN ${col}`);
+      }
     }
   } catch {}
   db.exec(CONTROL_PLANE_SCHEMA);
@@ -2077,6 +2086,9 @@ function rowToLibraryItem(row) {
     desiredState: row.desired_state, createdAt: row.created_at, updatedAt: row.updated_at,
     publicationMode: row.publication_mode ?? 'permanent',
     retireAt: row.retire_at ?? null,
+    firstPlayedAt: row.first_played_at ?? null,
+    lastPlayedAt: row.last_played_at ?? null,
+    maxProgress: row.max_progress ?? null,
   };
 }
 function rowToLibraryPath(row) {
