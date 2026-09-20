@@ -200,12 +200,25 @@ export function observePlaybackSessions({ controlPlaneStore, sessions = [], nowM
  */
 export function setPublicationProfile(controlPlaneStore, identity, profile, { nowMs = Date.now() } = {}) {
   const item = findItem(controlPlaneStore, identity);
-  if (!item) return { ok: false, reason: 'no-library-item' };
-  try {
-    controlPlaneStore.db.prepare('UPDATE library_items SET profile = ?, updated_at = ? WHERE id = ?')
-      .run(profile, nowMs, item.id);
-  } catch (err) {
-    return { ok: false, reason: String(err?.message || err).slice(0, 120) };
+  if (item) {
+    try {
+      controlPlaneStore.db.prepare('UPDATE library_items SET profile = ?, updated_at = ? WHERE id = ?')
+        .run(profile, nowMs, item.id);
+    } catch (err) {
+      return { ok: false, reason: String(err?.message || err).slice(0, 120) };
+    }
+    return { ok: true, libraryItemId: item.id, profile };
   }
-  return { ok: true, libraryItemId: item.id, profile };
+  // Movie-scope miss with fanned-out episodes (miniseries published as
+  // episodes): intent belongs to those episode items publication itself
+  // created. Exact hits always win; this fallback only fires when no
+  // exact item exists, so precise targeting is never overridden.
+  if (identity?.mediaType === 'movie' && identity?.mediaId) {
+    try {
+      const res = controlPlaneStore.db.prepare(`UPDATE library_items SET profile = ?, updated_at = ?
+        WHERE media_id = ? AND media_type = 'episode'`).run(profile, nowMs, identity.mediaId);
+      if (res.changes > 0) return { ok: true, libraryItemId: null, profile, fannedOut: res.changes };
+    } catch {}
+  }
+  return { ok: false, reason: 'no-library-item' };
 }

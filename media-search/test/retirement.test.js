@@ -194,3 +194,36 @@ test('setPublicationProfile persists explicit intent; readPublishedTier surfaces
   assert.equal(pub.profile, 'hd');
   assert.equal(cps.getLibraryItemByIdentityKey('movie:tt-prof:default').profile, 'hd');
 });
+
+test('setPublicationProfile fans out to episodes on movie-identity miss; exact hits win', async () => {
+  const { setPublicationProfile } = await import('../src/lib/library/retirement.js');
+  const { createControlPlaneStore } = await import('../src/lib/control-plane/store.js');
+  const cps = createControlPlaneStore({ database: new DatabaseSync(':memory:') });
+  for (const ep of [1, 2]) {
+    cps.ensureLibraryItem({
+      mediaType: 'episode', mediaId: 'tt-fan', title: 'Fan', season: 1, episode: ep,
+      desiredState: 'present',
+    });
+  }
+  // No movie item exists: movie-scope intent reaches the fanned-out episodes.
+  const fan = setPublicationProfile(cps, { mediaType: 'movie', mediaId: 'tt-fan' }, 'hd', { nowMs: 1000 });
+  assert.ok(fan.ok);
+  assert.equal(fan.fannedOut, 2);
+  for (const ep of [1, 2]) {
+    const row = cps.db.prepare(`SELECT profile FROM library_items
+      WHERE media_id = 'tt-fan' AND season = 1 AND episode = ?`).get(ep);
+    assert.equal(row.profile, 'hd');
+  }
+  // An exact episode item is targeted precisely (no fan-out).
+  const exact = setPublicationProfile(cps,
+    { mediaType: 'episode', mediaId: 'tt-fan', season: 1, episode: 1 }, 'max', { nowMs: 2000 });
+  assert.ok(exact.ok);
+  assert.equal(exact.fannedOut, undefined);
+  assert.equal(cps.db.prepare(`SELECT profile FROM library_items
+    WHERE media_id = 'tt-fan' AND season = 1 AND episode = 1`).get().profile, 'max');
+  assert.equal(cps.db.prepare(`SELECT profile FROM library_items
+    WHERE media_id = 'tt-fan' AND season = 1 AND episode = 2`).get().profile, 'hd');
+  // Unknown media still reports cleanly.
+  const miss = setPublicationProfile(cps, { mediaType: 'movie', mediaId: 'tt-nope' }, 'hd');
+  assert.ok(!miss.ok);
+});

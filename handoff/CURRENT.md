@@ -1,9 +1,9 @@
 # HashSucker self-handoff (durable — survives session death)
 
-If this session dies right now: `main` == `github/main` at 149ae66 plus the
-uncommitted /download-profile slice described below. Read this file,
-`../AGENTS.override.md` (operating rules), and `../docs/architecture.md`
-(durable model). Do not trust old containers or historical HY4 handoffs.
+If this session dies right now: `main` == `github/main` at 85b039c (pushed).
+Read this file, `../AGENTS.override.md` (operating rules), and
+[`../docs/architecture.md`](../docs/architecture.md) (durable model). Do not
+trust old containers or historical HY4 handoffs.
 
 ## Architecture boundaries (frozen)
 
@@ -52,8 +52,17 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
 
 - Packages at `0.0.1` (placeholder); shipping identity is GHCR
   `latest`/`main`/`v0.1.0` tags, not package versions.
-- `main` == `github/main` == 149ae66 (pushed). Uncommitted: /download
-  qualityProfile slice (7 files, tests green — see "Next active slice").
+- `main` == `github/main` == 85b039c (pushed): staged-download
+  post-consumption lifecycle closed the generic-download loop.
+- Household canary (2026-09-20, scratch stack on DB copies, real
+  data-plane image + provider bytes): fresh hd request selected capped
+  1080p in 6.6s; omitted re-request reused in 0.5s; bounded ranges
+  (first byte + 2 seeks) byte-identical; 255MB download staged exact,
+  handed off, ACKed, swept. Found + fixed: movie-scope profile intent
+  missed fanned-out episode items (`setPublicationProfile` now fans out
+  on exact-miss). Production media-search was down during the canary;
+  Requestrr/Seerr/Plex are not present in this environment — their exact
+  HTTP seams were driven instead.
 
 ## Major completed features (recent first)
 
