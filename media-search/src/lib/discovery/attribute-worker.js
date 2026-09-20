@@ -63,6 +63,16 @@ export async function runAttributeWorker(cache, options = {}) {
 
   for (const candidate of candidates) {
     stats.processed++;
+    // Cooperative yielding (contention tranche): this loop is fully
+    // synchronous (regex parse + upsert + FTS trigger per row, ~4k/s),
+    // so an unbounded pass holds the event loop hostage for tens of
+    // seconds (measured: 3x5s /health timeouts during a 100k pass).
+    // Yielding every row batch keeps worst-case blockage in the tens
+    // of milliseconds at negligible throughput cost. No scheduler,
+    // no priority state — just don't hog the loop.
+    if (stats.processed % 100 === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
     try {
       // Parse the filename
       const parsed = parser(candidate.filename || candidate.title);

@@ -283,9 +283,14 @@ export function createCorpusLifecycle({
     return json;
   }
 
-  function ingestJson(json) {
+  // Async ingester with cooperative yielding (contention tranche): a
+  // single huge fragment (11MB HTML observed) otherwise holds the event
+  // loop for seconds in decode + upserts. Yielding every batch keeps
+  // worst-case blockage near one small transaction. Throughput cost is
+  // ~1ms per yield — negligible against provider fetch latency.
+  async function ingestJson(json) {
     const batch = [];
-    let raw = 0, accepted = 0;
+    let raw = 0, accepted = 0, sinceYield = 0;
     const flush = () => {
       if (batch.length === 0) return;
       db.exec('BEGIN IMMEDIATE');
@@ -307,6 +312,10 @@ export function createCorpusLifecycle({
       const entry = transformDMMRecord(record);
       if (!entry) continue;
       batch.push(entry);
+      if (++sinceYield >= batchSize) {
+        sinceYield = 0;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
       if (batch.length >= batchSize) flush();
     }
     flush();
@@ -498,7 +507,7 @@ export function createCorpusLifecycle({
           try {
             const html = await source.fetchFragment(fragment.url);
             const json = decodeFragment(html, name);
-            const r = ingestJson(json);
+            const r = await ingestJson(json);
             rawRecords += r.raw; accepted += r.accepted;
             recordFragment(runId, { name, url: fragment.url, status: 'complete', rawRecords: r.raw, accepted: r.accepted });
             noteFragmentQuarantine(treeSha, name, { ok: true });
@@ -680,7 +689,7 @@ export function createCorpusLifecycle({
           try {
             const html = await fetchRaw(f.filename, branch);
             const json = decodeFragment(html, f.filename);
-            const r = ingestJson(json);
+            const r = await ingestJson(json);
             rawRecords += r.raw; accepted += r.accepted;
             recordFragment(runId, { name: f.filename, url: f.filename, status: 'complete', rawRecords: r.raw, accepted: r.accepted });
             noteFragmentQuarantine(headTree, f.filename, { ok: true });
