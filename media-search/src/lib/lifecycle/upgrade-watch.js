@@ -16,6 +16,7 @@
  * market has nothing better.
  */
 import { tierOf, isTerminalTier, compareUpgrade, durabilityOf, shouldVetoUpgrade, DURABILITY } from './upgrade-policy.js';
+import { profilePolicy } from './quality-profiles.js';
 import { intentBackoffMs } from '../anticipation/future-intents.js';
 import { probeByteReady } from '../anticipation/prewarm.js';
 import { createLibraryIdentityKey } from '../control-plane/canonical-path.js';
@@ -170,7 +171,7 @@ export function readPublishedTier({ cache, controlPlaneStore, mediaType, mediaId
         tier = t.tier; label = t.label;
       }
     } catch {}
-    return { tf: tfId, tier, label, infoHash: tf.infoHash };
+    return { tf: tfId, tier, label, infoHash: tf.infoHash, profile: item.profile ?? null };
   } catch {
     return null;
   }
@@ -381,6 +382,15 @@ export function createUpgradeEvaluator({
       store.remove(row.id);
       return done({ acted: true, to: 'removed', reason: 'reached-terminal' });
     }
+    // Profile terminal (quality-profile tranche): at/above the intent's
+    // terminal tier the row parks (never churns, never removed — removal
+    // is reserved for the global terminal, so a profile change back to
+    // a higher terminal re-arms without reseeding).
+    const policy = profilePolicy(pub.profile);
+    if (policy.terminalTier != null && pub.tier != null && pub.tier >= policy.terminalTier) {
+      store.park(row.id, { reason: `profile-terminal:${pub.profile ?? 'balanced'}` });
+      return done({ acted: false, reason: 'profile-terminal' });
+    }
     // 2. Probe the live market (zero writes) and gate on tier.
     let probe;
     try {
@@ -424,7 +434,8 @@ export function createUpgradeEvaluator({
       const curTf = controlPlaneStore.getTorrentFile?.(row.current_tf);
       const curDur = durabilityFor({ infoHash: curTf?.infoHash ?? curTf?.info_hash ?? null, cacheState: null });
       const tierDelta = (pub.tier != null && cand.tier != null) ? cand.tier - pub.tier : null;
-      const veto = shouldVetoUpgrade({ currentDur: curDur.level, winnerDur: winnerDur.level, tierDelta });
+      const veto = shouldVetoUpgrade({ currentDur: curDur.level, winnerDur: winnerDur.level, tierDelta,
+        vetoDelta: profilePolicy(pub.profile).vetoDelta });
       if (veto.veto) {
         const reason = `durability-veto:${veto.reason}(winner ${winnerDur.level} [${winnerDur.reasons.join(',')}] vs current ${curDur.level})`;
         store.park(row.id, { reason });

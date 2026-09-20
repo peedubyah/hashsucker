@@ -140,9 +140,9 @@ export function durabilityOf({
  * itself (cached, placed, or seen over time). Null delta (unknown
  * current tier) never vetoes: the upgrade floor already gated it.
  */
-export function shouldVetoUpgrade({ currentDur = null, winnerDur = null, tierDelta = null } = {}) {
+export function shouldVetoUpgrade({ currentDur = null, winnerDur = null, tierDelta = null, vetoDelta = VETO_MAX_TIER_DELTA } = {}) {
   if (tierDelta == null) return { veto: false, reason: 'unknown-delta' };
-  if (tierDelta < VETO_MAX_TIER_DELTA
+  if (tierDelta < vetoDelta
     && winnerDur === DURABILITY.FRAGILE && currentDur === DURABILITY.STRONG) {
     return { veto: true, reason: 'fragile-winner-vs-durable-current' };
   }

@@ -126,6 +126,7 @@ export function listLibrary({ cache, controlPlaneStore, promotionStore = null, l
       publicationMode: item.publicationMode ?? 'permanent',
       retireAt: item.retireAt ?? null,
       publishedAt: vfs?.createdAt ?? null,
+      qualityProfile: item.profile ?? 'balanced',
       firstPlayedAt: item.firstPlayedAt ?? null,
       lastPlayedAt: item.lastPlayedAt ?? null,
       watchProgress: item.maxProgress ?? null,

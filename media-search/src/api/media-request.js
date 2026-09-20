@@ -1148,6 +1148,7 @@ export async function searchByMedia(cache, request) {
       resolveTvTorrentFileFn: resolveTvTorrentFile,
       tvCoordinates,
       controlPlaneStore: request.controlPlaneStore ?? null,
+      maxTier: request.maxTier ?? null,
     });
 
     // Stage 8: Persist media request to obtain requestId
@@ -1772,6 +1773,7 @@ export async function searchByMedia(cache, request) {
     resolveTvTorrentFileFn: resolveTvTorrentFile,
     tvCoordinates,
     controlPlaneStore: request.controlPlaneStore ?? null,
+    maxTier: request.maxTier ?? null,
   });
 
   // Stage 8: Build playback handoff if bindable selection succeeded and request was persisted

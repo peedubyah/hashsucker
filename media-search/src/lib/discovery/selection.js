@@ -173,6 +173,12 @@ export async function selectBindableCandidate(results, options = {}) {
     resolveTvTorrentFileFn,
     tvCoordinates,
     controlPlaneStore,
+    // Intent quality cap (quality-profile tranche): drop candidates
+    // above this tier so a bounded profile never binds a giant it does
+    // not want. Null = uncapped (today's behavior). Never empties the
+    // set: if everything exceeds the cap, fall back unfiltered rather
+    // than failing the request.
+    maxTier = null,
   } = options;
 
   if (!Array.isArray(results) || results.length === 0) {
@@ -183,6 +189,18 @@ export async function selectBindableCandidate(results, options = {}) {
 
   if (eligible.length === 0) {
     return { selected: null, reason: 'no eligible candidates', alternates: [], skipped: [] };
+  }
+
+  let capped = eligible;
+  if (Number.isFinite(maxTier)) {
+    try {
+      const { tierOf } = await import('../lifecycle/upgrade-policy.js');
+      const under = eligible.filter((r) => {
+        const t = tierOf({ sourceType: r.release?.source ?? null, resolution: r.release?.resolution ?? null });
+        return t.tier == null || t.tier <= maxTier;
+      });
+      if (under.length > 0) capped = under;
+    } catch {}
   }
 
   const skipped = [];
@@ -219,7 +237,7 @@ export async function selectBindableCandidate(results, options = {}) {
   const availClass = (c) => (c.availability?.torbox?.state === 'uncached' ? 1 : 0);
   const immediate = [];
   const deferred = [];
-  for (const candidate of eligible) {
+  for (const candidate of capped) {
     (availClass(candidate) === 0 ? immediate : deferred).push(candidate);
   }
   const ordered = [...immediate, ...deferred]
@@ -520,7 +538,7 @@ export async function selectBindableCandidate(results, options = {}) {
   // Ranks below the winner were never visited, exactly as in strict order.
   if (selected) {
     const seen = new Set(skipped.map((s) => `${s.infoHash}:${s.rank}`));
-    for (const candidate of eligible) {
+    for (const candidate of capped) {
       if (candidate.rank >= selected.rank) break;
       if (candidate.availability?.torbox?.state === 'uncached'
           && !seen.has(`${candidate.infoHash}:${candidate.rank}`)) {
@@ -542,9 +560,9 @@ export async function selectBindableCandidate(results, options = {}) {
   // torrent_file_id=NULL. TV still uses the fallback when no controlPlaneStore
   // is available (PATH B cannot run), preserving the original behavior for
   // that branch.
-  if (!selected && eligible.length > 0 && tvCoordinates) {
+  if (!selected && capped.length > 0 && tvCoordinates) {
     const byState = { cached: [], unknown: [], uncached: [] };
-    for (const candidate of eligible) {
+    for (const candidate of capped) {
       const state = candidate.availability?.torbox?.state || 'unknown';
       if (byState[state]) byState[state].push(candidate);
       else byState.unknown.push(candidate);
@@ -557,7 +575,7 @@ export async function selectBindableCandidate(results, options = {}) {
     }
   }
 
-  const alternates = eligible
+  const alternates = capped
     .filter(c => c.infoHash !== selected?.infoHash || c.fileIndex !== selected?.fileIndex)
     .slice(0, 10)
     .map(c => ({

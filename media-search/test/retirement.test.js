@@ -166,3 +166,31 @@ test('mapSessionEntry: imdb identity without fuzzy titles', async () => {
   assert.equal(mapSessionEntry({ type: 'movie', ratingKey: '44', title: 'Some Title' }), null);
   assert.equal(mapSessionEntry(null), null);
 });
+
+test('setPublicationProfile persists explicit intent; readPublishedTier surfaces it', async () => {
+  const { setPublicationProfile } = await import('../src/lib/library/retirement.js');
+  const { readPublishedTier } = await import('../src/lib/lifecycle/upgrade-watch.js');
+  const { DatabaseSync } = await import('node:sqlite');
+  const { createDiscoveryCache } = await import('../src/lib/discovery/cache.js');
+  const { createControlPlaneStore } = await import('../src/lib/control-plane/store.js');
+  const cache = createDiscoveryCache({ db: new DatabaseSync(':memory:') });
+  const cps = createControlPlaneStore({ database: new DatabaseSync(':memory:') });
+  cps.ensureLibraryItem({ mediaType: 'movie', mediaId: 'tt-prof', title: 'P', desiredState: 'present' });
+  cps.db.prepare(`INSERT INTO torrent_files (id, info_hash, internal_path, size, created_at)
+    VALUES ('tf-p', ?, 'P.mkv', 10, 1)`).run('d'.repeat(40));
+  cache.createVfsMovieEntry({
+    mediaId: 'tt-prof', releaseKey: `${'d'.repeat(40)}:torrent`, infoHash: 'd'.repeat(40),
+    fileIndex: null, canonicalPath: 'Movies/P/P.mkv', torrentFileId: 'tf-p', size: 10,
+    createdAt: 1, updatedAt: 1,
+  });
+  // Default is balanced without any explicit declaration.
+  let pub = readPublishedTier({ cache, controlPlaneStore: cps, mediaType: 'movie', mediaId: 'tt-prof' });
+  assert.equal(pub.profile, 'balanced');
+  const set = setPublicationProfile(cps,
+    { mediaType: 'movie', mediaId: 'tt-prof' }, 'hd', { nowMs: 1000 });
+  assert.ok(set.ok);
+  assert.equal(set.profile, 'hd');
+  pub = readPublishedTier({ cache, controlPlaneStore: cps, mediaType: 'movie', mediaId: 'tt-prof' });
+  assert.equal(pub.profile, 'hd');
+  assert.equal(cps.getLibraryItemByIdentityKey('movie:tt-prof:default').profile, 'hd');
+});

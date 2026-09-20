@@ -191,3 +191,21 @@ export function observePlaybackSessions({ controlPlaneStore, sessions = [], nowM
   }
   return { observed, extended, completed };
 }
+
+/**
+ * Persist explicit presentation intent profile (quality-profile
+ * tranche). Called only for explicit requests carrying a validated
+ * profile; omitted profiles preserve whatever is stored (backward
+ * compatible). Never downgrades or disturbs publication itself.
+ */
+export function setPublicationProfile(controlPlaneStore, identity, profile, { nowMs = Date.now() } = {}) {
+  const item = findItem(controlPlaneStore, identity);
+  if (!item) return { ok: false, reason: 'no-library-item' };
+  try {
+    controlPlaneStore.db.prepare('UPDATE library_items SET profile = ?, updated_at = ? WHERE id = ?')
+      .run(profile, nowMs, item.id);
+  } catch (err) {
+    return { ok: false, reason: String(err?.message || err).slice(0, 120) };
+  }
+  return { ok: true, libraryItemId: item.id, profile };
+}

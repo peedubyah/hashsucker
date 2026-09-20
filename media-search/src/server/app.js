@@ -27,7 +27,9 @@ import { createHandoff, HANDLING_MODES } from '../lib/requests/handoff.js';
 import { createRequestIntent } from '../lib/requests/intent.js';
 import { bindPlexMetricsSink, openSeasonFanOutScope } from '../lib/requests/plex-notifier.js';
 import { unpublishMedia } from '../lib/library/unpublish.js';
-import { markTemporaryPublication, clearTemporaryPublication } from '../lib/library/retirement.js';
+import { markTemporaryPublication, clearTemporaryPublication, setPublicationProfile } from '../lib/library/retirement.js';
+import { normalizeQualityProfile, selectionMaxTier } from '../lib/lifecycle/quality-profiles.js';
+import { tierOf } from '../lib/lifecycle/upgrade-policy.js';
 import {
   buildHandoffManifest, ensureHandoffDirs, writeManifest,
   parseHandoffRequestId, mirrorManifestState,
@@ -3935,19 +3937,50 @@ export function createRequestHandler(dependencies = {}) {
             clock,
             scope: 'media-request',
           });
+          // Intent quality profile (quality-profile tranche): optional,
+          // validated (unknown names are a 400, never silent reinterpret),
+          // omitted = today's behavior exactly. Caps initial selection
+          // for bounded profiles (hd) and persists presentation intent
+          // for the upgrade loop.
+          let qualityProfile = null;
+          let maxTier = null;
+          if (body?.qualityProfile != null && body.qualityProfile !== '') {
+            const norm = normalizeQualityProfile(body.qualityProfile);
+            if (!norm.ok) return sendJson(response, 400, { error: norm.error });
+            qualityProfile = norm.profile;
+            maxTier = selectionMaxTier(qualityProfile);
+          }
+          if (maxTier != null) {
+            // No-downgrade guard: a healthy publication already above the
+            // requested cap stays (profile is still recorded below for
+            // future terminal behavior). Only fresh selections are capped.
+            try {
+              const epS = body?.season ?? null, epE = body?.episode ?? null;
+              const isEp = epS != null && epE != null;
+              const vfsEntry = isEp
+                ? searchCache.getVfsTvEntry?.(body.mediaId, epS, epE)
+                : searchCache.getVfsMovieEntry?.(body.mediaId);
+              const vtfId = vfsEntry?.torrentFileId ?? vfsEntry?.torrent_file_id ?? null;
+              if (vtfId) {
+                const vtf = controlPlaneStore.getTorrentFile?.(vtfId);
+                if (vtf?.infoHash) {
+                  const aids = searchCache.db.prepare(`SELECT source_type, resolution FROM release_attributes
+                    WHERE info_hash = ? LIMIT 5`).all(vtf.infoHash);
+                  const best = aids.map((a) => tierOf({ sourceType: a.source_type, resolution: a.resolution }).tier)
+                    .filter((t) => t != null);
+                  if (best.length > 0 && Math.max(...best) > maxTier) maxTier = null;
+                }
+              }
+            } catch {}
+          }
           const result = await searchByMedia(searchCache, {
             ...body,
+            maxTier,
             hydrateVfs: hydrateVfsForRequest,
             controlPlaneStore,
             ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
             ...rdEnsureForRequest({ rdClient, controlPlaneStore, clock }),
           });
-          // Temporary publication declaration (watch-once tranche): an
-          // explicit request either marks the published item temporary
-          // (with TTL) or adopts it permanent (default). Internal
-          // republish flows (anticipation scheduler, upgrade watch)
-          // never declare intent, so they never disturb presentation
-          // intent. No-op when nothing published.
           //
           // Dual-provider coverage (enrichment tranche): a freshly
           // published single-provider TF gets one cheap second-placement
@@ -3971,6 +4004,12 @@ export function createRequestHandler(dependencies = {}) {
                 });
               } else {
                 clearTemporaryPublication(controlPlaneStore, identity, { nowMs: clock() });
+              }
+              // Presentation intent profile: persist only when explicitly
+              // supplied (omitted preserves whatever is stored). Never
+              // downgrades publication by itself (guarded above).
+              if (qualityProfile != null) {
+                setPublicationProfile(controlPlaneStore, identity, qualityProfile, { nowMs: clock() });
               }
               if (ho?.torrentFileId && coverageEnsurer) {
                 const tfId = ho.torrentFileId;

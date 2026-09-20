@@ -98,3 +98,22 @@ test('shouldVetoUpgrade: only fragile-vs-strong on marginal deltas', async () =>
   // Unknown delta (unknown current tier) never vetoed: floor rule gated it.
   assert.ok(!shouldVetoUpgrade({ currentDur: 'fragile', winnerDur: 'fragile', tierDelta: null }).veto);
 });
+
+test('quality profiles: validate, caps, terminals', async () => {
+  const { normalizeQualityProfile, selectionMaxTier, profilePolicy, DEFAULT_QUALITY_PROFILE } =
+    await import('../src/lib/lifecycle/quality-profiles.js');
+  assert.equal(DEFAULT_QUALITY_PROFILE, 'balanced');
+  assert.deepEqual(normalizeQualityProfile(null), { ok: true, profile: null });
+  assert.deepEqual(normalizeQualityProfile('').profile, null);
+  assert.equal(normalizeQualityProfile('HD').profile, 'hd');
+  assert.equal(normalizeQualityProfile('Max').profile, 'max');
+  const bad = normalizeQualityProfile('ultra-hd-8k');
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /unknown qualityProfile/);
+  assert.equal(selectionMaxTier(null), null);
+  assert.equal(selectionMaxTier('balanced'), null);
+  assert.equal(selectionMaxTier('hd'), 42);
+  assert.equal(profilePolicy(null).terminalTier, 53);
+  assert.equal(profilePolicy('hd').terminalTier, 42);
+  assert.equal(profilePolicy('max').vetoDelta, 0);
+});
