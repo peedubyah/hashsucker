@@ -104,6 +104,7 @@ function rowToDownload(row) {
     handoffState: row.handoff_state ?? 'none',
     handoffId: row.handoff_id ?? null,
     handoffAt: row.handoff_at ?? null,
+    qualityProfile: row.quality_profile ?? 'balanced',
   };
 }
 
@@ -122,6 +123,7 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
     if (!cols.includes('handoff_state')) db.exec("ALTER TABLE download_requests ADD COLUMN handoff_state TEXT NOT NULL DEFAULT 'none'");
     if (!cols.includes('handoff_id')) db.exec('ALTER TABLE download_requests ADD COLUMN handoff_id TEXT');
     if (!cols.includes('handoff_at')) db.exec('ALTER TABLE download_requests ADD COLUMN handoff_at INTEGER');
+    if (!cols.includes('quality_profile')) db.exec("ALTER TABLE download_requests ADD COLUMN quality_profile TEXT NOT NULL DEFAULT 'balanced'");
   } catch {}
 
   function get(id) {
@@ -134,7 +136,7 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
    * or staged row for the same exact media is returned as-is; a failed
    * row is reset to requested (asked again). Otherwise a new intent.
    */
-  function request({ mediaId, mediaType, season = null, episode = null, title = null, year = null }) {
+  function request({ mediaId, mediaType, season = null, episode = null, title = null, year = null, qualityProfile = null }) {
     if (!mediaId) throw new Error('mediaId is required');
     if (mediaType !== 'movie' && mediaType !== 'episode') {
       throw new Error('mediaType must be movie or episode');
@@ -148,23 +150,36 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
       ORDER BY updated_at DESC LIMIT 1
     `).get(mediaId, mediaType, season, episode);
     const current = rowToDownload(existing);
+    // Explicit profile updates stored intent everywhere (never triggers
+    // work by itself); omitted preserves whatever is stored.
+    const adoptProfile = (id) => {
+      if (qualityProfile != null) {
+        db.prepare('UPDATE download_requests SET quality_profile = ?, updated_at = ? WHERE id = ?')
+          .run(qualityProfile, timestamp, id);
+      }
+    };
     if (current) {
       if (current.status === DOWNLOAD_STATUS.STAGED) {
         // No-op only while the staged file is actually there. A moved /
         // consumed file resets to requested so the worker re-stages from
         // durable truth (re-POST === re-stage-when-needed).
-        if (stagedFilePresent(current)) return { download: current, created: false };
+        if (stagedFilePresent(current)) {
+          adoptProfile(current.downloadRequestId);
+          return { download: get(current.downloadRequestId), created: false };
+        }
       } else if (current.status !== DOWNLOAD_STATUS.FAILED) {
-        return { download: current, created: false };
+        adoptProfile(current.downloadRequestId);
+        return { download: get(current.downloadRequestId), created: false };
       }
       db.prepare(`
         UPDATE download_requests SET status = 'requested', last_error = NULL,
           torrent_file_id = NULL, expected_size = NULL, bytes_complete = 0,
           staged_path = NULL, title = COALESCE(?, title), year = COALESCE(?, year),
           attempts = 0, next_due_at = NULL, fail_category = NULL,
+          quality_profile = COALESCE(?, quality_profile),
           updated_at = ?
         WHERE id = ?
-      `).run(title, year, timestamp, current.downloadRequestId);
+      `).run(title, year, qualityProfile, timestamp, current.downloadRequestId);
       return { download: get(current.downloadRequestId), created: false, reset: true };
     }
     const id = randomUUID();
@@ -172,9 +187,9 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
       INSERT INTO download_requests (
         id, media_id, media_type, season, episode, title, year,
         status, torrent_file_id, expected_size, bytes_complete,
-        staged_path, last_error, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'requested', NULL, NULL, 0, NULL, NULL, ?, ?)
-    `).run(id, mediaId, mediaType, season, episode, title, year, timestamp, timestamp);
+        staged_path, last_error, quality_profile, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'requested', NULL, NULL, 0, NULL, NULL, ?, ?, ?)
+    `).run(id, mediaId, mediaType, season, episode, title, year, qualityProfile ?? 'balanced', timestamp, timestamp);
     return { download: get(id), created: true };
   }
 

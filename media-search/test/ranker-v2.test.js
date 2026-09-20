@@ -290,3 +290,47 @@ test('v2: quality breakdown exposes hdr/audio inputs', () => {
   assert.equal(det.hdrBonus, 0.125);
   assert.equal(det.audioBonus, 0.025);
 });
+
+// ---------------------------------------------------------------------------
+// Intent quality cap (quality-profile tranche)
+// ---------------------------------------------------------------------------
+
+function tieredRow(hash, source, resolution, rank) {
+  return {
+    infoHash: hash, fileIndex: 0, filename: `${hash}.mkv`, rank,
+    score: 0.5, identity: { tier: 'Probable', eligible: true },
+    availability: { torbox: { state: 'cached' } },
+    exactFileSize: 2000000000 + rank,
+    release: { source, resolution }, sources: [],
+  };
+}
+
+test('profile cap: hd binds best at-or-below terminal, uncapped binds top', async () => {
+  const ensure = async ({ infoHash }) => ({ torrentFileId: `tf_${infoHash}` });
+  const rows = [
+    tieredRow('remux', 'Remux', '2160p', 1),
+    tieredRow('bluray', 'BluRay', '1080p', 2),
+    tieredRow('webdl', 'WEB-DL', '1080p', 3),
+  ];
+  const capped = await selectBindableCandidate(rows, {
+    ensureTorBoxFileIdentityFn: ensure, maxTier: 42,
+  });
+  assert.equal(capped.selected.infoHash, 'bluray');
+  const open = await selectBindableCandidate(rows, {
+    ensureTorBoxFileIdentityFn: ensure, maxTier: null,
+  });
+  assert.equal(open.selected.infoHash, 'remux');
+  const omitted = await selectBindableCandidate(rows, {
+    ensureTorBoxFileIdentityFn: ensure,
+  });
+  assert.equal(omitted.selected.infoHash, 'remux', 'omitted cap behaves exactly as before');
+});
+
+test('profile cap: all-above-cap falls back unfiltered instead of failing', async () => {
+  const ensure = async ({ infoHash }) => ({ torrentFileId: `tf_${infoHash}` });
+  const rows = [tieredRow('remux', 'Remux', '2160p', 1)];
+  const sel = await selectBindableCandidate(rows, {
+    ensureTorBoxFileIdentityFn: ensure, maxTier: 42,
+  });
+  assert.equal(sel.selected.infoHash, 'remux');
+});

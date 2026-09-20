@@ -93,6 +93,7 @@ export function buildHandoffManifest(row, version, { quality = null, nowMs = Dat
     stagedPath: row.stagedPath,
     torrentFileId: row.torrentFileId ?? null,
     expectedSize: row.expectedSize ?? null,
+    qualityProfile: row.qualityProfile ?? null,
     ...(quality ? { quality } : {}),
     createdAt: nowMs,
   };

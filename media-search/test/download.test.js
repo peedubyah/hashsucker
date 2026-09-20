@@ -166,6 +166,24 @@ test('download resolve: fresh path prepares then resolves; miss stays unresolvab
   assert.equal(miss.status, 'unresolvable');
 });
 
+test('download resolve: fresh path forwards profile cap (hd capped, omitted uncapped)', async () => {
+  const seen = [];
+  const cacheData = {};
+  const resolver = createDownloadResolver({
+    searchCache: stubCache(cacheData),
+    controlPlaneStore: stubControlPlane(),
+    searchByMediaFn: async (cache, req) => {
+      seen.push(req.maxTier ?? null);
+      cacheData[`tt-cap-${seen.length}`] = { ...STORED_HANDOFF, mediaId: `tt-cap-${seen.length}` };
+      return { prepared: true };
+    },
+  });
+  await resolver.resolve({ mediaId: 'tt-cap-1', mediaType: 'movie', qualityProfile: 'hd' });
+  await resolver.resolve({ mediaId: 'tt-cap-2', mediaType: 'movie' });
+  await resolver.resolve({ mediaId: 'tt-cap-3', mediaType: 'movie', qualityProfile: 'max' });
+  assert.deepEqual(seen, [42, null, null]);
+});
+
 test('download resolve: episode input prepares as series (pipeline native type)', async () => {
   const cacheData = {};
   let preparedAs = null;
@@ -505,4 +523,71 @@ test('download handoff: create/poll/apply lifecycle with version guard', async (
   } finally {
     await fsp.rm(dir, { recursive: true, force: true });
   }
+});
+
+// ─── quality profile intent ───
+test('download profile: persists, preserves on omit, updates on explicit re-POST', async () => {
+  const store = memStore();
+  const a = store.request({ mediaId: 'tt-prof', mediaType: 'movie' });
+  assert.equal(a.download.qualityProfile, 'balanced');
+  // Active row + omitted profile: preserved, no-op.
+  const b = store.request({ mediaId: 'tt-prof', mediaType: 'movie' });
+  assert.ok(!b.created);
+  assert.equal(b.download.qualityProfile, 'balanced');
+  // Active row + explicit profile: stored, still no new work.
+  const c = store.request({ mediaId: 'tt-prof', mediaType: 'movie', qualityProfile: 'hd' });
+  assert.ok(!c.created && !c.reset);
+  assert.equal(c.download.qualityProfile, 'hd');
+  // Omitted afterwards preserves hd (never silently reverts).
+  const d = store.request({ mediaId: 'tt-prof', mediaType: 'movie' });
+  assert.equal(d.download.qualityProfile, 'hd');
+  // Failed reset without profile preserves; with profile updates.
+  store.claimResolving(a.download.downloadRequestId);
+  store.markFailed(a.download.downloadRequestId, 'boom');
+  const e = store.request({ mediaId: 'tt-prof', mediaType: 'movie' });
+  assert.ok(e.reset);
+  assert.equal(e.download.qualityProfile, 'hd');
+  store.claimResolving(e.download.downloadRequestId);
+  store.markFailed(e.download.downloadRequestId, 'boom');
+  const f = store.request({ mediaId: 'tt-prof', mediaType: 'movie', qualityProfile: 'max' });
+  assert.ok(f.reset);
+  assert.equal(f.download.qualityProfile, 'max');
+});
+
+test('download worker passes row profile into resolveFn', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'dl-prof-'));
+  const store = memStore();
+  const { download } = store.request({ mediaId: 'tt-prof2', mediaType: 'movie', qualityProfile: 'hd' });
+  let seen = null;
+  const worker = createDownloadWorker({
+    downloadStore: store,
+    resolveFn: async (args) => {
+      seen = args;
+      return { status: 'unresolvable', reason: 'no healthy TorrentFile after discovery' };
+    },
+    stagingRoot: root,
+    dataPlaneBaseUrl: 'http://dp:3001',
+    fetchFn: stubFetch(Buffer.alloc(0)),
+  });
+  await worker.tick();
+  assert.equal(seen.qualityProfile, 'hd');
+  assert.equal(seen.mediaId, 'tt-prof2');
+  await fsp.rm(root, { recursive: true, force: true });
+});
+
+test('handoff manifest carries profile as intent metadata', async () => {
+  const { buildHandoffManifest } = await import('../src/lib/download/handoff.js');
+  const m = buildHandoffManifest({
+    status: 'staged', downloadRequestId: 'r1', mediaType: 'movie', mediaId: 'tt1',
+    season: null, episode: null, title: null, year: null, stagedPath: '/s/x.mkv',
+    torrentFileId: 'tf-1', expectedSize: 10, qualityProfile: 'hd',
+  }, 2);
+  assert.equal(m.handoffId, 'dl-r1-v2');
+  assert.equal(m.qualityProfile, 'hd');
+  const def = buildHandoffManifest({
+    status: 'staged', downloadRequestId: 'r1', mediaType: 'movie', mediaId: 'tt1',
+    season: null, episode: null, title: null, year: null, stagedPath: '/s/x.mkv',
+    torrentFileId: 'tf-1', expectedSize: 10, qualityProfile: 'balanced',
+  }, 1);
+  assert.equal(def.qualityProfile, 'balanced');
 });

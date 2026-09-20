@@ -13,6 +13,8 @@
  *                discovery/ranking/binding pipeline persists reusable
  *                durable truth without presentation; the prepared
  *                handoff then resolves exactly like the fast path.
+ *                Fresh selection honors the same intent profile cap as
+ *                media requests (maxTier); reuse never does.
  *
  * TV exactness: episode identity (season/episode) is enforced by the
  * prepared-state lookup itself. A pack supplies the episode's exact
@@ -21,6 +23,7 @@
  */
 
 import { getPreparedDurableState } from '../../api/media-request.js';
+import { selectionMaxTier } from '../lifecycle/quality-profiles.js';
 
 export function createDownloadResolver({
   searchCache,
@@ -43,10 +46,13 @@ export function createDownloadResolver({
     });
   }
 
-  async function resolve({ mediaId, mediaType, season = null, episode = null }) {
+  async function resolve({ mediaId, mediaType, season = null, episode = null, qualityProfile = null }) {
     if (!mediaId) return { status: 'invalid-input', reason: 'mediaId is required' };
     const fast = prepared({ mediaId, mediaType, season, episode });
     if (fast) {
+      // Reuse is uncapped by design (no-downgrade analog): a healthy
+      // durable binding is never re-resolved merely because intent
+      // carries a profile. Fresh selections below are capped.
       return {
         status: 'ok',
         reused: true,
@@ -76,6 +82,10 @@ export function createDownloadResolver({
         source: 'download-request',
         sourceType: 'operator',
         controlPlaneStore,
+        // Same selection primitive as media requests: hd caps fresh
+        // selection at the HD tier (empty fallback inside selection);
+        // omitted/max resolve uncapped. Never a ranking rewrite.
+        maxTier: selectionMaxTier(qualityProfile),
         ...ensureFns,
       });
     } catch (error) {

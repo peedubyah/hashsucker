@@ -1951,6 +1951,14 @@ export function createRequestHandler(dependencies = {}) {
   function normalizeDownloadIdentity(body) {
     const mediaId = String(body?.mediaId ?? '').trim();
     if (!mediaId) return { error: 'mediaId is required' };
+    // Same profile vocabulary as media-request (validated identically:
+    // unknown names are a clear 400, omitted means no constraint).
+    let qualityProfile = null;
+    if (body?.qualityProfile != null && body.qualityProfile !== '') {
+      const norm = normalizeQualityProfile(body.qualityProfile);
+      if (!norm.ok) return { error: norm.error };
+      qualityProfile = norm.profile;
+    }
     const rawType = String(body?.mediaType ?? 'movie').trim().toLowerCase();
     const seasonRaw = body?.season ?? null;
     const episodeRaw = body?.episode ?? null;
@@ -1960,14 +1968,14 @@ export function createRequestHandler(dependencies = {}) {
       if (season != null || episode != null) {
         return { error: 'movie download must not carry season/episode' };
       }
-      return { mediaId, mediaType: 'movie', season: null, episode: null };
+      return { mediaId, mediaType: 'movie', season: null, episode: null, qualityProfile };
     }
     if (rawType === 'episode' || rawType === 'series' || rawType === 'tv' || rawType === 'show') {
       if (!Number.isSafeInteger(season) || season < 1
         || !Number.isSafeInteger(episode) || episode < 1) {
         return { error: 'TV download requires exact season and episode (>= 1)' };
       }
-      return { mediaId, mediaType: 'episode', season, episode };
+      return { mediaId, mediaType: 'episode', season, episode, qualityProfile };
     }
     return { error: 'mediaType must be movie or episode (series/tv accepted with season+episode)' };
   }
@@ -3429,6 +3437,7 @@ export function createRequestHandler(dependencies = {}) {
             episode: identity.episode,
             title,
             year,
+            qualityProfile: identity.qualityProfile ?? null,
           });
           // Nudge the worker so staging starts without waiting for the
           // next tick; the tick remains the durability backstop.
@@ -3451,6 +3460,7 @@ export function createRequestHandler(dependencies = {}) {
             bytesComplete: download.bytesComplete,
             stagedPath: download.stagedPath,
             lastError: download.lastError,
+            qualityProfile: download.qualityProfile ?? 'balanced',
             handoffState: download.handoffState ?? 'none',
             handoffId: download.handoffId ?? null,
             handoffVersion: download.handoffVersion ?? 0,
@@ -3563,6 +3573,7 @@ export function createRequestHandler(dependencies = {}) {
           stagedPath: download.stagedPath,
           filePresent,
           lastError: download.lastError,
+          qualityProfile: download.qualityProfile ?? 'balanced',
           attempts: download.attempts ?? 0,
           nextDueAt: download.nextDueAt ?? null,
           failCategory: download.failCategory ?? null,

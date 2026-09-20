@@ -80,6 +80,7 @@ export function createDownloadWorker({
           mediaType: download.mediaType,
           season: download.season,
           episode: download.episode,
+          qualityProfile: download.qualityProfile ?? null,
         });
       } catch (error) {
         // Previously an uncaught throw stranded the row in resolving

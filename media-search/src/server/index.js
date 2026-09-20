@@ -38,6 +38,7 @@ import { createPromotionStore } from '../lib/promotion/store.js';
 import { createPromotionWorker } from '../lib/promotion/worker.js';
 import { createDownloadStore } from '../lib/download/store.js';
 import { createDownloadWorker } from '../lib/download/worker.js';
+import { selectionMaxTier } from '../lib/lifecycle/quality-profiles.js';
 import { getPreparedDurableState } from '../api/media-request.js';
 import { createAnticipationScheduler } from '../lib/anticipation/scheduler.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
@@ -407,7 +408,7 @@ const downloadWorker = downloadStore
     // (TorBox/RD identity seams) are built server-side, with no
     // duplicated provider wiring here. Same pattern as the
     // anticipation scheduler's baseUrl.
-    resolveFn: async ({ mediaId, mediaType, season = null, episode = null }) => {
+    resolveFn: async ({ mediaId, mediaType, season = null, episode = null, qualityProfile = null }) => {
       if (!mediaId) return { status: 'invalid-input', reason: 'mediaId is required' };
       const readPrepared = () => getPreparedDurableState({
         cache: discoveryCache,
@@ -429,11 +430,15 @@ const downloadWorker = downloadStore
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           // The pipeline's native TV type is 'series'; never send 'episode'.
+          // Intent profile rides along as a tier cap so staged downloads
+          // honor the same bounded selection as explicit requests
+          // (uncapped when omitted; garbage falls back to balanced).
           body: JSON.stringify({
             mediaId,
             mediaType: mediaType === 'episode' ? 'series' : mediaType,
             season,
             episode,
+            maxTier: selectionMaxTier(qualityProfile),
           }),
         });
         if (!prepareResponse.ok) {
