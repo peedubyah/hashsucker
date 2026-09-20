@@ -13,9 +13,12 @@
  *   <root>/.handoff/failed/    consumer rejected (may note error)
  *
  * Consumers are external and pluggable (shell loop, Arr ManualImport
- * folder flow, smart HTTP-ACK client). HashSucker never deletes staged
- * files: the consumer moves them (Arr move semantics); a copied file
- * simply remains beside a completed row (documented, household-managed).
+ * folder flow, smart HTTP-ACK client). Staged-file end of life is the
+ * staged-cleanup slice: HashSucker retains the file through pending /
+ * accepted / failed, and after an explicit completed ACK it unlinks the
+ * staging copy once a short grace elapses (a consumer atomic move simply
+ * converges — absence at cleanup time is success, not corruption).
+ * HashSucker never touches the consumer's destination copy.
  *
  * Handoff id is deterministic per (request, version):
  * `dl-<downloadRequestId>-v<version>`. Only the row's current version

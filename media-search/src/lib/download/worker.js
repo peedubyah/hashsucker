@@ -14,6 +14,7 @@
  */
 
 import path from 'node:path';
+import fs from 'node:fs';
 
 import {
   materializeTorrentFile, discardStagingPartials, PARTIAL_SUFFIX,
@@ -137,5 +138,81 @@ export function createDownloadWorker({
     return processOne(next);
   }
 
-  return { tick, processOne, discardPartials };
+  /**
+   * Post-consumption sweep (staged-cleanup slice): forget staged
+   * artifacts whose handoff completed past the grace. Bounded row list
+   * from the store (no filesystem scan); per row at most one stat plus
+   * one unlink, both confined to the owned staging root. Never touches
+   * discovery, providers, or permanent library assets. Version-tied via
+   * markCleanupDone: a row whose handoff moved on is skipped, never
+   * deleted. Missing file (consumer atomic move) converges successfully.
+   */
+  async function sweepStagedCleanup(limit = 10) {
+    const counts = { checked: 0, removed: 0, converged: 0, deferred: 0, skipped: 0 };
+    let due = [];
+    try {
+      due = downloadStore.listCleanupDue(limit) ?? [];
+    } catch (error) {
+      log(`[download] cleanup list failed: ${String(error?.message ?? error).slice(0, 120)}`);
+      return counts;
+    }
+    for (const row of due) {
+      counts.checked++;
+      const id = row.downloadRequestId;
+      const stagedPath = row.stagedPath;
+      // Never unlink outside the owned staging root (config anomaly →
+      // bounded retry, file retained).
+      if (!stagedPath || !isWithinRoot(stagingRoot, stagedPath)) {
+        const res = downloadStore.deferCleanup(id, 'staged path escapes owned root');
+        if (res?.parked) counts.skipped++;
+        else counts.deferred++;
+        continue;
+      }
+      let kind = 'absent';
+      try {
+        kind = fs.statSync(stagedPath).isFile() ? 'file' : 'unexpected';
+      } catch (error) {
+        // Absence is the expected consumer-move outcome; any other stat
+        // failure (permissions, I/O) is an anomaly worth a bounded retry.
+        kind = (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) ? 'absent' : 'unexpected';
+      }
+      if (kind === 'absent') {
+        const done = downloadStore.markCleanupDone(id, row.handoffId, { fileRemoved: false });
+        if (done) counts.converged++;
+        else counts.skipped++;
+        continue;
+      }
+      if (kind === 'unexpected') {
+        const res = downloadStore.deferCleanup(id, 'staged path is not a regular file');
+        if (res?.parked) counts.skipped++;
+        else counts.deferred++;
+        continue;
+      }
+      try {
+        fs.unlinkSync(stagedPath);
+      } catch (error) {
+        const res = downloadStore.deferCleanup(id, error);
+        if (res?.parked) {
+          counts.skipped++;
+          log(`[download] cleanup parked ${id}: ${String(error?.message ?? error).slice(0, 120)}`);
+        } else {
+          counts.deferred++;
+        }
+        continue;
+      }
+      const done = downloadStore.markCleanupDone(id, row.handoffId, { fileRemoved: true });
+      if (done) {
+        counts.removed++;
+        log(`[download] cleaned staged ${id} (${row.handoffId})`);
+      } else {
+        // Handoff moved on between list and unlink (new version owns the
+        // path now — and it is gone). Nothing more to do; the new
+        // version's lifecycle governs. Count as skipped, never error.
+        counts.skipped++;
+      }
+    }
+    return counts;
+  }
+
+  return { tick, processOne, discardPartials, sweepStagedCleanup };
 }

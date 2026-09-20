@@ -501,6 +501,19 @@ function armDownloadTimer(delayMs) {
           } catch (error) {
             console.warn('media-search: handoff poll failed', error?.message);
           }
+          // Post-consumption staged cleanup (same loop, no new daemon):
+          // forget staged artifacts whose handoff completed past the
+          // grace. Bounded eligible-row list, owned-root unlinks only,
+          // no discovery/provider calls.
+          try {
+            const swept = await downloadWorker.sweepStagedCleanup(10);
+            const n = swept.removed + swept.converged + swept.deferred;
+            if (n > 0) {
+              console.log(`media-search: staged cleanup removed=${swept.removed} converged=${swept.converged} deferred=${swept.deferred} skipped=${swept.skipped}`);
+            }
+          } catch (error) {
+            console.warn('media-search: staged cleanup failed', error?.message);
+          }
         } finally {
           downloadInFlight = false;
         }

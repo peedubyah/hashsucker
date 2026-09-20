@@ -82,6 +82,19 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
   `anticipation/scheduler.js` (pre-warm); `promotion/` (library permanents);
   `download/` (`store`/`worker`/`resolve`/`handoff`/`paths` — back-door
   staging); `library/retirement.js` (temporary publication expiry).
+- Staged-download end of life (staged-cleanup slice): HashSucker owns
+  staging, consumer owns the destination. pending/accepted/failed retain
+  the file indefinitely. completed schedules cleanup after a 1h grace,
+  tied to the exact completing handoff version (`cleanup_*` columns;
+  a new handoff version voids prior scheduling). The sweep rides the
+  existing download timer (no daemon, no filesystem scan, owned-root
+  unlinks only, no discovery/provider calls). A missing file at sweep
+  time is the expected atomic-move outcome (converge, no error); unlink
+  failures re-due boundedly (15min x 48, then parked, file retained)
+  without touching media resolution. Re-POST after cleanup reactivates
+  the same durable row (reset, re-stage, new handoff version). Completed
+  rows predating the deploy entered the lifecycle with one full grace
+  at migration.
 
 ## Known provider behavior
 
@@ -127,7 +140,7 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
 - `max`: terminal = balanced, durability veto never fires (fragility for
   quality); byte-readiness still gates every switch.
 - `media-request` accepts/persists/honors it; publication + upgrades honor
-  it; `/download` threading is the active slice (below).
+  it; `/download` threading landed in 5ae84ca (both resolver paths).
 
 ## Do-not-regress invariants
 
@@ -150,9 +163,12 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
   paths/volumes/containers/stacks before creating; never keep simultaneous
   host + Docker copies of one multi-GB artifact; bounded Range/hash over
   full downloads; scratch under `/var/tmp/patrick/hashsucker/<run-name>`;
-  delete your own disposables; never touch `hashsucker_hy4-cache` or active
-  production volumes; never `docker system prune -a --volumes` without
-  Patrick. End every substantial proof with the 5-line cleanup report.
+  scratch HTTP/integration servers use scratch copies of BOTH DBs unless
+  the proof explicitly needs the live dev corpus (never mutate/checkpoint
+  live discovery merely for convenience); delete your own disposables;
+  never touch `hashsucker_hy4-cache` or active production volumes; never
+  `docker system prune -a --volumes` without Patrick. End every substantial
+  proof with the 5-line cleanup report.
 
 ## Recent important commits
 
@@ -178,35 +194,20 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
   project license; set GitHub description/topics if still unset.
 - No UI, no Arr mapping, no Requestrr changes in the profile slice.
 
-## Next active slice — /download qualityProfile (IN PROGRESS, uncommitted)
+## Next active slice — staged-download lifecycle (IN PROGRESS, uncommitted)
 
-Goal: quality intent means the same thing for playable-now and
-staged-for-later. `media-request` already accepts/persists/honors profile;
-publication + upgrades honor it; `/download` threading is ~done but
-uncommitted (interrupted session's work — valid, do not reset):
-
-- `download/store.js`: `quality_profile` column (+migration, default
-  `balanced`), `request()` persists/preserves/updates, staged-present
-  re-POST adopts explicit profile without touching bytes, failed/consumed
-  reset uses `COALESCE(?, quality_profile)`. Restart/retry/stale-recovery/
-  handoff paths never touch the column.
-- `server/app.js`: `normalizeDownloadIdentity` validates via
-  `normalizeQualityProfile` (invalid = 400, omitted = null); POST threads
-  into store; POST + GET responses expose `qualityProfile`.
-- `server/index.js`: worker `resolveFn` maps row profile →
-  `selectionMaxTier` → internal `POST /api/media-prepare {maxTier}` →
-  `selectBindableCandidate` cap with unfiltered fallback. Fast path reuses
-  durable truth uncapped (no-downgrade analog — never re-resolves healthy
-  bindings for profile alone).
-- `download/worker.js`: passes row profile into `resolveFn`.
-- `download/handoff.js`: manifest carries `qualityProfile` (intent metadata,
-  consumers may ignore; no provider internals).
-- Tests (all green): `download.test.js` (+3: persist/preserve/update,
-  worker passthrough, handoff field), `ranker-v2.test.js` (+2: hd cap
-  binds ≤terminal / omitted binds top; all-above-cap falls back).
-- Still needed to close: HTTP-level proof on a scratch stack (invalid =
-  400, omitted = legacy, hd constrains, max permits top, restart/retry/
-  re-POST semantics, handoff field, Requestrr payload unchanged, exact
-  bytes on one representative file) — disk-conscious (bounded ranges, one
-  file, smallest candidate, no dual host+Docker copies). Then one coherent
-  feature commit.
+Goal: bound the post-consumption life of staged artifacts before household
+use fills disk. Model: pending/accepted/failed retain; completed + 1h grace
+→ sweep unlinks (owned root only) or converges when already moved; unlink
+failures re-due boundedly without media retry; stale handoff versions can
+never authorize deletion; re-POST after cleanup reactivates the same row.
+Implemented in `download/store.js` (`cleanup_*` columns + migration +
+`listCleanupDue`/`markCleanupDone`/`deferCleanup`), `download/worker.js`
+(`sweepStagedCleanup`), `server/index.js` (existing download timer, no new
+daemon), `server/app.js` (GET exposes `cleanupDueAt`/`cleanupDoneAt`),
+`download/handoff.js` (doc). Tests: `download.test.js` (+6 cleanup tests,
+30/30 green with neighbors 63/63). Live proof done on a scratch stack
+(both DBs fresh, 1KB fixtures): pending/accepted/failed retained, completed
+due at +60min, expiry → removed, pre-move → converged, stale v1 ACK → 404,
+restart preserves due byte-identical, re-POST → same-row reset. Then one
+coherent feature commit.

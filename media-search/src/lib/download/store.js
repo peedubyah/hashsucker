@@ -33,6 +33,31 @@ import fs from 'node:fs';
 
 import { MAX_JOB_ATTEMPTS } from '../lifecycle/job-retry.js';
 
+/**
+ * Post-consumption staged-file lifecycle (staged-cleanup slice).
+ *
+ * HashSucker owns staging; the consumer owns the destination copy/move.
+ * A staged file exists to cross a handoff boundary — once the consumer
+ * durably says "I have it" (handoff completed), HashSucker stops paying
+ * disk rent after a short grace. Deletion happens only here:
+ *
+ *   pending / accepted / failed → file retained, never eligible
+ *   completed → cleanup due after STAGED_CLEANUP_GRACE_MS (tied to the
+ *     exact handoff version that completed)
+ *   due + file still present → unlink, mark done
+ *   due + file already moved/deleted by consumer → converge done, no error
+ *
+ * Missing-file meaning is encoded by eligibility, not by guessing:
+ * only completed rows are ever inspected, so a missing file before
+ * completion still means re-stage/recovery (existing request() paths),
+ * while a missing file at cleanup time is the expected atomic-move
+ * outcome. Cleanup failure never re-enters discovery/materialization:
+ * unlink errors re-due boundedly via deferCleanup (file retained).
+ */
+export const STAGED_CLEANUP_GRACE_MS = 3_600_000;
+export const STAGED_CLEANUP_RETRY_MS = 15 * 60_000;
+export const STAGED_CLEANUP_MAX_ATTEMPTS = 48;
+
 /** Same presence semantics as the status endpoint: regular file with the expected size. */
 export function stagedFilePresent(row) {
   if (!row || row.status !== DOWNLOAD_STATUS.STAGED || !row.stagedPath || row.expectedSize == null) return false;
@@ -105,10 +130,14 @@ function rowToDownload(row) {
     handoffId: row.handoff_id ?? null,
     handoffAt: row.handoff_at ?? null,
     qualityProfile: row.quality_profile ?? 'balanced',
+    cleanupDueAt: row.cleanup_due_at ?? null,
+    cleanupDoneAt: row.cleanup_done_at ?? null,
+    cleanupHandoffId: row.cleanup_handoff_id ?? null,
+    cleanupAttempts: row.cleanup_attempts ?? 0,
   };
 }
 
-export function createDownloadStore({ db, now = () => Date.now() } = {}) {
+export function createDownloadStore({ db, now = () => Date.now(), cleanupGraceMs = STAGED_CLEANUP_GRACE_MS } = {}) {
   if (!db) throw new Error('download store requires db');
   db.exec(SCHEMA);
   // Additive retry + handoff columns (job-retry / download-handoff
@@ -124,6 +153,17 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
     if (!cols.includes('handoff_id')) db.exec('ALTER TABLE download_requests ADD COLUMN handoff_id TEXT');
     if (!cols.includes('handoff_at')) db.exec('ALTER TABLE download_requests ADD COLUMN handoff_at INTEGER');
     if (!cols.includes('quality_profile')) db.exec("ALTER TABLE download_requests ADD COLUMN quality_profile TEXT NOT NULL DEFAULT 'balanced'");
+    // Staged-cleanup tranche: due/done timestamps, authorizing handoff
+    // version tie, bounded unlink-retry attempts. Rows already completed
+    // before this deploy enter the new lifecycle with a full grace (their
+    // consumer already said "I have it"; a moved file simply converges).
+    if (!cols.includes('cleanup_due_at')) db.exec('ALTER TABLE download_requests ADD COLUMN cleanup_due_at INTEGER');
+    if (!cols.includes('cleanup_done_at')) db.exec('ALTER TABLE download_requests ADD COLUMN cleanup_done_at INTEGER');
+    if (!cols.includes('cleanup_handoff_id')) db.exec('ALTER TABLE download_requests ADD COLUMN cleanup_handoff_id TEXT');
+    if (!cols.includes('cleanup_attempts')) db.exec('ALTER TABLE download_requests ADD COLUMN cleanup_attempts INTEGER NOT NULL DEFAULT 0');
+    db.prepare(`UPDATE download_requests SET cleanup_due_at = ?, cleanup_handoff_id = handoff_id
+      WHERE handoff_state = 'completed' AND cleanup_due_at IS NULL AND cleanup_done_at IS NULL`)
+      .run(now() + cleanupGraceMs);
   } catch {}
 
   function get(id) {
@@ -300,8 +340,12 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
     if (activeHandoff(row)) return { handoff: rowToHandoff(row), active: true };
     const version = (row.handoffVersion ?? 0) + 1;
     const handoffId = `dl-${id}-v${version}`;
+    // A new handoff version starts a new consumption lifecycle: any
+    // cleanup scheduled by a previous version is void (its completion
+    // can never authorize deleting this version's artifact).
     db.prepare(`UPDATE download_requests SET handoff_version = ?, handoff_state = 'pending',
-      handoff_id = ?, handoff_at = ?, updated_at = ? WHERE id = ?`)
+      handoff_id = ?, handoff_at = ?, cleanup_due_at = NULL, cleanup_done_at = NULL,
+      cleanup_handoff_id = NULL, cleanup_attempts = 0, updated_at = ? WHERE id = ?`)
       .run(version, handoffId, now(), now(), id);
     return { handoff: rowToHandoff(get(id)), created: true };
   }
@@ -324,6 +368,15 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
     }
     db.prepare(`UPDATE download_requests SET handoff_state = ?, last_error = COALESCE(?, last_error),
       updated_at = ? WHERE id = ?`).run(state, detail, now(), id);
+    // Entering completed schedules post-consumption cleanup after the
+    // grace, tied to this exact handoff version. Terminal states are
+    // entered at most once (guarded above), so the due timestamp is set
+    // exactly once per version. accepted/failed/pending never schedule.
+    if (state === 'completed') {
+      db.prepare(`UPDATE download_requests SET cleanup_due_at = ?, cleanup_done_at = NULL,
+        cleanup_handoff_id = ?, cleanup_attempts = 0, updated_at = ? WHERE id = ?`)
+        .run(now() + cleanupGraceMs, handoffId, now(), id);
+    }
     return { applied: true, handoff: rowToHandoff(get(id)) };
   }
 
@@ -335,6 +388,62 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
       state: row.handoffState,
       handoffAt: row.handoffAt,
     };
+  }
+
+  /**
+   * Rows whose staged artifact may now be forgotten: still staged, handoff
+   * completed, grace elapsed, not yet cleaned, and the live handoff is
+   * still the version that authorized cleanup. Bounded LIMIT — the sweep
+   * inspects known-eligible rows only, never scans the filesystem.
+   */
+  function listCleanupDue(limit = 10) {
+    return db.prepare(`
+      SELECT * FROM download_requests
+      WHERE status = 'staged' AND handoff_state = 'completed'
+        AND cleanup_due_at IS NOT NULL AND cleanup_due_at <= ?
+        AND cleanup_done_at IS NULL AND handoff_id = cleanup_handoff_id
+      ORDER BY cleanup_due_at ASC LIMIT ?
+    `).all(now(), limit).map(rowToDownload);
+  }
+
+  /**
+   * Converge cleanup for one row (file removed or already absent).
+   * Version-tied: returns null without touching the row when the live
+   * handoff is no longer the authorizing version (a newer transfer is
+   * in flight — its own lifecycle governs the artifact).
+   */
+  function markCleanupDone(id, handoffId, { fileRemoved = false } = {}) {
+    const result = db.prepare(`
+      UPDATE download_requests SET cleanup_done_at = ?, updated_at = ?
+      WHERE id = ? AND handoff_id = ? AND handoff_id = cleanup_handoff_id
+        AND status = 'staged' AND handoff_state = 'completed' AND cleanup_done_at IS NULL
+    `).run(now(), now(), id, handoffId);
+    if (result.changes !== 1) return null;
+    const download = get(id);
+    return { download, fileRemoved };
+  }
+
+  /**
+   * Re-due a failed unlink separately from media resolution: the file is
+   * retained, no discovery/materialization re-runs. Bounded: after
+   * STAGED_CLEANUP_MAX_ATTEMPTS the row parks (due cleared, attempts
+   * stay visible, file retained) instead of retrying forever.
+   */
+  function deferCleanup(id, error) {
+    const row = get(id);
+    if (!row) return null;
+    const attempts = (row.cleanupAttempts ?? 0) + 1;
+    const msg = String(error?.message ?? error ?? 'cleanup failed').slice(0, 300);
+    if (attempts >= STAGED_CLEANUP_MAX_ATTEMPTS) {
+      db.prepare(`UPDATE download_requests SET cleanup_due_at = NULL, cleanup_attempts = ?,
+        last_error = ?, updated_at = ? WHERE id = ?`)
+        .run(attempts, `staged cleanup parked after ${attempts} attempts: ${msg}`, now(), id);
+      return { download: get(id), parked: true };
+    }
+    db.prepare(`UPDATE download_requests SET cleanup_due_at = ?, cleanup_attempts = ?,
+      updated_at = ? WHERE id = ?`)
+      .run(now() + STAGED_CLEANUP_RETRY_MS, attempts, now(), id);
+    return { download: get(id), parked: false };
   }
 
   return {
@@ -350,5 +459,8 @@ export function createDownloadStore({ db, now = () => Date.now() } = {}) {
     resetStale,
     createHandoff,
     applyHandoffEvent,
+    listCleanupDue,
+    markCleanupDone,
+    deferCleanup,
   };
 }

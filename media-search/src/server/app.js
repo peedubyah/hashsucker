@@ -3583,6 +3583,8 @@ export function createRequestHandler(dependencies = {}) {
           handoffId: download.handoffId ?? null,
           handoffVersion: download.handoffVersion ?? 0,
           handoffAt: download.handoffAt ?? null,
+          cleanupDueAt: download.cleanupDueAt ?? null,
+          cleanupDoneAt: download.cleanupDoneAt ?? null,
         });
       }
       if (request.method === 'GET' && url.pathname === '/api/search') {

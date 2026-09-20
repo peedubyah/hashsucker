@@ -16,7 +16,7 @@ import { resolveStagedTarget, isWithinRoot } from '../src/lib/download/paths.js'
 import { createDownloadResolver } from '../src/lib/download/resolve.js';
 import { createDownloadWorker } from '../src/lib/download/worker.js';
 
-function memStore() {
+function memStore({ now, ...opts } = {}) {
   const db = new DatabaseSync(':memory:');
   db.exec(`CREATE TABLE torrent_files (
     id TEXT PRIMARY KEY, info_hash TEXT NOT NULL, internal_path TEXT NOT NULL,
@@ -24,7 +24,7 @@ function memStore() {
     UNIQUE (info_hash, internal_path))`);
   db.prepare(`INSERT INTO torrent_files (id, info_hash, internal_path, size, created_at)
     VALUES ('tf-1', ?, 'Dune (2021).mkv', 32, 1)`).run('a'.repeat(40));
-  return createDownloadStore({ db });
+  return createDownloadStore({ db, ...(now ? { now } : {}), ...opts });
 }
 
 function stubFetch(bytes) {
@@ -590,4 +590,214 @@ test('handoff manifest carries profile as intent metadata', async () => {
     torrentFileId: 'tf-1', expectedSize: 10, qualityProfile: 'balanced',
   }, 1);
   assert.equal(def.qualityProfile, 'balanced');
+});
+
+// ─── post-consumption staged cleanup ───
+async function stageFixture(store, root, mediaId, bytes = Buffer.from('tiny-staged-artifact')) {
+  const file = path.join(root, `${mediaId}.mkv`);
+  await fsp.writeFile(file, bytes);
+  const { download } = store.request({ mediaId, mediaType: 'movie' });
+  store.claimResolving(download.downloadRequestId);
+  store.markMaterializing(download.downloadRequestId, {
+    torrentFileId: 'tf-1', expectedSize: bytes.length, stagedPath: file,
+  });
+  return store.markStaged(download.downloadRequestId);
+}
+
+function sweepWorker(store, root) {
+  return createDownloadWorker({
+    downloadStore: store,
+    resolveFn: async () => ({ status: 'unresolvable', reason: 'no healthy TorrentFile after discovery' }),
+    stagingRoot: root,
+    dataPlaneBaseUrl: 'http://127.0.0.1:1',
+  });
+}
+
+test('cleanup: completed schedules due tied to version; accepted/failed/pending schedule nothing', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'dl-clean-'));
+  try {
+    const store = memStore();
+    const done = await stageFixture(store, root, 'tt-clean-1');
+    const { handoff } = store.createHandoff(done.downloadRequestId);
+    assert.equal(store.get(done.downloadRequestId).cleanupDueAt, null);
+    store.applyHandoffEvent(done.downloadRequestId, handoff.handoffId, { state: 'accepted' });
+    assert.equal(store.get(done.downloadRequestId).cleanupDueAt, null);
+    const res = store.applyHandoffEvent(done.downloadRequestId, handoff.handoffId, { state: 'completed' });
+    assert.ok(res.applied);
+    const row = store.get(done.downloadRequestId);
+    assert.ok(row.cleanupDueAt > Date.now());
+    assert.ok(row.cleanupDueAt <= Date.now() + 3_600_000);
+    assert.equal(row.cleanupHandoffId, handoff.handoffId);
+    // Failed transfer never schedules.
+    const bad = await stageFixture(store, root, 'tt-clean-2');
+    const hb = store.createHandoff(bad.downloadRequestId).handoff;
+    store.applyHandoffEvent(bad.downloadRequestId, hb.handoffId, { state: 'failed' });
+    assert.equal(store.get(bad.downloadRequestId).cleanupDueAt, null);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cleanup sweep: future due retained, expired due removed, accepted retained', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'dl-clean-'));
+  try {
+    let t = Date.now();
+    const store = memStore({ now: () => t });
+    const worker = sweepWorker(store, root);
+    const done = await stageFixture(store, root, 'tt-sw-1');
+    const { handoff } = store.createHandoff(done.downloadRequestId);
+    store.applyHandoffEvent(done.downloadRequestId, handoff.handoffId, { state: 'completed' });
+    // Grace not elapsed: sweep must not touch the file.
+    const early = await worker.sweepStagedCleanup();
+    assert.deepEqual([early.checked, early.removed, early.converged], [0, 0, 0]);
+    assert.ok((await fsp.stat(done.stagedPath)).isFile());
+    // Accepted transfer is never eligible, even past the grace.
+    const acc = await stageFixture(store, root, 'tt-sw-2');
+    const ha = store.createHandoff(acc.downloadRequestId).handoff;
+    store.applyHandoffEvent(acc.downloadRequestId, ha.handoffId, { state: 'accepted' });
+    // Grace expires: sweep removes the completed file and marks done.
+    t += 3_700_000;
+    const swept = await worker.sweepStagedCleanup();
+    assert.deepEqual([swept.checked, swept.removed, swept.converged], [1, 1, 0]);
+    await assert.rejects(fsp.stat(done.stagedPath));
+    const row = store.get(done.downloadRequestId);
+    assert.ok(row.cleanupDoneAt != null);
+    assert.equal(row.status, 'staged');
+    assert.equal(row.handoffState, 'completed');
+    assert.ok((await fsp.stat(acc.stagedPath)).isFile());
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cleanup sweep: already-moved file converges successfully', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'dl-clean-'));
+  try {
+    let t = Date.now();
+    const store = memStore({ now: () => t });
+    const worker = sweepWorker(store, root);
+    const done = await stageFixture(store, root, 'tt-mv-1');
+    const { handoff } = store.createHandoff(done.downloadRequestId);
+    store.applyHandoffEvent(done.downloadRequestId, handoff.handoffId, { state: 'completed' });
+    // Consumer atomic move before the sweep runs.
+    await fsp.rm(done.stagedPath);
+    t += 3_700_000;
+    const swept = await worker.sweepStagedCleanup();
+    assert.deepEqual([swept.checked, swept.removed, swept.converged], [1, 0, 1]);
+    assert.ok(store.get(done.downloadRequestId).cleanupDoneAt != null);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cleanup: stale-version completion cannot authorize deletion of current artifact', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'dl-clean-'));
+  try {
+    let t = Date.now();
+    const store = memStore({ now: () => t });
+    const worker = sweepWorker(store, root);
+    const done = await stageFixture(store, root, 'tt-ver-1');
+    const v1 = store.createHandoff(done.downloadRequestId).handoff;
+    store.applyHandoffEvent(done.downloadRequestId, v1.handoffId, { state: 'completed' });
+    // New lifecycle version starts (clears v1 scheduling)…
+    const v2 = store.createHandoff(done.downloadRequestId).handoff;
+    assert.equal(store.get(done.downloadRequestId).cleanupDueAt, null);
+    // …so a late v1 completion ACK is rejected and schedules nothing…
+    const late = store.applyHandoffEvent(done.downloadRequestId, v1.handoffId, { state: 'completed' });
+    assert.ok(!late.applied);
+    assert.equal(store.get(done.downloadRequestId).cleanupDueAt, null);
+    // …and a direct done-mark against the old version is a no-op.
+    assert.equal(store.markCleanupDone(done.downloadRequestId, v1.handoffId), null);
+    // v2 pending is not eligible even past v1's grace.
+    t += 3_700_000;
+    const swept = await worker.sweepStagedCleanup();
+    assert.deepEqual([swept.checked, swept.removed, swept.converged], [0, 0, 0]);
+    assert.ok((await fsp.stat(done.stagedPath)).isFile());
+    // Completing v2 schedules against v2 only.
+    store.applyHandoffEvent(done.downloadRequestId, v2.handoffId, { state: 'accepted' });
+    store.applyHandoffEvent(done.downloadRequestId, v2.handoffId, { state: 'completed' });
+    assert.equal(store.get(done.downloadRequestId).cleanupHandoffId, v2.handoffId);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cleanup: unlink failure defers boundedly, parks, retains file', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'dl-clean-'));
+  try {
+    let t = Date.now();
+    const store = memStore({ now: () => t });
+    const worker = sweepWorker(store, root);
+    // A directory at the staged path makes unlinkSync throw (EISDIR/EPERM).
+    const dirPath = path.join(root, 'tt-fail-1.mkv');
+    await fsp.mkdir(dirPath);
+    const { download } = store.request({ mediaId: 'tt-fail-1', mediaType: 'movie' });
+    store.claimResolving(download.downloadRequestId);
+    store.markMaterializing(download.downloadRequestId, {
+      torrentFileId: 'tf-1', expectedSize: 7, stagedPath: dirPath,
+    });
+    const staged = store.markStaged(download.downloadRequestId);
+    const { handoff } = store.createHandoff(staged.downloadRequestId);
+    store.applyHandoffEvent(staged.downloadRequestId, handoff.handoffId, { state: 'completed' });
+    t += 3_700_000;
+    const first = await worker.sweepStagedCleanup();
+    assert.equal(first.deferred, 1);
+    const row = store.get(staged.downloadRequestId);
+    assert.equal(row.cleanupAttempts, 1);
+    assert.ok(row.cleanupDueAt > t);
+    assert.equal(row.cleanupDoneAt, null);
+    // Exhaust the bound: parks with due cleared, file retained, no media retry.
+    for (let i = 0; i < 60; i++) store.deferCleanup(staged.downloadRequestId, 'x');
+    const parked = store.get(staged.downloadRequestId);
+    assert.equal(parked.cleanupDueAt, null);
+    assert.equal(parked.cleanupDoneAt, null);
+    assert.ok(parked.cleanupAttempts >= 48);
+    assert.equal(parked.status, 'staged', 'no media-resolution retry triggered');
+    const after = await worker.sweepStagedCleanup();
+    assert.deepEqual([after.checked, after.deferred], [0, 0]);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cleanup: restart preserves due; re-request after cleanup reactivates same row', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'dl-clean-'));
+  try {
+    let t = Date.now();
+    const store = memStore({ now: () => t });
+    const worker = sweepWorker(store, root);
+    const done = await stageFixture(store, root, 'tt-re-1');
+    const { handoff } = store.createHandoff(done.downloadRequestId);
+    store.applyHandoffEvent(done.downloadRequestId, handoff.handoffId, { state: 'completed' });
+    const dueBefore = store.get(done.downloadRequestId).cleanupDueAt;
+    assert.equal(store.resetStale(), 0);
+    assert.equal(store.get(done.downloadRequestId).cleanupDueAt, dueBefore);
+    t += 3_700_000;
+    await worker.sweepStagedCleanup();
+    assert.ok(store.get(done.downloadRequestId).cleanupDoneAt != null);
+    // Same intent re-POST: file absent → intentional reset of the SAME
+    // durable row (identity/history retained), not a parallel model.
+    const again = store.request({ mediaId: 'tt-re-1', mediaType: 'movie' });
+    assert.ok(!again.created && again.reset);
+    assert.equal(again.download.downloadRequestId, done.downloadRequestId);
+    assert.equal(again.download.status, 'requested');
+    // Re-stage works through the normal path…
+    store.claimResolving(again.download.downloadRequestId);
+    const bytes = Buffer.from('re-staged-bytes');
+    const file = path.join(root, 'tt-re-1.mkv');
+    await fsp.writeFile(file, bytes);
+    store.markMaterializing(again.download.downloadRequestId, {
+      torrentFileId: 'tf-1', expectedSize: bytes.length, stagedPath: file,
+    });
+    const restaged = store.markStaged(again.download.downloadRequestId);
+    assert.equal(restaged.status, 'staged');
+    // …and a new handoff version starts a clean lifecycle.
+    const v2 = store.createHandoff(restaged.downloadRequestId).handoff;
+    assert.equal(v2.version, 2);
+    const r2 = store.get(restaged.downloadRequestId);
+    assert.equal(r2.cleanupDueAt, null);
+    assert.equal(r2.cleanupDoneAt, null);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
 });
