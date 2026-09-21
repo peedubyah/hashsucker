@@ -86,6 +86,12 @@ services:
       #   explicit HASHSUCKER_*_HOST_PATH > legacy alias (when retained)
       #   > HASHSUCKER_DATA_PATH / HASHSUCKER_MEDIA_PATH-derived default
       #   > repo-local fallback.
+      #   Canonical HASHSUCKER_*_HOST_PATH variables are FINAL leaf paths:
+      #   compose never appends another directory to them (a set leaf is
+      #   mounted as-is). The leaf suffix in each expression belongs to
+      #   the fallback branches only, so roots and legacy aliases keep
+      #   working while leaf-style legacy values must be shadowed by an
+      #   explicit pin (leaf legacy values double-append otherwise).
       #   HASHSUCKER_DATA_PATH  private state: discovery DBs, queue,
       #                         importer state
       #   HASHSUCKER_MEDIA_PATH consumer-visible media: STRM files
