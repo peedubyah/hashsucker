@@ -47,7 +47,7 @@ import {
 import {
   createCorpusHygiene, hygieneIntervalMs,
 } from '../lib/discovery/corpus-hygiene.js';
-import { isCorpusBusy } from '../lib/discovery/corpus-lifecycle.js';
+import { isCorpusBusy, recoverStaleCorpusState } from '../lib/discovery/corpus-lifecycle.js';
 import { getMediaById } from '../lib/metadata/unified-search.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
 import { createArrClient } from '../lib/anticipation/arr-client.js';
@@ -757,6 +757,18 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 server.listen(port, host, () => {
   console.log(`media-search listening on http://${host}:${port}`);
+  // Stale-ownership recovery at startup: a kill mid-session leaves a
+  // busy marker with no owner. Same shared detector as the tick gate;
+  // a fresh heartbeat is left alone, anything older converges to the
+  // last-good position without discarding ingested work.
+  try {
+    const rec = recoverStaleCorpusState(discoveryCache.db, {});
+    if (rec.recovered) {
+      console.log(`media-search: Recovered stale corpus lifecycle state (was ${rec.from}, heartbeat ${Math.round((rec.ageMs ?? 0) / 60000)}m old)`);
+    }
+  } catch (error) {
+    console.warn('media-search: corpus stale-recovery check failed', error?.message);
+  }
   // One product-readiness summary at startup (background, never blocks
   // listen, never retries). Short-timeout checks only; any failure logs
   // and leaves runtime behavior unchanged.
