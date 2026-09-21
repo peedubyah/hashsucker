@@ -52,7 +52,9 @@ async function writeToCache(results, providerStatus, searchKey = null) {
 
   const safe = withCacheFailureIsolation(cache, (error) => {
     if (!cache.isClosed()) {
-        emit(EVENTS.DISCOVERY_ERROR, { scope: 'cache_write', error: error.message });
+      emit(EVENTS.DISCOVERY_ERROR, { scope: 'cache_write', error: error.message });
+    }
+  });
 
   for (const item of results) {
     const candidate = {
