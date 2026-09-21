@@ -247,6 +247,27 @@ confirmed: HEAD was genuinely invalid because the cache failure logger
 callback lacked its closing `});`; standalone fix is `6340e90`. Unrelated A/B
 artifacts remain untracked and untouched. No release/build/tag work performed.
 
+### Landed: media-facing Web / operator TUI split
+
+Commit `ce67880` is pushed to `github/main`. Browser navigation is now Home /
+Search, Requests, Library, Downloads, Settings. The browser uses normalized
+metadata search, household intent actions, request-centric progress projection,
+and user-facing download/library views; provider, corpus, worker, identity,
+placement, log, probe, and housekeeping internals remain in the TUI. Added
+`GET /api/operator/media-requests` with durable request metadata and coarse
+stages (`discovering`, `preparing`, `retry scheduled`, `ready`, `failed`),
+without fake percentages or duplicate internal events. TUI now has Requests,
+Corpus, Workers, and Storage/housekeeping sections; storage is report-only and
+shows `scripts/hashsucker-housekeeping --clean`. Focused backend validation:
+51 tests passed; UI typecheck/build passed. Real PTY walkthrough visited
+Requests, Library, Providers, Corpus, Downloads, Workers, Logs, Probes, and
+Storage; q exit and detail/probe navigation worked. Source UI desktop review
+confirmed the five-tab media surface and real search/request flow. Scratch DB
+copies were used for bounded endpoint proof and removed. Historical production
+rows predate the new metadata columns, so their fallback rate is currently
+100% for persisted media-request titles; new browser requests persist title,
+year, and poster metadata. No release/build/tag work performed.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
