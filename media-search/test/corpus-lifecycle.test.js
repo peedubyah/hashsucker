@@ -332,7 +332,7 @@ test('stuck updating state recovers to usable on next tick', async () => {
   try {
     const lc = lifecycle(cache, {});
     void lc.getState();
-    cache.db.exec(`UPDATE corpus_state SET state='updating', imported_revision='${TREE_A}', imported_commit='${COMMIT_A}', last_check=1000 WHERE id=1`);
+    cache.db.exec(`UPDATE corpus_state SET state='updating', imported_revision='${TREE_A}', imported_commit='${COMMIT_A}', last_check=1000, updated_at=${Date.now() - 61 * 60_000} WHERE id=1`);
     const t = lc.tick({ intervalMs: 6 * 60 * 60 * 1000, autoBootstrap: true });
     assert.equal(t.action, 'update', 'recovered stuck updating into an update tick');
     assert.equal(lc.getState().state, 'usable');
@@ -346,7 +346,7 @@ test('stuck bootstrapping without revision recovers to absent', async () => {
   try {
     const lc = lifecycle(cache, {});
     void lc.getState();
-    cache.db.exec(`UPDATE corpus_state SET state='bootstrapping', imported_revision=NULL, last_check=1000 WHERE id=1`);
+    cache.db.exec(`UPDATE corpus_state SET state='bootstrapping', imported_revision=NULL, last_check=1000, updated_at=${Date.now() - 61 * 60_000} WHERE id=1`);
     const t = lc.tick({ intervalMs: 6 * 60 * 60 * 1000, autoBootstrap: false });
     assert.equal(t.action, 'idle-absent');
     assert.equal(lc.getState().state, 'absent');
@@ -360,7 +360,7 @@ test('stuck bootstrapping with imported candidates recovers to usable-partial', 
   try {
     const lc = lifecycle(cache, {});
     void lc.getState();
-    cache.db.exec(`UPDATE corpus_state SET state='bootstrapping', imported_revision=NULL, candidate_count=41, last_check=1000 WHERE id=1`);
+    cache.db.exec(`UPDATE corpus_state SET state='bootstrapping', imported_revision=NULL, candidate_count=41, last_check=1000, updated_at=${Date.now() - 61 * 60_000} WHERE id=1`);
     const t = lc.tick({ intervalMs: 6 * 60 * 60 * 1000, autoBootstrap: false });
     assert.equal(t.action, 'idle-absent');
     assert.equal(lc.getState().state, CORPUS_STATES.USABLE_PARTIAL);
@@ -378,7 +378,7 @@ test('stuck bootstrapping recovers via candidate-table probe when counters preda
     // row exists from the killed session.
     cache.db.prepare(`INSERT INTO candidates (info_hash, file_index, file_index_key, filename, size, first_seen, last_seen, metadata, sources)
       VALUES ('aa', 0, -1, 'M.2020.1080p.mkv', 100, 1, 1, '{}', '[]')`).run();
-    cache.db.exec(`UPDATE corpus_state SET state='bootstrapping', imported_revision=NULL, candidate_count=NULL, fragment_count=NULL, last_check=1000 WHERE id=1`);
+    cache.db.exec(`UPDATE corpus_state SET state='bootstrapping', imported_revision=NULL, candidate_count=NULL, fragment_count=NULL, last_check=1000, updated_at=${Date.now() - 61 * 60_000} WHERE id=1`);
     const t = lc.tick({ intervalMs: 6 * 60 * 60 * 1000, autoBootstrap: false });
     assert.equal(t.action, 'idle-absent');
     assert.equal(lc.getState().state, CORPUS_STATES.USABLE_PARTIAL);
@@ -639,4 +639,76 @@ test('quarantine is tree-scoped: new tree re-evaluates the same path', async () 
   } finally {
     cache.close();
   }
+});
+
+test('stale recovery: old updating with revision converges to usable, revision kept', async () => {
+  const { recoverStaleCorpusState, isCorpusBusy } = await import('../src/lib/discovery/corpus-lifecycle.js');
+  const { DatabaseSync } = await import('node:sqlite');
+  const cache = createDiscoveryCache({ database: new DatabaseSync(':memory:') });
+  lifecycle(cache, {}).getState();
+  const db = cache.db;
+  db.prepare(`UPDATE corpus_state SET state='updating', imported_revision=?, updated_at=? WHERE id=1`)
+    .run(TREE_A, Date.now() - 61 * 60_000);
+  const rec = recoverStaleCorpusState(db, {});
+  assert.equal(rec.recovered, true);
+  assert.equal(rec.from, 'updating');
+  assert.ok(rec.ageMs >= 61 * 60_000);
+  const row = db.prepare('SELECT state, imported_revision FROM corpus_state WHERE id=1').get();
+  assert.equal(row.state, 'usable');
+  assert.equal(row.imported_revision, TREE_A);
+  assert.equal(isCorpusBusy(db), false);
+  cache.close();
+});
+
+test('stale recovery: fresh busy state is not falsely cleared', async () => {
+  const { recoverStaleCorpusState, isCorpusBusy } = await import('../src/lib/discovery/corpus-lifecycle.js');
+  const { DatabaseSync } = await import('node:sqlite');
+  const cache = createDiscoveryCache({ database: new DatabaseSync(':memory:') });
+  lifecycle(cache, {}).getState();
+  const db = cache.db;
+  db.prepare(`UPDATE corpus_state SET state='updating', imported_revision=?, updated_at=? WHERE id=1`)
+    .run(TREE_A, Date.now() - 60_000);
+  const rec = recoverStaleCorpusState(db, {});
+  assert.equal(rec.recovered, false);
+  assert.equal(rec.busy, true);
+  assert.equal(isCorpusBusy(db), true);
+  assert.equal(db.prepare('SELECT state FROM corpus_state WHERE id=1').get().state, 'updating');
+  cache.close();
+});
+
+test('stale recovery: bootstrapping without revision degrades by evidence', async () => {
+  const { recoverStaleCorpusState } = await import('../src/lib/discovery/corpus-lifecycle.js');
+  const { DatabaseSync } = await import('node:sqlite');
+  const cache = createDiscoveryCache({ database: new DatabaseSync(':memory:') });
+  lifecycle(cache, {}).getState();
+  const db = cache.db;
+  // Nothing imported anywhere: absent.
+  db.prepare(`UPDATE corpus_state SET state='bootstrapping', imported_revision=NULL, updated_at=? WHERE id=1`)
+    .run(Date.now() - 61 * 60_000);
+  assert.equal(recoverStaleCorpusState(db, {}).recovered, true);
+  assert.equal(db.prepare('SELECT state FROM corpus_state WHERE id=1').get().state, 'absent');
+  // Candidates present but no revision: usable-partial, work preserved.
+  db.prepare(`INSERT INTO candidates (info_hash, file_index_key, title, first_seen, last_seen)
+    VALUES ('${'ab'.repeat(20)}', -1, 'X', 1, 1)`).run();
+  db.prepare(`UPDATE corpus_state SET state='bootstrapping', updated_at=? WHERE id=1`)
+    .run(Date.now() - 61 * 60_000);
+  assert.equal(recoverStaleCorpusState(db, {}).recovered, true);
+  assert.equal(db.prepare('SELECT state FROM corpus_state WHERE id=1').get().state, 'usable-partial');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM candidates').get().n, 1);
+  cache.close();
+});
+
+test('stale recovery: custom threshold honored', async () => {
+  const { recoverStaleCorpusState } = await import('../src/lib/discovery/corpus-lifecycle.js');
+  const { DatabaseSync } = await import('node:sqlite');
+  const cache = createDiscoveryCache({ database: new DatabaseSync(':memory:') });
+  lifecycle(cache, {}).getState();
+  const db = cache.db;
+  db.prepare(`UPDATE corpus_state SET state='updating', imported_revision=?, updated_at=? WHERE id=1`)
+    .run(TREE_A, Date.now() - 20 * 60_000);
+  assert.equal(recoverStaleCorpusState(db, { staleAfterMs: 10 * 60_000 }).recovered, true);
+  db.prepare(`UPDATE corpus_state SET state='updating', imported_revision=?, updated_at=? WHERE id=1`)
+    .run(TREE_A, Date.now() - 20 * 60_000);
+  assert.equal(recoverStaleCorpusState(db, { staleAfterMs: 60 * 60_000 }).recovered, false);
+  cache.close();
 });

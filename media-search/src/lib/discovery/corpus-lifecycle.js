@@ -714,10 +714,26 @@ export function createCorpusLifecycle({
               failures.push(`${f.filename}: ${msg}`);
             }
           }
+          // Heartbeat: a live session must never look stale. Same cadence
+          // as the bootstrap progress writes; stale-ownership recovery
+          // treats a frozen heartbeat as proof no worker owns the work.
+          if ((complete + failed) % 50 === 0) {
+            try {
+              writeState(db, { fragment_count: (cur.fragment_count ?? 0) + complete }, now);
+            } catch {}
+          }
         }
         try {
           const { runAttributeWorker } = await import('./attribute-worker.js');
+          // Heartbeats around the unbounded attribute pass: a live session
+          // must never look stale to ownership recovery.
+          try {
+            writeState(db, {}, now);
+          } catch {}
           await runAttributeWorker(cache, { limit: undefined });
+          try {
+            writeState(db, {}, now);
+          } catch {}
         } catch (err) {
           log(`corpus update attribute pass failed: ${err?.message || err}`);
         }
@@ -757,32 +773,16 @@ export function createCorpusLifecycle({
      * does not hammer (last_check persists).
      */
     tick({ intervalMs, autoBootstrap }) {
-      // Crash recovery: a kill mid-bootstrap/update leaves the persisted
-      // state behind while inFlight is gone. Recover to the last-good
-      // position (usable when a revision exists, else absent) so the
-      // scheduler resumes instead of wedging on 'busy' forever.
-      // Fragment-level resume data makes the retry cheap.
+      // Crash recovery via shared stale-ownership detection: a kill
+      // mid-session leaves the persisted busy state behind while inFlight
+      // is gone. A frozen heartbeat (no live worker can be that quiet)
+      // converges to the last-good position; fragment-level resume data
+      // makes the retry cheap. Fresh busy states pass through untouched.
       let cur = readState(db);
       if (!inFlight && (cur.state === CORPUS_STATES.UPDATING || cur.state === CORPUS_STATES.BOOTSTRAPPING)) {
-        try {
-          // Resume position: usable when a revision exists, usable-partial
-          // when candidates were imported but no revision is claimed yet,
-          // else absent. Candidate presence is an O(1) existence probe
-          // (state counters may predate partial imports from older code).
-          // Fragment-level resume data makes the retry cheap.
-          let partial = !cur.imported_revision
-            && ((cur.candidate_count ?? 0) > 0 || (cur.fragment_count ?? 0) > 0);
-          if (!partial && !cur.imported_revision) {
-            try {
-              partial = !!db.prepare('SELECT 1 AS ok FROM candidates LIMIT 1').get();
-            } catch {}
-          }
-          writeState(db, {
-            state: cur.imported_revision ? CORPUS_STATES.USABLE : (partial ? CORPUS_STATES.USABLE_PARTIAL : CORPUS_STATES.ABSENT),
-            last_error: `recovered stuck ${cur.state} after restart`,
-          }, now);
-        } catch {
-          return { action: 'wait', nextDueMs: intervalMs };
+        const rec = recoverStaleCorpusState(db, {});
+        if (rec.recovered) {
+          log(`corpus recovered stale ${rec.from} (heartbeat ${Math.round((rec.ageMs ?? 0) / 60000)}m old)`);
         }
         cur = readState(db);
       }
@@ -845,9 +845,57 @@ export function corpusMaintenanceEnabled(env = process.env) {
 export function isCorpusBusy(db) {
   if (!db) return false;
   try {
-    const cur = readState(db);
-    return cur?.state === CORPUS_STATES.UPDATING || cur?.state === CORPUS_STATES.BOOTSTRAPPING;
+    return recoverStaleCorpusState(db, {}).busy;
   } catch {
     return false;
   }
+}
+
+/**
+ * Stale-ownership recovery (shared by tick recovery, isCorpusBusy, and
+ * boot): a durable busy state (UPDATING/BOOTSTRAPPING) whose heartbeat
+ * (updated_at) is older than the stale threshold cannot belong to a live
+ * worker — every live session heartbeats via progress writes — so it
+ * converges to the last-good resume position (usable when a revision
+ * exists, usable-partial when candidates were imported, else absent).
+ * Fragment/attribute progress is per-fragment durable and untouched; the
+ * next session resumes/skips it idempotently. Returns { busy, recovered,
+ * ageMs, from }.
+ */
+export function recoverStaleCorpusState(db, { now = () => Date.now(), staleAfterMs = null, env = process.env } = {}) {
+  const threshold = staleAfterMs
+    ?? (() => {
+      const v = Number(env?.CORPUS_STALE_AFTER_MIN);
+      return Number.isFinite(v) && v >= 10 ? v * 60_000 : 60 * 60_000;
+    })();
+  let cur;
+  try {
+    cur = readState(db);
+  } catch {
+    return { busy: false, recovered: false, ageMs: null, from: null };
+  }
+  if (cur.state !== CORPUS_STATES.UPDATING && cur.state !== CORPUS_STATES.BOOTSTRAPPING) {
+    return { busy: false, recovered: false, ageMs: null, from: null };
+  }
+  const ageMs = now() - (cur.updated_at ?? 0);
+  if (ageMs < threshold) {
+    return { busy: true, recovered: false, ageMs, from: cur.state };
+  }
+  const from = cur.state;
+  try {
+    let partial = !cur.imported_revision
+      && ((cur.candidate_count ?? 0) > 0 || (cur.fragment_count ?? 0) > 0);
+    if (!partial && !cur.imported_revision) {
+      try {
+        partial = !!db.prepare('SELECT 1 AS ok FROM candidates LIMIT 1').get();
+      } catch {}
+    }
+    writeState(db, {
+      state: cur.imported_revision ? CORPUS_STATES.USABLE : (partial ? CORPUS_STATES.USABLE_PARTIAL : CORPUS_STATES.ABSENT),
+      last_error: `recovered stale ${from} (heartbeat ${Math.round(ageMs / 60000)}m old)`,
+    }, now);
+  } catch {
+    return { busy: true, recovered: false, ageMs, from };
+  }
+  return { busy: false, recovered: true, ageMs, from };
 }

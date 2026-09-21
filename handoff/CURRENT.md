@@ -227,7 +227,18 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
   project license; set GitHub description/topics if still unset.
 - No UI, no Arr mapping, no Requestrr changes in the profile slice.
 
-## Next active slice — corpus hygiene (IN PROGRESS, uncommitted)
+## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
+
+Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
+refreshed by progress writes + new heartbeats in the update loop and
+around the attribute pass). Shared recoverStaleCorpusState used by the
+tick, isCorpusBusy, and boot: frozen >60min (env override) converges
+to usable/usable-partial/absent without touching ingested work; fresh
+markers pass through. Boot logs "Recovered stale corpus lifecycle
+state (was X, heartbeat Nm old)". Live root cause: updateOnce writes
+UPDATING then does unbounded work (fragment loop had no heartbeat);
+a kill in the window froze it (live: 29.6h). Crash-proven on scratch
+copies incl. SIGKILL mid-marker. No release until Patrick says so.
 
 Surgical repair of provably-wrong associations (DELETE the mapping
 row only; Releases/TFs/placements never touched). Shared matcher with
