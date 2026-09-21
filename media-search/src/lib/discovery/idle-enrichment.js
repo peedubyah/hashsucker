@@ -23,6 +23,8 @@
 import { runLiveDiscoveryWithCounts } from './live-bridge.js';
 import { storeReleaseAttributes } from './release-attributes.js';
 import { parseFilename } from './parser-adapter.js';
+import { significantTokens, isSubstantialTitle, titleAgrees, referenceTitleForMedia } from './identity-agreement.js';
+import { createQuietGate, measureLoopLag } from './quiet-gate.js';
 import { profilePolicy } from '../lifecycle/quality-profiles.js';
 import { readPublishedTier } from '../lifecycle/upgrade-watch.js';
 
@@ -43,103 +45,12 @@ export function enrichmentIntervalMs(env = process.env) {
 }
 
 /**
- * Sources that represent background machinery (not human foreground
- * activity). Live proof showed the upgrade evaluator persisting
- * `upgrade-watch|upgrade-watch-prepare` rows; counting those as
- * foreground would defer enrichment forever while upgrades run.
- * Unknown sources default to foreground (safe direction).
- */
-const BACKGROUND_REQUEST_SOURCES = new Set(['anticipation', 'prepare', 'upgrade-watch']);
-
-const STOPWORDS = new Set(['the', 'of', 'a', 'an', 'and', 'or', 'to', 'in', 'on', 'for', 'with', 's']);
-
-/** Significant tokens: lowercase alnum, len>=3, no stopwords. */
-export function significantTokens(text) {
-  return String(text ?? '').toLowerCase().split(/[^a-z0-9]+/)
-    .filter((t) => t.length >= 3 && !STOPWORDS.has(t));
-}
-
-/**
- * A reference title is usable for unsupervised agreement only when it is
- * substantial: 2+ significant tokens, or 8+ significant chars. Single
- * short tokens ("Mogul", "Up", "It") are too ambiguous — live proof showed
- * a garbage one-token resolution ("Mogul", 1965) admitting a wrong show
- * that happened to share season/episode numbers.
- */
-export function isSubstantialTitle(title) {
-  const toks = significantTokens(title);
-  if (toks.length >= 2) return true;
-  return toks.join('').length >= 8;
-}
-
-/**
- * Reference title for agreement, most-authoritative first:
- *  1. a published/bound TorrentFile for the same media (any episode) —
- *     household-verified truth; immune to association pollution and
- *     garbage metadata resolutions.
- *  2. consensus of already-associated candidate titles, when substantial.
- *  3. the resolved target title, when substantial.
- *  4. null (refuse — never guess blind).
+ * Reference title for agreement — shared implementation in
+ * identity-agreement.js (one conservative matcher everywhere).
  */
 function referenceTitle(target, cache, controlPlaneStore) {
-  try {
-    const items = controlPlaneStore.listAllLibraryItems?.({ limit: 500 }) ?? [];
-    for (const it of items) {
-      if ((it.mediaId ?? it.media_id) !== target.mediaId) continue;
-      const isEp = (it.season ?? it.episode) != null;
-      const handoff = isEp
-        ? cache.getTvPlaybackHandoff?.(target.mediaId, it.season, it.episode)
-        : cache.getPlaybackHandoffByMediaId?.(target.mediaId);
-      const tfId = handoff?.torrentFileId ?? null;
-      if (!tfId) continue;
-      const tf = controlPlaneStore.getTorrentFile?.(tfId);
-      const internal = tf?.internalPath ?? tf?.internal_path ?? null;
-      if (!internal) continue;
-      let title = null;
-      try {
-        title = parseFilename(internal)?.parsed?.title ?? null;
-      } catch { /* unparseable */ }
-      if (isSubstantialTitle(title)) return title;
-    }
-  } catch { /* fall through */ }
-  try {
-    const rows = cache.db.prepare(`
-      SELECT DISTINCT c.title FROM candidates c
-      JOIN candidate_media m ON m.info_hash = c.info_hash
-      WHERE m.media_id = ? AND c.title IS NOT NULL LIMIT 20`).all(target.mediaId);
-    const consensus = rows.map((r) => r.title).join(' ');
-    if (isSubstantialTitle(consensus)) return consensus;
-  } catch { /* fall through to resolved title */ }
-  if (isSubstantialTitle(target.title)) return target.title;
-  return null;
-}
-
-/**
- * Release agrees with the reference title: 2+ shared significant tokens,
- * or shared coverage of 60%+ of the reference's significant chars (covers
- * single distinctive words like "Severance" without admitting one shared
- * word out of a long title).
- */
-function titleAgrees(reference, release) {
-  let parsed = null;
-  try {
-    parsed = parseFilename(release.filename ?? release.title ?? '')?.parsed ?? null;
-  } catch { /* unparseable */ }
-  const relTitle = parsed?.title ?? release.title ?? release.filename ?? '';
-  const refToks = new Set(significantTokens(reference));
-  if (refToks.size === 0) return false;
-  const relToks = significantTokens(relTitle);
-  const refChars = [...refToks].join('').length;
-  let shared = 0;
-  let sharedChars = 0;
-  for (const t of new Set(relToks)) {
-    if (refToks.has(t)) {
-      shared += 1;
-      sharedChars += t.length;
-    }
-  }
-  if (shared >= 2) return true;
-  return refChars > 0 && sharedChars / refChars >= 0.6;
+  return referenceTitleForMedia(
+    { mediaId: target.mediaId, title: target.title }, cache, controlPlaneStore);
 }
 
 function countAssociations(cache, mediaId) {
@@ -151,12 +62,8 @@ function countAssociations(cache, mediaId) {
   }
 }
 
-/** Event-loop lag in ms (runtime-only quiet signal; ~5 lines, no deps). */
-export async function measureLoopLag() {
-  const start = Date.now();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  return Date.now() - start;
-}
+/** Re-exported for compatibility (implementation lives in quiet-gate.js). */
+export { measureLoopLag };
 
 export function createIdleEnrichment({
   cache,
@@ -175,8 +82,6 @@ export function createIdleEnrichment({
   if (!controlPlaneStore) throw new Error('idle enrichment requires a control-plane store');
 
   const dailyCap = () => envNumber(env, 'ENRICHMENT_DAILY_CAP', { fallback: 100, min: 1 });
-  const idleAfterMs = () => envNumber(env, 'ENRICHMENT_IDLE_AFTER_MIN', { fallback: 15, min: 1 }) * 60_000;
-  const lagLimitMs = () => envNumber(env, 'ENRICHMENT_MAX_LAG_MS', { fallback: 250, min: 10 });
 
   const backoff = new Map();
   let knownSources = new Set();
@@ -317,37 +222,22 @@ export function createIdleEnrichment({
     return { accept: true, confidence };
   }
 
-  /** Quiet-appliance gate (all runtime signals, nothing durable). */
-  async function isQuiet() {
-    const reasons = [];
-    try {
-      const claimable = downloadStore?.listClaimable?.(1) ?? [];
-      if (claimable.length > 0) reasons.push('download-work-pending');
-    } catch { /* store unavailable */ }
-    try {
-      const reqs = cache.getMediaRequests?.() ?? [];
-      let latest = 0;
-      for (const r of reqs) {
-        if (BACKGROUND_REQUEST_SOURCES.has(r.source)) continue;
-        latest = Math.max(latest, r.created_at ?? 0);
-      }
-      if (now() - latest < idleAfterMs()) reasons.push('recent-foreground-request');
-    } catch { /* requests unavailable */ }
-    try {
-      const lag = await measureLag();
-      if (lag > lagLimitMs()) reasons.push(`event-loop-lag-${lag}ms`);
-    } catch { /* lag unmeasurable */ }
-    try {
-      const hints = busyHints?.() ?? {};
-      for (const [k, v] of Object.entries(hints)) {
-        if (v) reasons.push(`worker-busy:${k}`);
-      }
-    } catch { /* hints unavailable */ }
-    try {
-      if (await isCorpusBusy?.()) reasons.push('corpus-bootstrap-busy');
-    } catch { /* corpus state unknown */ }
-    return { quiet: reasons.length === 0, reasons };
-  }
+  /** Quiet-appliance gate — shared implementation (one quiet notion). */
+  const { isQuiet } = createQuietGate({
+    cache,
+    downloadStore,
+    busyHints,
+    isCorpusBusy,
+    measureLag,
+    // Legacy per-worker env names map onto the shared IDLE_* names so
+    // existing operator configuration keeps working unchanged.
+    env: {
+      ...env,
+      IDLE_AFTER_MIN: env?.ENRICHMENT_IDLE_AFTER_MIN ?? env?.IDLE_AFTER_MIN,
+      IDLE_MAX_LAG_MS: env?.ENRICHMENT_MAX_LAG_MS ?? env?.IDLE_MAX_LAG_MS,
+    },
+    now,
+  });
 
   function persistRelease(target, release, sourceName, confidence) {
     let isNew = false;

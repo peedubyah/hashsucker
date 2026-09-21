@@ -4138,6 +4138,18 @@ export function createRequestHandler(dependencies = {}) {
           return sendJson(response, 500, { error: err.message });
         }
       }
+      // Corpus-hygiene status (read-only operator surface for the TUI):
+      // checked/repaired/flagged counts, top contradiction reasons, last
+      // tick. Repair detail lives in the hygiene_repairs ring + events.
+      if (request.method === 'GET' && url.pathname === '/api/operator/hygiene') {
+        try {
+          const getStatus = dependencies.hygieneStatus;
+          const status = typeof getStatus === 'function' ? getStatus() : { enabled: false };
+          return sendJson(response, 200, { generatedAt: clock(), ...status });
+        } catch (err) {
+          return sendJson(response, 500, { error: err.message });
+        }
+      }
       // Appliance operator surface (read-mostly, TUI-compatible): recent
       // household intents across media requests + generic downloads, newest
       // first. Two bounded queries, no provider calls, no business logic

@@ -33,6 +33,7 @@ export const api = {
   failedEvents: (limit = 20) => get(`/api/operator/events/failed?limit=${limit}`),
   workers: () => get('/api/operator/workers'),
   enrichment: () => get('/api/operator/enrichment'),
+  hygiene: () => get('/api/operator/hygiene'),
 };
 
 export function bytes(n) {

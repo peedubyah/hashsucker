@@ -227,7 +227,23 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
   project license; set GitHub description/topics if still unset.
 - No UI, no Arr mapping, no Requestrr changes in the profile slice.
 
-## Next active slice — idle enrichment worker (IN PROGRESS, uncommitted)
+## Next active slice — corpus hygiene (IN PROGRESS, uncommitted)
+
+Surgical repair of provably-wrong associations (DELETE the mapping
+row only; Releases/TFs/placements never touched). Shared matcher with
+enrichment; R-episode structural + R-show for machine-tier rows under
+published truth only; transliteration/alternates/orphans can only flag;
+published bindings never deleted. Status at /api/operator/hygiene +
+TUI line; repairs logged to a bounded ring. Live-proven on scratch
+copies (poison repaired, guard flagged, packs/orphans spared). The
+first live tick exposed two over-firing bugs (since fixed): absent
+candidate evidence repaired, and path-like reference titles. Pristine
+historical scan (84 published medias, ~825 associations, 907ms):
+795 ok, 0 repair, 30 flagged — flags are exactly the right shapes
+(Polish Biuro, Spanish Gone-With-The-Wind, 500-film collections,
+filename-only rows). No release until Patrick says so.
+
+### Landed just before: idle enrichment worker
 
 One bounded live-discovery query per quiet hour through the normal
 pipeline seams (ingest/associate/attributes); never acquisition.

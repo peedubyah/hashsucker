@@ -89,11 +89,11 @@ async function load(screen) {
     } else if (screen === 'downloads') {
       state.data.downloads = await api.downloads(50);
     } else if (screen === 'diagnostics') {
-      const [diag, workers, failed, enrichment] = await Promise.all([
+      const [diag, workers, failed, enrichment, hygiene] = await Promise.all([
         api.diagnostics(), api.workers().catch(() => null), api.failedEvents(10).catch(() => ({ runs: [] })),
-        api.enrichment().catch(() => null),
+        api.enrichment().catch(() => null), api.hygiene().catch(() => null),
       ]);
-      state.data.diagnostics = { diag, workers, failed, enrichment };
+      state.data.diagnostics = { diag, workers, failed, enrichment, hygiene };
     } else if (screen === 'logs') {
       state.data.logs = tailLogs(state.logService, 120);
     }
@@ -225,7 +225,7 @@ function renderDownloads() {
 }
 
 function renderDiagnostics() {
-  const { diag, workers, failed, enrichment } = state.data.diagnostics || {};
+  const { diag, workers, failed, enrichment, hygiene } = state.data.diagnostics || {};
   const out = [`${C.bold}Diagnostics${C.reset}`, line()];
   const kv = (k, v) => out.push(`${k.padEnd(14)} ${cut(v, W() - 17)}`);
   kv('corpus', `${diag?.corpus?.state ?? '?'}${diag?.corpus?.candidates != null ? ` · ${diag.corpus.candidates.toLocaleString()}` : ''}`);
@@ -239,6 +239,11 @@ function renderDiagnostics() {
     kv('enrichment', `${enrichment.lastOutcome ?? '?'} · +${enrichment.newHashes ?? 0} ~${enrichment.refreshed ?? 0} x${enrichment.rejected ?? 0} · day ${enrichment.dailyCount ?? 0}${bo ? ` · backoff ${bo}` : ''}`);
   } else {
     kv('enrichment', 'disabled');
+  }
+  if (hygiene && hygiene.enabled !== false) {
+    kv('hygiene', `${hygiene.lastOutcome ?? '?'} · checked ${hygiene.checked ?? 0} · repaired ${hygiene.repaired ?? 0} · flagged ${hygiene.flagged ?? 0}`);
+  } else {
+    kv('hygiene', 'disabled');
   }
   kv('workers', cut(JSON.stringify(workers ?? 'n/a'), 60));
   out.push(line());

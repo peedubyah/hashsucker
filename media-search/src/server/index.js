@@ -44,6 +44,9 @@ import { createAnticipationScheduler } from '../lib/anticipation/scheduler.js';
 import {
   createIdleEnrichment, enrichmentIntervalMs,
 } from '../lib/discovery/idle-enrichment.js';
+import {
+  createCorpusHygiene, hygieneIntervalMs,
+} from '../lib/discovery/corpus-hygiene.js';
 import { isCorpusBusy } from '../lib/discovery/corpus-lifecycle.js';
 import { getMediaById } from '../lib/metadata/unified-search.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
@@ -660,6 +663,62 @@ if (enrichment) {
   armEnrichmentTimer(firstTickMin * 60_000);
 }
 
+// ─── corpus hygiene audit ───────────────────────────────────────────
+// Conservative repair of provably-wrong media associations (one small
+// batch per idle tick through the shared quiet gate). Deletes only the
+// wrong association row — never Releases, TorrentFiles, placements, or
+// currently-bound hashes. HYGIENE_ENABLED=0 disables. Default every
+// 2h, first tick 20 min after boot (staggered past enrichment).
+// See lib/discovery/corpus-hygiene.js.
+const hygieneOn = (() => {
+  const v = String(process.env.HYGIENE_ENABLED ?? '').toLowerCase();
+  return v !== '0' && v !== 'false';
+})();
+const hygiene = hygieneOn ? createCorpusHygiene({
+  cache: discoveryCache,
+  controlPlaneStore,
+  downloadStore,
+  busyHints: () => ({
+    anticipation: anticipationInFlight,
+    download: downloadInFlight,
+    upgradeWatch: upgradeWatchInFlight,
+  }),
+  isCorpusBusy: async () => isCorpusBusy(discoveryCache.db),
+  recordEvent: null,
+  env: process.env,
+}) : null;
+let hygieneTimer = null;
+let hygieneInFlight = false;
+function armHygieneTimer(delayMs) {
+  hygieneTimer = setTimeout(async () => {
+    try {
+      if (hygiene && !hygieneInFlight) {
+        hygieneInFlight = true;
+        try {
+          const result = await hygiene.tickOnce();
+          if (result.acted || (result.flagged ?? 0) > 0) {
+            console.log(`media-search: hygiene tick checked=${result.checked} repaired=${result.repaired} flagged=${result.flagged}`);
+          }
+        } finally {
+          hygieneInFlight = false;
+        }
+      }
+    } catch (error) {
+      console.warn('media-search: hygiene tick failed', error?.message);
+    } finally {
+      armHygieneTimer(hygieneIntervalMs(process.env));
+    }
+  }, delayMs);
+  if (hygieneTimer.unref) hygieneTimer.unref();
+}
+if (hygiene) {
+  const firstTickMin = (() => {
+    const v = Number(process.env.HYGIENE_FIRST_TICK_MIN);
+    return Number.isFinite(v) && v >= 0 ? v : 20;
+  })();
+  armHygieneTimer(firstTickMin * 60_000);
+}
+
 const server = createApp({
   searchCache: discoveryCache,
   controlPlaneStore,
@@ -677,6 +736,7 @@ const server = createApp({
     armAnticipationTimer(5000);
   },
   enrichmentStatus: () => enrichment?.getStatus() ?? { enabled: false },
+  hygieneStatus: () => hygiene?.getStatus() ?? { enabled: false },
 });
 let shuttingDown = false;
 
