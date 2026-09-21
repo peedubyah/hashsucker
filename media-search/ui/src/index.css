@@ -30,6 +30,36 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+.global-health { margin-left: auto; font-size: 0.78rem; white-space: nowrap; }
+.global-health-ready { color: var(--success); }
+.global-health-attention { color: var(--warning); }
+.hero-search { display: flex; gap: 0.75rem; max-width: 760px; margin: 2rem auto 1.5rem; }
+.hero-search input { flex: 1; min-width: 0; font-size: 1.15rem; padding: 0.9rem 1rem; }
+.media-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+.media-result { display: flex; gap: 1rem; padding: 1rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elevated); }
+.media-poster { width: 82px; height: 122px; flex: 0 0 auto; object-fit: cover; border-radius: 6px; background: var(--bg-surface); }
+.media-poster-empty { display: grid; place-items: center; font-size: 1.6rem; }
+.media-result h2, .request-card h2 { margin: 0; font-size: 1rem; color: var(--text-bright); }
+.media-result-body { min-width: 0; }
+.media-overview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; font-size: 0.85rem; line-height: 1.35; }
+.request-options { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
+.choice { border: 1px solid var(--border-strong); background: var(--bg-surface); color: var(--text); border-radius: 999px; padding: 0.5rem 0.8rem; cursor: pointer; }
+.choice.selected { border-color: var(--accent); background: var(--accent-dim); color: var(--text-bright); }
+.compact-select { display: flex; align-items: center; gap: 0.4rem; color: var(--text-dim); font-size: 0.85rem; }
+.request-list { display: grid; gap: 0.75rem; }
+.request-card { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elevated); }
+.request-card-main { min-width: 0; }
+.request-card p { margin: 0.5rem 0 0; }
+.notice { border: 1px solid var(--accent); background: var(--accent-dim); padding: 0.75rem 1rem; border-radius: 8px; }
+@media (max-width: 700px) {
+  .app-topbar { flex-wrap: wrap; gap: 0.6rem; }
+  .app-nav { order: 3; width: 100%; overflow-x: auto; }
+  .global-health { margin-left: auto; }
+  .hero-search { margin-top: 1rem; }
+  .hero-search .btn { padding-inline: 0.8rem; }
+  .request-card { flex-direction: column; }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -3469,6 +3499,29 @@ code {
   }
   .candidate-metrics { text-align: left; }
 }
+
+/* Media-facing household surface. */
+.global-health { margin-left: auto; font-size: 0.78rem; white-space: nowrap; }
+.global-health-ready { color: var(--success); }
+.global-health-attention { color: var(--warning); }
+.hero-search { display: flex; gap: 0.75rem; max-width: 760px; margin: 2rem auto 1.5rem; }
+.hero-search input { flex: 1; min-width: 0; font-size: 1.15rem; padding: 0.9rem 1rem; }
+.media-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+.media-result { display: flex; gap: 1rem; padding: 1rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elevated); }
+.media-poster { width: 82px; height: 122px; flex: 0 0 auto; object-fit: cover; border-radius: 6px; background: var(--bg-surface); }
+.media-poster-empty { display: grid; place-items: center; font-size: 1.6rem; }
+.media-result h2, .request-card h2 { margin: 0; font-size: 1rem; color: var(--text-bright); }
+.media-result-body { min-width: 0; }
+.media-overview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; font-size: 0.85rem; line-height: 1.35; }
+.request-options { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
+.choice { border: 1px solid var(--border-strong); background: var(--bg-surface); color: var(--text); border-radius: 999px; padding: 0.5rem 0.8rem; cursor: pointer; }
+.choice.selected { border-color: var(--accent); background: var(--accent-dim); color: var(--text-bright); }
+.compact-select { display: flex; align-items: center; gap: 0.4rem; color: var(--text-dim); font-size: 0.85rem; }
+.request-list { display: grid; gap: 0.75rem; }
+.request-card { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elevated); }
+.request-card-main { min-width: 0; }
+.request-card p { margin: 0.5rem 0 0; }
+.notice { border: 1px solid var(--accent); background: var(--accent-dim); padding: 0.75rem 1rem; border-radius: 8px; }
 
 /* Appliance surface (UI rewrite): cards, lists, brand, themes. */
 .app-brand-logo { border-radius: 6px; display: block; }

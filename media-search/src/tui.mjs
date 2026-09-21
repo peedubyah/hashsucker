@@ -76,6 +76,8 @@ async function load(screen) {
         api.downloads(50).catch(() => ({ items: [] })),
       ]);
       state.data.home = { ready, diag, dl };
+    } else if (screen === 'requests') {
+      state.data.requests = await api.requests(100);
     } else if (screen === 'activity') {
       state.data.activity = await api.activity(40);
     } else if (screen === 'library') {
@@ -86,8 +88,14 @@ async function load(screen) {
     } else if (screen === 'providers') {
       const [diag, failed] = await Promise.all([api.diagnostics(), api.failedEvents(20).catch(() => ({ runs: [] }))]);
       state.data.providers = { diag, failed };
+    } else if (screen === 'corpus') {
+      state.data.corpus = await api.corpus();
+    } else if (screen === 'storage') {
+      state.data.storage = readStorageReport();
     } else if (screen === 'downloads') {
       state.data.downloads = await api.downloads(50);
+    } else if (screen === 'workers') {
+      state.data.workers = await api.workers();
     } else if (screen === 'diagnostics') {
       const [diag, workers, failed, enrichment, hygiene] = await Promise.all([
         api.diagnostics(), api.workers().catch(() => null), api.failedEvents(10).catch(() => ({ runs: [] })),
@@ -120,6 +128,20 @@ function tailLogs(service, n) {
   return { service, lines: r.text.trim().split('\n').slice(-n), note: null };
 }
 
+function commandText(command, args) {
+  try {
+    const r = spawnSync(command, args, { encoding: 'utf8', timeout: 15000 });
+    return r.status === 0 ? r.stdout.trim() : `unavailable (${cut(r.stderr || '', 100)})`;
+  } catch (e) { return `unavailable (${cut(e.message, 100)})`; }
+}
+
+function readStorageReport() {
+  const disk = commandText('df', ['-h', '/']);
+  const docker = commandText('docker', ['system', 'df']);
+  const scratch = commandText('du', ['-sh', '/var/tmp/patrick/hashsucker']);
+  return { disk, docker, scratch, cleanup: 'scripts/hashsucker-housekeeping --clean' };
+}
+
 const SERVICES = [
   'hashsucker-media-search-1',
   'hashsucker-data-plane-1',
@@ -146,13 +168,24 @@ function renderHome() {
   const failed = items.filter((d) => d.state === 'failed');
   out.push(`downloads  ${active.length} active · ${failed.length} failed · library ${(diag?.publication?.vfs?.movies ?? 0)} movies`);
   out.push(line());
-  out.push(`${C.dim}1 activity  2 library  3 providers  4 downloads  5 diagnostics  6 logs  7 probes${C.reset}`);
+  out.push(`${C.dim}1 requests  2 library  3 providers  4 corpus  5 downloads  6 workers  7 logs  8 probes  9 storage  0 home${C.reset}`);
   return out.join('\n');
 }
 
 function matchFilter(s) {
   if (!state.filter) return true;
   return s.toLowerCase().includes(state.filter.toLowerCase());
+}
+
+function renderRequests() {
+  const items = (state.data.requests?.items ?? []).filter((i) => matchFilter(`${i.title} ${i.mediaId} ${i.stage} ${i.intentLabel}`));
+  const out = [`${C.bold}Requests${C.reset}  ${C.dim}${items.length} human requests · exact IDs/details available here · / filter${C.reset}`, line()];
+  items.slice(0, Math.max(5, process.stdout.rows - 8)).forEach((it, idx) => {
+    const cur = idx === state.cursor ? `${C.cyan}›${C.reset}` : ' ';
+    out.push(`${cur} ${cut(it.title || it.mediaId || '?', 28).padEnd(28)} ${pill(cut(it.stage, 16), stateColor(it.stage))} ${cut(it.intentLabel, 18).padEnd(18)} ${cut(it.message, W() - 72)}`);
+    if (state.detail === it.id) out.push(`    media=${it.mediaId} type=${it.mediaType} profile=${it.qualityProfile ?? 'balanced'} created=${it.createdAt ? new Date(it.createdAt).toISOString() : '—'}`);
+  });
+  return out.join('\\n');
 }
 
 function renderActivity() {
@@ -192,6 +225,24 @@ function renderLibrary() {
   return out.join('\n');
 }
 
+function renderCorpus() {
+  const { lifecycle = {}, enrichment = {}, hygiene = {} } = state.data.corpus || {};
+  const out = [`${C.bold}Corpus${C.reset}  ${C.dim}lifecycle, revision, enrichment, hygiene${C.reset}`, line()];
+  out.push(`state        ${lifecycle.state ?? '?'}`);
+  out.push(`revision     ${lifecycle.imported_revision ?? '—'}`);
+  out.push(`commit       ${lifecycle.imported_commit ?? '—'}`);
+  out.push(`candidates   ${lifecycle.candidate_count ?? '—'} · fragments ${lifecycle.fragment_count ?? '—'}`);
+  out.push(`last success ${lifecycle.last_success ? new Date(lifecycle.last_success).toISOString() : '—'}`);
+  out.push(`enrichment   ${enrichment.enabled === false ? 'disabled' : `${enrichment.lastOutcome ?? '?'} · learned ${enrichment.newHashes ?? 0} · refreshed ${enrichment.refreshed ?? 0}`}`);
+  out.push(`hygiene      ${hygiene.enabled === false ? 'disabled' : `checked ${hygiene.checked ?? 0} · repaired ${hygiene.repaired ?? 0} · flagged ${hygiene.flagged ?? 0}`}`);
+  return out.join('\\n');
+}
+
+function renderStorage() {
+  const s = state.data.storage || {};
+  return [`${C.bold}Storage / housekeeping${C.reset}  ${C.dim}report-only; no Docker socket or generic prune${C.reset}`, line(), `disk\\n${s.disk ?? '—'}`, `docker reclaimable\\n${s.docker ?? '—'}`, `known scratch\\n${s.scratch ?? '—'}`, `safe cleanup command\\n${s.cleanup ?? 'scripts/hashsucker-housekeeping --clean'}`].join('\\n');
+}
+
 function renderProviders() {
   const { diag, failed } = state.data.providers || {};
   const out = [`${C.bold}Providers${C.reset}`, line()];
@@ -222,6 +273,12 @@ function renderDownloads() {
     }
   });
   return out.join('\n');
+}
+
+function renderWorkers() {
+  const out = [`${C.bold}Workers${C.reset}  ${C.dim}last/next tick and lifecycle visibility${C.reset}`, line()];
+  out.push(cut(JSON.stringify(state.data.workers ?? {}, null, 2), W() - 1));
+  return out.join('\\n');
 }
 
 function renderDiagnostics() {
@@ -309,19 +366,21 @@ async function runProbe(n) {
 
 function render() {
   let s;
-  if (state.screen === 'home') s = renderHome();
-  else if (state.screen === 'activity') s = renderActivity();
+  if (state.screen === 'home') s = renderHome();  else if (state.screen === 'requests') s = renderRequests();  else if (state.screen === 'activity') s = renderActivity();
   else if (state.screen === 'library') s = renderLibrary();
   else if (state.screen === 'providers') s = renderProviders();
+  else if (state.screen === 'corpus') s = renderCorpus();
+  else if (state.screen === 'storage') s = renderStorage();
   else if (state.screen === 'downloads') s = renderDownloads();
   else if (state.screen === 'diagnostics') s = renderDiagnostics();
   else if (state.screen === 'logs') s = renderLogs();
   else if (state.screen === 'probes') s = renderProbes();
+  else if (state.screen === 'workers') s = renderWorkers();
   if (state.error) s += `\n${C.red}error: ${cut(state.error, W() - 9)}${C.reset}`;
   emit(s.endsWith('\n') ? s : `${s}\n`);
 }
 
-const SCREENS = ['home', 'activity', 'library', 'providers', 'downloads', 'diagnostics', 'logs', 'probes'];
+const SCREENS = ['home', 'requests', 'library', 'providers', 'corpus', 'downloads', 'workers', 'logs', 'probes', 'storage'];
 
 async function go(screen) {
   state.screen = screen;
@@ -370,13 +429,13 @@ async function main() {
     }
     const k = key.name === 'q' ? 'q' : (ch || '');
     if (k === 'q') { cleanup(); process.exit(0); return; }
-    if (['1', '2', '3', '4', '5', '6', '7', '8'].includes(k)) {
+    if (['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'].includes(k)) {
       if (state.screen === 'probes' && ['1', '2', '3', '4'].includes(k)) {
         await runProbe(k);
         render();
         return;
       }
-      const map = { 1: 'activity', 2: 'library', 3: 'providers', 4: 'downloads', 5: 'diagnostics', 6: 'logs', 7: 'probes', 8: 'home' };
+      const map = { 0: 'home', 1: 'requests', 2: 'library', 3: 'providers', 4: 'corpus', 5: 'downloads', 6: 'workers', 7: 'logs', 8: 'probes', 9: 'storage' };
       await go(map[k]);
       return;
     }
@@ -400,7 +459,11 @@ async function main() {
 }
 
 function toggleDetail() {
-  if (state.screen === 'activity') {
+    if (state.screen === 'requests') {
+    const items = state.data.requests?.items ?? [];
+    const it = items[state.cursor];
+    state.detail = it && state.detail !== it.id ? it.id : null;
+  } else if (state.screen === 'activity') {
     const items = (state.data.activity?.items ?? []).filter((i) =>
       `${i.mediaId} ${i.headline} ${i.state} ${i.kind}`.toLowerCase().includes(state.filter.toLowerCase()));
     const it = items[state.cursor];

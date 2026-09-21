@@ -829,6 +829,10 @@ export async function searchByMedia(cache, request) {
   const sourceLabel = request.sourceLabel || null;
   const requestedBy = request.requestedBy || null;
   const priority = request.priority ?? null;
+  const requestIntent = request.intent || 'library';
+  const qualityProfile = request.qualityProfile || 'balanced';
+  const posterUrl = request.posterUrl || null;
+  const mediaYear = request.canonicalYear ?? request.year ?? null;
   const mediaTitle = request.mediaTitle || null; // Optional: human-readable media name for identity verification
   const intentId = request.intentId != null ? request.intentId : null; // Optional: pre-existing media_intents.id (skips implicit upsert)
   // Canonical presentation title/year for the VFS path. Surfaces the
@@ -1165,6 +1169,11 @@ export async function searchByMedia(cache, request) {
           sourceLabel,
           requestedBy,
           priority,
+          requestIntent,
+          qualityProfile,
+          mediaTitle,
+          mediaYear,
+          posterUrl,
           intentId,
         },
         explainable
@@ -1742,6 +1751,11 @@ export async function searchByMedia(cache, request) {
         sourceLabel,
         requestedBy,
         priority,
+        requestIntent,
+        qualityProfile,
+        mediaTitle,
+        mediaYear,
+        posterUrl,
         intentId,
       },
       explainable

@@ -92,6 +92,48 @@ test('operator downloads: failed row carries headline + retry state', async () =
   }
 });
 
+test('operator media requests: projects durable lifecycle and human metadata once per request', async () => {
+  const { cache, cps } = stores();
+  const now = Date.now();
+  cache.db.prepare(`INSERT INTO media_requests
+    (media_id, media_type, request_intent, quality_profile, media_title, media_year, poster_url, status, candidate_count, created_at)
+    VALUES (?, 'movie', 'library', 'hd', 'Dune: Part Two', 2024, 'https://img.test/dune.jpg', 'completed', 0, ?),
+           (?, 'movie', 'watch', 'balanced', 'Heat', 1995, 'https://img.test/heat.jpg', 'completed', 1, ?),
+           (?, 'movie', 'immediate', 'max', 'Alien', 1979, NULL, 'completed', 1, ?),
+           (?, 'movie', 'library', 'balanced', 'Retry me', 2020, NULL, 'failed', 1, ?),
+           (?, 'movie', 'library', 'balanced', NULL, NULL, NULL, 'failed', 0, ?)`)
+    .run('tt-accepted', now - 5000, 'tt-preparing', now - 4000, 'tt-ready', now - 3000, 'tt-retry', now - 2000, 'tt-terminal', now - 1000);
+  const requestId = cache.db.prepare('SELECT id FROM media_requests WHERE media_id = ?').get('tt-ready').id;
+  cache.db.prepare(`INSERT INTO playback_handoffs
+    (request_id, media_id, media_type, release_key, info_hash, filename, selected_at, created_at)
+    VALUES (?, 'tt-ready', 'movie', 'a:torrent', ?, 'ready.mkv', ?, ?)`)
+    .run(requestId, 'a'.repeat(40), now, now);
+  // An internal retry row for the same human request is not added to the
+  // projection: the durable media_requests row is the human unit.
+  const server = serve(cache, cps);
+  await new Promise((r) => server.listen(0, r));
+  try {
+    const { status, json } = await get(server, '/api/operator/media-requests?limit=20');
+    assert.equal(status, 200);
+    assert.equal(json.items.length, 5);
+    const byId = Object.fromEntries(json.items.map((i) => [i.mediaId, i]));
+    assert.deepEqual(byId['tt-accepted'], { ...byId['tt-accepted'], stage: 'discovering', message: 'Finding a viable release…' });
+    assert.equal(byId['tt-preparing'].stage, 'preparing');
+    assert.equal(byId['tt-ready'].stage, 'ready');
+    assert.equal(byId['tt-ready'].title, 'Alien');
+    assert.equal(byId['tt-retry'].stage, 'failed');
+    assert.equal(byId['tt-retry'].message, 'Could not find a viable release');
+    assert.equal(byId['tt-terminal'].stage, 'failed');
+    assert.equal(byId['tt-terminal'].title, 'tt-terminal');
+    assert.equal(byId['tt-ready'].intentLabel, 'Best available now');
+    assert.equal(byId['tt-ready'].qualityProfile, 'max');
+    assert.equal(byId['tt-accepted'].posterUrl, 'https://img.test/dune.jpg');
+    assert.match(byId['tt-retry'].message, /viable release/i);
+  } finally {
+    server.close();
+  }
+});
+
 test('operator activity: merges requests and downloads newest-first', async () => {
   const { cache, cps } = stores();
   const server = serve(cache, cps);
@@ -212,6 +254,25 @@ test('media-request intent: unknown 400, download guidance 400', async () => {
       { mediaId: 'tt-intent', mediaType: 'movie', intent: 'download', source: 'operator' });
     assert.equal(dl.status, 400);
     assert.match(dl.json.error, /download-request/);
+  } finally {
+    server.close();
+  }
+});
+
+test('operator media requests: historical rows use compatibility defaults', async () => {
+  const { cache, cps } = stores();
+  cache.db.prepare(`INSERT INTO media_requests (media_id, media_type, status, candidate_count, created_at)
+    VALUES ('tt-old', 'movie', 'completed', 0, ?)`)
+    .run(Date.now());
+  const server = serve(cache, cps);
+  await new Promise((r) => server.listen(0, r));
+  try {
+    const { status, json } = await get(server, '/api/operator/media-requests');
+    assert.equal(status, 200);
+    const row = json.items.find((i) => i.mediaId === 'tt-old');
+    assert.equal(row.intentLabel, 'Add to library');
+    assert.equal(row.qualityProfile, 'balanced');
+    assert.equal(row.title, 'tt-old');
   } finally {
     server.close();
   }

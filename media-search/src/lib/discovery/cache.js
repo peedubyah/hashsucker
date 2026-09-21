@@ -218,6 +218,11 @@ CREATE TABLE IF NOT EXISTS media_requests (
   intent_id INTEGER,
   source TEXT NOT NULL DEFAULT 'api',
   source_type TEXT,
+  request_intent TEXT NOT NULL DEFAULT 'library',
+  quality_profile TEXT NOT NULL DEFAULT 'balanced',
+  media_title TEXT,
+  media_year INTEGER,
+  poster_url TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
   candidate_count INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
@@ -1762,6 +1767,16 @@ function migrateMediaIntents(db) {
   const hasSourceType = reqInfo.some(col => col.name === 'source_type');
   if (!hasSourceType) {
     db.exec('ALTER TABLE media_requests ADD COLUMN source_type TEXT');
+  }
+  for (const column of [
+    "request_intent TEXT NOT NULL DEFAULT 'library'",
+    "quality_profile TEXT NOT NULL DEFAULT 'balanced'",
+    'media_title TEXT',
+    'media_year INTEGER',
+    'poster_url TEXT',
+  ]) {
+    const name = column.split(' ')[0];
+    if (!reqInfo.some(col => col.name === name)) db.exec(`ALTER TABLE media_requests ADD COLUMN ${column}`);
   }
 
   // Add intent_id column to media_request_results if missing
@@ -3908,12 +3923,17 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
   // Media request persistence
   function buildInsertMediaRequestSql(intent) {
-    const cols = ['media_id', 'media_type', 'season', 'episode', 'status', 'candidate_count', 'created_at'];
+    const cols = ['media_id', 'media_type', 'season', 'episode', 'request_intent', 'quality_profile', 'media_title', 'media_year', 'poster_url', 'status', 'candidate_count', 'created_at'];
     const values = [
       intent.mediaId,
       intent.mediaType || 'movie',
       intent.season || null,
       intent.episode != null ? intent.episode : (intent.episodes?.length ? intent.episodes[0] : null),
+      intent.requestIntent || 'library',
+      intent.qualityProfile || 'balanced',
+      intent.mediaTitle || null,
+      intent.mediaYear ?? null,
+      intent.posterUrl || null,
       'completed',
       intent.resultsLength || 0,
       intent.now,

@@ -27,11 +27,13 @@ export const api = {
   ready: () => getLenient('/health/ready'),
   diagnostics: () => get('/api/diagnostics'),
   activity: (limit = 30) => get(`/api/operator/activity?limit=${limit}`),
+  requests: (limit = 100) => get(`/api/operator/media-requests?limit=${limit}`),
   library: (limit = 100) => get(`/api/library?limit=${limit}`),
   quality: (tfs) => get(`/api/operator/quality?tfs=${tfs.join(',')}`),
   downloads: (limit = 50) => get(`/api/operator/downloads?limit=${limit}`),
   failedEvents: (limit = 20) => get(`/api/operator/events/failed?limit=${limit}`),
   workers: () => get('/api/operator/workers'),
+  corpus: () => get('/api/operator/corpus'),
   enrichment: () => get('/api/operator/enrichment'),
   hygiene: () => get('/api/operator/hygiene'),
 };

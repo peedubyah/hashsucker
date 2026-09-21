@@ -3847,6 +3847,35 @@ export function createRequestHandler(dependencies = {}) {
           throw resolverError;
         }
       }
+      // Household request projection: one durable row per media request,
+      // not importer attempts or internal event records. The TUI may still
+      // use the legacy operator request directory below for internals.
+      if (request.method === 'GET' && url.pathname === '/api/operator/media-requests') {
+        const limit = Math.min(parseBoundedLimit(url.searchParams.get('limit')), 100);
+        const rows = searchCache.getMediaRequests?.() ?? [];
+        const items = rows.slice(0, limit).map((row) => {
+          const handoff = searchCache.getPlaybackHandoffByRequestId?.(row.id);
+          let failure = null;
+          try {
+            failure = row.intent_id != null
+              ? searchCache.db.prepare('SELECT last_error FROM media_intents WHERE id = ?').get(row.intent_id)?.last_error ?? null
+              : null;
+          } catch {}
+          const retryScheduled = row.status === 'failed' && /429|rate|transient|retry|timeout|network/i.test(String(failure ?? ''));
+          const stage = handoff ? 'ready' : retryScheduled ? 'retry scheduled' : row.status === 'failed' ? 'failed' : row.candidate_count > 0 ? 'preparing' : 'discovering';
+          return {
+            id: String(row.id), mediaId: row.media_id, mediaType: row.media_type,
+            season: row.season ?? null, episode: row.episode ?? null,
+            title: row.media_title || row.media_id, year: row.media_year ?? null,
+            posterUrl: row.poster_url ?? null, stage,
+            intentLabel: row.request_intent === 'watch' ? 'Watch once' : row.request_intent === 'immediate' ? 'Best available now' : 'Add to library',
+            qualityProfile: row.quality_profile || 'balanced',
+            message: stage === 'ready' ? 'Ready to watch' : stage === 'retry scheduled' ? 'Provider temporarily rate-limited — retry scheduled' : stage === 'failed' ? (failure || 'Could not find a viable release') : stage === 'preparing' ? 'Preparing playback…' : 'Finding a viable release…',
+            createdAt: row.created_at,
+          };
+        });
+        return sendJson(response, 200, { generatedAt: clock(), items });
+      }
       // Operator dashboard endpoints
       if (request.method === 'GET' && url.pathname === '/api/operator/requests') {
         const filter = url.searchParams.get('filter') || 'all';
@@ -3861,20 +3890,40 @@ export function createRequestHandler(dependencies = {}) {
           const tb = b.request?.createdAt || b.request?.created_at || '';
           return ta < tb ? 1 : ta > tb ? -1 : 0;
         });
-        return sendJson(response, 200, {
-          requests: filtered.map(r => ({
+        const humanRequests = filtered.map(r => {
+          const request = r.request || {};
+          const mediaId = request.mediaId || request.media_id || null;
+          const mediaType = request.mediaType || request.media_type || 'movie';
+          const stage = r.status === 'done' ? 'ready'
+            : r.status === 'failed' ? 'failed'
+              : r.status === 'processing' ? 'preparing' : 'accepted';
+          const message = stage === 'ready' ? 'Ready to watch'
+            : stage === 'failed' ? (request.lastError || request.last_error || 'Could not find a viable release')
+              : stage === 'preparing' ? 'Preparing playback…' : 'Request accepted';
+          return {
+            id: r.requestId,
+            mediaId,
+            mediaType,
+            season: request.season ?? null,
+            episode: request.episode ?? null,
+            title: request.media?.title || request.mediaTitle || mediaId,
+            year: request.media?.year ?? request.year ?? null,
+            posterUrl: request.posterUrl || null,
+            stage,
+            intentLabel: request.intent || (request.temporary ? 'Watch once' : 'Library'),
+            qualityProfile: request.qualityProfile || 'balanced',
+            message,
+            createdAt: request.createdAt || request.created_at || null,
             requestId: r.requestId,
             status: r.status,
-            createdAt: r.request?.createdAt || r.request?.created_at || null,
-            handlingMode: r.request?.handlingMode || r.request?.handling_mode || null,
-            mediaTitle: r.request?.media?.title || r.request?.mediaTitle || null,
-            mediaId: r.request?.mediaId || r.request?.media_id || null,
-            releaseTitle: r.request?.release?.title || r.request?.releaseTitle || null,
-            provider: r.request?.provider || null,
-            lastError: r.request?.lastError || r.request?.last_error || null,
-          })),
-          total: filtered.length,
+            handlingMode: request.handlingMode || request.handling_mode || null,
+            mediaTitle: request.media?.title || request.mediaTitle || null,
+            releaseTitle: request.release?.title || request.releaseTitle || null,
+            provider: request.provider || null,
+            lastError: request.lastError || request.last_error || null,
+          };
         });
+        return sendJson(response, 200, { requests: humanRequests, items: humanRequests, total: humanRequests.length });
       }
 
       const operatorRequestDetail = request.method === 'GET'
@@ -4150,6 +4199,23 @@ export function createRequestHandler(dependencies = {}) {
         const row = searchCache.getPlaybackHandoffByRequestId(requestId);
         const handoff = searchCache.rowToPlaybackHandoff(row);
         return sendJson(response, handoff ? 200 : 404, handoff || { error: 'Handoff not found' });
+      }
+      // Corpus control-room snapshot: lifecycle revision plus existing
+      // enrichment/hygiene diagnostics, without creating a second state model.
+      if (request.method === 'GET' && url.pathname === '/api/operator/corpus') {
+        try {
+          const corpus = getCorpusLifecycle().getState();
+          const enrichment = typeof dependencies.enrichmentStatus === 'function' ? dependencies.enrichmentStatus() : { enabled: false };
+          const hygiene = typeof dependencies.hygieneStatus === 'function' ? dependencies.hygieneStatus() : { enabled: false };
+          return sendJson(response, 200, {
+            generatedAt: clock(),
+            lifecycle: corpus,
+            enrichment,
+            hygiene,
+          });
+        } catch (err) {
+          return sendJson(response, 500, { error: err.message });
+        }
       }
       // Worker visibility endpoint
       if (request.method === 'GET' && url.pathname === '/api/operator/workers') {

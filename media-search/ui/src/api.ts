@@ -50,6 +50,34 @@ export interface Diagnostics {
   };
 }
 
+export type RequestIntent = 'library' | 'watch' | 'immediate';
+
+export interface MediaSearchResult {
+  id: string;
+  type: 'movie' | 'series';
+  title: string;
+  year?: number | null;
+  posterUrl?: string | null;
+  backdropUrl?: string | null;
+  overview?: string | null;
+}
+
+export interface RequestItem {
+  id: string;
+  mediaId?: string | null;
+  mediaType?: string | null;
+  season?: number | null;
+  episode?: number | null;
+  title?: string | null;
+  year?: number | null;
+  posterUrl?: string | null;
+  stage: string;
+  intentLabel: string;
+  qualityProfile?: string | null;
+  message: string;
+  createdAt?: number | null;
+}
+
 export interface ActivityItem {
   kind: 'request' | 'download';
   id: string;
@@ -125,6 +153,14 @@ export interface FailedEvent {
 
 export const fetchHealth = () => get<{ status: string }>('/health');
 export const fetchReady = () => get<HealthReady>('/health/ready');
+export const fetchTitleSearch = (query: string) =>
+  get<{ results: MediaSearchResult[]; errors?: unknown[] }>(`/api/search?q=${encodeURIComponent(query)}`);
+export const fetchRequests = (limit = 50) =>
+  get<{ items: RequestItem[] }>(`/api/operator/media-requests?limit=${limit}`);
+export const submitMediaRequest = (body: Record<string, unknown>) =>
+  post<{ requestId?: number | string; intent?: RequestIntent; handoff?: unknown }>('/api/media-request', body);
+export const submitDownloadRequest = (body: Record<string, unknown>) =>
+  post<{ downloadRequestId?: string; state?: string }>('/api/download-request', { ...body, intent: 'download' });
 export const fetchDiagnostics = () => get<Diagnostics>('/api/diagnostics');
 export const fetchActivity = (limit = 30) =>
   get<{ items: ActivityItem[] }>(`/api/operator/activity?limit=${limit}`);
@@ -179,11 +215,12 @@ export function mediaLabel(i: {
   season?: number | null;
   episode?: number | null;
   year?: number | null;
+  episodeTitle?: string | null;
 }): string {
   const base = i.title || i.mediaId || 'Unknown';
   const y = i.year ? ` (${i.year})` : '';
   if (i.mediaType === 'episode' && i.season != null && i.episode != null) {
-    return `${base}${y} S${String(i.season).padStart(2, '0')}E${String(i.episode).padStart(2, '0')}`;
+    return `${base}${y} S${String(i.season).padStart(2, '0')}E${String(i.episode).padStart(2, '0')}${i.episodeTitle ? ` — ${i.episodeTitle}` : ''}`;
   }
   return `${base}${y}`;
 }

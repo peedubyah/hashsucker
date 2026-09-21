@@ -1,43 +1,36 @@
-import { OverviewPage } from '@/pages/OverviewPage';
-import { ActivityPage } from '@/pages/ActivityPage';
+import { useCallback } from 'react';
+import { HomePage } from '@/pages/HomePage';
+import { RequestsPage } from '@/pages/RequestsPage';
 import { LibraryPage } from '@/pages/LibraryPage';
 import { DownloadsPage } from '@/pages/DownloadsPage';
-import { ProvidersPage } from '@/pages/ProvidersPage';
-import { DiagnosticsPage } from '@/pages/DiagnosticsPage';
 import { SettingsPage } from '@/pages/SettingsPage';
 import { useUrlState } from '@/lib/url-state';
+import { usePoll } from '@/lib/use-poll';
+import { fetchReady } from '@/api';
 
-type Tab =
-  | 'overview'
-  | 'activity'
-  | 'library'
-  | 'downloads'
-  | 'providers'
-  | 'diagnostics'
-  | 'settings';
+type Tab = 'home' | 'requests' | 'library' | 'downloads' | 'settings';
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'activity', label: 'Activity' },
+  { id: 'home', label: 'Home / Search' },
+  { id: 'requests', label: 'Requests' },
   { id: 'library', label: 'Library' },
   { id: 'downloads', label: 'Downloads' },
-  { id: 'providers', label: 'Providers' },
-  { id: 'diagnostics', label: 'Diagnostics' },
   { id: 'settings', label: 'Settings' },
 ];
 
 const TAB_IDS: Tab[] = TABS.map((t) => t.id);
 
 function normalizeTab(value: string | null): Tab {
-  return TAB_IDS.includes(value as Tab) ? (value as Tab) : 'overview';
+  return TAB_IDS.includes(value as Tab) ? (value as Tab) : 'home';
 }
 
 export default function App() {
   const [params, setParams] = useUrlState();
   const tab = normalizeTab(params.get('tab'));
+  const [ready] = usePoll(useCallback(() => fetchReady().catch(() => ({ status: 'unreachable' })), []), 30_000);
 
   const setTab = (next: Tab) => {
-    setParams({ tab: next === 'overview' ? null : next }, { replace: true });
+    setParams({ tab: next === 'home' ? null : next }, { replace: true });
   };
 
   return (
@@ -60,15 +53,16 @@ export default function App() {
             </button>
           ))}
         </nav>
+        <div className={`global-health global-health-${ready?.status === 'ready' ? 'ready' : 'attention'}`} title={ready?.status === 'ready' ? 'HashSucker is ready' : 'HashSucker needs attention'}>
+          <span aria-hidden="true">●</span> {ready?.status === 'ready' ? 'Ready' : 'Needs attention'}
+        </div>
       </header>
 
       <main className="app-main">
-        {tab === 'overview' && <OverviewPage />}
-        {tab === 'activity' && <ActivityPage />}
+        {tab === 'home' && <HomePage />}
+        {tab === 'requests' && <RequestsPage />}
         {tab === 'library' && <LibraryPage />}
         {tab === 'downloads' && <DownloadsPage />}
-        {tab === 'providers' && <ProvidersPage />}
-        {tab === 'diagnostics' && <DiagnosticsPage />}
         {tab === 'settings' && <SettingsPage />}
       </main>
     </div>
