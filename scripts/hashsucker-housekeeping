@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# HashSucker host-side housekeeping — report by default, remove only
+# ownership-labelled disposables with --clean.
+#
+# Ownership model (going forward, every scratch Docker resource created by
+# HashSucker scripts/proofs carries):
+#   com.hashsucker.scratch=true
+#   com.hashsucker.run=<run-id>
+#   com.hashsucker.created=<unix timestamp>
+# Production resources must NEVER receive the scratch label.
+#
+# --clean removes ONLY:
+#   stopped containers labelled com.hashsucker.scratch=true
+#   unattached volumes labelled com.hashsucker.scratch=true
+#   scratch networks carrying the same ownership label
+#   scratch dirs under /var/tmp/patrick/hashsucker older than the age
+#   threshold (default 7 days) and not on the retain list
+# Never: active containers, production volumes (incl. hashsucker_hy4-cache),
+# DB/corpus state, media, arbitrary images, `docker system prune`,
+# `docker image prune -a`, or broad `--volumes` pruning. Images are
+# reported (reclaimable bytes) for a human to decide.
+#
+# Recommended schedule (manual, weekly — nothing is installed by this script):
+#   0 4 * * 0 /home/patrick/src/hashsucker/scripts/hashsucker-housekeeping --clean --older-than 7
+set -u
+
+SCRATCH_ROOT="/var/tmp/patrick/hashsucker"
+OLDER_THAN_DAYS=7
+FORCE=0
+CLEAN=0
+# Intentionally retained fixtures: never listed as cleanable.
+RETAIN="fresh fresh2 upgrade-sim unraid-sim smoke conflict badcfg node-compile-cache opencode"
+
+usage() {
+  sed -n '2,30p' "$0"
+  echo "usage: $(basename "$0") [--clean] [--older-than <days>] [--force] [--help]"
+  echo "  default (no flags) is report-only and shows exactly what --clean would remove."
+  echo "  --older-than rejects 0 unless --force is also given."
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --clean) CLEAN=1; shift ;;
+    --older-than) OLDER_THAN_DAYS="${2:?missing days}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "$OLDER_THAN_DAYS" in
+  ''|*[!0-9]*) echo "error: --older-than must be a positive integer" >&2; exit 2 ;;
+esac
+if [ "$OLDER_THAN_DAYS" -eq 0 ] && [ "$FORCE" -ne 1 ]; then
+  echo "error: --older-than 0 requires --force (refusing to make age meaningless)" >&2
+  exit 2
+fi
+
+have_docker=1
+docker info > /dev/null 2>&1 || have_docker=0
+
+echo "=== filesystem ==="
+df -h / | tail -n 1
+
+echo "=== docker images (report only, never auto-deleted) ==="
+if [ "$have_docker" -eq 1 ]; then
+  docker system df 2>&1 | head -n 7
+else
+  echo "(docker unavailable)"
+fi
+
+echo "=== scratch containers (stopped, labelled) ==="
+CLEAN_CONTAINERS=""
+if [ "$have_docker" -eq 1 ]; then
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    name="${line%% *}"; rest="${line#* }"; id="${rest%% *}"; run="${rest##* }"
+    echo "would-remove container $name ($id run=$run)"
+    CLEAN_CONTAINERS="$CLEAN_CONTAINERS $id"
+  done <<EOF
+$(docker ps -a --filter "label=com.hashsucker.scratch=true" --filter "status=exited" --filter "status=created" --format '{{.Names}} {{.ID}} {{.Label "com.hashsucker.run"}}' 2>/dev/null)
+EOF
+  # Unlabelled stopped HashSucker containers are reported but NEVER touched.
+  docker ps -a --format '{{.Names}} {{.Status}}' 2>/dev/null | grep -iE 'hashsucker|canary|fresh030' | grep -viE 'Up ' | head -n 5 | sed 's/^/unowned-stopped (kept): /' || true
+  [ -z "$CLEAN_CONTAINERS" ] && echo "(none)"
+else
+  echo "(docker unavailable)"
+fi
+
+echo "=== scratch volumes (unattached, labelled) ==="
+CLEAN_VOLUMES=""
+if [ "$have_docker" -eq 1 ]; then
+  while IFS= read -r vol; do
+    [ -z "$vol" ] && continue
+    if [ -n "$(docker ps -aq --filter "volume=$vol" 2>/dev/null)" ]; then
+      echo "attached, kept: $vol"
+      continue
+    fi
+    echo "would-remove volume $vol"
+    CLEAN_VOLUMES="$CLEAN_VOLUMES $vol"
+  done <<EOF
+$(docker volume ls -q --filter "label=com.hashsucker.scratch=true" 2>/dev/null)
+EOF
+  [ -z "$CLEAN_VOLUMES" ] && echo "(none)"
+else
+  echo "(docker unavailable)"
+fi
+
+echo "=== scratch networks (labelled) ==="
+CLEAN_NETWORKS=""
+if [ "$have_docker" -eq 1 ]; then
+  while IFS= read -r net; do
+    [ -z "$net" ] && continue
+    case "$net" in bridge|host|none) continue ;; esac
+    echo "would-remove network $net"
+    CLEAN_NETWORKS="$CLEAN_NETWORKS $net"
+  done <<EOF
+$(docker network ls -q --filter "label=com.hashsucker.scratch=true" 2>/dev/null)
+EOF
+  [ -z "$CLEAN_NETWORKS" ] && echo "(none)"
+else
+  echo "(docker unavailable)"
+fi
+
+echo "=== scratch directories under $SCRATCH_ROOT (older than ${OLDER_THAN_DAYS}d, minus retain list) ==="
+CLEAN_DIRS=""
+if [ -d "$SCRATCH_ROOT" ]; then
+  cutoff=$(date -d "$OLDER_THAN_DAYS days ago" +%s 2>/dev/null || date -v-"${OLDER_THAN_DAYS}"d +%s)
+  while IFS= read -r -d '' entry; do
+    base="$(basename "$entry")"
+    skip=0
+    for r in $RETAIN; do
+      if [ "$base" = "$r" ]; then echo "retained fixture: $entry"; skip=1; break; fi
+    done
+    [ "$skip" -eq 1 ] && continue
+    mtime=$(stat -c %Y "$entry" 2>/dev/null || stat -f %m "$entry" 2>/dev/null || echo 0)
+    age_days=$(( ( $(date +%s) - mtime ) / 86400 ))
+    size=$(du -sh "$entry" 2>/dev/null | cut -f1)
+    if [ "$mtime" -le "$cutoff" ]; then
+      echo "would-remove dir $entry (size=$size age=${age_days}d)"
+      CLEAN_DIRS="$CLEAN_DIRS
+$entry"
+    else
+      echo "too-new, kept: $entry (size=$size age=${age_days}d)"
+    fi
+  done < <(find "$SCRATCH_ROOT" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+else
+  echo "(scratch root absent)"
+fi
+
+if [ "$CLEAN" -ne 1 ]; then
+  echo "=== report-only: nothing removed (use --clean to remove the would-remove items) ==="
+  exit 0
+fi
+
+echo "=== --clean: removing (each object printed before removal) ==="
+recovered_containers=0
+# shellcheck disable=SC2086
+for id in $CLEAN_CONTAINERS; do
+  [ -z "$id" ] && continue
+  echo "removing container $id"
+  docker rm "$id" > /dev/null 2>&1 && recovered_containers=$((recovered_containers+1)) || echo "FAILED container $id"
+done
+# shellcheck disable=SC2086
+for vol in $CLEAN_VOLUMES; do
+  [ -z "$vol" ] && continue
+  echo "removing volume $vol"
+  docker volume rm "$vol" > /dev/null 2>&1 || echo "FAILED volume $vol (attached or in use)"
+done
+# shellcheck disable=SC2086
+for net in $CLEAN_NETWORKS; do
+  [ -z "$net" ] && continue
+  echo "removing network $net"
+  docker network rm "$net" > /dev/null 2>&1 || echo "FAILED network $net (in use)"
+done
+recovered_bytes=0
+while IFS= read -r dir; do
+  [ -z "$dir" ] && continue
+  bytes=$(du -sb "$dir" 2>/dev/null | cut -f1)
+  echo "removing dir $dir"
+  rm -rf "$dir" 2>/dev/null && recovered_bytes=$((recovered_bytes + ${bytes:-0})) || echo "FAILED dir $dir"
+done <<< "$CLEAN_DIRS"
+echo "=== clean summary: containers_removed=$recovered_containers scratch_bytes_recovered=$recovered_bytes ==="
+df -h / | tail -n 1
