@@ -1,7 +1,8 @@
 # HashSucker self-handoff (durable — survives session death)
 
-If this session dies right now: `main` == `github/main` at 1fcb52b (pushed).
-Production media-search is RUNNING on local image 9193caa9f324 (=1fcb52b).
+If this session dies right now: `main` == `github/main` at c1075c5 (pushed).
+Production media-search RUNNING v0.4.0. Web UI = household appliance,
+TUI (`npm run tui` in media-search/) = operator control room.
 Read this file, `../AGENTS.override.md` (operating rules), and
 [`../docs/architecture.md`](../docs/architecture.md) (durable model). Do not
 trust old containers or historical HY4 handoffs.
@@ -60,9 +61,8 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
 
 - Packages at `0.0.1` (placeholder); shipping identity is GHCR
   `latest`/`main`/`v0.1.0` tags, not package versions.
-- `main` == `github/main` == 1fcb52b (pushed): staged-download
-  post-consumption lifecycle closed the generic-download loop, plus the
-  profile fan-out fix.
+- `main` == `github/main` == c1075c5 (pushed): v0.4.0 released,
+  production re-pinned, housekeeping clean.
 - v0.4.0 RELEASED (tag → 32c0f45; all 4 images amd64+arm64,
   revision labels verified, `:latest` + `0.4`/`0.4.0` aliases live):
   appliance UI, operator API, diagnostics probe cache, housekeeping
@@ -227,7 +227,14 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
   project license; set GitHub description/topics if still unset.
 - No UI, no Arr mapping, no Requestrr changes in the profile slice.
 
-## Next active slice — appliance UI (LANDED; proofs green, uncommitted)
+## Next active slice — web/TUI split (IN PROGRESS, uncommitted)
+
+Browser = household appliance (7 small tabs, first-run state, no admin
+controls, no raw dumps); terminal (`npm run tui`) = control room (live
+overview, identity/placement detail, logs via host docker CLI, read-only
+probes). Shared operator API; diagnostics probes cached 60s so neither
+interface creates provider traffic. Proven on scratch DB copies + empty
+boot; TUI toured over pty. No release until Patrick says so.
 
 Operator workbench replaced with a 7-tab appliance surface (Overview,
 Activity, Library, Downloads, Providers, Diagnostics, Settings) on a

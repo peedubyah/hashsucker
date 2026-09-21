@@ -3513,3 +3513,21 @@ code {
   .app-nav { overflow-x: auto; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* Appliance polish: overflow, touch targets, focus, density. */
+.media-card .media-name, .activity-title { overflow: hidden; text-overflow: ellipsis; }
+.media-card .media-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.activity-main { min-height: 44px; }
+.metric-grid { gap: 10px; }
+.surface-section { margin-bottom: 2px; }
+.page-subtitle { max-width: 72ch; }
+
+@media (max-width: 720px) {
+  .app-topbar { flex-wrap: wrap; gap: 0.6rem; }
+  .nav-tab { padding: 0.65rem 0.9rem; font-size: 0.9rem; }
+  .page-title { font-size: 1.3rem; }
+  .check-list li, .activity-row { font-size: 0.95rem; }
+}

@@ -1,13 +1,11 @@
-import { useCallback, useState } from 'react';
-import { fetchDiagnostics, fetchFailedEvents, fetchWorkers } from '@/api';
+import { useCallback } from 'react';
+import { fetchDiagnostics, fetchFailedEvents } from '@/api';
 import { usePoll } from '@/lib/use-poll';
 import { PageHeader, Section, EmptyState, ErrorState, LoadingState, KeyValueGrid } from '@/components/common';
 
 export function DiagnosticsPage() {
   const [diag, error, refresh] = usePoll(useCallback(() => fetchDiagnostics(), []), 30_000);
   const [failed] = usePoll(useCallback(() => fetchFailedEvents(10).catch(() => ({ runs: [] })), []), 30_000);
-  const [workers] = usePoll(useCallback(() => fetchWorkers().catch(() => null), []), 30_000);
-  const [showRaw, setShowRaw] = useState(false);
 
   if (!diag && !error) return <LoadingState label="Loading diagnostics…" />;
   if (error && !diag) return <ErrorState message={error} onRetry={() => void refresh()} />;
@@ -41,17 +39,12 @@ export function DiagnosticsPage() {
           </ul>
         )}
       </Section>
-      <Section
-        title="Raw state"
-        description="Full diagnostics payload and worker status for troubleshooting."
-        actions={<button type="button" className="btn btn-secondary btn-sm" onClick={() => setShowRaw((v) => !v)}>{showRaw ? 'Hide' : 'Show'}</button>}
-      >
-        {showRaw && (
-          <details open>
-            <summary className="muted small">diagnostics + workers (technical)</summary>
-            <pre className="raw-dump">{JSON.stringify({ diagnostics: diag, workers }, null, 2)}</pre>
-          </details>
-        )}
+      <Section dense>
+        <p className="muted small">
+          Full technical state (raw payloads, worker internals, log tails) lives in the terminal
+          console — run <code>npm run tui</code> in <code>media-search/</code>. The browser stays
+          an appliance surface on purpose.
+        </p>
       </Section>
     </div>
   );

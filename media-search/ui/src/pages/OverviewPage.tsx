@@ -33,11 +33,14 @@ export function OverviewPage() {
   const integrationsConfigured = dot(plexState) === 'good' || dot(jellyState) === 'good';
   const failedRuns = failed?.runs ?? [];
 
-  // First-run: no provider can serve anything yet.
-  if (!providersReady) {
+  // First-run: no provider can serve anything yet AND nothing is
+  // published (a populated library with missing keys is degraded, not
+  // unconfigured — keys may be temporarily absent).
+  const libraryEmpty = (vfs?.movies ?? 0) + (vfs?.episodes ?? 0) === 0;
+  if (!providersReady && libraryEmpty) {
     return (
       <div className="page">
-        <PageHeader title="HashSucker needs configuration" subtitle="Nothing can be fetched until a provider is connected." />
+        <PageHeader title="HashSucker needs configuration" subtitle="HashSucker finds and plays movies and series through your debrid providers. Nothing can be fetched until a provider is connected." />
         <Section title="What is missing">
           <ul className="check-list">
             <li>
