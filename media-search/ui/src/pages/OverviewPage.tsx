@@ -11,6 +11,17 @@ function dot(state?: string): 'good' | 'bad' | 'warn' | 'neutral' {
   return 'neutral';
 }
 
+/** Backend state tokens never reach the household verbatim. */
+function words(state?: string | null): string {
+  const s = (state ?? '').toLowerCase();
+  if (s === 'not_ready') return 'Not ready';
+  if (s === 'skipped') return 'Not configured';
+  if (s === 'unreachable') return 'Unreachable';
+  if (s === 'ok') return 'OK';
+  if (!s || s === 'unknown') return '—';
+  return s;
+}
+
 export function OverviewPage() {
   const [diag, diagErr, refreshDiag] = usePoll(useCallback(() => fetchDiagnostics(), []), 30_000);
   const [ready] = usePoll(useCallback(() => fetchReady().catch(() => null), []), 30_000);
@@ -66,21 +77,40 @@ export function OverviewPage() {
     if (r.error) attention.push(`${r.mediaId ?? r.requestId ?? 'A request'} — ${r.error.slice(0, 120)}`);
   }
 
+  const health = (ready?.status ?? diag?.status ?? '').toLowerCase();
+  const healthy = health === 'healthy' || health === 'ready';
+  const providersLabel =
+    dot(tb) === 'good' && dot(rd) === 'good' ? 'Both'
+    : dot(tb) === 'good' ? 'TorBox'
+    : dot(rd) === 'good' ? 'Real-Debrid' : 'None configured';
+
+  // One dominant state, in priority order. The title never contradicts
+  // the health card: ready requires actual readiness.
+  const dominant = !providersReady && libraryEmpty
+    ? { title: 'HashSucker needs configuration', tone: 'warn' as const }
+    : !healthy || attention.length > 0
+      ? { title: 'HashSucker needs attention', tone: 'bad' as const }
+      : { title: 'HashSucker is ready', tone: 'good' as const };
+
   return (
     <div className="page">
       <PageHeader
-        title="HashSucker is ready"
-        subtitle="Optional integrations are marked; only real problems ask for attention."
+        title={dominant.title}
+        subtitle={dominant.title === 'HashSucker is ready'
+          ? 'Optional integrations are marked; only real problems ask for attention.'
+          : dominant.title === 'HashSucker needs attention'
+            ? 'Something below needs a look. Providers, library, and recent failures are summarized here.'
+            : undefined}
         actions={<button type="button" className="btn btn-secondary btn-sm" onClick={() => void refreshDiag()}>Refresh</button>}
       />
       <Section dense>
         <MetricGrid>
-          <MetricTile label="Health" value={ready?.status ?? diag?.status ?? '—'} tone={dot(ready?.status ?? diag?.status)} />
-          <MetricTile label="Providers" value={dot(tb) === 'good' && dot(rd) === 'good' ? 'Both' : dot(tb) === 'good' ? 'TorBox' : 'Real-Debrid'} tone="good" hint={`TorBox ${tb} · RD ${rd}`} />
-          <MetricTile label="Corpus" value={corpusOk ? 'Usable' : (corpus?.state ?? '—')} tone={corpusOk ? 'good' : 'warn'} hint={corpus?.candidates != null ? `${corpus.candidates.toLocaleString()} candidates` : undefined} />
-          <MetricTile label="Data plane" value={dp ?? '—'} tone={dot(dp)} />
+          <MetricTile label="Health" value={words(ready?.status ?? diag?.status)} tone={dot(ready?.status ?? diag?.status)} />
+          <MetricTile label="Providers" value={providersLabel} tone={providersReady ? 'good' : 'warn'} hint={`TorBox ${tb === 'skipped' ? 'not configured' : tb} · RD ${rd === 'skipped' ? 'not configured' : rd}`} />
+          <MetricTile label="Corpus" value={corpusOk ? 'Usable' : words(corpus?.state)} tone={corpusOk ? 'good' : 'warn'} hint={corpus?.candidates != null ? `${corpus.candidates.toLocaleString()} candidates` : undefined} />
+          <MetricTile label="Data plane" value={words(dp)} tone={dot(dp)} />
           <MetricTile label="Library" value={vfs?.detail ?? `${vfs?.movies ?? 0} movies · ${vfs?.episodes ?? 0} episodes`} tone={dot(vfs?.state)} />
-          <MetricTile label="Plex / Jellyfin" value={integrationsConfigured ? 'Connected' : 'Optional'} tone={integrationsConfigured ? 'good' : 'neutral'} hint={`Plex ${plexState ?? '—'} · Jellyfin ${jellyState ?? '—'}`} />
+          <MetricTile label="Plex / Jellyfin" value={integrationsConfigured ? 'Connected' : 'Optional'} tone={integrationsConfigured ? 'good' : 'neutral'} hint={`Plex ${words(plexState)} · Jellyfin ${words(jellyState)}`} />
         </MetricGrid>
       </Section>
       <Section title="Needs attention" description={attention.length ? undefined : 'Nothing is failing.'}>

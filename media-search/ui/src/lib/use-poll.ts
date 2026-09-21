@@ -20,11 +20,14 @@ export function usePoll<T>(fn: () => Promise<T>, intervalMs = 30_000) {
 
   useEffect(() => {
     let alive = true;
+    // First paint always loads (even in a background tab) so returning
+    // to the tab never shows a stale spinner; interval ticks pause while
+    // hidden to avoid background polling pressure.
+    void refresh();
     const tick = async () => {
       if (!alive || document.hidden) return;
       await refresh();
     };
-    void tick();
     timer.current = window.setInterval(() => void tick(), intervalMs);
     return () => {
       alive = false;

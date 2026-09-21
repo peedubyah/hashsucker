@@ -66,6 +66,7 @@ export function LibraryPage() {
           <ul className="card-list">
             {items.map((item) => {
               const q = item.torrentFileId ? quality[item.torrentFileId] : undefined;
+              const qualityLabel = q?.tier != null ? q.label : (q?.resolution ?? null);
               const key = `${item.mediaId}:${item.season ?? ''}:${item.episode ?? ''}`;
               return (
                 <li key={key} className="media-card">
@@ -73,7 +74,7 @@ export function LibraryPage() {
                     <div className="media-name">{mediaLabel(item)}</div>
                     <div className="media-sub muted small">
                       {item.mediaType === 'episode' ? 'Episode' : 'Movie'}
-                      {q?.label ? ` · ${q.label}` : ''}
+                      {qualityLabel ? ` · ${qualityLabel}` : ''}
                       {item.size ? ` · ${formatBytes(item.size)}` : ''}
                     </div>
                     <div className="tag-row">

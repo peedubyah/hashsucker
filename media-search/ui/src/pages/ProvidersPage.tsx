@@ -1,7 +1,7 @@
 import { useCallback } from 'react';
 import { fetchDiagnostics, fetchFailedEvents } from '@/api';
 import { usePoll } from '@/lib/use-poll';
-import { PageHeader, Section, EmptyState, ErrorState, LoadingState, MetricTile, MetricGrid } from '@/components/common';
+import { PageHeader, Section, EmptyState, ErrorState, LoadingState } from '@/components/common';
 
 function tone(state?: string): 'good' | 'bad' | 'warn' | 'neutral' {
   const s = (state ?? '').toLowerCase();
@@ -22,13 +22,19 @@ export function ProvidersPage() {
   const rd = diag?.providers?.realdebrid;
   const throttle = (failed?.runs ?? []).filter((r) => /429|rate|limit|throttle/i.test(r.error ?? ''));
 
-  const card = (name: string, p?: { state?: string; detail?: string }) => (
-    <Section key={name} title={name} meta={<span className={`badge badge-${tone(p?.state)}`}>{p?.state ?? 'unknown'}</span>}>
-      <p className="muted small">{p?.detail ?? 'No status reported.'}</p>
-      {name === 'TorBox' && dot(tb?.state) && <p className="muted small">Cached files play instantly; uncached titles are fetched on demand.</p>}
-    </Section>
-  );
-  const dot = (s?: string) => tone(s) === 'good';
+  const card = (name: string, p?: { state?: string; detail?: string }) => {
+    const skipped = (p?.state ?? '').toLowerCase() === 'skipped';
+    return (
+      <Section key={name} title={name} meta={<span className={`badge badge-${tone(p?.state)}`}>{skipped ? 'Not configured' : (p?.state ?? 'unknown')}</span>}>
+        <p className="muted small">
+          {skipped
+            ? 'No key configured. Add it in .env to enable this provider.'
+            : (p?.detail ?? 'No status reported.')}
+        </p>
+        {name === 'TorBox' && !skipped && <p className="muted small">Cached files play instantly; uncached titles are fetched on demand.</p>}
+      </Section>
+    );
+  };
 
   return (
     <div className="page">
@@ -49,11 +55,6 @@ export function ProvidersPage() {
             ))}
           </ul>
         )}
-      </Section>
-      <Section dense>
-        <MetricGrid>
-          <MetricTile label="Note" value="No action needed" tone="neutral" hint="HashSucker backs off and retries on its own." />
-        </MetricGrid>
       </Section>
     </div>
   );

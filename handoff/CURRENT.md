@@ -227,7 +227,13 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
   project license; set GitHub description/topics if still unset.
 - No UI, no Arr mapping, no Requestrr changes in the profile slice.
 
-## Next active slice — web/TUI split (IN PROGRESS, uncommitted)
+## Next active slice — web finish + TUI boundary (IN PROGRESS, uncommitted)
+
+Browser proven with real Firefox screenshots (1440/1024/390): dominant
+state never contradicts health; first-run names exact missing keys;
+Activity/Library/Downloads read like a product; providers/settings hide
+raw tokens and state names. TUI toured over pty (all screens + probes).
+No release until Patrick says so.
 
 Browser = household appliance (7 small tabs, first-run state, no admin
 controls, no raw dumps); terminal (`npm run tui`) = control room (live

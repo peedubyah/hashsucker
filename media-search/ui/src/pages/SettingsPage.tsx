@@ -17,8 +17,18 @@ export function SettingsPage() {
   if (!diag && !error) return <LoadingState label="Loading settings…" />;
   if (error && !diag) return <ErrorState message={error} onRetry={() => void refresh()} />;
 
-  const tbConfigured = (diag?.providers?.torbox?.state ?? '').toLowerCase() !== 'unknown';
-  const rdConfigured = (diag?.providers?.realdebrid?.state ?? '').toLowerCase() !== 'unknown';
+  const keyPresent = (s?: string) => {
+    const v = (s ?? '').toLowerCase();
+    return v !== '' && v !== 'unknown' && v !== 'skipped';
+  };
+  const tbConfigured = keyPresent(diag?.providers?.torbox?.state);
+  const rdConfigured = keyPresent(diag?.providers?.realdebrid?.state);
+  const consumerLabel = (s?: string) => {
+    const v = (s ?? '').toLowerCase();
+    if (v === 'ok' || v === 'reachable') return 'Connected';
+    if (!v || v === 'unknown' || v === 'skipped') return 'Not connected (optional)';
+    return 'Unreachable (optional)';
+  };
   const plex = diag?.consumers?.plex;
   const jelly = diag?.consumers?.jellyfin;
   const arr = diag?.arr;
@@ -38,8 +48,8 @@ export function SettingsPage() {
       </Section>
       <Section title="Playback visibility" description="Optional. Plex/Jellyfin hosts only — tokens stay in .env.">
         <KeyValueGrid rows={[
-          { key: 'Plex', value: `${plex?.state ?? '—'} · ${hostOf(plex?.endpoint)}` },
-          { key: 'Jellyfin', value: `${jelly?.state ?? '—'} · ${hostOf(jelly?.endpoint)}` },
+          { key: 'Plex', value: `${consumerLabel(plex?.state)} · ${hostOf(plex?.endpoint)}` },
+          { key: 'Jellyfin', value: `${consumerLabel(jelly?.state)} · ${hostOf(jelly?.endpoint)}` },
         ]} />
       </Section>
       <Section title="Request intake" description="Optional. Sonarr/Radarr/Seerr feed future intents; Requestrr drives downloads.">
