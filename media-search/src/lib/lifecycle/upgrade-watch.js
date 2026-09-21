@@ -179,13 +179,33 @@ export function readPublishedTier({ cache, controlPlaneStore, mediaType, mediaId
 
 /** Scan VFS publication truth for below-terminal bindings; ensure watch rows. */
 export function seedBelowTerminal({ cache, controlPlaneStore, store, dueInMs = 0, limit = 500 } = {}) {
-  let seeded = 0, terminal = 0;
+  let seeded = 0, terminal = 0, skippedIntent = 0;
   let entries = [];
   try {
     entries = [...(cache.listVfsMovieEntries?.() || []), ...(cache.listVfsTvEntries?.() || [])];
   } catch { return { seeded, terminal }; }
+  const intentOf = (mediaId, season, episode) => {
+    try {
+      const row = controlPlaneStore.db.prepare(`SELECT publication_mode, intent, upgrade_policy FROM library_items
+        WHERE media_id = ? AND COALESCE(season, -1) = COALESCE(?, -1)
+          AND COALESCE(episode, -1) = COALESCE(?, -1) LIMIT 1`)
+        .get(mediaId, season, episode);
+      return row ?? null;
+    } catch {
+      return null;
+    }
+  };
   for (const e of entries.slice(0, limit)) {
     if (!e?.mediaId || !e?.torrentFileId) continue;
+    // Intent policy: watch-once and immediate holdings never chase
+    // upgrades (watch retires; immediate holds what it published).
+    const pol = intentOf(e.mediaId, e.season ?? null, e.episode ?? null);
+    if (pol && (pol.publication_mode === 'temporary'
+      || (pol.intent != null && pol.intent !== 'library')
+      || pol.upgrade_policy === 'off')) {
+      skippedIntent++;
+      continue;
+    }
     const isEpisode = e.season != null && e.episode != null;
     const mediaType = isEpisode ? 'episode' : 'movie';
     let pub = null;
@@ -202,7 +222,7 @@ export function seedBelowTerminal({ cache, controlPlaneStore, store, dueInMs = 0
     });
     seeded++;
   }
-  return { seeded, terminal };
+  return { seeded, terminal, skippedIntent };
 }
 
 export function createUpgradeEvaluator({
@@ -371,6 +391,20 @@ export function createUpgradeEvaluator({
       store.remove(row.id);
       return done({ acted: true, to: 'removed', reason: 'no-active-publication' });
     }
+    // Intent policy (second lock after the seed filter): watch-once and
+    // immediate holdings never chase upgrades, even if seeded earlier.
+    try {
+      const pol = controlPlaneStore.db.prepare(`SELECT publication_mode, intent, upgrade_policy FROM library_items
+        WHERE media_id = ? AND COALESCE(season, -1) = COALESCE(?, -1)
+          AND COALESCE(episode, -1) = COALESCE(?, -1) LIMIT 1`)
+        .get(row.media_id, row.season ?? null, row.episode ?? null);
+      if (pol && (pol.publication_mode === 'temporary'
+        || (pol.intent != null && pol.intent !== 'library')
+        || pol.upgrade_policy === 'off')) {
+        store.park(row.id, { reason: `intent:${pol.intent ?? 'watch'}` });
+        return done({ acted: false, reason: 'intent-no-upgrade' });
+      }
+    } catch { /* policy unreadable: proceed with normal evaluation */ }
     if ((pub.tf ?? null) !== (row.current_tf ?? null)) {
       store.ensure({
         mediaType: row.media_type, mediaId: row.media_id, season: row.season, episode: row.episode,

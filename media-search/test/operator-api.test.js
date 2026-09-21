@@ -199,3 +199,34 @@ test('operator downloads: staged file presence reflects the filesystem', async (
     await fs.promises.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('media-request intent: unknown 400, download guidance 400', async () => {
+  const { cache, cps } = stores();
+  const server = serve(cache, cps);
+  await new Promise((r) => server.listen(0, r));
+  try {
+    const bad = await post(server, '/api/media-request',
+      { mediaId: 'tt-intent', mediaType: 'movie', intent: 'ultraviolet', source: 'operator' });
+    assert.equal(bad.status, 400);
+    const dl = await post(server, '/api/media-request',
+      { mediaId: 'tt-intent', mediaType: 'movie', intent: 'download', source: 'operator' });
+    assert.equal(dl.status, 400);
+    assert.match(dl.json.error, /download-request/);
+  } finally {
+    server.close();
+  }
+});
+
+test('download-request: library intent rejected with guidance', async () => {
+  const { cache, cps } = stores();
+  const server = serve(cache, cps);
+  await new Promise((r) => server.listen(0, r));
+  try {
+    const res = await post(server, '/api/download-request',
+      { mediaId: 'tt-intent', mediaType: 'movie', intent: 'library' });
+    assert.equal(res.status, 400);
+    assert.match(res.json.error, /media-request/);
+  } finally {
+    server.close();
+  }
+});

@@ -1,12 +1,23 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  fetchLibrary, fetchQuality, setLibraryProfile, formatBytes, mediaLabel,
+  fetchLibrary, fetchQuality, setLibraryProfile, setLibraryIntent, formatBytes, mediaLabel,
   type LibraryItem, type QualityInfo,
 } from '@/api';
 import { usePoll } from '@/lib/use-poll';
 import { PageHeader, Section, EmptyState, ErrorState, LoadingState } from '@/components/common';
 
 const PROFILES = ['balanced', 'hd', 'max'] as const;
+const INTENTS = [
+  { value: 'library', label: 'Keep in library' },
+  { value: 'watch', label: 'Watch once' },
+  { value: 'immediate', label: 'Best available now' },
+] as const;
+
+function intentOf(item: LibraryItem): string {
+  if (item.intent) return item.intent;
+  if (item.publicationMode === 'temporary') return 'watch';
+  return 'library';
+}
 
 export function LibraryPage() {
   const [data, error, refresh] = usePoll(useCallback(() => fetchLibrary(100), []), 30_000);
@@ -48,6 +59,25 @@ export function LibraryPage() {
     }
   };
 
+  const changeIntent = async (item: LibraryItem, intent: string) => {
+    setProfileMsg(null);
+    try {
+      const res = await setLibraryIntent({
+        mediaId: item.mediaId,
+        mediaType: item.mediaType,
+        season: item.season,
+        episode: item.episode,
+        intent: intent as 'library' | 'watch' | 'immediate',
+      });
+      setProfileMsg(res.unchanged
+        ? `${mediaLabel(item)} is already permanent — left unchanged.`
+        : `Saved intent ${res.intent} for ${mediaLabel(item)}.`);
+      void refresh();
+    } catch (err) {
+      setProfileMsg(`Could not save intent: ${(err as Error).message}`);
+    }
+  };
+
   if (!data && !error) return <LoadingState label="Loading library…" />;
   if (error && !data) return <ErrorState message={error} onRetry={() => void refresh()} />;
 
@@ -84,6 +114,9 @@ export function LibraryPage() {
                         {item.hasServingCoordinates ? 'Watchable' : 'No copy yet'}
                       </span>
                       {item.publicationMode === 'temporary' && <span className="badge badge-info">Temporary</span>}
+                      {intentOf(item) !== 'library' && (
+                        <span className="badge badge-info">{intentOf(item) === 'watch' ? 'Watch once' : 'Best now'}</span>
+                      )}
                     </div>
                   </div>
                   <label className="profile-pick">
@@ -94,6 +127,16 @@ export function LibraryPage() {
                       aria-label={`Quality intent for ${mediaLabel(item)}`}
                     >
                       {PROFILES.map((p) => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </label>
+                  <label className="profile-pick">
+                    <span className="muted small">Outcome</span>
+                    <select
+                      value={intentOf(item)}
+                      onChange={(e) => void changeIntent(item, e.target.value)}
+                      aria-label={`Desired outcome for ${mediaLabel(item)}`}
+                    >
+                      {INTENTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
                   </label>
                 </li>

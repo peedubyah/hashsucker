@@ -49,26 +49,47 @@ function findItem(controlPlaneStore, identity) {
 export function markTemporaryPublication(controlPlaneStore, identity, { ttlMs = DEFAULT_TEMP_TTL_MS, nowMs = Date.now() } = {}) {
   const item = findItem(controlPlaneStore, identity);
   if (!item) return { ok: false, reason: 'no-library-item' };
+  if ((item.publicationMode ?? PERMANENT_MODE) === TEMPORARY_MODE
+    && (item.intent ?? 'watch') === 'watch') {
+    return { ok: true, unchanged: true, libraryItemId: item.id, retireAt: item.retireAt ?? null };
+  }
   const ttl = Math.min(Math.max(Number(ttlMs) || DEFAULT_TEMP_TTL_MS, MIN_TEMP_TTL_MS), MAX_TEMP_TTL_MS);
   try {
-    controlPlaneStore.db.prepare(`UPDATE library_items SET publication_mode = ?, retire_at = ?, updated_at = ?
-      WHERE id = ?`).run(TEMPORARY_MODE, nowMs + ttl, nowMs, item.id);
+    controlPlaneStore.db.prepare(`UPDATE library_items SET publication_mode = ?, retire_at = ?, intent = ?,
+      upgrade_policy = ?, updated_at = ? WHERE id = ?`)
+      .run(TEMPORARY_MODE, nowMs + ttl, 'watch', 'off', nowMs, item.id);
   } catch (err) {
     return { ok: false, reason: String(err?.message || err).slice(0, 120) };
   }
   return { ok: true, libraryItemId: item.id, retireAt: nowMs + ttl };
 }
 
-/** Adopt to permanent (explicit re-request without the flag, or promotion). */
-export function clearTemporaryPublication(controlPlaneStore, identity, { nowMs = Date.now() } = {}) {
+/**
+ * Adopt to a durable intent (explicit re-request or promotion).
+ * intent 'library' restores permanent + re-enables upgrades; 'immediate'
+ * stays permanent without upgrade chasing. A permanent publication with
+ * no timer is never destructively shortened: requesting watch against it
+ * is a no-op that reports unchanged (the household already has better
+ * than asked).
+ */
+export function clearTemporaryPublication(controlPlaneStore, identity, { nowMs = Date.now(), intent = 'library', ttlMs = null } = {}) {
   const item = findItem(controlPlaneStore, identity);
   if (!item) return { ok: false, reason: 'no-library-item' };
-  if ((item.publicationMode ?? PERMANENT_MODE) === PERMANENT_MODE && item.retireAt == null) {
+  if (intent === 'watch') {
+    if ((item.publicationMode ?? PERMANENT_MODE) === PERMANENT_MODE && item.retireAt == null) {
+      return { ok: true, unchanged: true, reason: 'already-permanent', libraryItemId: item.id };
+    }
+    return markTemporaryPublication(controlPlaneStore, identity, { ttlMs: ttlMs ?? undefined, nowMs });
+  }
+  const upgradePolicy = intent === 'immediate' ? 'off' : 'auto';
+  if ((item.publicationMode ?? PERMANENT_MODE) === PERMANENT_MODE && item.retireAt == null
+    && (item.intent ?? 'library') === intent && (item.upgradePolicy ?? 'auto') === upgradePolicy) {
     return { ok: true, unchanged: true, libraryItemId: item.id };
   }
   try {
-    controlPlaneStore.db.prepare(`UPDATE library_items SET publication_mode = ?, retire_at = NULL, updated_at = ?
-      WHERE id = ?`).run(PERMANENT_MODE, nowMs, item.id);
+    controlPlaneStore.db.prepare(`UPDATE library_items SET publication_mode = ?, retire_at = NULL,
+      intent = ?, upgrade_policy = ?, updated_at = ? WHERE id = ?`)
+      .run(PERMANENT_MODE, intent === 'immediate' ? 'immediate' : 'library', upgradePolicy, nowMs, item.id);
   } catch (err) {
     return { ok: false, reason: String(err?.message || err).slice(0, 120) };
   }

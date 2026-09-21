@@ -73,6 +73,8 @@ export interface LibraryItem {
   state?: string | null;
   publicationMode?: string | null;
   qualityProfile?: string | null;
+  intent?: string | null;
+  upgradePolicy?: string | null;
   canonicalPath?: string | null;
   torrentFileId?: string | null;
   size?: number | null;
@@ -153,6 +155,14 @@ export const setLibraryProfile = (args: {
   episode?: number | null;
   qualityProfile: string;
 }) => post<{ qualityProfile: string; fannedOut?: number }>('/api/library/profile', args);
+
+export const setLibraryIntent = (args: {
+  mediaId: string;
+  mediaType: string;
+  season?: number | null;
+  episode?: number | null;
+  intent: 'library' | 'watch' | 'immediate';
+}) => post<{ intent: string; unchanged?: boolean }>('/api/library/intent', args);
 
 export function formatBytes(n: number | null | undefined): string {
   if (n == null) return '—';

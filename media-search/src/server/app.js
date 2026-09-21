@@ -29,6 +29,7 @@ import { createRequestIntent } from '../lib/requests/intent.js';
 import { bindPlexMetricsSink, openSeasonFanOutScope } from '../lib/requests/plex-notifier.js';
 import { unpublishMedia } from '../lib/library/unpublish.js';
 import { markTemporaryPublication, clearTemporaryPublication, setPublicationProfile } from '../lib/library/retirement.js';
+import { normalizeRequestIntent, intentTtlMs } from '../lib/library/intent.js';
 import { humanizeFailure, humanizeRequest } from '../lib/operator/failure-text.js';
 import { normalizeQualityProfile, selectionMaxTier } from '../lib/lifecycle/quality-profiles.js';
 import { tierOf } from '../lib/lifecycle/upgrade-policy.js';
@@ -1978,6 +1979,13 @@ export function createRequestHandler(dependencies = {}) {
       const norm = normalizeQualityProfile(body.qualityProfile);
       if (!norm.ok) return { error: norm.error };
       qualityProfile = norm.profile;
+    }
+    // This endpoint IS the download intent: library/watch/immediate belong
+    // on POST /api/media-request, not here. Accept the named download intent
+    // case-insensitively, like the library intent normalizer does.
+    const requestedIntent = body?.intent == null ? '' : String(body.intent).trim().toLowerCase();
+    if (requestedIntent !== '' && requestedIntent !== 'download') {
+      return { error: `intent '${String(body.intent).slice(0, 40)}' belongs on POST /api/media-request (this endpoint stages for import)` };
     }
     const rawType = String(body?.mediaType ?? 'movie').trim().toLowerCase();
     const seasonRaw = body?.season ?? null;
@@ -3987,6 +3995,24 @@ export function createRequestHandler(dependencies = {}) {
             qualityProfile = norm.profile;
             maxTier = selectionMaxTier(qualityProfile);
           }
+          // Durable request intent (intent tranche): what outcome the
+          // human wants (library/watch/immediate), not execution. Omitted
+          // preserves legacy behavior via the temporary flag.
+          const intentNorm = normalizeRequestIntent(body);
+          if (!intentNorm.ok) return sendJson(response, 400, { error: intentNorm.error });
+          const requestIntent = intentNorm.intent;
+          // Capture publication truth before fulfillment. A fresh watch
+          // request may create a temporary publication; a re-request against
+          // an existing permanent publication must never demote it.
+          let hadPublishedPublication = false;
+          try {
+            const epS = body?.season ?? null, epE = body?.episode ?? null;
+            const isEp = epS != null && epE != null;
+            const existing = isEp
+              ? searchCache.getVfsTvEntry?.(body.mediaId, epS, epE)
+              : searchCache.getVfsMovieEntry?.(body.mediaId);
+            hadPublishedPublication = !!(existing?.torrentFileId ?? existing?.torrent_file_id);
+          } catch {}
           if (maxTier != null) {
             // No-downgrade guard: a healthy publication already above the
             // requested cap stays (profile is still recorded below for
@@ -4032,15 +4058,25 @@ export function createRequestHandler(dependencies = {}) {
                 mediaType: ho.mediaType, mediaId: ho.mediaId,
                 season: ho.season ?? null, episode: ho.episode ?? null,
               };
-              if (body?.temporary === true) {
-                const ttlHours = Number(body?.ttlHours);
+              // Durable request intent: explicit intent wins; otherwise the
+              // legacy temporary flag selects watch, absence selects
+              // library. Unknown names already 400'd above, never silent.
+              const intent = requestIntent;
+              if (intent === 'watch' && hadPublishedPublication) {
+                // Re-request transitions are non-destructive: an existing
+                // permanent publication is never demoted to a timer.
+                clearTemporaryPublication(controlPlaneStore, identity, {
+                  nowMs: clock(), intent: 'watch', ttlMs: intentTtlMs(body),
+                });
+              } else if (intent === 'watch') {
                 markTemporaryPublication(controlPlaneStore, identity, {
-                  ttlMs: Number.isFinite(ttlHours) && ttlHours > 0
-                    ? ttlHours * 3600 * 1000 : undefined,
-                  nowMs: clock(),
+                  ttlMs: intentTtlMs(body), nowMs: clock(),
                 });
               } else {
-                clearTemporaryPublication(controlPlaneStore, identity, { nowMs: clock() });
+                clearTemporaryPublication(controlPlaneStore, identity, {
+                  nowMs: clock(), intent,
+                  ttlMs: intentTtlMs(body),
+                });
               }
               // Presentation intent profile: persist only when explicitly
               // supplied (omitted preserves whatever is stored). Never
@@ -4062,6 +4098,7 @@ export function createRequestHandler(dependencies = {}) {
           } catch {}
           return sendJson(response, 200, {
             ...result,
+            intent: requestIntent,
             timings: { totalMs: Math.round(performance.now() - startedAt) },
           });
         } catch (err) {
@@ -4332,6 +4369,32 @@ export function createRequestHandler(dependencies = {}) {
           mediaId, mediaType, qualityProfile,
           libraryItemId: res.libraryItemId ?? null,
           fannedOut: res.fannedOut ?? 0,
+        });
+      }
+      // Appliance operator surface: change the durable request intent for
+      // a publication (genuine human decision; no re-resolution, no
+      // discovery — mark/clear the temporary state directly).
+      if (request.method === 'POST' && url.pathname === '/api/library/intent') {
+        const body = await readBody(request);
+        const mediaId = String(body?.mediaId ?? '').trim();
+        if (!mediaId) return sendJson(response, 400, { error: 'mediaId is required' });
+        const rawType = String(body?.mediaType ?? 'movie').trim().toLowerCase();
+        const mediaType = rawType === 'movie' ? 'movie' : 'episode';
+        const season = body?.season ?? null, episode = body?.episode ?? null;
+        const norm = normalizeRequestIntent(body);
+        // Omitted intent means library; unknown names (or download) are
+        // a 400 with guidance, never silent.
+        if (!norm.ok) return sendJson(response, 400, { error: norm.error });
+        if (!controlPlaneStore?.db) return sendJson(response, 503, { error: 'control plane unavailable' });
+        const identity = { mediaType, mediaId, season, episode };
+        const res = norm.intent === 'watch'
+          ? markTemporaryPublication(controlPlaneStore, identity, { ttlMs: intentTtlMs(body), nowMs: clock() })
+          : clearTemporaryPublication(controlPlaneStore, identity, { nowMs: clock(), intent: norm.intent });
+        if (!res.ok) return sendJson(response, 404, { error: res.reason ?? 'no-library-item' });
+        return sendJson(response, 200, {
+          mediaId, mediaType, intent: norm.intent,
+          unchanged: !!res.unchanged,
+          libraryItemId: res.libraryItemId ?? null,
         });
       }
       // Event store endpoints — persistent lifecycle history

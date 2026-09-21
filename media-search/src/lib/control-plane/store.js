@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS library_items (
   last_played_at INTEGER,
   max_progress REAL,
   profile TEXT NOT NULL DEFAULT 'balanced',
+  intent TEXT NOT NULL DEFAULT 'library',
+  upgrade_policy TEXT NOT NULL DEFAULT 'auto',
   CHECK ((media_type = 'movie' AND season IS NULL AND episode IS NULL)
     OR (media_type = 'episode' AND season IS NOT NULL AND episode IS NOT NULL))
 );
@@ -397,6 +399,16 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       if (libraryColumns.length > 0 && !libraryColumns.includes(name)) {
         db.exec(`ALTER TABLE library_items ADD COLUMN ${col}`);
       }
+    }
+    // Intent tranche: durable request-intent outcome (library/watch/
+    // immediate) plus the upgrade-chasing switch. Backfilled from
+    // publication_mode so existing rows keep their meaning.
+    if (libraryColumns.length > 0 && !libraryColumns.includes('intent')) {
+      db.exec("ALTER TABLE library_items ADD COLUMN intent TEXT NOT NULL DEFAULT 'library'");
+      db.exec("UPDATE library_items SET intent = 'watch' WHERE publication_mode = 'temporary'");
+    }
+    if (libraryColumns.length > 0 && !libraryColumns.includes('upgrade_policy')) {
+      db.exec("ALTER TABLE library_items ADD COLUMN upgrade_policy TEXT NOT NULL DEFAULT 'auto'");
     }
   } catch {}
   db.exec(CONTROL_PLANE_SCHEMA);
@@ -2091,6 +2103,8 @@ function rowToLibraryItem(row) {
     lastPlayedAt: row.last_played_at ?? null,
     maxProgress: row.max_progress ?? null,
     profile: row.profile ?? 'balanced',
+    intent: row.intent ?? 'library',
+    upgradePolicy: row.upgrade_policy ?? 'auto',
   };
 }
 function rowToLibraryPath(row) {
