@@ -300,7 +300,6 @@ export function createDownloadStore({ db, now = () => Date.now(), cleanupGraceMs
       attempts ?? 0, now() + (delayMs ?? 0), now(), id);
     return get(id);
   }
-
   function listClaimable(limit = 1) {
     return db.prepare(`
       SELECT * FROM download_requests
@@ -308,6 +307,14 @@ export function createDownloadStore({ db, now = () => Date.now(), cleanupGraceMs
         AND next_due_at IS NOT NULL AND next_due_at <= ? AND attempts < ?)
       ORDER BY created_at ASC LIMIT ?
     `).all(now(), MAX_JOB_ATTEMPTS, limit).map(rowToDownload);
+  }
+
+  /** Newest-first intent list for the operator surface (bounded). */
+  function listRecent(limit = 50) {
+    const n = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 200) : 50;
+    return db.prepare(`
+      SELECT * FROM download_requests ORDER BY updated_at DESC LIMIT ?
+    `).all(n).map(rowToDownload);
   }
 
   /**
@@ -456,6 +463,7 @@ export function createDownloadStore({ db, now = () => Date.now(), cleanupGraceMs
     markFailed,
     scheduleRetry,
     listClaimable,
+    listRecent,
     resetStale,
     createHandoff,
     applyHandoffEvent,

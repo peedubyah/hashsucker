@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { statSync as fsStatSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 
@@ -28,6 +29,7 @@ import { createRequestIntent } from '../lib/requests/intent.js';
 import { bindPlexMetricsSink, openSeasonFanOutScope } from '../lib/requests/plex-notifier.js';
 import { unpublishMedia } from '../lib/library/unpublish.js';
 import { markTemporaryPublication, clearTemporaryPublication, setPublicationProfile } from '../lib/library/retirement.js';
+import { humanizeFailure, humanizeRequest } from '../lib/operator/failure-text.js';
 import { normalizeQualityProfile, selectionMaxTier } from '../lib/lifecycle/quality-profiles.js';
 import { tierOf } from '../lib/lifecycle/upgrade-policy.js';
 import {
@@ -1811,6 +1813,24 @@ export function createRequestHandler(dependencies = {}) {
   const staticRoot = dependencies.staticRoot === undefined ? process.env.STATIC_ROOT : dependencies.staticRoot;
   const env = dependencies.env ?? process.env;
 
+  // Diagnostics probe cache (operator-surface only): buildDiagnostics runs
+  // live network probes (TorBox/Plex/data-plane). Sharing the payload for
+  // one minute keeps UI polling from becoming provider traffic. Staleness
+  // is bounded and the payload carries its own generatedAt upstream.
+  const DIAGNOSTICS_CACHE_MS = 60_000;
+  let cachedDiagnostics = null;
+  function getCachedDiagnostics() {
+    if (!cachedDiagnostics) return null;
+    if (clock() - cachedDiagnostics.at > DIAGNOSTICS_CACHE_MS) {
+      cachedDiagnostics = null;
+      return null;
+    }
+    return cachedDiagnostics.payload;
+  }
+  function setCachedDiagnostics(payload) {
+    cachedDiagnostics = { at: clock(), payload };
+  }
+
   // Corpus lifecycle (bootstrap + incremental DMM updates). One instance
   // per handler: its in-flight flag is the process single-flight guard.
   // Injectable for tests via dependencies.corpusLifecycle.
@@ -2969,11 +2989,14 @@ export function createRequestHandler(dependencies = {}) {
       }
       // Rollout readiness diagnostics: storage, data-plane, providers,
       // consumers, publication, lifecycle. Cheap checks only, no secrets.
-      // See lib/diagnostics/readiness.js.
+      // See lib/diagnostics/readiness.js. The live probes inside (TorBox,
+      // Plex, data-plane) are shared for DIAGNOSTICS_CACHE_MS so UI
+      // polling and repeated loads never turn into provider traffic.
       if (request.method === 'GET' && url.pathname === '/api/diagnostics') {
         requireControlPlaneStore(controlPlaneStore);
         try {
-          const diagnostics = await buildDiagnostics({
+          const cached = getCachedDiagnostics();
+          const diagnostics = cached ?? await buildDiagnostics({
             cache: searchCache,
             controlPlaneStore,
             env,
@@ -2981,6 +3004,7 @@ export function createRequestHandler(dependencies = {}) {
             retirementPolicy: readRetirementPolicy(),
             realDebridClientFactory: (opts) => createRealDebridClient({ ...opts, minIntervalMs: 100 }),
           });
+          if (!cached) setCachedDiagnostics(diagnostics);
           return sendJson(response, 200, { generatedAt: clock(), ...diagnostics });
         } catch (err) {
           return sendJson(response, 500, { error: err.message });
@@ -4101,6 +4125,190 @@ export function createRequestHandler(dependencies = {}) {
           return;
         }
         return sendJson(response, 200, status);
+      }
+      // Appliance operator surface (read-mostly, TUI-compatible): recent
+      // household intents across media requests + generic downloads, newest
+      // first. Two bounded queries, no provider calls, no business logic
+      // duplicated — headlines come from lib/operator/failure-text.js.
+      if (request.method === 'GET' && url.pathname === '/api/operator/activity') {
+        let limit = 30;
+        try {
+          limit = Math.min(parseBoundedLimit(url.searchParams.get('limit')), 100);
+        } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
+        const items = [];
+        try {
+          const reqs = searchCache.getMediaRequests?.() ?? [];
+          for (const r of reqs.slice(-limit * 2)) {
+            const h = humanizeRequest({ status: r.status, candidateCount: r.candidate_count ?? 0 });
+            items.push({
+              kind: 'request',
+              id: String(r.id ?? r.request_id ?? ''),
+              mediaId: r.media_id ?? null,
+              mediaType: r.media_type ?? null,
+              season: r.season ?? null,
+              episode: r.episode ?? null,
+              state: r.status ?? null,
+              headline: h.headline,
+              at: r.created_at ?? null,
+            });
+          }
+        } catch { /* discovery unavailable: downloads still report */ }
+        try {
+          const store = getDownloadStore();
+          const rows = store ? (store.listRecent(limit) ?? []) : [];
+          for (const d of rows) {
+            const retryPending = d.status === 'failed' && d.nextDueAt != null && d.nextDueAt > Date.now();
+            const h = humanizeFailure({ category: d.failCategory, error: d.lastError, retryPending });
+            items.push({
+              kind: 'download',
+              id: d.downloadRequestId,
+              mediaId: d.mediaId,
+              mediaType: d.mediaType,
+              season: d.season ?? null,
+              episode: d.episode ?? null,
+              state: d.status,
+              headline: d.status === 'failed' ? h.headline
+                : d.status === 'staged' ? (d.handoffState === 'completed' ? 'Handed off — cleaning up shortly'
+                  : d.handoffState === 'failed' ? 'Importer reported failure — staged copy kept'
+                  : d.handoffState !== 'none' ? `Handoff ${d.handoffState}` : 'Staged, awaiting importer')
+                : d.status === 'requested' || d.status === 'resolving' ? 'Working'
+                : d.status === 'materializing' ? 'Downloading' : d.status,
+              qualityProfile: d.qualityProfile ?? 'balanced',
+              at: d.updatedAt ?? d.createdAt ?? null,
+            });
+          }
+        } catch { /* download store unavailable */ }
+        items.sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+        return sendJson(response, 200, { generatedAt: clock(), items: items.slice(0, limit) });
+      }
+      // Appliance operator surface: generic download jobs with retry,
+      // handoff, and cleanup state plus human headlines. Bounded, read-only.
+      if (request.method === 'GET' && url.pathname === '/api/operator/downloads') {
+        let limit = 50;
+        try {
+          limit = parseBoundedLimit(url.searchParams.get('limit'));
+        } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
+        const store = getDownloadStore();
+        if (!store) return sendJson(response, 503, { error: 'download store unavailable' });
+        let rows = [];
+        try {
+          rows = store.listRecent(limit) ?? [];
+        } catch (err) {
+          return sendJson(response, 500, { error: err.message });
+        }
+        const items = rows.map((d) => {
+          const retryPending = d.status === 'failed' && d.nextDueAt != null && d.nextDueAt > Date.now();
+          const h = humanizeFailure({ category: d.failCategory, error: d.lastError, retryPending });
+          // Non-failed rows have no failure to headline: describe the
+          // lifecycle position instead (same wording as activity).
+          const headline = d.status === 'failed' ? h.headline
+            : d.status === 'staged'
+              ? (d.handoffState === 'completed' ? 'Handed off — cleaning up shortly'
+                : d.handoffState === 'failed' ? 'Importer reported failure — staged copy kept'
+                : d.handoffState && d.handoffState !== 'none' ? `Handoff ${d.handoffState}`
+                : 'Staged, awaiting importer')
+              : d.status === 'materializing' ? 'Downloading'
+              : d.status === 'requested' || d.status === 'resolving' ? 'Working'
+              : d.status;
+          let filePresent = null;
+          if (d.status === 'staged' && d.stagedPath) {
+            try {
+              const stat = fsStatSync(d.stagedPath);
+              filePresent = stat.isFile() && stat.size === d.expectedSize;
+            } catch {
+              filePresent = false;
+            }
+          }
+          return {
+            downloadRequestId: d.downloadRequestId,
+            mediaId: d.mediaId,
+            mediaType: d.mediaType,
+            season: d.season ?? null,
+            episode: d.episode ?? null,
+            title: d.title ?? null,
+            year: d.year ?? null,
+            state: d.status,
+            qualityProfile: d.qualityProfile ?? 'balanced',
+            torrentFileId: d.torrentFileId,
+            expectedSize: d.expectedSize,
+            bytesComplete: d.bytesComplete,
+            stagedPath: d.stagedPath,
+            filePresent,
+            headline,
+            detail: h.detail || null,
+            retryPending,
+            attempts: d.attempts ?? 0,
+            nextDueAt: d.nextDueAt ?? null,
+            handoffState: d.handoffState ?? 'none',
+            handoffId: d.handoffId ?? null,
+            handoffVersion: d.handoffVersion ?? 0,
+            cleanupDueAt: d.cleanupDueAt ?? null,
+            cleanupDoneAt: d.cleanupDoneAt ?? null,
+          };
+        });
+        return sendJson(response, 200, { generatedAt: clock(), items });
+      }
+      // Appliance operator surface: current quality per TorrentFile
+      // (resolution/source/tier label). Bounded batch, pure reads.
+      if (request.method === 'GET' && url.pathname === '/api/operator/quality') {
+        const raw = String(url.searchParams.get('tfs') ?? '').split(',').map((s) => s.trim()).filter(Boolean).slice(0, 100);
+        if (raw.length === 0) return sendJson(response, 400, { error: 'tfs (comma-separated TorrentFile ids, max 100) is required' });
+        const items = [];
+        for (const id of raw) {
+          try {
+            const tf = controlPlaneStore?.getTorrentFile?.(id);
+            if (!tf?.infoHash) {
+              items.push({ torrentFileId: id, found: false });
+              continue;
+            }
+            let source = null, resolution = null;
+            try {
+              const attr = searchCache.db.prepare(`SELECT source_type, resolution FROM release_attributes
+                WHERE info_hash = ? LIMIT 1`).get(tf.infoHash);
+              source = attr?.source_type ?? null;
+              resolution = attr?.resolution ?? null;
+            } catch { /* attributes unavailable */ }
+            const t = tierOf({ sourceType: source, resolution });
+            items.push({
+              torrentFileId: id, found: true, resolution, source,
+              tier: t.tier ?? null, label: t.label ?? null, size: tf.size ?? null,
+            });
+          } catch {
+            items.push({ torrentFileId: id, found: false });
+          }
+        }
+        return sendJson(response, 200, { generatedAt: clock(), items });
+      }
+      // Appliance operator surface: change explicit presentation intent
+      // profile for a publication (genuine human decision; no re-resolution,
+      // no policy change — setPublicationProfile persists intent only).
+      if (request.method === 'POST' && url.pathname === '/api/library/profile') {
+        const body = await readBody(request);
+        const mediaId = String(body?.mediaId ?? '').trim();
+        if (!mediaId) return sendJson(response, 400, { error: 'mediaId is required' });
+        const rawType = String(body?.mediaType ?? 'movie').trim().toLowerCase();
+        const mediaType = rawType === 'movie' ? 'movie' : 'episode';
+        const season = body?.season ?? null, episode = body?.episode ?? null;
+        let qualityProfile = null;
+        if (body?.qualityProfile != null && body.qualityProfile !== '') {
+          const norm = normalizeQualityProfile(body.qualityProfile);
+          if (!norm.ok) return sendJson(response, 400, { error: norm.error });
+          qualityProfile = norm.profile;
+        }
+        if (!qualityProfile) return sendJson(response, 400, { error: 'qualityProfile is required' });
+        if (!controlPlaneStore?.db) return sendJson(response, 503, { error: 'control plane unavailable' });
+        const res = setPublicationProfile(controlPlaneStore,
+          { mediaType, mediaId, season, episode }, qualityProfile, { nowMs: clock() });
+        if (!res.ok) return sendJson(response, 404, { error: res.reason ?? 'no-library-item' });
+        return sendJson(response, 200, {
+          mediaId, mediaType, qualityProfile,
+          libraryItemId: res.libraryItemId ?? null,
+          fannedOut: res.fannedOut ?? 0,
+        });
       }
       // Event store endpoints — persistent lifecycle history
       if (request.method === 'GET' && url.pathname === '/api/operator/events/recent') {

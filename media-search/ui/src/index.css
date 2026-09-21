@@ -11,6 +11,7 @@
   --text-bright: #e8eaef;
   --accent: #6ea8fe;
   --accent-dim: rgba(110, 168, 254, 0.15);
+  --info: #6ea8fe;
   --success: #4ade80;
   --success-bg: rgba(74, 222, 128, 0.12);
   --warning: #fbbf24;
@@ -3467,4 +3468,48 @@ code {
     grid-template-areas: "rank" "summary" "metrics" "actions";
   }
   .candidate-metrics { text-align: left; }
+}
+
+/* Appliance surface (UI rewrite): cards, lists, brand, themes. */
+.app-brand-logo { border-radius: 6px; display: block; }
+.app-brand { display: flex; align-items: center; gap: 10px; }
+.badge-neutral { background: var(--bg-hover); color: var(--text-dim); }
+.tone-neutral { border-color: var(--border); }
+.card-list, .activity-list, .check-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.check-list li { padding: 8px 12px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 8px; }
+.media-card { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; padding: 12px 14px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 10px; }
+.media-card-main { min-width: 0; flex: 1; }
+.media-card .media-name { font-weight: 650; font-size: 1.02rem; }
+.media-sub { margin-top: 2px; }
+.tag-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.activity-row { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.activity-main { display: flex; gap: 10px; align-items: baseline; width: 100%; text-align: left; padding: 10px 12px; background: none; border: 0; color: inherit; cursor: pointer; flex-wrap: wrap; }
+.activity-title { font-weight: 600; flex: 1; min-width: 140px; }
+.activity-state { color: var(--text-dim); }
+.activity-detail { padding: 0 12px 10px; }
+.profile-pick { display: flex; flex-direction: column; gap: 4px; min-width: 120px; }
+.profile-pick select { background: var(--bg-surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 8px; }
+.card-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.raw-dump { max-height: 420px; overflow: auto; font-size: 0.78rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+
+/* Light appliance theme: same layout, cream/paper surfaces. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f1e8; --bg-elevated: #faf7ef; --bg-surface: #efe9da;
+    --bg-hover: #e6dfcd; --bg-active: #dbd3bc;
+    --border: #d5cdb4; --border-strong: #b8ad8c;
+    --text: #2b2620; --text-dim: #6f6653; --text-bright: #171310;
+    --accent: #a33b2e;
+    --success: #2e7d46; --warning: #9a6a12; --error: #a33b2e; --info: #3c6e9e;
+  }
+}
+
+/* Narrow screens: stack cards, full-width actions, scroll nav. */
+@media (max-width: 720px) {
+  .media-card { flex-direction: column; }
+  .card-actions { width: 100%; }
+  .card-actions .btn { flex: 1; }
+  .profile-pick { width: 100%; }
+  .app-nav { overflow-x: auto; }
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

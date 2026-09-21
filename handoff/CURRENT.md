@@ -225,7 +225,17 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
   project license; set GitHub description/topics if still unset.
 - No UI, no Arr mapping, no Requestrr changes in the profile slice.
 
-## Next active slice — staged-download lifecycle (LANDED 85b039c; canary-proven)
+## Next active slice — appliance UI (LANDED; proofs green, uncommitted)
+
+Operator workbench replaced with a 7-tab appliance surface (Overview,
+Activity, Library, Downloads, Providers, Diagnostics, Settings) on a
+small read-mostly operator API (`/api/operator/activity|downloads|
+quality`, `POST /api/library/profile`, failure headlines shared with a
+future TUI). Manual-maintenance controls removed; first-run state when
+no provider is configured; diagnostics probes cached 60s so UI polling
+never becomes provider traffic. Proven on a scratch copy of production
+state + empty-state boot. Production still serves the old workbench
+until the next image build — re-pin then.
 
 Goal: bound the post-consumption life of staged artifacts before household
 use fills disk. Model: pending/accepted/failed retain; completed + 1h grace
