@@ -41,6 +41,11 @@ import { createDownloadWorker } from '../lib/download/worker.js';
 import { selectionMaxTier } from '../lib/lifecycle/quality-profiles.js';
 import { getPreparedDurableState } from '../api/media-request.js';
 import { createAnticipationScheduler } from '../lib/anticipation/scheduler.js';
+import {
+  createIdleEnrichment, enrichmentIntervalMs,
+} from '../lib/discovery/idle-enrichment.js';
+import { isCorpusBusy } from '../lib/discovery/corpus-lifecycle.js';
+import { getMediaById } from '../lib/metadata/unified-search.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
 import { createArrClient } from '../lib/anticipation/arr-client.js';
 import { createArrSync } from '../lib/anticipation/arr-sync.js';
@@ -596,6 +601,65 @@ if (arrSync) {
   armArrSyncTimer(3 * 60_000);
 }
 
+// ─── idle corpus enrichment ─────────────────────────────────────────
+// Opportunistic discovery-evidence gathering during quiet periods: one
+// bounded live-discovery query per tick through the normal pipeline
+// seams (ingest/associate/attributes), never acquisition. Default hourly,
+// first tick 15 min after boot (staggered past anticipation/corpus/
+// upgrade). ENRICHMENT_ENABLED=0 disables. No durable crawl queue —
+// targets rebuild from intents/requests/library every tick, so restarts
+// resume naturally. See lib/discovery/idle-enrichment.js.
+const enrichmentOn = (() => {
+  const v = String(process.env.ENRICHMENT_ENABLED ?? '').toLowerCase();
+  return v !== '0' && v !== 'false';
+})();
+const enrichment = enrichmentOn ? createIdleEnrichment({
+  cache: discoveryCache,
+  controlPlaneStore,
+  downloadStore,
+  futureIntentStore: createFutureIntentStore({ db: discoveryCache.db }),
+  getMediaById,
+  busyHints: () => ({
+    anticipation: anticipationInFlight,
+    download: downloadInFlight,
+    upgradeWatch: upgradeWatchInFlight,
+  }),
+  isCorpusBusy: async () => isCorpusBusy(discoveryCache.db),
+  env: process.env,
+}) : null;
+let enrichmentTimer = null;
+let enrichmentInFlight = false;
+function armEnrichmentTimer(delayMs) {
+  enrichmentTimer = setTimeout(async () => {
+    try {
+      if (enrichment && !enrichmentInFlight) {
+        enrichmentInFlight = true;
+        try {
+          const result = await enrichment.tickOnce();
+          if (result.acted || !String(result.reason ?? '').startsWith('idle')) {
+            console.log(`media-search: enrichment tick ${result.reason ?? 'ok'}`
+              + (result.added != null ? ` +${result.added} ~${result.refreshed ?? 0} x${result.rejected ?? 0}` : ''));
+          }
+        } finally {
+          enrichmentInFlight = false;
+        }
+      }
+    } catch (error) {
+      console.warn('media-search: enrichment tick failed', error?.message);
+    } finally {
+      armEnrichmentTimer(enrichmentIntervalMs(process.env));
+    }
+  }, delayMs);
+  if (enrichmentTimer.unref) enrichmentTimer.unref();
+}
+if (enrichment) {
+  const firstTickMin = (() => {
+    const v = Number(process.env.ENRICHMENT_FIRST_TICK_MIN);
+    return Number.isFinite(v) && v >= 0 ? v : 15;
+  })();
+  armEnrichmentTimer(firstTickMin * 60_000);
+}
+
 const server = createApp({
   searchCache: discoveryCache,
   controlPlaneStore,
@@ -612,6 +676,7 @@ const server = createApp({
     } catch {}
     armAnticipationTimer(5000);
   },
+  enrichmentStatus: () => enrichment?.getStatus() ?? { enabled: false },
 });
 let shuttingDown = false;
 

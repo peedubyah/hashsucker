@@ -835,3 +835,19 @@ export function corpusMaintenanceEnabled(env = process.env) {
   if (off(env.CORPUS_ENABLED)) return false;
   return true;
 }
+
+/**
+ * Idle-gate helper: true while corpus bootstrap/update owns the pipeline.
+ * Reads persisted state only (UPDATING/BOOTSTRAPPING); in-process ticks
+ * are additionally covered by the caller's worker-busy hints. Additive
+ * read — no behavior change.
+ */
+export function isCorpusBusy(db) {
+  if (!db) return false;
+  try {
+    const cur = readState(db);
+    return cur?.state === CORPUS_STATES.UPDATING || cur?.state === CORPUS_STATES.BOOTSTRAPPING;
+  } catch {
+    return false;
+  }
+}

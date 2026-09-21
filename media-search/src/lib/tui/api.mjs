@@ -32,6 +32,7 @@ export const api = {
   downloads: (limit = 50) => get(`/api/operator/downloads?limit=${limit}`),
   failedEvents: (limit = 20) => get(`/api/operator/events/failed?limit=${limit}`),
   workers: () => get('/api/operator/workers'),
+  enrichment: () => get('/api/operator/enrichment'),
 };
 
 export function bytes(n) {

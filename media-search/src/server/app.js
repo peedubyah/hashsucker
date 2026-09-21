@@ -4126,6 +4126,18 @@ export function createRequestHandler(dependencies = {}) {
         }
         return sendJson(response, 200, status);
       }
+      // Idle-enrichment status (read-only operator surface for the TUI):
+      // last tick, targets, hashes learned/refreshed, backoff. The worker
+      // itself lives in index.js; this only exposes its status getter.
+      if (request.method === 'GET' && url.pathname === '/api/operator/enrichment') {
+        try {
+          const getStatus = dependencies.enrichmentStatus;
+          const status = typeof getStatus === 'function' ? getStatus() : { enabled: false };
+          return sendJson(response, 200, { generatedAt: clock(), ...status });
+        } catch (err) {
+          return sendJson(response, 500, { error: err.message });
+        }
+      }
       // Appliance operator surface (read-mostly, TUI-compatible): recent
       // household intents across media requests + generic downloads, newest
       // first. Two bounded queries, no provider calls, no business logic

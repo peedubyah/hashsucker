@@ -227,7 +227,18 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
   project license; set GitHub description/topics if still unset.
 - No UI, no Arr mapping, no Requestrr changes in the profile slice.
 
-## Next active slice — web finish + TUI boundary (IN PROGRESS, uncommitted)
+## Next active slice — idle enrichment worker (IN PROGRESS, uncommitted)
+
+One bounded live-discovery query per quiet hour through the normal
+pipeline seams (ingest/associate/attributes); never acquisition.
+Priority: future intents → recent requests → thin/below-terminal/sparse.
+Gates: downloads, human requests (background sources excluded),
+loop lag, worker hints, corpus state. Hygiene: episode-exact + title
+agreement (published truth > consensus > substantial resolved title).
+Backoff per source, daily cap, zero-yield rotation, no durable queue.
+Status at /api/operator/enrichment + TUI diagnostics. Live-proven on
+scratch copies (true positives learned, wrong-show rows refused).
+No release until Patrick says so.
 
 Browser proven with real Firefox screenshots (1440/1024/390): dominant
 state never contradicts health; first-run names exact missing keys;
