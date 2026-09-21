@@ -63,6 +63,14 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
 - `main` == `github/main` == 1fcb52b (pushed): staged-download
   post-consumption lifecycle closed the generic-download loop, plus the
   profile fan-out fix.
+- v0.3.0 RELEASED 2026-09-21 (tag → 858bf6d; all 4 images amd64+arm64,
+  revision labels verified, `:latest` + `0.3`/`0.3.0` aliases live):
+  profiles, generic downloads, staged cleanup, fan-out fix, deploy path
+  normalization. Fresh-install smoke green on published images (schemas,
+  honest not-ready, correct mounts, write path). Production still runs
+  local 9193caa9f324 (=1fcb52b, behaviorally == release); re-pin with
+  `docker compose pull && docker compose up -d` whenever convenient —
+  no urgency, no live swap performed.
 - Production media-search ACTIVE since 2026-09-21 00:4x UTC on local
   image 9193caa9f324 (=1fcb52b incl. the profile fan-out fix): 14
   migrations applied, VFS 66/26, counts unchanged, reconcile/Arr/corpus/
