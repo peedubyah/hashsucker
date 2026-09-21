@@ -56,10 +56,10 @@ export interface EmptyStateProps {
   action?: ReactNode;
 }
 
-export function EmptyState({ icon = '·', title, detail, action }: EmptyStateProps) {
+export function EmptyState({ icon = '', title, detail, action }: EmptyStateProps) {
   return (
     <div className="empty-state">
-      <div className="empty-state-icon">{icon}</div>
+      {icon ? <div className="empty-state-icon">{icon}</div> : null}
       <div className="empty-state-title">{title}</div>
       {detail ? <div className="empty-state-message">{detail}</div> : null}
       {action ? <div className="empty-state-action">{action}</div> : null}
