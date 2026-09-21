@@ -1,6 +1,7 @@
 # HashSucker self-handoff (durable — survives session death)
 
-If this session dies right now: `main` == `github/main` at 85b039c (pushed).
+If this session dies right now: `main` == `github/main` at 1fcb52b (pushed).
+Production media-search is RUNNING on local image 9193caa9f324 (=1fcb52b).
 Read this file, `../AGENTS.override.md` (operating rules), and
 [`../docs/architecture.md`](../docs/architecture.md) (durable model). Do not
 trust old containers or historical HY4 handoffs.
@@ -43,6 +44,13 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
   `up -d --no-deps` after product changes), `data-plane` (internal `:3001`),
   `edge` (public `:8080`, Caddy reverse proxy), `torbox-importer`
   (no listener; filesystem-queue acquisition → Arr import).
+- media-search reactivated 2026-09-21 on image 9193caa9f324 (local build
+  of 1fcb52b; GHCR latest was Sep-16 and 12 commits stale). `.env` now
+  pins `HASHSUCKER_{DISCOVERY,QUEUE,STRM}_HOST_PATH` to leaf paths: the
+  legacy leaf aliases double-append (`.../discovery/discovery`) and would
+  boot media-search on empty state. LANDMINE (pre-existing, do not touch
+  the healthy importer to fix): `DOWNLOADS_HOST_PATH` has the same
+  leaf/suffix mismatch for any future importer recreate.
 - Images: `${HASHSUCKER_REGISTRY:-ghcr.io/peedubyah}/hashsucker-<svc>:${HASHSUCKER_VERSION:-latest}`.
 - DBs (same backup unit): `/home/patrick/hashsucker-data/discovery/discovery-cache.db`,
   `.../control-plane.db` (`download_requests` lives in control-plane.db).
@@ -52,8 +60,14 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
 
 - Packages at `0.0.1` (placeholder); shipping identity is GHCR
   `latest`/`main`/`v0.1.0` tags, not package versions.
-- `main` == `github/main` == 85b039c (pushed): staged-download
-  post-consumption lifecycle closed the generic-download loop.
+- `main` == `github/main` == 1fcb52b (pushed): staged-download
+  post-consumption lifecycle closed the generic-download loop, plus the
+  profile fan-out fix.
+- Production media-search ACTIVE since 2026-09-21 00:4x UTC on local
+  image 9193caa9f324 (=1fcb52b incl. the profile fan-out fix): 14
+  migrations applied, VFS 66/26, counts unchanged, reconcile/Arr/corpus/
+  upgrade ticks quiet, production byte path proven (206 + identical
+  sha256 on bounded ranges), one restart clean. Leave it running.
 - Household canary (2026-09-20, scratch stack on DB copies, real
   data-plane image + provider bytes): fresh hd request selected capped
   1080p in 6.6s; omitted re-request reused in 0.5s; bounded ranges
@@ -203,7 +217,7 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
   project license; set GitHub description/topics if still unset.
 - No UI, no Arr mapping, no Requestrr changes in the profile slice.
 
-## Next active slice — staged-download lifecycle (IN PROGRESS, uncommitted)
+## Next active slice — staged-download lifecycle (LANDED 85b039c; canary-proven)
 
 Goal: bound the post-consumption life of staged artifacts before household
 use fills disk. Model: pending/accepted/failed retain; completed + 1h grace
