@@ -63,14 +63,16 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
 - `main` == `github/main` == 1fcb52b (pushed): staged-download
   post-consumption lifecycle closed the generic-download loop, plus the
   profile fan-out fix.
-- v0.3.0 RELEASED 2026-09-21 (tag → 858bf6d; all 4 images amd64+arm64,
-  revision labels verified, `:latest` + `0.3`/`0.3.0` aliases live):
-  profiles, generic downloads, staged cleanup, fan-out fix, deploy path
-  normalization. Fresh-install smoke green on published images (schemas,
-  honest not-ready, correct mounts, write path). Production still runs
-  local 9193caa9f324 (=1fcb52b, behaviorally == release); re-pin with
-  `docker compose pull && docker compose up -d` whenever convenient —
-  no urgency, no live swap performed.
+- v0.4.0 RELEASED (tag → 32c0f45; all 4 images amd64+arm64,
+  revision labels verified, `:latest` + `0.4`/`0.4.0` aliases live):
+  appliance UI, operator API, diagnostics probe cache, housekeeping
+  utility, deploy path pins. Fresh-install smoke green on published
+  images (schemas, honest not-ready → TorBox key → ready, correct
+  mounts, write path). Production re-pinned to v0.4.0 (media-search
+  only; rest untouched): new UI served, counts unchanged, byte range
+  sha256-identical to pre-release proof. Host housekeeping
+  (`scripts/hashsucker-housekeeping`, report default, labelled `--clean`
+  proven incl. a self-caught volume-guard bug) shows zero cleanable.
 - Production media-search ACTIVE since 2026-09-21 00:4x UTC on local
   image 9193caa9f324 (=1fcb52b incl. the profile fan-out fix): 14
   migrations applied, VFS 66/26, counts unchanged, reconcile/Arr/corpus/
