@@ -227,6 +227,26 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
   project license; set GitHub description/topics if still unset.
 - No UI, no Arr mapping, no Requestrr changes in the profile slice.
 
+### Landed: durable request intent policy
+
+Commits `6340e90` and `415d1c3` are local, not pushed. The normalized
+library outcomes are `library`, `watch`, and `immediate`; `/api/download-request`
+remains the separate direct-download outcome. Omitted intent preserves legacy
+behavior (`temporary:true` → watch, otherwise library); `qualityProfile`,
+`ttlHours`, and direct `/download` behavior remain compatible. Intent and
+upgrade policy persist on `library_items`, survive restart/re-request, and
+use non-destructive transitions: watch → library adopts permanent, library →
+watch never demotes an existing permanent publication, immediate → library
+re-enables upgrades, and same-intent requests are no-ops. Watch publications
+retain existing TTL/playback retirement and do not chase upgrades; immediate
+publications are permanent but do not chase upgrades; library publications
+retain normal upgrade behavior. UI vocabulary is limited to Keep in library,
+Watch once, and Best available now. Focused intent/operator/library/download
+validation passed (77 tests). The previous `search.js` syntax report was
+confirmed: HEAD was genuinely invalid because the cache failure logger
+callback lacked its closing `});`; standalone fix is `6340e90`. Unrelated A/B
+artifacts remain untracked and untouched. No release/build/tag work performed.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
