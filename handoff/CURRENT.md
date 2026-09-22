@@ -407,20 +407,36 @@ materialize broad associations or add a derived index until a truth-set resolver
 can safely scope titles and prove precision. No backfill, live provider run,
 ranking change, release, build, or tag work performed.
 
-### Landed: conservative show identity truth-set helper
+### Landed: real-corpus show identity validation — integration parked
 
-Commit `6e70a04` is pushed to `github/main`. Added offline-only
-`show-identity.js` using exact normalized canonical/alternate/original title
-agreement, optional year support, and known episode-title suffix evidence. It
-intentionally rejects weak substring/root-token matches. A bounded truth set
-covered 25 clear/variant positive cases and 13 ambiguous negative controls;
-precision was 100% with zero false positives, and the existing shared matcher
-was shown to have severe false positives for `Friends`, `Lost`, `House`, `Dark`,
-`The Office`, and similar names. The helper is not wired into production
-retrieval yet because metadata-ID-to-alias resolution and episode-title truth
-need a real provider-neutral input contract. Existing dynamic FTS/episode
-coverage remains unchanged; no broad association persistence, index, ranking,
-provider, or live behavior changed.
+The offline-only `show-identity.js` now documents a provider-neutral
+`ShowIdentityContext` (`canonicalTitle`, optional `originalTitle`,
+`alternateTitles[]`, `firstAirYear`, `externalIds`, `episodeTitle`, and
+`episodeTitles[]`). A 60-case deterministic truth set (30 positive, 30
+negative) passes with exact matching, including ambiguous titles, punctuation,
+remake/year, aliases, miniseries, and release noise.
+
+`media-search/scripts/show-identity-corpus-benchmark.mjs` runs read-only against
+`DISCOVERY_DB` and never writes `candidate_media`. It sampled 30 real identities
+including Breaking Bad, Game of Thrones, The Sopranos, The Last of Us, Chernobyl,
+Fleabag, The Office, Friends, Lost, House, Dark, From, and You. The persisted
+association path was 100% precision/recall on its bounded oracle (506/506). The
+broad FTS baseline had 20 TP, 1,280 FP, 486 FN; the conservative scoped mode
+had 5 TP, 33 FP, 501 FN. Thus the current resolver removes most exposure but
+also destroys useful recall because real pack/suffix parser output is not an
+exact show title. Scoped answerability was 14/30 at >=1, 5/30 at >=3, and
+1/30 at >=10, versus 23/30, 22/30, and 17/30 for broad retrieval; persisted
+was 24/30, 23/30, and 23/30. FTS/identity/episode/total p50/p95 were
+45.683/265.638ms, 15.232/76.241ms, 0.094/0.340ms, and 61.041/337.094ms.
+
+Decision: **do not integrate**. The resolver meets the precision priority only
+when paired with an already-correct association, but standalone real-corpus
+recall is not acceptable and would make live discovery necessary for many
+ordinary requests. Do not loosen matching or add fuzzy matching. The next
+work, if resumed, is a deterministic parser/pack-evidence rule backed by
+categorized false negatives and a manually labeled stratified corpus sample;
+no production retrieval, provider traffic, ranking, persistence, TUI, or live
+behavior changed.
 
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 

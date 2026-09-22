@@ -1,12 +1,20 @@
 /**
  * Conservative show-identity agreement for local episode retrieval.
- *
- * This is intentionally stricter than the historical identity-agreement
- * matcher: exact canonical/alias matches are safe; a longer release title
- * only agrees when its suffix is a supplied known episode title. Weak token
- * overlap never establishes show identity.
+ * Exact canonical/alias matches are safe; a longer release title only agrees
+ * when its suffix is a supplied known episode title.
  */
 import { parsedReleaseTitle } from './identity-agreement.js';
+
+/**
+ * @typedef {Object} ShowIdentityContext
+ * @property {string} canonicalTitle
+ * @property {string|null} [originalTitle]
+ * @property {string[]} [alternateTitles]
+ * @property {number|null} [firstAirYear]
+ * @property {Object} [externalIds]
+ * @property {string|null} [episodeTitle]
+ * @property {string[]} [episodeTitles]
+ */
 
 export function normalizeShowTitle(value) {
   return String(value ?? '')
@@ -29,17 +37,19 @@ function boundarySuffix(title, show) {
   return title.slice(show.length + 1).trim();
 }
 
-/**
- * @returns {{matched: boolean, reason: string, confidence: number}}
- */
+/** @param {ShowIdentityContext & {release: Object, year?: number|null}} input */
 export function agreeShowIdentity({
   canonicalTitle,
   alternateTitles = [],
   originalTitle = null,
   release,
+  firstAirYear = null,
   year = null,
+  episodeTitle = null,
   episodeTitles = [],
 } = {}) {
+  const expectedYear = firstAirYear ?? year;
+  const knownEpisodeTitles = episodeTitle ? [...episodeTitles, episodeTitle] : episodeTitles;
   const references = [...new Set([canonicalTitle, originalTitle, ...alternateTitles]
     .map(normalizeShowTitle).filter(Boolean))];
   if (references.length === 0) return { matched: false, reason: 'no-reference-title', confidence: 0 };
@@ -48,12 +58,12 @@ export function agreeShowIdentity({
   const title = normalizeShowTitle(parsed.title || rawFilename);
   const rawTitle = normalizeShowTitle(rawFilename);
   const titles = new Set([title, rawTitle].filter(Boolean));
-  if (titles.size === 0 || !yearAgrees(parsed.year, year)) return { matched: false, reason: 'title-or-year-mismatch', confidence: 0 };
+  if (titles.size === 0 || !yearAgrees(parsed.year, expectedYear)) return { matched: false, reason: 'title-or-year-mismatch', confidence: 0 };
   if ([...titles].some((candidate) => references.includes(candidate))) return { matched: true, reason: 'exact-title', confidence: 1 };
-  const knownEpisodes = episodeTitles.map(normalizeShowTitle).filter(Boolean);
+  const knownEpisodes = knownEpisodeTitles.map(normalizeShowTitle).filter(Boolean);
   for (const reference of references) {
     const suffix = boundarySuffix(title, reference);
-    if (suffix && knownEpisodes.some((episodeTitle) => suffix === episodeTitle || suffix.startsWith(`${episodeTitle} `))) {
+    if (suffix && knownEpisodes.some((episode) => suffix === episode || suffix.startsWith(`${episode} `))) {
       return { matched: true, reason: 'known-episode-title', confidence: 0.95 };
     }
   }
