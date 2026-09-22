@@ -491,6 +491,60 @@ identify the current bottleneck, but canonical recovery and manual negative
 safety are insufficient. No new heuristics were added during measurement, no
 persistence changed, and production retrieval remains untouched.
 
+### Resolver path verdict: park, do not integrate
+
+Audited the exact 59 uncertain rows from the prior 100-row ambiguous FTS
+sample with `media-search/scripts/resolver-path-audit.mjs`. Primary buckets:
+56 `parser_determinable`, 3 `existing_source_provenance_can_label`, and 0
+for `existing_candidate_media_can_label`, `metadata_alias_can_label`,
+`genuinely_insufficient_evidence`, or `benchmark_bug`. The durable database
+copy used for the audit had no `evidence_observations` table; no uncertain row
+had candidate_media, request-result, or provider-event evidence. The generic
+`candidates.sources` payload was present but did not preserve a media intent.
+Therefore HashSucker did not retain enough source/media context to label those
+rows after the fact.
+
+The 22 known-positive misses were categorized as: 10 episode-title
+contamination, 6 language/edition residuals, 5 audio/codec residuals, and 1
+release-group/parser residual. This is heterogeneous parser cleanup, not a
+single safe identity rule. The canonical extractor improved the exact
+per-request benchmark from 5/28 raw to 6/28 canonical/full; FTS recall stayed
+28/28. The same 30 requests had 6 zero-depth, 14 one-to-two, 7 three-to-nine,
+and 3 ten-plus scoped candidate sets. No bounded fix was justified during this
+slice because the remaining rules would require stripping arbitrary episode
+and edition words without independently known episode metadata.
+
+The 100-row manual audit remains partially labeled: 32 correct-show, 9
+wrong-show, 59 uncertain. One wrong-show row was accepted. Trustworthy
+negative precision over labeled accepted rows was therefore not clean; the
+uncertain rows are excluded from binary precision claims.
+
+Source semantics finding: current generic evidence/source fields do not retain
+the complete tuple `(observer, release, media intent, season, episode)` for
+these local FTS rows. `media_request_results` can retain expected scope when
+written, but it was absent for the audited rows. No schema or persistence
+change was made.
+
+Product comparison:
+
+- Simpler path: local FTS/attributes → episode coverage/ranking → live fallback.
+  It preserves 23/30 request answerability at >=1 in the earlier corpus study
+  and does not add a new grammar of title exceptions.
+- Resolver path: FTS → canonical title → identity → episode coverage. It
+  improves ambiguous-title filtering conceptually, but currently recovers only
+  6/28 trusted episode positives, leaves 20/30 requests at zero or one-to-two
+  candidates, and has one labeled wrong-show accept in the 100-row audit.
+  Latency is interactive (total p50/p95 23.233/163.165ms), but speed does not
+  offset poor recovery and unclear negative precision.
+
+Claimed product value would be: **prevent wrong-show local fulfillment for
+ambiguous titles without increasing live-discovery dependence**. The measured
+path has not demonstrated that value. Verdict: **PARK** the resolver path;
+retain `canonicalReleaseTitle()` as a standalone parser utility and retain the
+benchmark/audit artifacts, but do not integrate show identity into production
+retrieval. Do not delete the utility until a corrected source-context contract
+is evaluated; no production behavior changed.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
