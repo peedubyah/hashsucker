@@ -363,6 +363,25 @@ had 13/17 known releases for the two popular movies and zero known associations
 for the other four IDs; no persisted winners were used. No provider acquisition,
 ranking, or fan-out changes. No release/build/tag work performed.
 
+### Completed: corpus coverage and retrieval audit
+
+No code changes were required. On scratch copies of the current discovery DB,
+all six baseline identities were reproduced. The database contains 1,586,607
+candidates, 1,586,549 attribute rows, and only 5,711 distinct candidate/media
+associations; 1,584,812 candidates have no media association. Useful attributes
+cover 1,585,821 candidate/file keys and the enrichment queue has 4,598 pending
+rows. The zero baseline for `tt0903747:5:14` is an identity/association issue,
+not corpus absence: show-level `tt0903747` has 221 associations but the exact
+colon episode ID has zero. `tt0944947` has 56 show-level associations but zero
+for `tt0944947:1:1`; `tt10986410` has 256 show-level and zero exact episode
+associations. FTS/title attributes exist, but the normal media-scoped search
+requires candidate_media identity confidence and explicit episode coverage, so
+knowledge disappears at exact episode association/retrieval. Movie coverage in
+a bounded 20-ID sample: 14/20 any associations, 14/20 with >=3 and >=10.
+Episode coverage: 6/20 for all three thresholds. This supports a structural TV
+association gap. No live source was re-run, no provider work, no ranking change,
+no backfill or enrichment pass was started. No release/build/tag work performed.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
