@@ -652,6 +652,60 @@ Verdict: **KEEP existing fast path; PARK new contextual-memory abstraction.**
 No UI, migration, provider change, ranking change, scheduler work, or release
 performed.
 
+### Tier-D reconciliation audit — existing lifecycle state is the answer
+
+Read-only `reuse-first-historical-audit.mjs` classified all 45 repeated intent
+groups. The 36 Tier-D cases have one root cause: **prior result was never
+fulfilled**. They have eligible historical result rows, but no playback handoff
+or exact reusable TorrentFile/publication. The remaining groups were 8 healthy
+published Tier A and 1 with no useful prior state. No cases showed profile
+change, known fulfillment failure, stale placement, or a missing handoff after a
+known successful selection in the audited database.
+
+For the 32 repeated groups with at least two rank-1 historical result rows, the
+previous and latest top Release were identical in 29 cases and changed in 3;
+all previous rank-1 rows were eligible. This is 90.6% top-hash stability. It
+shows that synchronous reranking is often re-confirming an existing answer,
+but this audit did not run a live provider comparison. A bounded live replay
+was deliberately not executed because the experiment has no captured safe
+source fixtures and must not add provider traffic or alter production behavior.
+
+The legitimate-work classification is therefore: 8 reconciliation-only
+healthy publications; 36 local-rerank/fulfillment cases where a prior result
+exists but was never fulfilled; 1 live-discovery-required case. The 36 are not
+really “memory” failures: the missing state is a fulfillment lifecycle outcome,
+not a missing candidate-memory abstraction. A prior eligible rank-1 candidate
+can be locally selected, but it still needs exact TorrentFile binding and
+provider placement before safe playback.
+
+Existing `media-request.js` already has the correct Tier-A fast path through
+`getPreparedDurableState()` and `tryReuseHealthyPublication()`. It requires
+exact media/episode identity, Release/hash, TorrentFile ID, positive size, and
+a mapped data-plane coordinate. Provider identity is not the reuse key; provider
+runtime may reacquire delivery for the same TorrentFile.
+
+Decisions:
+
+- Repeat live discovery: **REDUCE**, not default for a known eligible prior
+  result; no production change in this slice.
+- Synchronous reranking: **REDUCE** when the previous eligible winner is stable;
+  retain reranking for changed policy, invalidation, or missing exact identity.
+- Upgrade-on-request: **MOVE-ASYNCHRONOUS** conceptually; serve a sufficient
+  known-good representation first and sense improvements separately. Existing
+  `forceDiscovery` remains the explicit upgrade path.
+- Permanent publication: **INTENT-DEPENDENT**. Healthy published Tier A needs
+  no discovery; a Tier-D candidate need not be permanently published until
+  fulfillment is actually selected and bound.
+
+No missing schema concept was proven. Production lacks profile/request-intent
+columns in the audited snapshot, but no evidence showed that this blocked the
+Tier-D cases. No ranking, provider, persistence, UI, scheduler, or lifecycle
+implementation changed.
+
+Product implication: **Repeated intents should pay for discovery only when no
+eligible prior answer can be safely bound, revalidated, or locally selected;
+most Tier-D cost is uncompleted fulfillment, not insufficient knowledge.**
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
