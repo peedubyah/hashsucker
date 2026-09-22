@@ -706,6 +706,42 @@ Product implication: **Repeated intents should pay for discovery only when no
 eligible prior answer can be safely bound, revalidated, or locally selected;
 most Tier-D cost is uncompleted fulfillment, not insufficient knowledge.**
 
+### Repeat provenance + Tier-A fast-path proof — closed
+
+The durable repeat-intent audit grouped requests by
+`media_id + media_type + season + episode` (request ID and provider excluded).
+The production snapshot does not preserve explicit request-intent/profile
+columns, so provenance classification is limited to timestamps, source fields,
+request IDs, lifecycle status, result history, and handoff state. All 377
+requests are completed; 45 groups repeat. No durable lifecycle event identifies
+these repeats as retries, reactivation, upgrade, or canary with sufficient
+confidence. Therefore Tier-D user-versus-system provenance is **unknown**, not
+assumed human demand: 36 Tier-D, 8 healthy Tier-A, and 1 no-knowledge group
+remain unclassified by origin.
+
+A scratch proof exercised the actual `searchByMedia()` path for three healthy
+published exact TorrentFiles (movie, TV episode, second movie), 10 repetitions
+each. All 30 requests returned `reuseMode=noop` and
+`reason=reused-healthy-publication`. p50 was 0.149ms and p95 0.488ms (min
+0.124ms, max 1.811ms). Every request reported `liveDiscoveryTriggered=false`,
+zero live candidates, ranking disabled, and zero availability checks. The only
+provider-facing operation was the control-plane data-plane-coordinate lookup
+needed to prove the exact TorrentFile remains serveable: 30 lookups, no provider
+acquisition or source calls. This proves healthy exact publication behaves as
+idempotent desired-state reconciliation and is effectively immediate.
+
+The existing `tryReuseHealthyPublication()` / `getPreparedDurableState()` is
+already the correct single fast path. A second reuse abstraction is not needed.
+Tier-D provenance is insufficient to call it a product problem: without request
+origin/lifecycle evidence, the 36 cases cannot distinguish genuine user repeats
+from internal/system/test traffic. The prior rank-1 stability result remains
+supporting evidence, not a reason to implement Tier-D reuse now.
+
+Decisions: **NO new reuse stage**; repeat live discovery remains default only
+when no healthy exact publication exists; Tier-A requests are already
+reconciliation-first; upgrade/force discovery remains explicit; no UI, schema,
+ranking, provider, resolver, scheduler, or production behavior changed.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
