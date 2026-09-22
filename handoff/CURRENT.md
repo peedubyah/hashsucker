@@ -407,6 +407,21 @@ materialize broad associations or add a derived index until a truth-set resolver
 can safely scope titles and prove precision. No backfill, live provider run,
 ranking change, release, build, or tag work performed.
 
+### Landed: conservative show identity truth-set helper
+
+Commit `6e70a04` is pushed to `github/main`. Added offline-only
+`show-identity.js` using exact normalized canonical/alternate/original title
+agreement, optional year support, and known episode-title suffix evidence. It
+intentionally rejects weak substring/root-token matches. A bounded truth set
+covered 25 clear/variant positive cases and 13 ambiguous negative controls;
+precision was 100% with zero false positives, and the existing shared matcher
+was shown to have severe false positives for `Friends`, `Lost`, `House`, `Dark`,
+`The Office`, and similar names. The helper is not wired into production
+retrieval yet because metadata-ID-to-alias resolution and episode-title truth
+need a real provider-neutral input contract. Existing dynamic FTS/episode
+coverage remains unchanged; no broad association persistence, index, ranking,
+provider, or live behavior changed.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
