@@ -48,7 +48,8 @@ releaseKey = "<lowercase 40-hex infoHash>" + ":" + (fileIndex === null ? "torren
 
 Null is torrent-level evidence and is deliberately distinct from file index `0`. Storage uses
 `file_index_key = -1` for null for the same reason. Within a tier, ordering never crosses that
-distinction. `releaseKey` is a discovery, ranking, and handoff key; it is not Release identity.
+distinction. `releaseKey` and `file_index_key` are discovery, ranking, and candidate-storage keys;
+neither is TorrentFile identity and neither makes a file ordinal durable physical identity.
 
 **TorrentFile identity** — the exact durable file within a Release:
 

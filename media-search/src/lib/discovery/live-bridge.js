@@ -141,14 +141,24 @@ export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
       return { sourceClass, ok: false, error, latencyMs: Date.now() - startedAt };
     }
   };
+  const stremioAddons = options.addons ?? null;
+  const stremioTask = stremioAddons
+    ? Promise.all(stremioAddons.filter((addon) => addon.enabled !== false).map(async (addon) => {
+      const streams = await searchStremio({ type: mediaType, mediaId, addons: [addon] });
+      return streams.map((stream) => ({ ...stream, observer: stream.observer || addon.provider || addon.addon_id, addonId: addon.addon_id, addonName: addon.name }));
+    })).then((batches) => batches.flat())
+    : searchStremio({ type: mediaType, mediaId });
   const results = await Promise.all([
-    measure('torrentio', searchStremio({ type: mediaType, mediaId })),
+    measure('stremio', stremioTask),
     measure('torznab', searchTorznab({ type: mediaType, mediaId })),
     measure('prowlarr', prowlarrTask),
   ]);
 
+  const stremioObserver = options.addons?.length === 1
+    ? (options.addons[0].addon_id || options.addons[0].id || options.addons[0].provider || 'stremio')
+    : 'stremio';
   const sources = {
-    torrentio: { observer: 'torrentio', sourceClass: 'stremio', count: 0, error: null, disposition: 'queried_success' },
+    stremio: { observer: stremioObserver, sourceClass: 'stremio', count: 0, error: null, disposition: 'queried_success' },
     torznab: { observer: 'torznab', sourceClass: 'torznab', count: 0, error: null, disposition: 'queried_success' },
     prowlarr: { observer: 'prowlarr', sourceClass: 'prowlarr', count: 0, error: null, disposition: prowlarrClient ? 'queried_success' : 'not_configured' },
   };
@@ -167,6 +177,13 @@ export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
     if (!result.ok) source.disposition = /timeout|abort/i.test(source.error) ? 'timeout' : 'upstream_error';
     else if (valid.length === 0 && source.disposition === 'queried_success') source.disposition = 'queried_empty';
     allReleases.push(...valid.map((release) => ({ ...release, sourceClass: result.sourceClass })));
+    if (result.sourceClass === 'stremio' && valid.length > 0) {
+      for (const release of valid) {
+        const observer = release.observer || release.addonId || release.provider || 'stremio';
+        sources[observer] ??= { observer, sourceClass: 'stremio', count: 0, error: null, disposition: 'queried_success' };
+        sources[observer].count++;
+      }
+    }
     if (cache?.recordEvidenceQuery) {
       const unique = new Set(valid.map((r) => String(r.infoHash).toLowerCase()));
       let known = 0;

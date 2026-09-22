@@ -230,9 +230,14 @@ function renderLibrary() {
 function renderEvidence() {
   const data = state.data.evidence ?? {};
   const out = [`${C.bold}Evidence${C.reset}  ${C.dim}bounded source yield and claim calibration${C.reset}`, line()];
-  out.push('Source'.padEnd(18) + 'Obs'.padStart(6) + 'Novel release'.padStart(15) + 'Novel assoc'.padStart(14) + 'Novel TF'.padStart(11) + 'Selected'.padStart(10));
+  out.push('Observer'.padEnd(24) + 'State'.padEnd(18) + 'Q'.padStart(4) + 'Hashes'.padStart(9) + 'Novel'.padStart(8) + 'p50'.padStart(8) + 'p95'.padStart(8));
+  for (const row of data.queryYield ?? []) {
+    const latency = data.queryLatency?.find((item) => item.observer === row.observer && item.source_class === row.source_class);
+    out.push(`${cut(row.observer, 24).padEnd(24)}${cut(row.disposition, 18).padEnd(18)}${String(row.query_count ?? 0).padStart(4)}${String(row.hashes_observed ?? 0).padStart(9)}${String(row.novel_releases ?? 0).padStart(8)}${String(latency?.p50_latency_ms ?? '—').padStart(8)}${String(latency?.p95_latency_ms ?? '—').padStart(8)}`);
+  }
   for (const row of data.sources ?? []) {
-    out.push(`${cut(`${row.observer}/${row.source_class}`, 18).padEnd(18)}${String(row.asserted_observations ?? 0).padStart(6)}${String(row.novel_releases ?? 0).padStart(15)}${String(row.novel_associations ?? 0).padStart(14)}${String(row.novel_torrent_files ?? 0).padStart(11)}${String(row.selections ?? 0).padStart(10)}`);
+    if (row.subject_kind === 'selection') continue;
+    if (!(data.queryYield ?? []).some((item) => item.observer === row.observer)) out.push(`${cut(row.observer, 24).padEnd(24)}${C.dim}no query aggregate${C.reset}`);
   }
   out.push(line());
   out.push(`${C.bold}Query yield${C.reset}`);
