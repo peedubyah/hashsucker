@@ -457,6 +457,40 @@ remains parked pending a corrected per-request positive benchmark and
 stratified manual validation. No fuzzy matching, persistence, provider,
 ranking, or live behavior changed.
 
+### Landed: corrected per-request episode benchmark — integration parked
+
+Added read-only `media-search/scripts/episode-identity-benchmark.mjs` with 30
+explicit season/episode requests. Positive rows are only exact persisted
+associations for the requested media ID that pass `episode-coverage.js` for
+that request. Rows for another episode and unlabeled FTS rows are excluded
+from the positive denominator.
+
+The first trustworthy run had 28 positive rows across the request set and
+100% FTS recall (28/28 retrieved). Raw title recovery was 5/28 (17.86%);
+canonical title recovery was 6/28 (21.43%); full canonical + episode recovery
+was 6/28 (21.43%). The stage result shows FTS is not the bottleneck for these
+known positives. Remaining misses are predominantly release syntax still
+surrounding episode titles, language/edition text, and parser damage; the
+benchmark captured raw filename, parser title, canonical title, expected title,
+and failure reason for each miss.
+
+The manual real-FTS sample contains 100 rows from 10 ambiguous intents:
+32 correct-show, 9 wrong-show, and 59 uncertain. One wrong-show row was
+accepted (`The Bear` versus the explicitly labeled `Bear Grylls` negative),
+so manual negative precision is not yet clean. This label heuristic is a
+bounded audit sample, not a candidate_media oracle.
+
+Scoped candidate depth across the 30 requests: 6 with zero, 14 with 1–2,
+7 with 3–9, and 3 with 10+ candidates; distinct-release depth follows the
+same full-pipeline counts. Latency p50/p95: FTS 3.015/17.957ms, canonical
+extraction 9.081/76.308ms, identity 9.352/66.923ms, episode coverage
+0.044/0.165ms, total 23.233/163.165ms.
+
+Decision: do not integrate. The benchmark is now trustworthy enough to
+identify the current bottleneck, but canonical recovery and manual negative
+safety are insufficient. No new heuristics were added during measurement, no
+persistence changed, and production retrieval remains untouched.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
