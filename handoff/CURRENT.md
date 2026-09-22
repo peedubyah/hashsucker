@@ -429,14 +429,33 @@ exact show title. Scoped answerability was 14/30 at >=1, 5/30 at >=3, and
 was 24/30, 23/30, and 23/30. FTS/identity/episode/total p50/p95 were
 45.683/265.638ms, 15.232/76.241ms, 0.094/0.340ms, and 61.041/337.094ms.
 
-Decision: **do not integrate**. The resolver meets the precision priority only
-when paired with an already-correct association, but standalone real-corpus
-recall is not acceptable and would make live discovery necessary for many
-ordinary requests. Do not loosen matching or add fuzzy matching. The next
-work, if resumed, is a deterministic parser/pack-evidence rule backed by
-categorized false negatives and a manually labeled stratified corpus sample;
-no production retrieval, provider traffic, ranking, persistence, TUI, or live
-behavior changed.
+Decision: **do not integrate**. The previous benchmark terminology was corrected: `candidate_media` is a
+sparse positive oracle. Associated rows rejected by the resolver are valid
+false negatives; unassociated FTS rows are unlabeled and are not false
+positives/TNs.
+
+A 971-row trusted TV association inventory found 421 `SxxExx`, 490 season or
+range-pack, 14 complete-pack, 16 quality/source, 6 language, and 24 other
+parser-title contamination cases. The existing parser already extracts many
+attributes, but `extractTitle()` reconstructs title text before removing all
+season-pack and release grammar.
+
+Added deterministic `canonicalReleaseTitle()` and routed it into
+`agreeShowIdentity()` without changing the matcher. It removes only explicit
+release grammar, preserves identity-bearing regional tokens (`US`, `UK`,
+`Australia`), and does not use requested metadata. A 100-case hard-negative
+set had zero false accepts. Resolver tests and canonical-title tests pass.
+
+On the same 30-show corpus, known-positive recovery remains 5/506 (0.99%) in
+the current benchmark because the benchmark's episode gate is fixed to S01E01
+and the persisted association set is polluted by cross-intent canary rows;
+this is not sufficient to claim production readiness. Scoped answerability
+improved from 14/30 to 16/30 at >=1, 5/30 to 8/30 at >=3, and 1/30 to 2/30 at
+>=10. Canonical identity/episode/total p50/p95 were 23.344/132.181ms,
+0.108/0.388ms, and 25.554/141.634ms. Integration into production retrieval
+remains parked pending a corrected per-request positive benchmark and
+stratified manual validation. No fuzzy matching, persistence, provider,
+ranking, or live behavior changed.
 
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 

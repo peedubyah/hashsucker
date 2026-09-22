@@ -47,22 +47,22 @@ function percentile(values, p) {
   const xs = [...values].sort((a, b) => a - b);
   return xs[Math.min(xs.length - 1, Math.ceil(xs.length * p) - 1)];
 }
-function classify(rows, mediaId) {
+function classifyKnownPositives(rows, mediaId) {
   const cm = db.prepare('SELECT 1 FROM candidate_media WHERE info_hash=? AND file_index_key=? AND media_id=?');
-  const out = { tp: 0, fp: 0, fn: 0, tn: 0 };
+  const out = { acceptedKnownPositive: 0, rejectedKnownPositive: 0, unlabeledAccepted: 0, unlabeledRejected: 0 };
   for (const row of rows) {
-    const correct = Boolean(cm.get(row.info_hash, row.file_index_key, mediaId));
-    if (row.accepted && correct) out.tp++;
-    else if (row.accepted && !correct) out.fp++;
-    else if (!row.accepted && correct) out.fn++;
-    else out.tn++;
+    const knownPositive = Boolean(cm.get(row.info_hash, row.file_index_key, mediaId));
+    if (knownPositive && row.accepted) out.acceptedKnownPositive++;
+    else if (knownPositive) out.rejectedKnownPositive++;
+    else if (row.accepted) out.unlabeledAccepted++;
+    else out.unlabeledRejected++;
   }
   return out;
 }
 function add(a, b) { for (const k of Object.keys(a)) a[k] += b[k]; return a; }
 
 const modes = { existing: [], scoped: [], persisted: [] };
-const totals = { existing: {tp:0,fp:0,fn:0,tn:0}, scoped: {tp:0,fp:0,fn:0,tn:0}, persisted: {tp:0,fp:0,fn:0,tn:0} };
+const totals = { existing: {acceptedKnownPositive:0,rejectedKnownPositive:0,unlabeledAccepted:0,unlabeledRejected:0}, scoped: {acceptedKnownPositive:0,rejectedKnownPositive:0,unlabeledAccepted:0,unlabeledRejected:0}, persisted: {acceptedKnownPositive:0,rejectedKnownPositive:0,unlabeledAccepted:0,unlabeledRejected:0} };
 const answerability = { existing: {one:0,three:0,ten:0,unresolved:0}, scoped: {one:0,three:0,ten:0,unresolved:0}, persisted: {one:0,three:0,ten:0,unresolved:0} };
 const timings = { metadata: [], fts: [], identity: [], episode: [], total: [] };
 const perShow = [];
@@ -93,7 +93,7 @@ for (const [canonicalTitle, mediaId, firstAirYear] of shows) {
   const existingRows = rows.map((row) => ({ ...row, accepted: isEpisodeCovered({ ...row, episodeRange: row.episode_range, seasonOnly: row.media_type === 'season' }, 1, 1) }));
   const resultRows = { existing: existingRows, scoped: episodeRows, persisted: persistedRows };
   for (const mode of Object.keys(resultRows)) {
-    const c = classify(resultRows[mode], mediaId); add(totals[mode], c);
+    const c = classifyKnownPositives(resultRows[mode], mediaId); add(totals[mode], c);
     const accepted = resultRows[mode].filter((r) => r.accepted).length;
     answerability[mode].one += accepted >= 1; answerability[mode].three += accepted >= 3; answerability[mode].ten += accepted >= 10; answerability[mode].unresolved += accepted === 0;
   }
@@ -105,7 +105,8 @@ console.log(JSON.stringify({
   metadataContract: ['canonicalTitle','originalTitle?','alternateTitles[]','firstAirYear?','externalIds?','episodeTitle?','episodeTitles[]'],
   classificationOracle: 'candidate_media exact association; bounded, not exhaustive manual truth',
   perShow, totals,
-  metrics: Object.fromEntries(Object.entries(totals).map(([mode,c]) => [mode, { ...c, precision: percent(c.tp, c.tp+c.fp), recall: percent(c.tp, c.tp+c.fn) }])),
+  metrics: Object.fromEntries(Object.entries(totals).map(([mode,c]) => [mode, { ...c, knownPositiveRecovery: percent(c.acceptedKnownPositive, c.acceptedKnownPositive+c.rejectedKnownPositive) }])),
+  note: 'Unlabeled FTS candidates are reported separately and are not false positives or true negatives.',
   answerability, latencyMs: Object.fromEntries(Object.entries(timings).map(([k,v]) => [k, { p50: Number(percentile(v,.5).toFixed(3)), p95: Number(percentile(v,.95).toFixed(3)) }])),
 }, null, 2));
 db.close();

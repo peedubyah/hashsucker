@@ -4,6 +4,7 @@
  * when its suffix is a supplied known episode title.
  */
 import { parsedReleaseTitle } from './identity-agreement.js';
+import { canonicalReleaseTitle } from './release-title.js';
 
 /**
  * @typedef {Object} ShowIdentityContext
@@ -55,7 +56,7 @@ export function agreeShowIdentity({
   if (references.length === 0) return { matched: false, reason: 'no-reference-title', confidence: 0 };
   const parsed = parsedReleaseTitle(release);
   const rawFilename = String(release?.filename ?? '').split('/').pop()?.replace(/\.[^.]+$/, '') ?? '';
-  const title = normalizeShowTitle(parsed.title || rawFilename);
+  const title = normalizeShowTitle(canonicalReleaseTitle(release) || parsed.title || rawFilename);
   const rawTitle = normalizeShowTitle(rawFilename);
   const titles = new Set([title, rawTitle].filter(Boolean));
   if (titles.size === 0 || !yearAgrees(parsed.year, expectedYear)) return { matched: false, reason: 'title-or-year-mismatch', confidence: 0 };
