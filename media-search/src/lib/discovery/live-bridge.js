@@ -120,8 +120,9 @@ export async function runLiveDiscovery(mediaId, options = {}) {
  * @returns {Promise<{ releases: Array, sources: Object }>}
  */
 export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
-  const { season, episode, title, year, wantedImdbId } = options;
+  const { season, episode, title, year, wantedImdbId, cache = null } = options;
   const mediaType = episode != null ? 'series' : 'movie';
+  const queryKey = `${mediaId}${season != null ? `:${season}` : ''}${episode != null ? `:${episode}` : ''}`;
 
   const prowlarrClient = prowlarrClientFromEnv(options.env);
   const prowlarrTask = prowlarrClient
@@ -131,10 +132,19 @@ export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
     })
     : Promise.resolve([]);
 
-  const results = await Promise.allSettled([
-    searchStremio({ type: mediaType, mediaId }),
-    searchTorznab({ type: mediaType, mediaId }),
-    prowlarrTask,
+  const measure = async (sourceClass, task) => {
+    const startedAt = Date.now();
+    try {
+      const value = await task;
+      return { sourceClass, ok: true, value, latencyMs: Date.now() - startedAt };
+    } catch (error) {
+      return { sourceClass, ok: false, error, latencyMs: Date.now() - startedAt };
+    }
+  };
+  const results = await Promise.all([
+    measure('torrentio', searchStremio({ type: mediaType, mediaId })),
+    measure('torznab', searchTorznab({ type: mediaType, mediaId })),
+    measure('prowlarr', prowlarrTask),
   ]);
 
   const sources = {
@@ -145,30 +155,25 @@ export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
 
   const allReleases = [];
 
-  const [stremioResult, torznabResult, prowlarrResult] = results;
-
-  if (stremioResult.status === 'fulfilled' && Array.isArray(stremioResult.value)) {
-    const valid = stremioResult.value.filter(r => r.infoHash);
-    sources.torrentio.count = valid.length;
-    allReleases.push(...valid);
-  } else if (stremioResult.status === 'rejected') {
-    sources.torrentio.error = stremioResult.reason?.message || 'unknown error';
-  }
-
-  if (torznabResult.status === 'fulfilled' && Array.isArray(torznabResult.value)) {
-    const valid = torznabResult.value.filter(r => r.infoHash);
-    sources.torznab.count = valid.length;
-    allReleases.push(...valid);
-  } else if (torznabResult.status === 'rejected') {
-    sources.torznab.error = torznabResult.reason?.message || 'unknown error';
-  }
-
-  if (prowlarrResult.status === 'fulfilled' && Array.isArray(prowlarrResult.value)) {
-    const valid = prowlarrResult.value.filter(r => r.infoHash);
-    sources.prowlarr.count = valid.length;
-    allReleases.push(...valid);
-  } else if (prowlarrResult.status === 'rejected') {
-    sources.prowlarr.error = prowlarrResult.reason?.message || 'unknown error';
+  for (const result of results) {
+    const source = sources[result.sourceClass];
+    const valid = result.ok && Array.isArray(result.value)
+      ? result.value.filter((r) => r.infoHash)
+      : [];
+    source.count = valid.length;
+    source.latencyMs = result.latencyMs;
+    source.error = result.ok ? null : String(result.error?.message || result.error || 'unknown error');
+    allReleases.push(...valid.map((release) => ({ ...release, sourceClass: result.sourceClass })));
+    if (cache?.recordEvidenceQuery) {
+      const unique = new Set(valid.map((r) => String(r.infoHash).toLowerCase()));
+      let known = 0;
+      for (const infoHash of unique) if (cache.getCandidate?.(infoHash, null)) known++;
+      cache.recordEvidenceQuery({
+        queryKey, sourceClass: result.sourceClass, observedAt: Date.now(),
+        latencyMs: result.latencyMs, candidateCount: unique.size,
+        novelReleaseCount: Math.max(0, unique.size - known),
+      });
+    }
   }
 
   // Normalize (same as runLiveDiscovery)
@@ -186,6 +191,8 @@ export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
     audio: r.audio,
     releaseGroup: r.releaseGroup,
     providers: r.providers || {},
+    sources: [{ addonId: r.sourceClass || 'live-discovery', addonName: r.sourceClass || 'live-discovery' }],
+    sourceClass: r.sourceClass || 'live-discovery',
     confidence: r.confidence ?? 0.5,
     // Slice 1.75: prefer the strict `exactFileSize` (behaviorHints.videoSize
     // only, safe integer > 0) over `size`, which may be a parseSizeFromText

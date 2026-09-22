@@ -3356,6 +3356,22 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     return getEvidenceQuerySummaryStmt.all(from, to);
   }
 
+  function listEvidenceQueryLatency({ from = 0, to = Date.now() } = {}) {
+    const rows = db.prepare(`SELECT source_class, latency_ms FROM evidence_query_observations
+      WHERE observed_at BETWEEN ? AND ? AND latency_ms IS NOT NULL ORDER BY source_class, latency_ms`).all(from, to);
+    const grouped = new Map();
+    for (const row of rows) {
+      if (!grouped.has(row.source_class)) grouped.set(row.source_class, []);
+      grouped.get(row.source_class).push(row.latency_ms);
+    }
+    const percentile = (values, p) => values.length ? values[Math.min(values.length - 1, Math.floor((values.length - 1) * p))] : null;
+    return [...grouped.entries()].map(([sourceClass, values]) => ({
+      source_class: sourceClass, samples: values.length,
+      p50_latency_ms: percentile(values, 0.5), p95_latency_ms: percentile(values, 0.95),
+      max_latency_ms: values[values.length - 1],
+    }));
+  }
+
   function listEvidenceClaimCalibration({ from = 0, to = Date.now() } = {}) {
     return db.prepare(`
       SELECT c.provider, c.observer, c.source_class,
@@ -6349,6 +6365,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     listEvidenceSummary,
     recordEvidenceQuery,
     listEvidenceQuerySummary,
+    listEvidenceQueryLatency,
     listEvidenceClaimCalibration,
     // Playback handoff persistence
     persistPlaybackHandoff,

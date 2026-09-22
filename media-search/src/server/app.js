@@ -2838,6 +2838,7 @@ export function createRequestHandler(dependencies = {}) {
             ? async () => runLiveDiscoveryWithCounts(mediaId, {
                 season: intent?.season,
                 episode: intent?.episodes?.[0],
+                cache: searchCache,
               })
             : null,
         });
@@ -3646,7 +3647,7 @@ export function createRequestHandler(dependencies = {}) {
             includeMedia: true,
             mode: 'ui',
             mediaId,
-            liveDiscoveryFn: async () => runLiveDiscoveryWithCounts(mediaId, { season: intent.season, episode: intent.episodes[0] }),
+            liveDiscoveryFn: async () => runLiveDiscoveryWithCounts(mediaId, { season: intent.season, episode: intent.episodes[0], cache: searchCache }),
           });
           // Expose debug output in the response
           const liveDebug = result.debug?.liveDiscovery || null;
@@ -4209,6 +4210,7 @@ export function createRequestHandler(dependencies = {}) {
           generatedAt: to,
           sources: searchCache.listEvidenceSummary?.() ?? [],
           queryYield: searchCache.listEvidenceQuerySummary?.({ from, to }) ?? [],
+          queryLatency: searchCache.listEvidenceQueryLatency?.({ from, to }) ?? [],
           claimCalibration: searchCache.listEvidenceClaimCalibration?.({ from, to }) ?? [],
         });
       }
