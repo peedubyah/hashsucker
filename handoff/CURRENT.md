@@ -343,6 +343,26 @@ candidate baseline; novelty uses existing `(infoHash,fileIndexKey)` identity and
 recognizes prior evidence rows. Focused source/evidence/operator tests passed
 (54 tests). No ranking, fan-out, or provider behavior changed. No release/build/tag work performed.
 
+### Landed: corrected independent-source mini census
+
+Commit `95a14a6` is pushed to `github/main`. Identity wording now explicitly
+states that `fileIndex`/`file_index_key` are discovery candidate keys, never
+TorrentFile identity; TorrentFile remains `infoHash + canonicalInternalPath +
+exact positive size`. A six-identity scratch census queried configured Stremio
+observers independently against one immutable pre-query baseline: two Torrentio
+manifests and two Comet manifests were active; no manual Comet manifest was
+configured. Results: Torrentio-TorBox 819 hashes, Torrentio-RD 591, Comet-TorBox
+3541, Comet-RD 3541 across six queries each; all succeeded. Comet TB/RD were
+identical per identity (near-1.0 overlap); Torrentio TB/RD overlapped 0.61-0.82.
+Torrentio/Comet overlap was 0.10-0.36, with Comet expanding the union materially
+in this sample. Exclusive hashes were mostly Torrentio-TorBox (1-6 per item);
+Comet had zero exclusive hashes because its larger sets contained the other
+sets. No Torznab/Prowlarr census calls were included in this independent
+Stremio-only run; their prior state remains disposition-based. The six baselines
+had 13/17 known releases for the two popular movies and zero known associations
+for the other four IDs; no persisted winners were used. No provider acquisition,
+ranking, or fan-out changes. No release/build/tag work performed.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
