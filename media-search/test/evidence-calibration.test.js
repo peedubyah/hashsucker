@@ -38,10 +38,10 @@ test('claim calibration joins observer/provider independently of correlation id'
 
 test('query yield stores bounded source latency and counts', () => {
   const c = cache();
-  c.recordEvidenceQuery({ queryKey: 'tt-example', sourceClass: 'torrentio', observedAt: 1000, latencyMs: 120, candidateCount: 10, novelReleaseCount: 3, novelAssociationCount: 2, selectedCount: 1 });
-  c.recordEvidenceQuery({ queryKey: 'tt-example', sourceClass: 'torrentio', observedAt: 2000, latencyMs: 80, candidateCount: 5, novelReleaseCount: 1 });
+  c.recordEvidenceQuery({ queryKey: 'tt-example', observer: 'torrentio', sourceClass: 'stremio', observedAt: 1000, latencyMs: 120, candidateCount: 10, novelReleaseCount: 3, novelAssociationCount: 2, selectedCount: 1 });
+  c.recordEvidenceQuery({ queryKey: 'tt-example', observer: 'torrentio', sourceClass: 'stremio', observedAt: 2000, latencyMs: 80, candidateCount: 5, novelReleaseCount: 1 });
   const rows = c.listEvidenceQuerySummary({ from: 0, to: 3000 });
   assert.equal(rows.length, 1);
-  assert.deepEqual({ ...rows[0] }, { source_class: 'torrentio', query_count: 2, hashes_observed: 15, novel_releases: 4, novel_associations: 2, selections: 1, average_latency_ms: 100 });
+  assert.deepEqual({ ...rows[0] }, { observer: 'torrentio', source_class: 'stremio', disposition: 'queried_success', query_count: 2, attempted_queries: 2, successful_queries: 2, empty_queries: 0, skipped_or_failed_queries: 0, hashes_observed: 15, novel_releases: 4, novel_associations: 2, selections: 1, average_latency_ms: 100 });
   c.close();
 });

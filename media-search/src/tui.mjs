@@ -237,8 +237,8 @@ function renderEvidence() {
   out.push(line());
   out.push(`${C.bold}Query yield${C.reset}`);
   for (const row of data.queryYield ?? []) {
-    const latency = data.queryLatency?.find((item) => item.source_class === row.source_class);
-    out.push(`  ${row.source_class} queries=${row.query_count ?? 0} hashes=${row.hashes_observed ?? 0} novel=${row.novel_releases ?? 0} p50=${latency?.p50_latency_ms ?? '—'}ms p95=${latency?.p95_latency_ms ?? '—'}ms max=${latency?.max_latency_ms ?? '—'}ms`);
+    const latency = data.queryLatency?.find((item) => item.observer === row.observer && item.source_class === row.source_class);
+    out.push(`  ${row.observer}/${row.source_class} ${row.disposition} q=${row.query_count ?? 0} hashes=${row.hashes_observed ?? 0} novel=${row.novel_releases ?? 0} p50=${latency?.p50_latency_ms ?? '—'}ms p95=${latency?.p95_latency_ms ?? '—'}ms max=${latency?.max_latency_ms ?? '—'}ms`);
   }
   out.push(line());
   out.push(`${C.bold}Claim calibration${C.reset}`);

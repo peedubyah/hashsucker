@@ -91,7 +91,9 @@ CREATE INDEX IF NOT EXISTS idx_evidence_last_seen ON evidence_observations(last_
 CREATE TABLE IF NOT EXISTS evidence_query_observations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   query_key TEXT NOT NULL,
+  observer TEXT NOT NULL DEFAULT 'unknown',
   source_class TEXT NOT NULL,
+  disposition TEXT NOT NULL DEFAULT 'queried_success',
   observed_at INTEGER NOT NULL,
   latency_ms INTEGER,
   candidate_count INTEGER NOT NULL DEFAULT 0,
@@ -100,7 +102,7 @@ CREATE TABLE IF NOT EXISTS evidence_query_observations (
   selected_count INTEGER NOT NULL DEFAULT 0,
   UNIQUE(query_key, source_class, observed_at)
 );
-CREATE INDEX IF NOT EXISTS idx_evidence_query_source ON evidence_query_observations(source_class, observed_at);
+CREATE INDEX IF NOT EXISTS idx_evidence_query_source ON evidence_query_observations(observer, source_class, observed_at);
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
   name TEXT PRIMARY KEY,
@@ -2201,6 +2203,9 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   ensureMediaIntentIdentityColumns(db);
 
   db.exec(SCHEMA);
+  const queryEvidenceColumns = db.prepare('PRAGMA table_info(evidence_query_observations)').all().map((row) => row.name);
+  if (!queryEvidenceColumns.includes('observer')) db.exec("ALTER TABLE evidence_query_observations ADD COLUMN observer TEXT NOT NULL DEFAULT 'unknown'");
+  if (!queryEvidenceColumns.includes('disposition')) db.exec("ALTER TABLE evidence_query_observations ADD COLUMN disposition TEXT NOT NULL DEFAULT 'queried_success'");
 
   migrateLegacyProviderObservations(db);
   migrateMediaRequestEligibilityColumns(db);
@@ -2242,12 +2247,16 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   `);
   const insertEvidenceQueryStmt = db.prepare(`
     INSERT OR IGNORE INTO evidence_query_observations (
-      query_key, source_class, observed_at, latency_ms, candidate_count,
-      novel_release_count, novel_association_count, selected_count
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      query_key, observer, source_class, disposition, observed_at, latency_ms,
+      candidate_count, novel_release_count, novel_association_count, selected_count
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const getEvidenceQuerySummaryStmt = db.prepare(`
-    SELECT source_class, COUNT(*) AS query_count,
+    SELECT observer, source_class, disposition, COUNT(*) AS query_count,
+      SUM(CASE WHEN disposition LIKE 'queried_%' THEN 1 ELSE 0 END) AS attempted_queries,
+      SUM(CASE WHEN disposition = 'queried_success' THEN 1 ELSE 0 END) AS successful_queries,
+      SUM(CASE WHEN disposition = 'queried_empty' THEN 1 ELSE 0 END) AS empty_queries,
+      SUM(CASE WHEN disposition NOT LIKE 'queried_%' THEN 1 ELSE 0 END) AS skipped_or_failed_queries,
       SUM(candidate_count) AS hashes_observed,
       SUM(novel_release_count) AS novel_releases,
       SUM(novel_association_count) AS novel_associations,
@@ -2255,7 +2264,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       AVG(latency_ms) AS average_latency_ms
     FROM evidence_query_observations
     WHERE observed_at >= ? AND observed_at <= ?
-    GROUP BY source_class ORDER BY source_class
+    GROUP BY observer, source_class, disposition ORDER BY observer, source_class, disposition
   `);
   const getEvidenceSummaryStmt = db.prepare(`
     SELECT observer, source_class,
@@ -3341,8 +3350,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
   function recordEvidenceQuery(input = {}) {
     insertEvidenceQueryStmt.run(
-      input.queryKey ?? 'unknown', input.sourceClass ?? 'unknown',
-      input.observedAt ?? Date.now(), input.latencyMs ?? null,
+      input.queryKey ?? 'unknown', input.observer ?? 'unknown', input.sourceClass ?? 'unknown',
+      input.disposition ?? 'queried_success', input.observedAt ?? Date.now(), input.latencyMs ?? null,
       input.candidateCount ?? 0, input.novelReleaseCount ?? 0,
       input.novelAssociationCount ?? 0, input.selectedCount ?? 0,
     );
@@ -3357,16 +3366,17 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   }
 
   function listEvidenceQueryLatency({ from = 0, to = Date.now() } = {}) {
-    const rows = db.prepare(`SELECT source_class, latency_ms FROM evidence_query_observations
-      WHERE observed_at BETWEEN ? AND ? AND latency_ms IS NOT NULL ORDER BY source_class, latency_ms`).all(from, to);
+    const rows = db.prepare(`SELECT observer, source_class, latency_ms FROM evidence_query_observations
+      WHERE observed_at BETWEEN ? AND ? AND latency_ms IS NOT NULL ORDER BY observer, source_class, latency_ms`).all(from, to);
     const grouped = new Map();
     for (const row of rows) {
-      if (!grouped.has(row.source_class)) grouped.set(row.source_class, []);
-      grouped.get(row.source_class).push(row.latency_ms);
+      const key = `${row.observer}\u001f${row.source_class}`;
+      if (!grouped.has(key)) grouped.set(key, { observer: row.observer, source_class: row.source_class, values: [] });
+      grouped.get(key).values.push(row.latency_ms);
     }
     const percentile = (values, p) => values.length ? values[Math.min(values.length - 1, Math.floor((values.length - 1) * p))] : null;
-    return [...grouped.entries()].map(([sourceClass, values]) => ({
-      source_class: sourceClass, samples: values.length,
+    return [...grouped.values()].map(({ observer, source_class, values }) => ({
+      observer, source_class, samples: values.length,
       p50_latency_ms: percentile(values, 0.5), p95_latency_ms: percentile(values, 0.95),
       max_latency_ms: values[values.length - 1],
     }));

@@ -148,10 +148,11 @@ export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
   ]);
 
   const sources = {
-    torrentio: { count: 0, error: null },
-    torznab: { count: 0, error: null },
-    prowlarr: { count: 0, error: null },
+    torrentio: { observer: 'torrentio', sourceClass: 'stremio', count: 0, error: null, disposition: 'queried_success' },
+    torznab: { observer: 'torznab', sourceClass: 'torznab', count: 0, error: null, disposition: 'queried_success' },
+    prowlarr: { observer: 'prowlarr', sourceClass: 'prowlarr', count: 0, error: null, disposition: prowlarrClient ? 'queried_success' : 'not_configured' },
   };
+  if (!prowlarrClient) sources.prowlarr.disposition = 'not_configured';
 
   const allReleases = [];
 
@@ -163,15 +164,17 @@ export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
     source.count = valid.length;
     source.latencyMs = result.latencyMs;
     source.error = result.ok ? null : String(result.error?.message || result.error || 'unknown error');
+    if (!result.ok) source.disposition = /timeout|abort/i.test(source.error) ? 'timeout' : 'upstream_error';
+    else if (valid.length === 0 && source.disposition === 'queried_success') source.disposition = 'queried_empty';
     allReleases.push(...valid.map((release) => ({ ...release, sourceClass: result.sourceClass })));
     if (cache?.recordEvidenceQuery) {
       const unique = new Set(valid.map((r) => String(r.infoHash).toLowerCase()));
       let known = 0;
       for (const infoHash of unique) if (cache.getCandidate?.(infoHash, null)) known++;
       cache.recordEvidenceQuery({
-        queryKey, sourceClass: result.sourceClass, observedAt: Date.now(),
-        latencyMs: result.latencyMs, candidateCount: unique.size,
-        novelReleaseCount: Math.max(0, unique.size - known),
+        queryKey, observer: source.observer, sourceClass: source.sourceClass,
+        disposition: source.disposition, observedAt: Date.now(), latencyMs: result.latencyMs,
+        candidateCount: unique.size, novelReleaseCount: Math.max(0, unique.size - known),
       });
     }
   }
@@ -191,7 +194,8 @@ export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
     audio: r.audio,
     releaseGroup: r.releaseGroup,
     providers: r.providers || {},
-    sources: [{ addonId: r.sourceClass || 'live-discovery', addonName: r.sourceClass || 'live-discovery' }],
+    sources: [{ addonId: r.addonId || r.sourceClass || 'live-discovery', addonName: r.addonName || r.sourceClass || 'live-discovery' }],
+    observer: r.observer || r.addonId || r.sourceClass || 'live-discovery',
     sourceClass: r.sourceClass || 'live-discovery',
     confidence: r.confidence ?? 0.5,
     // Slice 1.75: prefer the strict `exactFileSize` (behaviorHints.videoSize

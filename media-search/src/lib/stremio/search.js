@@ -219,6 +219,8 @@ export async function searchStremio({
         normalizeStream(raw, {
           addonId: addon.addon_id,
           addonName: addon.name,
+          provider: addon.provider || addon.provider_name || addon.addon_id,
+          sourceClass: 'stremio',
           sortOrder: addon.sort_order ?? index,
           streamType: type,
         })

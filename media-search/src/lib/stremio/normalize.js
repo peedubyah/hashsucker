@@ -366,6 +366,8 @@ export function normalizeStream(raw, addonMeta = {}) {
     key,
     addonId: addonMeta.addonId || null,
     addonName: addonMeta.addonName || null,
+    observer: addonMeta.provider || addonMeta.addonId || null,
+    sourceClass: addonMeta.sourceClass || 'stremio',
     addonLogo: addonMeta.addonLogo || null,
     addonSortOrder: addonMeta.sortOrder ?? 0,
     streamType: addonMeta.streamType || null,
@@ -392,6 +394,8 @@ export function normalizeStream(raw, addonMeta = {}) {
       {
         addonId: addonMeta.addonId || null,
         addonName: addonMeta.addonName || null,
+        observer: addonMeta.provider || addonMeta.addonId || null,
+        sourceClass: addonMeta.sourceClass || 'stremio',
         role: addonMeta.role || 'discovery',
         provider: addonMeta.provider || null,
       },

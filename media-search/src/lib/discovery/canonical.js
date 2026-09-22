@@ -169,6 +169,8 @@ export function toCanonicalLive(raw, options = {}) {
       if (hint && typeof hint === 'object') {
         sources.push({
           origin: 'live',
+          observer: providerName,
+          sourceClass: 'stremio',
           evidence: hint.evidence || [],
           confidence: raw.confidence ?? 0.5,
           evidenceType: `provider-hint:${providerName}`,
@@ -186,8 +188,8 @@ export function toCanonicalLive(raw, options = {}) {
   if (raw.sources && Array.isArray(raw.sources)) {
     for (const src of raw.sources) {
       sources.push({
-        origin: 'live',
-        evidence: [],
+        origin: 'live',        observer: src?.observer || src?.addonName || src?.addonId || 'unknown',
+        sourceClass: 'stremio',        evidence: [],
         confidence: raw.confidence ?? 0.5,
         evidenceType: src?.addonId || src?.kind || 'live-discovery',
         addonId: src?.addonId || null,
@@ -197,6 +199,8 @@ export function toCanonicalLive(raw, options = {}) {
   } else {
     sources.push({
       origin: 'live',
+      observer: raw.observer || raw.sourceClass || 'unknown',
+      sourceClass: raw.sourceClass || 'stremio',
       evidence: [],
       confidence: raw.confidence ?? 0.5,
       evidenceType: 'live-discovery',
