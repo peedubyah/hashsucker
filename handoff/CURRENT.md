@@ -382,6 +382,31 @@ Episode coverage: 6/20 for all three thresholds. This supports a structural TV
 association gap. No live source was re-run, no provider work, no ranking change,
 no backfill or enrichment pass was started. No release/build/tag work performed.
 
+### Completed: episode retrieval audit
+
+No product code changes were required. `candidate_media` is a high-confidence
+persisted association/enrichment table, not an exhaustive media index: writers
+are explicit ingestion associations and identity-enrichment/idle-enrichment
+paths; readers provide identity confidence and media-scoped ranking context;
+hygiene protects published bindings. The current corpus has 1,586,607
+candidates, 1,586,549 attribute rows, 5,711 distinct candidate/media
+associations, 1,584,812 unassociated candidates, 1,585,821 useful-attribute
+keys, and 4,598 pending enrichment rows. Existing FTS plus the proven
+`episode-coverage.js` logic can answer exact episodes dynamically: Breaking Bad
+S05E14 returned 118 eligible hits/7 paged results in ~140ms; Game of Thrones
+S01E01 returned 142/12 in ~163ms; The Last of Us S01E01 returned 609/11 in
+~212ms; The Sopranos S01E04 returned 49/3 in ~101ms. Negative-control `Friends`
+S01E01 returned false-title candidates because the query title was ambiguous,
+so media identity/title scoping remains necessary; no resolver was shipped.
+Show-level associations exist while exact colon episode IDs do not (`tt0903747`
+221 vs `tt0903747:5:14` 0; `tt0944947` 56 vs exact 0; `tt10986410` 256 vs
+exact 0). Bounded 20-movie/20-episode association coverage was 14/20 movies
+and 6/20 episodes at >=1, >=3, and >=10 association thresholds. Decision:
+retain dynamic attribute/episode retrieval as the measured foundation; do not
+materialize broad associations or add a derived index until a truth-set resolver
+can safely scope titles and prove precision. No backfill, live provider run,
+ranking change, release, build, or tag work performed.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
