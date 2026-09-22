@@ -1,0 +1,16 @@
+#!/usr/bin/env node
+/**
+ * Read-only contextual-memory replay over historical request results.
+ * No schema, provider, ranking, or production state changes.
+ */
+import { DatabaseSync } from 'node:sqlite';
+const path=process.env.DISCOVERY_DB||'/home/patrick/hashsucker-data/discovery/discovery-cache.db';
+const db=new DatabaseSync(path,{readOnly:true});
+const movieIds=db.prepare(`SELECT media_id FROM media_requests WHERE media_type='movie' GROUP BY media_id ORDER BY MAX(created_at) DESC LIMIT 10`).all().map(x=>x.media_id);
+const tv= db.prepare(`SELECT media_id,season,episode FROM media_requests WHERE media_type IN ('tv','series') AND season IS NOT NULL AND episode IS NOT NULL GROUP BY media_id,season,episode ORDER BY MAX(created_at) DESC LIMIT 20`).all();
+const requests=[...movieIds.map(media_id=>({media_id,season:null,episode:null,kind:'movie'})),...tv.map(x=>({...x,kind:'tv'}))];
+function rowsFor(r){return db.prepare(`SELECT mrr.*,mr.media_id,mr.season,mr.episode,mr.created_at FROM media_request_results mrr JOIN media_requests mr ON mr.id=mrr.request_id WHERE mr.media_id=? AND (mr.season IS ? OR mr.season=?) AND (mr.episode IS ? OR mr.episode=?) ORDER BY mr.created_at DESC,mrr.rank ASC`).all(r.media_id,r.season,r.season,r.episode,r.episode)}
+const per=[]; let observed=0,useful=0,selected=0,withHandoff=0;
+for(const r of requests){const rows=rowsFor(r); if(!rows.length)continue; const latest=rows.filter(x=>x.request_id===rows[0].request_id); const hashes=[...new Set(latest.map(x=>x.info_hash))]; const prior=rows.filter(x=>x.request_id!==rows[0].request_id); const priorHashes=new Set(prior.map(x=>x.info_hash)); const remembered=hashes.filter(h=>priorHashes.has(h)); const handoff=db.prepare(`SELECT COUNT(*) n FROM playback_handoffs ph JOIN media_requests mr ON mr.id=ph.request_id WHERE mr.media_id=? AND (mr.season IS ? OR mr.season=?) AND (mr.episode IS ? OR mr.episode=?)`).get(r.media_id,r.season,r.season,r.episode,r.episode).n; observed+=priorHashes.size; useful+=remembered.length; selected+=latest.filter(x=>x.rank===1&&x.eligible===1).length; withHandoff+=handoff>0; per.push({ ...r,requests:[...new Set(rows.map(x=>x.request_id))].length,latestCandidates:hashes.length,priorObserved:priorHashes.size,rememberedOnRepeat:remembered.length,topStable:latest[0]?.info_hash===prior[0]?.info_hash,providerHint:latest.some(x=>x.torrent_file_id),handoff:handoff>0});}
+const repeated=per.filter(x=>x.requests>1); const topStable=repeated.filter(x=>x.topStable).length; const depth=(key)=>per.filter(x=>x.latestCandidates>=key).length;
+console.log(JSON.stringify({status:'offline-read-only',sample:{movies:10,tv:20,total:requests.length},availableHistory:{cases:per.length,repeatedCases:repeated.length,requestsWithHandoff:withHandoff},observations:{priorDistinctReleaseObservations:observed,usefulRememberedReleases:useful,usefulPercent:observed?Number((useful/observed*100).toFixed(2)):0},repeat:{topSelectionStable:topStable,topSelectionStablePercent:repeated.length?Number((topStable/repeated.length*100).toFixed(2)):0,depth:{onePlus:depth(1),threePlus:depth(3),tenPlus:depth(10)}},tiers:{tier1:observed,usefulTier1:useful,tier2:'not available: observer-level media context is not retained in the audited records',tier3:selected,tier4:selected,tier5:withHandoff},per},null,2));db.close();

@@ -545,6 +545,58 @@ benchmark/audit artifacts, but do not integrate show identity into production
 retrieval. Do not delete the utility until a corrected source-context contract
 is evaluated; no production behavior changed.
 
+### Contextual-memory right-to-exist experiment — PARK
+
+The resolver remains parked. Added two read-only experiment scripts:
+`contextual-memory-replay.mjs` replays historical media request results, and the
+existing request/evidence audit was used to map information loss. No product
+schema, provider, ranking, UI, or production state changed.
+
+Current production DB is older than current `main`: it has 16,223
+`media_request_results`, 6,447 provider-observation events, 377 media requests,
+110 playback handoffs, 26 TV VFS entries, and 67 movie VFS entries, but lacks
+`evidence_observations` and `evidence_query_observations`. A scratch
+`createDiscoveryCache()` from current `main` creates both tables, so this is a
+schema/image drift finding, not a production migration performed for this
+experiment.
+
+Information-loss map: media intent survives in `media_requests` and
+`media_request_results`; release/hash/filename/rank/eligibility survive;
+expected media scope and parsed candidate scope survive in result rows; provider
+and playback handoff/TorrentFile survive when fulfilled. Generic corpus rows
+retain release knowledge and source lists, but the audited historical rows do
+not retain a durable complete `(observer, media intent, season, episode, hash)`
+tuple. Current source-context memory is therefore incomplete.
+
+Offline bounded replay: 10 movies + 20 TV intents (30 total), all selected from
+existing request history. All 30 had historical candidates; 16 had repeats.
+There were 666 distinct prior observed Releases, 513 reappeared on a later
+request (77.03% useful by hash recurrence), 75% top-selection stability on
+repeated cases, and 27/30 cases with a playback handoff. Candidate depth in the
+latest historical results was 30/30 at >=1, 25/30 at >=3, and 23/30 at >=10.
+However this is historical result recurrence, not an intervention: no actual
+source calls were suppressed, no latency was measured for a memory-assisted
+path, and observer-level Tier 2 provenance was unavailable. Tier 3/4 evidence
+was available for 29 cases and Tier 5 handoff evidence for 27.
+
+The replay shows potentially useful continuity, especially for fulfilled
+representations, but cannot prove discovery avoidance or latency savings. It
+also cannot distinguish a remembered candidate from normal persisted result
+reuse because the existing `media_request_results` already stores the relevant
+hashes and ranks. Adding a second contextual-memory schema would duplicate
+existing state without a demonstrated product gain.
+
+One-sentence value claim: **Contextual memory could deserve to exist if it
+materially suppresses repeat source fan-out while preserving the previously
+selected playable Release/TorrentFile.** This experiment did not measure that
+intervention or establish the missing observer-intent tuple.
+
+Verdict: **PARK**. Retain existing request results, playback handoffs, provider
+observation events, and current-main evidence schema for future use. Do not add
+a new memory schema, migration, UI, scheduler, provider behavior, or resolver
+integration. A future experiment must capture source responses on scratch DBs
+and compare actual no-memory versus in-memory source-call counts and latency.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
