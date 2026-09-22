@@ -228,12 +228,19 @@ function renderLibrary() {
 }
 
 function renderEvidence() {
-  const out = [`${C.bold}Evidence${C.reset}  ${C.dim}bounded source novelty and selection observations${C.reset}`, line()];
+  const data = state.data.evidence ?? {};
+  const out = [`${C.bold}Evidence${C.reset}  ${C.dim}bounded source yield and claim calibration${C.reset}`, line()];
   out.push('Source'.padEnd(18) + 'Obs'.padStart(6) + 'Novel release'.padStart(15) + 'Novel assoc'.padStart(14) + 'Novel TF'.padStart(11) + 'Selected'.padStart(10));
-  for (const row of state.data.evidence?.sources ?? []) {
+  for (const row of data.sources ?? []) {
     out.push(`${cut(`${row.observer}/${row.source_class}`, 18).padEnd(18)}${String(row.asserted_observations ?? 0).padStart(6)}${String(row.novel_releases ?? 0).padStart(15)}${String(row.novel_associations ?? 0).padStart(14)}${String(row.novel_torrent_files ?? 0).padStart(11)}${String(row.selections ?? 0).padStart(10)}`);
   }
-  if (!(state.data.evidence?.sources ?? []).length) out.push(`${C.dim}No evidence observations recorded yet.${C.reset}`);
+  out.push(line());
+  out.push(`${C.bold}Query yield${C.reset}`);
+  for (const row of data.queryYield ?? []) out.push(`  ${row.source_class} queries=${row.query_count ?? 0} hashes=${row.hashes_observed ?? 0} novel=${row.novel_releases ?? 0} avg=${row.average_latency_ms == null ? '—' : `${Math.round(row.average_latency_ms)}ms`}`);
+  out.push(line());
+  out.push(`${C.bold}Claim calibration${C.reset}`);
+  for (const row of data.claimCalibration ?? []) out.push(`  ${row.observer} → ${row.provider} ${row.age_bucket}: ${row.confirmed ?? 0}/${row.claims ?? 0} confirmed`);
+  if (!(data.sources ?? []).length && !(data.queryYield ?? []).length) out.push(`${C.dim}No evidence observations recorded yet.${C.reset}`);
   return out.join('\\n');
 }
 

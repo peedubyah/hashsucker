@@ -88,14 +88,18 @@ function ingestEntry(cache, source, entry) {
 
   // Upsert candidate through cache API (preserves identity, merges fields)
   cache.upsertCandidate(candidate);
-  cache.appendEvidenceObservation?.({
-    subjectKind: 'release',
-    infoHash: candidate.infoHash,
-    fileIndex: candidate.fileIndex,
-    observer: source,
-    sourceClass: source,
-    payload: { searchKey: candidate.searchKey ?? null },
-  });
+  // Bulk DMM has its own generation/fragment provenance table. Do not
+  // duplicate every corpus candidate in the generic evidence aggregate.
+  if (!/^dmm(?:-|$)/i.test(source)) {
+    cache.appendEvidenceObservation?.({
+      subjectKind: 'release',
+      infoHash: candidate.infoHash,
+      fileIndex: candidate.fileIndex,
+      observer: source,
+      sourceClass: source,
+      payload: { searchKey: candidate.searchKey ?? null },
+    });
+  }
 
   const inserted = !existing;
   const updated = !!existing;
@@ -108,15 +112,17 @@ function ingestEntry(cache, source, entry) {
       source,
       confidence: mediaAssoc.confidence ?? 1.0,
     });
-    cache.appendEvidenceObservation?.({
-      subjectKind: 'association',
-      infoHash: candidate.infoHash,
-      fileIndex: candidate.fileIndex,
-      mediaId: mediaAssoc.mediaId,
-      observer: source,
-      sourceClass: source,
-      payload: { confidence: mediaAssoc.confidence ?? 1.0 },
-    });
+    if (!/^dmm(?:-|$)/i.test(source)) {
+      cache.appendEvidenceObservation?.({
+        subjectKind: 'association',
+        infoHash: candidate.infoHash,
+        fileIndex: candidate.fileIndex,
+        mediaId: mediaAssoc.mediaId,
+        observer: source,
+        sourceClass: source,
+        payload: { confidence: mediaAssoc.confidence ?? 1.0 },
+      });
+    }
     const after = cache.getMediaAssociations(candidate.infoHash, candidate.fileIndex);
     if (after.length > before.length) associated++;
   }

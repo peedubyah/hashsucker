@@ -88,6 +88,20 @@ CREATE INDEX IF NOT EXISTS idx_evidence_source ON evidence_observations(observer
 CREATE INDEX IF NOT EXISTS idx_evidence_subject ON evidence_observations(info_hash, file_index_key, subject_kind);
 CREATE INDEX IF NOT EXISTS idx_evidence_last_seen ON evidence_observations(last_seen_at);
 
+CREATE TABLE IF NOT EXISTS evidence_query_observations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  query_key TEXT NOT NULL,
+  source_class TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,
+  latency_ms INTEGER,
+  candidate_count INTEGER NOT NULL DEFAULT 0,
+  novel_release_count INTEGER NOT NULL DEFAULT 0,
+  novel_association_count INTEGER NOT NULL DEFAULT 0,
+  selected_count INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(query_key, source_class, observed_at)
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_query_source ON evidence_query_observations(source_class, observed_at);
+
 CREATE TABLE IF NOT EXISTS schema_migrations (
   name TEXT PRIMARY KEY,
   applied_at INTEGER NOT NULL
@@ -2221,10 +2235,27 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       size, media_id, provider, observer, source_class, state)
     DO UPDATE SET last_seen_at = excluded.last_seen_at,
       observation_count = evidence_observations.observation_count + 1,
-      novelty = CASE WHEN evidence_observations.novelty = 'repeat_observation'
-        THEN evidence_observations.novelty ELSE evidence_observations.novelty END,
+      novelty = CASE WHEN evidence_observations.novelty = 'novel_release'
+        THEN 'repeat_observation' ELSE evidence_observations.novelty END,
       correlation_id = COALESCE(excluded.correlation_id, evidence_observations.correlation_id),
       payload = COALESCE(excluded.payload, evidence_observations.payload)
+  `);
+  const insertEvidenceQueryStmt = db.prepare(`
+    INSERT OR IGNORE INTO evidence_query_observations (
+      query_key, source_class, observed_at, latency_ms, candidate_count,
+      novel_release_count, novel_association_count, selected_count
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const getEvidenceQuerySummaryStmt = db.prepare(`
+    SELECT source_class, COUNT(*) AS query_count,
+      SUM(candidate_count) AS hashes_observed,
+      SUM(novel_release_count) AS novel_releases,
+      SUM(novel_association_count) AS novel_associations,
+      SUM(selected_count) AS selections,
+      AVG(latency_ms) AS average_latency_ms
+    FROM evidence_query_observations
+    WHERE observed_at >= ? AND observed_at <= ?
+    GROUP BY source_class ORDER BY source_class
   `);
   const getEvidenceSummaryStmt = db.prepare(`
     SELECT observer, source_class,
@@ -3271,7 +3302,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     const now = input.observedAt ?? Date.now();
     const infoHash = input.infoHash ?? null;
     const fileIndexKey = fileIndexKeyForEvidence(input.fileIndex, input.subjectKind);
-    const knownRelease = infoHash ? !!getCandidate(infoHash, input.fileIndex) : false;
+    const knownRelease = infoHash
+      ? !!getCandidate(infoHash, input.fileIndex)
+        || !!db.prepare('SELECT 1 FROM evidence_observations WHERE subject_kind = ? AND info_hash = ? AND file_index_key = ? LIMIT 1').get('release', infoHash, fileIndexKey)
+      : false;
     const knownAssociation = infoHash && input.mediaId
       ? getMediaAssociations(infoHash, input.fileIndex).some((row) => row.mediaId === input.mediaId)
       : false;
@@ -3282,18 +3316,70 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     if (input.subjectKind === 'release' && novelty === 'not_applicable') novelty = knownRelease ? 'repeat_observation' : 'novel_release';
     if (input.subjectKind === 'association' && novelty === 'not_applicable') novelty = knownAssociation ? 'repeat_observation' : 'novel_association';
     if (input.subjectKind === 'torrent_file' && novelty === 'not_applicable') novelty = knownTorrentFile ? 'repeat_observation' : 'novel_torrent_file';
-    upsertEvidenceObservationStmt.run(
-      input.subjectKind, infoHash, fileIndexKey, input.canonicalInternalPath ?? null,
+    const values = [input.subjectKind, infoHash, fileIndexKey, input.canonicalInternalPath ?? null,
       input.size ?? null, input.mediaId ?? null, input.provider ?? null,
-      input.observer ?? 'unknown', input.sourceClass ?? 'unknown', input.state ?? null,
-      novelty, now, now, input.correlationId ?? null,
-      input.payload == null ? null : JSON.stringify(input.payload),
+      input.observer ?? 'unknown', input.sourceClass ?? 'unknown', input.state ?? null];
+    const existing = db.prepare(`SELECT id, novelty, observation_count FROM evidence_observations
+      WHERE subject_kind = ? AND info_hash IS ? AND file_index_key = ?
+        AND canonical_internal_path IS ? AND size IS ? AND media_id IS ?
+        AND provider IS ? AND observer = ? AND source_class = ? AND state IS ?`).get(...values);
+    if (existing) {
+      db.prepare(`UPDATE evidence_observations SET last_seen_at = ?, observation_count = observation_count + 1,
+        novelty = CASE WHEN novelty = 'novel_release' THEN 'repeat_observation' ELSE novelty END,
+        correlation_id = COALESCE(?, correlation_id), payload = COALESCE(?, payload) WHERE id = ?`)
+        .run(now, input.correlationId ?? null, input.payload == null ? null : JSON.stringify(input.payload), existing.id);
+    } else {
+      db.prepare(`INSERT INTO evidence_observations (
+        subject_kind, info_hash, file_index_key, canonical_internal_path, size, media_id,
+        provider, observer, source_class, state, novelty, first_seen_at, last_seen_at,
+        observation_count, correlation_id, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`)
+        .run(...values, novelty, now, now, input.correlationId ?? null,
+          input.payload == null ? null : JSON.stringify(input.payload));
+    }
+    return { novelty: existing ? 'repeat_observation' : novelty, knownRelease, knownAssociation, knownTorrentFile };
+  }
+
+  function recordEvidenceQuery(input = {}) {
+    insertEvidenceQueryStmt.run(
+      input.queryKey ?? 'unknown', input.sourceClass ?? 'unknown',
+      input.observedAt ?? Date.now(), input.latencyMs ?? null,
+      input.candidateCount ?? 0, input.novelReleaseCount ?? 0,
+      input.novelAssociationCount ?? 0, input.selectedCount ?? 0,
     );
-    return { novelty, knownRelease, knownAssociation, knownTorrentFile };
   }
 
   function listEvidenceSummary() {
     return getEvidenceSummaryStmt.all();
+  }
+
+  function listEvidenceQuerySummary({ from = 0, to = Date.now() } = {}) {
+    return getEvidenceQuerySummaryStmt.all(from, to);
+  }
+
+  function listEvidenceClaimCalibration({ from = 0, to = Date.now() } = {}) {
+    return db.prepare(`
+      SELECT c.provider, c.observer, c.source_class,
+        CASE
+          WHEN (d.first_seen_at - c.last_seen_at) < 15*60*1000 THEN '<15m'
+          WHEN (d.first_seen_at - c.last_seen_at) < 60*60*1000 THEN '15-60m'
+          WHEN (d.first_seen_at - c.last_seen_at) < 6*60*60*1000 THEN '1-6h'
+          WHEN (d.first_seen_at - c.last_seen_at) < 24*60*60*1000 THEN '6-24h'
+          ELSE '>24h'
+        END AS age_bucket,
+        COUNT(*) AS claims,
+        SUM(CASE WHEN d.state IN ('ready','cached','available') THEN 1 ELSE 0 END) AS confirmed
+      FROM evidence_observations c
+      LEFT JOIN evidence_observations d
+        ON d.subject_kind = 'availability' AND d.info_hash = c.info_hash
+        AND d.file_index_key = c.file_index_key AND d.provider = c.provider
+        AND d.observer = d.provider AND d.source_class = 'direct_provider'
+        AND d.first_seen_at > c.last_seen_at
+      WHERE c.subject_kind = 'availability'
+        AND c.source_class = 'third_party_cache_claim'
+        AND c.last_seen_at BETWEEN ? AND ?
+      GROUP BY c.provider, c.observer, c.source_class, age_bucket
+      ORDER BY c.provider, c.observer, age_bucket
+    `).all(from, to);
   }
 
   function appendProviderObservation(input) {
@@ -6261,6 +6347,9 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     buildEvidenceSnapshot,
     appendEvidenceObservation,
     listEvidenceSummary,
+    recordEvidenceQuery,
+    listEvidenceQuerySummary,
+    listEvidenceClaimCalibration,
     // Playback handoff persistence
     persistPlaybackHandoff,
     upsertPlaybackHandoff,

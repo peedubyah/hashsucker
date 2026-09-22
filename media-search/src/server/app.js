@@ -4203,7 +4203,14 @@ export function createRequestHandler(dependencies = {}) {
       // Evidence summary for the operator TUI. Read-only aggregate over
       // bounded source/provider/selection observations; no browser exposure.
       if (request.method === 'GET' && url.pathname === '/api/operator/evidence') {
-        return sendJson(response, 200, { generatedAt: clock(), sources: searchCache.listEvidenceSummary?.() ?? [] });
+        const to = clock();
+        const from = Number(url.searchParams.get('from') ?? (to - 30 * 24 * 60 * 60 * 1000));
+        return sendJson(response, 200, {
+          generatedAt: to,
+          sources: searchCache.listEvidenceSummary?.() ?? [],
+          queryYield: searchCache.listEvidenceQuerySummary?.({ from, to }) ?? [],
+          claimCalibration: searchCache.listEvidenceClaimCalibration?.({ from, to }) ?? [],
+        });
       }
       // Corpus control-room snapshot: lifecycle revision plus existing
       // enrichment/hygiene diagnostics, without creating a second state model.
