@@ -326,6 +326,23 @@ Evidence view and operator evidence endpoint. DMM remains on its existing
 provenance path and is not duplicated into generic evidence aggregates. No
 provider acquisition was forced. Scratch DB copies were removed. Focused test
 suite passed (54 tests).
+
+### Landed: live source identity/disposition correction
+
+Commit `acff7e2` is pushed to `github/main`. Stremio configuration was audited:
+Torrentio and Comet are independently configured addon manifests and are called
+concurrently by `searchStremio`; addon metadata existed but was lost when the
+bridge flattened normalized results into one `torrentio` bucket. Observer
+identity now preserves actual addon/provider identity (`torrentio-*`,
+`comet-*`) with transport/source class `stremio`. Query evidence distinguishes
+`queried_success`, `queried_empty`, `not_configured`, `timeout`, and
+`upstream_error`; unconfigured Prowlarr is not recorded as successful empty.
+Candidate provenance retains multiple observers on one Release. The 35,362
+novelty audit confirmed the hashes were absent from the copied production
+candidate baseline; novelty uses existing `(infoHash,fileIndexKey)` identity and
+recognizes prior evidence rows. Focused source/evidence/operator tests passed
+(54 tests). No ranking, fan-out, or provider behavior changed. No release/build/tag work performed.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
