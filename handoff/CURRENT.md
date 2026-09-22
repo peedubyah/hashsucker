@@ -597,6 +597,61 @@ a new memory schema, migration, UI, scheduler, provider behavior, or resolver
 integration. A future experiment must capture source responses on scratch DBs
 and compare actual no-memory versus in-memory source-call counts and latency.
 
+### Reuse existing fulfillment knowledge — KEEP existing fast path, no new abstraction
+
+Audited repeated historical requests with read-only
+`media-search/scripts/reuse-first-historical-audit.mjs`. The durable repeat
+intent key available in production is `(media_id, media_type, season, episode)`;
+profile and request-intent columns are absent from the audited production
+`media_requests` schema, so quality/profile semantics are not part of the
+historical key. Request ID and provider are not identity keys.
+
+The current code already has `getPreparedDurableState()` and
+`tryReuseHealthyPublication()`. The predicate requires the exact media/episode
+handoff, non-null Release identity, TorrentFile ID, positive immutable size,
+and at least one mapped data-plane coordinate. It then republishes idempotent
+presentation without discovery. This is an existing Tier-A reuse-first stage,
+not a new memory abstraction.
+
+Across 45 repeated intent groups: 8 were Tier A healthy published and
+immediately reusable; 36 had only prior eligible candidate results and require
+local reranking; 0 were classified as provider-reacquire-only or prior-selected
+without a handoff; 1 had no useful prior state and requires live discovery.
+The current historical database therefore suggests 8/45 repeats can avoid
+source discovery immediately, while 36/45 can avoid starting from zero if the
+existing result set is locally reranked. Estimated source calls avoided is 8
+for the proven Tier-A cases. Exact latency savings and stale/invalid reuse
+counts cannot be measured from historical rows because no controlled repeat
+replay or serve probe was run.
+
+Independent historical fulfillment evidence is strong: 110 playback handoffs
+exist, 97 include provider plus TorrentFile identity, and 27/30 cases in the
+previous contextual replay had handoffs. The exact provider is not the reuse
+identity; the exact Release/TorrentFile is. Provider runtime may reacquire a
+current coordinate at serve time.
+
+Findings: a repeated request for Tier A is an idempotent desired-state
+reconciliation, not a new acquisition workflow. Upgrade sensing remains a
+separate explicit `forceDiscovery` path because reuse must not make improvement
+impossible. The existing split is intentional: normal reaffirmation may reuse;
+upgrade sensing may discover.
+
+No missing product state was proven. Existing request results, playback
+handoffs, VFS entries, provider observations, control-plane TorrentFiles, and
+placement coordinates already express the reuse tiers. Profile/request-intent
+semantics are absent in this production snapshot and should be added only if
+future request identity work proves they are needed; no schema change was made.
+
+Product value claim: **Existing fulfillment knowledge deserves a reuse-first
+stage because a healthy exact TorrentFile/publication can satisfy a repeated
+intent without discovery or provider fan-out.** That behavior already exists
+in `media-request.js`; the experiment validates retaining it rather than adding
+contextual memory.
+
+Verdict: **KEEP existing fast path; PARK new contextual-memory abstraction.**
+No UI, migration, provider change, ranking change, scheduler work, or release
+performed.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
