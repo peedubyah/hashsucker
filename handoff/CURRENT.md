@@ -268,6 +268,31 @@ rows predate the new metadata columns, so their fallback rate is currently
 100% for persisted media-request titles; new browser requests persist title,
 year, and poster metadata. No release/build/tag work performed.
 
+### Landed: evidence-before-intelligence observation slice
+
+Commit `db34b6d` is pushed to `github/main`. Existing telemetry was audited
+first: candidate first/last seen and source arrays, DMM generation/source
+observations, candidate-media provenance, provider observation event/current
+history, historical provider evidence, RD download correlations, compact
+selection evidence snapshots, playback handoffs, timing/events, Rust runtime
+metrics, and Plex consumption state already existed. This slice adds one small
+bounded aggregate table, `evidence_observations`, keyed by existing Release /
+TorrentFile/media/provider/observer dimensions. Repeated identical observations
+update `last_seen_at` and `observation_count`; they do not append duplicate
+rows. Discovery ingestion records normalized source release and association
+observations with novelty (`novel_release`, `novel_association`, or
+`repeat_observation`). Fulfillment records compact selection evidence: request
+source/intent, profile, reason, candidate/alternative counts, and identity tier.
+Availability observations distinguish observer from claimed provider and support
+shared correlation IDs for later third-party-claim calibration. No ranking,
+provider, acquisition, scheduler, or quality behavior changed. The TUI has a
+read-only Evidence summary; the browser is unchanged. Retention is aggregate
+knowledge retained by bounded upsert; fine-grained provider history remains
+under its existing bounded/history policies. Scratch proof covered repeated and
+cross-source Release evidence, third-party RD claim plus direct RD observation,
+TorrentFile and selection evidence; 61 focused tests passed. No backfill was
+run. No release/build/tag work performed.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
