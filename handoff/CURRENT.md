@@ -310,7 +310,22 @@ ingest created zero generic evidence rows, 10k existing DMM provenance rows, and
 validation passed (64 tests). No real provider acquisition or source fan-out was
 forced; the existing source adapters and timing paths remain unchanged. No
 release/build/tag work performed.
+### Landed: real live discovery source census
 
+Commit `3de4c43` is pushed to `github/main`. Instrumented the existing logical
+live boundary in `live-bridge.js`: Torrentio, Torznab, and optional Prowlarr
+are measured as one logical query each per media identity, with latency,
+result count, failure, and normalized unique-hash yield. Query aggregates feed
+the existing bounded evidence query table; no per-candidate query rows and no
+ranking/provider behavior changes. A fair scratch census covered 12 movies,
+episodes, and a miniseries. Torrentio returned 35,362 normalized hashes across
+12 successful queries, average latency 1.09s; Torznab and Prowlarr were
+configured as logical query slots but returned zero candidates in this
+environment. Per-source latency p50/p95/max reporting is available in the TUI
+Evidence view and operator evidence endpoint. DMM remains on its existing
+provenance path and is not duplicated into generic evidence aggregates. No
+provider acquisition was forced. Scratch DB copies were removed. Focused test
+suite passed (54 tests).
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
