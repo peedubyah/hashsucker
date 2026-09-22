@@ -293,6 +293,24 @@ cross-source Release evidence, third-party RD claim plus direct RD observation,
 TorrentFile and selection evidence; 61 focused tests passed. No backfill was
 run. No release/build/tag work performed.
 
+### Landed: evidence calibration and source yield
+
+Commit `cd7e746` is pushed to `github/main`. Evidence aggregates now support
+bounded query-yield summaries by source class: query count, hashes observed,
+novel releases, novel associations, selections, and average latency. Third-party
+cache claims can be calibrated against later direct-provider observations by
+Release/provider/time-window age buckets (`<15m`, `15-60m`, `1-6h`, `6-24h`,
+`>24h`); correlation IDs are optional and not part of identity. Repeated
+aggregate matching explicitly handles SQLite NULL dimensions. Bulk DMM ingestion
+is excluded from generic evidence rows because `dmm_source_observations` already
+provides generation/fragment provenance. A 10k live-source-shaped ingest created
+10k bounded generic rows at ~721 candidates/s and ~6.2MB scratch DB; a 10k DMM
+ingest created zero generic evidence rows, 10k existing DMM provenance rows, and
+~5.3MB scratch DB at ~547 candidates/s. Focused calibration/DMM/operator/intent
+validation passed (64 tests). No real provider acquisition or source fan-out was
+forced; the existing source adapters and timing paths remain unchanged. No
+release/build/tag work performed.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
