@@ -90,6 +90,8 @@ async function load(screen) {
       state.data.providers = { diag, failed };
     } else if (screen === 'corpus') {
       state.data.corpus = await api.corpus();
+    } else if (screen === 'evidence') {
+      state.data.evidence = await api.evidence();
     } else if (screen === 'storage') {
       state.data.storage = readStorageReport();
     } else if (screen === 'downloads') {
@@ -168,7 +170,7 @@ function renderHome() {
   const failed = items.filter((d) => d.state === 'failed');
   out.push(`downloads  ${active.length} active · ${failed.length} failed · library ${(diag?.publication?.vfs?.movies ?? 0)} movies`);
   out.push(line());
-  out.push(`${C.dim}1 requests  2 library  3 providers  4 corpus  5 downloads  6 workers  7 logs  8 probes  9 storage  0 home${C.reset}`);
+  out.push(`${C.dim}1 requests  2 library  3 providers  4 corpus  5 evidence  6 downloads  7 workers  8 logs  9 probes  0 storage${C.reset}`);
   return out.join('\n');
 }
 
@@ -223,6 +225,16 @@ function renderLibrary() {
   });
   if (state.filter) out.push(`${C.dim}filter: ${state.filter}${C.reset}`);
   return out.join('\n');
+}
+
+function renderEvidence() {
+  const out = [`${C.bold}Evidence${C.reset}  ${C.dim}bounded source novelty and selection observations${C.reset}`, line()];
+  out.push('Source'.padEnd(18) + 'Obs'.padStart(6) + 'Novel release'.padStart(15) + 'Novel assoc'.padStart(14) + 'Novel TF'.padStart(11) + 'Selected'.padStart(10));
+  for (const row of state.data.evidence?.sources ?? []) {
+    out.push(`${cut(`${row.observer}/${row.source_class}`, 18).padEnd(18)}${String(row.asserted_observations ?? 0).padStart(6)}${String(row.novel_releases ?? 0).padStart(15)}${String(row.novel_associations ?? 0).padStart(14)}${String(row.novel_torrent_files ?? 0).padStart(11)}${String(row.selections ?? 0).padStart(10)}`);
+  }
+  if (!(state.data.evidence?.sources ?? []).length) out.push(`${C.dim}No evidence observations recorded yet.${C.reset}`);
+  return out.join('\\n');
 }
 
 function renderCorpus() {
@@ -370,6 +382,7 @@ function render() {
   else if (state.screen === 'library') s = renderLibrary();
   else if (state.screen === 'providers') s = renderProviders();
   else if (state.screen === 'corpus') s = renderCorpus();
+  else if (state.screen === 'evidence') s = renderEvidence();
   else if (state.screen === 'storage') s = renderStorage();
   else if (state.screen === 'downloads') s = renderDownloads();
   else if (state.screen === 'diagnostics') s = renderDiagnostics();
@@ -380,7 +393,7 @@ function render() {
   emit(s.endsWith('\n') ? s : `${s}\n`);
 }
 
-const SCREENS = ['home', 'requests', 'library', 'providers', 'corpus', 'downloads', 'workers', 'logs', 'probes', 'storage'];
+const SCREENS = ['home', 'requests', 'library', 'providers', 'corpus', 'evidence', 'downloads', 'workers', 'logs', 'probes', 'storage'];
 
 async function go(screen) {
   state.screen = screen;
@@ -435,7 +448,7 @@ async function main() {
         render();
         return;
       }
-      const map = { 0: 'home', 1: 'requests', 2: 'library', 3: 'providers', 4: 'corpus', 5: 'downloads', 6: 'workers', 7: 'logs', 8: 'probes', 9: 'storage' };
+      const map = { 0: 'storage', 1: 'requests', 2: 'library', 3: 'providers', 4: 'corpus', 5: 'evidence', 6: 'downloads', 7: 'workers', 8: 'logs', 9: 'probes' };
       await go(map[k]);
       return;
     }

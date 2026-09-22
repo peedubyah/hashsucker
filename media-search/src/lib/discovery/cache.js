@@ -61,6 +61,33 @@ CREATE INDEX IF NOT EXISTS idx_candidates_last_seen ON candidates(last_seen);
 CREATE INDEX IF NOT EXISTS idx_candidates_search_key ON candidates(search_key);
 CREATE INDEX IF NOT EXISTS idx_observations_checked_at ON provider_observations(checked_at);
 
+-- Bounded evidence layer: one aggregate per stable subject/source/kind.
+-- It points at existing Release/TorrentFile/media identities and never creates
+-- a competing physical identity. Repeated observations update last_seen/count.
+CREATE TABLE IF NOT EXISTS evidence_observations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject_kind TEXT NOT NULL CHECK (subject_kind IN ('release', 'torrent_file', 'association', 'availability', 'selection')),
+  info_hash TEXT,
+  file_index_key INTEGER NOT NULL DEFAULT -1,
+  canonical_internal_path TEXT,
+  size INTEGER,
+  media_id TEXT,
+  provider TEXT,
+  observer TEXT NOT NULL,
+  source_class TEXT NOT NULL,
+  state TEXT,
+  novelty TEXT NOT NULL CHECK (novelty IN ('novel_release', 'novel_association', 'novel_torrent_file', 'repeat_observation', 'not_applicable')),
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  observation_count INTEGER NOT NULL DEFAULT 1,
+  correlation_id TEXT,
+  payload TEXT,
+  UNIQUE(subject_kind, info_hash, file_index_key, canonical_internal_path, size, media_id, provider, observer, source_class, state)
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_source ON evidence_observations(observer, source_class, subject_kind);
+CREATE INDEX IF NOT EXISTS idx_evidence_subject ON evidence_observations(info_hash, file_index_key, subject_kind);
+CREATE INDEX IF NOT EXISTS idx_evidence_last_seen ON evidence_observations(last_seen_at);
+
 CREATE TABLE IF NOT EXISTS schema_migrations (
   name TEXT PRIMARY KEY,
   applied_at INTEGER NOT NULL
@@ -2184,6 +2211,33 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   migrateRdDownloadsSchema(db);
 
   const insertCandidateStmt = db.prepare(INSERT_CANDIDATE);
+  const upsertEvidenceObservationStmt = db.prepare(`
+    INSERT INTO evidence_observations (
+      subject_kind, info_hash, file_index_key, canonical_internal_path, size,
+      media_id, provider, observer, source_class, state, novelty,
+      first_seen_at, last_seen_at, observation_count, correlation_id, payload
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    ON CONFLICT(subject_kind, info_hash, file_index_key, canonical_internal_path,
+      size, media_id, provider, observer, source_class, state)
+    DO UPDATE SET last_seen_at = excluded.last_seen_at,
+      observation_count = evidence_observations.observation_count + 1,
+      novelty = CASE WHEN evidence_observations.novelty = 'repeat_observation'
+        THEN evidence_observations.novelty ELSE evidence_observations.novelty END,
+      correlation_id = COALESCE(excluded.correlation_id, evidence_observations.correlation_id),
+      payload = COALESCE(excluded.payload, evidence_observations.payload)
+  `);
+  const getEvidenceSummaryStmt = db.prepare(`
+    SELECT observer, source_class,
+      COUNT(*) AS observations,
+      SUM(observation_count) AS asserted_observations,
+      SUM(CASE WHEN novelty = 'novel_release' THEN 1 ELSE 0 END) AS novel_releases,
+      SUM(CASE WHEN novelty = 'novel_association' THEN 1 ELSE 0 END) AS novel_associations,
+      SUM(CASE WHEN novelty = 'novel_torrent_file' THEN 1 ELSE 0 END) AS novel_torrent_files,
+      SUM(CASE WHEN subject_kind = 'selection' THEN 1 ELSE 0 END) AS selections
+    FROM evidence_observations
+    GROUP BY observer, source_class
+    ORDER BY observer, source_class
+  `);
   const getCandidateStmt = db.prepare(GET_CANDIDATE);
   const insertObservationEventStmt = db.prepare(INSERT_OBSERVATION_EVENT);
   const upsertCurrentObservationStmt = db.prepare(UPSERT_CURRENT_OBSERVATION);
@@ -2236,6 +2290,10 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
 
   function fileIndexKey(fileIndex) {
     return fileIndex == null ? -1 : fileIndex;
+  }
+
+  function fileIndexKeyForEvidence(fileIndex, subjectKind) {
+    return subjectKind === 'torrent_file' && fileIndex == null ? -1 : fileIndexKey(fileIndex);
   }
 
   function normalizeCandidate(candidate) {
@@ -3209,6 +3267,35 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
    * Append a normalized provider observation and update its current projection.
    * Older events remain in history but cannot replace newer current truth.
    */
+  function appendEvidenceObservation(input = {}) {
+    const now = input.observedAt ?? Date.now();
+    const infoHash = input.infoHash ?? null;
+    const fileIndexKey = fileIndexKeyForEvidence(input.fileIndex, input.subjectKind);
+    const knownRelease = infoHash ? !!getCandidate(infoHash, input.fileIndex) : false;
+    const knownAssociation = infoHash && input.mediaId
+      ? getMediaAssociations(infoHash, input.fileIndex).some((row) => row.mediaId === input.mediaId)
+      : false;
+    // TorrentFile lives in the control plane, not the discovery DB. Callers
+    // that have authoritative TF knowledge may supply novelty explicitly.
+    const knownTorrentFile = input.knownTorrentFile === true;
+    let novelty = input.novelty ?? 'not_applicable';
+    if (input.subjectKind === 'release' && novelty === 'not_applicable') novelty = knownRelease ? 'repeat_observation' : 'novel_release';
+    if (input.subjectKind === 'association' && novelty === 'not_applicable') novelty = knownAssociation ? 'repeat_observation' : 'novel_association';
+    if (input.subjectKind === 'torrent_file' && novelty === 'not_applicable') novelty = knownTorrentFile ? 'repeat_observation' : 'novel_torrent_file';
+    upsertEvidenceObservationStmt.run(
+      input.subjectKind, infoHash, fileIndexKey, input.canonicalInternalPath ?? null,
+      input.size ?? null, input.mediaId ?? null, input.provider ?? null,
+      input.observer ?? 'unknown', input.sourceClass ?? 'unknown', input.state ?? null,
+      novelty, now, now, input.correlationId ?? null,
+      input.payload == null ? null : JSON.stringify(input.payload),
+    );
+    return { novelty, knownRelease, knownAssociation, knownTorrentFile };
+  }
+
+  function listEvidenceSummary() {
+    return getEvidenceSummaryStmt.all();
+  }
+
   function appendProviderObservation(input) {
     const observation = createCacheObservation(input);
     const params = observationParams(observation);
@@ -6172,6 +6259,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getQualityFeatureDistribution,
     getQualityContributionShadowDistribution,
     buildEvidenceSnapshot,
+    appendEvidenceObservation,
+    listEvidenceSummary,
     // Playback handoff persistence
     persistPlaybackHandoff,
     upsertPlaybackHandoff,

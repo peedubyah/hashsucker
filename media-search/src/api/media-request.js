@@ -1213,6 +1213,25 @@ export async function searchByMedia(cache, request) {
         ...(selection.selected._torrentFileId ? { torrentFileId: selection.selected._torrentFileId } : {}),
       };
       handoff = buildPlaybackHandoff(selection, handoffRequest);
+      if (selection.selected && cache.appendEvidenceObservation) {
+        cache.appendEvidenceObservation({
+          subjectKind: 'selection',
+          infoHash: selection.selected.infoHash,
+          fileIndex: selection.selected.fileIndex,
+          mediaId,
+          observer: 'hashsucker',
+          sourceClass: source || 'request',
+          state: requestIntent || 'library',
+          correlationId: requestId == null ? null : String(requestId),
+          payload: {
+            qualityProfile,
+            reason: selection.reason,
+            candidateCount: explainable.length,
+            alternativeCount: selection.alternates?.length ?? 0,
+            identityTier: selection.selected.identity?.tier ?? null,
+          },
+        });
+      }
       if (handoff && binding) {
         handoff.torrentFileIdentity = {
           status: binding.status,
@@ -1813,6 +1832,25 @@ export async function searchByMedia(cache, request) {
       ...(selection.selected._torrentFileId ? { torrentFileId: selection.selected._torrentFileId } : {}),
     };
     handoff = buildPlaybackHandoff(selection, handoffRequest);
+    if (selection.selected && cache.appendEvidenceObservation) {
+      cache.appendEvidenceObservation({
+        subjectKind: 'selection',
+        infoHash: selection.selected.infoHash,
+        fileIndex: selection.selected.fileIndex,
+        mediaId,
+        observer: 'hashsucker',
+        sourceClass: source || 'request',
+        state: requestIntent || 'library',
+        correlationId: requestId == null ? null : String(requestId),
+        payload: {
+          qualityProfile,
+          reason: selection.reason,
+          candidateCount: explainable.length,
+          alternativeCount: selection.alternates?.length ?? 0,
+          identityTier: selection.selected.identity?.tier ?? null,
+        },
+      });
+    }
     if (handoff && binding) {
       handoff.torrentFileIdentity = {
         status: binding.status,

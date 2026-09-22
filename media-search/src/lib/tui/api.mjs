@@ -34,6 +34,7 @@ export const api = {
   failedEvents: (limit = 20) => get(`/api/operator/events/failed?limit=${limit}`),
   workers: () => get('/api/operator/workers'),
   corpus: () => get('/api/operator/corpus'),
+  evidence: () => get('/api/operator/evidence'),
   enrichment: () => get('/api/operator/enrichment'),
   hygiene: () => get('/api/operator/hygiene'),
 };

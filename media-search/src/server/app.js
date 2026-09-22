@@ -4200,6 +4200,11 @@ export function createRequestHandler(dependencies = {}) {
         const handoff = searchCache.rowToPlaybackHandoff(row);
         return sendJson(response, handoff ? 200 : 404, handoff || { error: 'Handoff not found' });
       }
+      // Evidence summary for the operator TUI. Read-only aggregate over
+      // bounded source/provider/selection observations; no browser exposure.
+      if (request.method === 'GET' && url.pathname === '/api/operator/evidence') {
+        return sendJson(response, 200, { generatedAt: clock(), sources: searchCache.listEvidenceSummary?.() ?? [] });
+      }
       // Corpus control-room snapshot: lifecycle revision plus existing
       // enrichment/hygiene diagnostics, without creating a second state model.
       if (request.method === 'GET' && url.pathname === '/api/operator/corpus') {

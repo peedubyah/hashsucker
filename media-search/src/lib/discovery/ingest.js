@@ -88,6 +88,14 @@ function ingestEntry(cache, source, entry) {
 
   // Upsert candidate through cache API (preserves identity, merges fields)
   cache.upsertCandidate(candidate);
+  cache.appendEvidenceObservation?.({
+    subjectKind: 'release',
+    infoHash: candidate.infoHash,
+    fileIndex: candidate.fileIndex,
+    observer: source,
+    sourceClass: source,
+    payload: { searchKey: candidate.searchKey ?? null },
+  });
 
   const inserted = !existing;
   const updated = !!existing;
@@ -99,6 +107,15 @@ function ingestEntry(cache, source, entry) {
     cache.associateMedia(candidate.infoHash, candidate.fileIndex, mediaAssoc.mediaId, {
       source,
       confidence: mediaAssoc.confidence ?? 1.0,
+    });
+    cache.appendEvidenceObservation?.({
+      subjectKind: 'association',
+      infoHash: candidate.infoHash,
+      fileIndex: candidate.fileIndex,
+      mediaId: mediaAssoc.mediaId,
+      observer: source,
+      sourceClass: source,
+      payload: { confidence: mediaAssoc.confidence ?? 1.0 },
     });
     const after = cache.getMediaAssociations(candidate.infoHash, candidate.fileIndex);
     if (after.length > before.length) associated++;
