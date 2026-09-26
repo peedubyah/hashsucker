@@ -836,6 +836,45 @@ budget on explicit upcoming or demonstrated demand with weak knowledge; this
 is already the current implementation, so the right change is to preserve it,
 not expand it.**
 
+### Demand-linked uncertainty adversarial replay — no change justified
+
+The current `idle-enrichment.js` eligibility is demand-linked but not a true
+knowledge-sufficiency predicate. Future intents, recent human requests, and
+published fragile items are admitted into `buildTargets()`; candidate depth is
+used for ordering and the later per-target diversity stop, not as a direct
+pre-query eligibility gate. Zero-yield/backoff and quiet/daily gates are
+separate controls.
+
+The 88-slot replay therefore labeled 85 targets `SUFFICIENT_DEPTH`, 2
+`UNRESOLVED`, and 1 `SHALLOW_RESILIENCE` under a conservative existing-state
+predicate. The earlier 74 `NO_GAIN` proxy was too coarse: exact per-media
+association depth and episode-scoped eligible result depth diverge. In
+particular, several episode future intents had zero episode-scoped results but
+many show-level Releases, so raw media-level count would incorrectly suppress
+real unresolved episode demand.
+
+A proposed uncertainty-aware replay suppressed 85 slots at a threshold of 10
+exact/eligible results and retained only 3 slots (2 unresolved future intents,
+1 shallow resilience recent request). This is not safe to implement: the
+threshold is an arbitrary proxy, quality envelope and exact TorrentFile
+viability are incomplete, episode scope differs from media scope, and no live
+outcome proves that the suppressed rows could not yield a meaningful
+resilience or quality gain. The replay demonstrates that current demand
+admission is broader than uncertainty, but does not establish a defensible
+sufficiency predicate from current state.
+
+Required verdicts: **FUTURE-INTENT ELIGIBILITY: KEEP**;
+**RECENT-REQUEST ELIGIBILITY: KEEP**; **PUBLISHED-FRAGILE ELIGIBILITY: KEEP**
+(the class remains demand-linked, though absent in this snapshot);
+**CURRENT 74 NO-GAIN TARGETS: NOT DETERMINABLE**;
+**UNCERTAINTY-AWARE ELIGIBILITY: NOT EARNED**; **IMPLEMENTATION: NO CHANGE
+JUSTIFIED**.
+
+Product implication: **Demand tells enrichment where to look, but current
+state cannot safely prove when a demand-linked Release set is sufficient, so
+no target should be suppressed merely by candidate count.** No schema,
+telemetry, provider, UI, scheduler, ranking, or persistence change was made.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
