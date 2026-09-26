@@ -47,8 +47,8 @@ const rel = (overrides = {}) => ({
 test('targets: future intent outranks recent request outranks thin library', () => {
   const s = stores();
   s.intents.seed({ mediaType: 'episode', mediaId: 'tt-intent', season: 1, episode: 2 });
-  s.cache.db.prepare(`INSERT INTO media_requests (media_id, media_type, season, episode, status, candidate_count, created_at)
-    VALUES ('tt-req', 'movie', NULL, NULL, 'done', 3, 999000)`).run();
+  s.cache.db.prepare(`INSERT INTO media_requests (media_id, media_type, season, episode, source, status, candidate_count, created_at)
+    VALUES ('tt-req', 'movie', NULL, NULL, 'seerr', 'done', 3, 999000)`).run();
   s.cps.ensureLibraryItem({ mediaType: 'movie', mediaId: 'tt-thin', title: 'Thin', desiredState: 'present' });
   const w = worker(s);
   const targets = w.buildTargets(20);
@@ -58,6 +58,54 @@ test('targets: future intent outranks recent request outranks thin library', () 
   assert.ok(classes.includes('thin-diversity'));
   assert.ok(classes.indexOf('future-intent') < classes.indexOf('recent-request'));
   assert.ok(classes.indexOf('recent-request') < classes.indexOf('thin-diversity'));
+});
+
+test('targets: system self-traffic never steers enrichment; humans do', () => {
+  const s = stores();
+  for (const [id, source] of [['tt-api', 'api'], ['tt-ant', 'anticipation'], ['tt-prep', 'prepare'], ['tt-test', 'test']]) {
+    s.cache.db.prepare(`INSERT INTO media_requests (media_id, media_type, season, episode, source, status, candidate_count, created_at)
+      VALUES (?, 'movie', NULL, NULL, ?, 'done', 1, 999000)`).run(id, source);
+  }
+  s.cache.db.prepare(`INSERT INTO media_requests (media_id, media_type, season, episode, source, status, candidate_count, created_at)
+    VALUES ('tt-human', 'movie', NULL, NULL, 'seerr', 'done', 1, 999000)`).run();
+  const w = worker(s);
+  const ids = w.buildTargets(20).map((t) => t.mediaId);
+  assert.ok(ids.includes('tt-human'));
+  for (const sys of ['tt-api', 'tt-ant', 'tt-prep', 'tt-test']) {
+    assert.ok(!ids.includes(sys), `${sys} must not steer enrichment`);
+  }
+});
+
+test('targets: generic scavenging classes are gone', () => {
+  const s = stores();
+  // Published but mid-diversity (5): formerly sparse-coverage, now no target.
+  s.cps.ensureLibraryItem({ mediaType: 'movie', mediaId: 'tt-mid', title: 'Mid', desiredState: 'present' });
+  for (let i = 0; i < 5; i++) {
+    const h = `m${i}`.repeat(10).slice(0, 40);
+    s.cache.ingestCandidate({ infoHash: h, fileIndex: null, title: 'Mid' });
+    s.cache.associateMedia(h, null, 'tt-mid', { source: 'test' });
+  }
+  // Published, rich, below any terminal: formerly below-terminal, now no target.
+  s.cps.ensureLibraryItem({ mediaType: 'movie', mediaId: 'tt-rich-cold', title: 'RichCold', desiredState: 'present' });
+  for (let i = 0; i < 12; i++) {
+    const h = `c${i}`.repeat(10).slice(0, 40);
+    s.cache.ingestCandidate({ infoHash: h, fileIndex: null, title: 'RichCold' });
+    s.cache.associateMedia(h, null, 'tt-rich-cold', { source: 'test' });
+  }
+  const w = worker(s);
+  const classes = w.buildTargets(20).map((t) => t.class);
+  assert.ok(!classes.includes('sparse-coverage'));
+  assert.ok(!classes.includes('below-terminal'));
+});
+
+test('targets: future intents sort soonest-expected, thinnest first', () => {
+  const s = stores();
+  s.intents.seed({ mediaType: 'movie', mediaId: 'tt-late', expectedAt: 9_000_000 });
+  s.intents.seed({ mediaType: 'movie', mediaId: 'tt-soon', expectedAt: 1_100_000 });
+  s.intents.seed({ mediaType: 'movie', mediaId: 'tt-undated' });
+  const w = worker(s);
+  const ids = w.buildTargets(20).filter((t) => t.class === 'future-intent').map((t) => t.mediaId);
+  assert.deepEqual(ids, ['tt-soon', 'tt-late', 'tt-undated']);
 });
 
 test('gate: download work, recent requests, lag, busy hints, corpus all defer', async () => {

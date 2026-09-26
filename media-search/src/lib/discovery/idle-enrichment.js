@@ -9,12 +9,15 @@
  * publishes, and never probes provider caches: provider acquisition stays
  * demand-driven under existing placement logic.
  *
- * Targets (priority order, all from existing durable state, capped):
- *   1. upcoming future intents (Sonarr/Radarr)
- *   2. recently requested titles
- *   3. published items with few viable releases
- *   4. published items below their profile terminal tier (widest gap first)
- *   5. metadata-known titles with sparse candidate coverage
+ * Targets (lexicographic demand-weighted priority, all from existing
+ * durable state, capped):
+ *   1. future intents with weak knowledge (soonest expected first)
+ *   2. recent HUMAN requests with weak knowledge (thinnest first)
+ *   3. published fragile items (diversity < 3, thinnest first)
+ *
+ * Generic scavenging is deliberately absent: sparse-coverage was a redundant
+ * slice of the DIVERSE_ENOUGH stop rule, and below-terminal quality scouting
+ * belongs to upgrade-watch's market probe, not to knowledge enrichment.
  *
  * Fresh state is reconstructed every tick (no durable crawl queue), so a
  * restart resumes naturally. Only per-source backoff + daily budget live
@@ -25,14 +28,21 @@ import { storeReleaseAttributes } from './release-attributes.js';
 import { parseFilename } from './parser-adapter.js';
 import { significantTokens, isSubstantialTitle, titleAgrees, referenceTitleForMedia } from './identity-agreement.js';
 import { createQuietGate, measureLoopLag } from './quiet-gate.js';
-import { profilePolicy } from '../lifecycle/quality-profiles.js';
-import { readPublishedTier } from '../lifecycle/upgrade-watch.js';
 
 export const ENRICHMENT_SOURCE = 'idle-enrichment';
 export const DIVERSE_ENOUGH = 8;
 export const MIN_CONFIDENCE = 0.5;
 export const BACKOFF_BASE_MS = 60 * 60_000;
 export const BACKOFF_MAX_MS = 24 * 60 * 60_000;
+
+/**
+ * Request sources that carry human-demand evidence. System self-traffic
+ * (anticipation/api/audit/probe/canary/prepare/test) must never steer
+ * background enrichment: it would spend the budget re-learning what the
+ * machinery itself just did. `operator` is included (Patrick is human).
+ */
+export const HUMAN_DEMAND_SOURCES = new Set(['seerr', 'web', 'plex-watchlist', 'operator']);
+export const RECENT_REQUEST_WINDOW_MS = 30 * 24 * 60 * 60_000;
 
 function envNumber(env, name, { fallback, min = 0 }) {
   const v = Number(env?.[name]);
@@ -120,7 +130,7 @@ export function createIdleEnrichment({
     return out;
   }
 
-  /** Priority-ordered enrichment targets from existing durable state. */
+  /** Demand-weighted enrichment targets from existing durable state. */
   function buildTargets(limit = 20) {
     const targets = [];
     const seen = new Set();
@@ -130,11 +140,32 @@ export function createIdleEnrichment({
       seen.add(key);
       targets.push(t);
     };
-    // 1. Upcoming future intents (highest value: learn before release time).
+    // 1. Future intents with weak knowledge: soonest expected first (an
+    // undated intent cannot be timed, so it sorts last), thinnest first.
+    // Store order is retry-cadence order, not value order — sort here.
+    // Depth uses the same episode rule as the picker: an episode with no
+    // published library item has zero coverage by definition.
     try {
-      const due = futureIntentStore?.due?.({ limit: 5 }) ?? [];
-      const listed = futureIntentStore?.list?.({ state: 'anticipated', limit: 5 }) ?? [];
-      for (const it of [...due, ...listed]) {
+      const due = futureIntentStore?.due?.({ limit: 10 }) ?? [];
+      const listed = futureIntentStore?.list?.({ state: 'anticipated', limit: 10 }) ?? [];
+      let publishedEps = null;
+      const epDiversity = (mediaId, season, episode) => {
+        if (season == null && episode == null) return countAssociations(cache, mediaId);
+        try {
+          publishedEps ??= new Set((controlPlaneStore.listAllLibraryItems?.({ limit: 500 }) ?? [])
+            .filter((it) => (it.desiredState ?? it.desired_state) === 'present')
+            .map((it) => `${it.mediaId ?? it.media_id}|${it.season ?? ''}|${it.episode ?? ''}`));
+          if (!publishedEps.has(`${mediaId}|${season ?? ''}|${episode ?? ''}`)) return 0;
+        } catch { /* library unreadable: fall back to media-level count */ }
+        return countAssociations(cache, mediaId);
+      };
+      const ordered = [...due, ...listed].sort((a, b) => {
+        const ea = a.expected_at ?? Number.MAX_SAFE_INTEGER;
+        const eb = b.expected_at ?? Number.MAX_SAFE_INTEGER;
+        if (ea !== eb) return ea - eb;
+        return epDiversity(a.media_id, a.season, a.episode) - epDiversity(b.media_id, b.season, b.episode);
+      });
+      for (const it of ordered) {
         push({
           class: 'future-intent', mediaType: it.media_type === 'episode' ? 'episode' : 'movie',
           mediaId: it.media_id, season: it.season ?? null, episode: it.episode ?? null,
@@ -142,52 +173,47 @@ export function createIdleEnrichment({
         });
       }
     } catch { /* intents unavailable */ }
-    // 2. Recently requested titles (last 7 days).
+    // 2. Recent HUMAN requests with weak knowledge, thinnest first.
+    // System self-traffic is excluded by source (see HUMAN_DEMAND_SOURCES);
+    // the 30d window matches the demand-linked horizon used elsewhere.
     try {
       const reqs = cache.getMediaRequests?.() ?? [];
-      const cutoff = now() - 7 * 24 * 60 * 60_000;
-      for (const r of reqs) {
-        if ((r.created_at ?? 0) < cutoff) continue;
+      const cutoff = now() - RECENT_REQUEST_WINDOW_MS;
+      const human = reqs.filter((r) =>
+        (r.created_at ?? 0) >= cutoff && HUMAN_DEMAND_SOURCES.has(r.source));
+      human.sort((a, b) =>
+        countAssociations(cache, a.media_id) - countAssociations(cache, b.media_id));
+      for (const r of human) {
         push({
           class: 'recent-request', mediaType: r.media_type ?? 'movie', mediaId: r.media_id,
-          season: r.season ?? null, episode: r.episode ?? null, reason: 'requested in the last 7d',
+          season: r.season ?? null, episode: r.episode ?? null, reason: 'human request in the last 30d',
         });
       }
     } catch { /* requests unavailable */ }
-    // 3-5. Published items: thin diversity, below-terminal gap, sparse coverage.
-    let items = [];
+    // 3. Published fragile items (diversity < 3): explicit keep-intent with
+    // no meaningful alternate. Thinnest first. This is the only generic
+    // tier that survives: publication IS demand linkage (keep-intent).
     try {
-      items = controlPlaneStore.listAllLibraryItems?.({ limit: 500 }) ?? [];
-    } catch { /* library unavailable */ }
-    const thin = [];
-    const gapped = [];
-    for (const it of items) {
-      if (it.desiredState !== 'present' && it.desired_state !== 'present') continue;
-      const mediaId = it.mediaId ?? it.media_id;
-      if (!mediaId) continue;
-      const mediaType = (it.season ?? it.episode) != null ? 'episode' : 'movie';
-      const diversity = countAssociations(cache, mediaId);
-      const base = {
-        mediaType, mediaId, season: it.season ?? null, episode: it.episode ?? null,
-      };
-      if (diversity < 3) thin.push({ ...base, class: 'thin-diversity', reason: `${diversity} known releases` });
-      try {
-        const pub = readPublishedTier({
-          cache, controlPlaneStore, mediaType, mediaId,
-          season: base.season, episode: base.episode,
-        });
-        const terminal = profilePolicy(pub?.profile)?.terminalTier;
-        if (pub?.tier != null && terminal != null && pub.tier < terminal) {
-          gapped.push({ ...base, class: 'below-terminal', gap: terminal - pub.tier, reason: `tier ${pub.tier} below terminal ${terminal}` });
+      const items = controlPlaneStore.listAllLibraryItems?.({ limit: 500 }) ?? [];
+      const thin = [];
+      for (const it of items) {
+        if (it.desiredState !== 'present' && it.desired_state !== 'present') continue;
+        const mediaId = it.mediaId ?? it.media_id;
+        if (!mediaId) continue;
+        const mediaType = (it.season ?? it.episode) != null ? 'episode' : 'movie';
+        const diversity = countAssociations(cache, mediaId);
+        if (diversity < 3) {
+          thin.push({
+            class: 'thin-diversity', mediaType, mediaId,
+            season: it.season ?? null, episode: it.episode ?? null,
+            reason: `${diversity} known releases`,
+          });
         }
-      } catch { /* tier unreadable */ }
-      if (diversity >= 1 && diversity < DIVERSE_ENOUGH) {
-        push({ ...base, class: 'sparse-coverage', reason: `${diversity} associations` });
       }
-    }
-    for (const t of thin) push(t);
-    gapped.sort((a, b) => (b.gap ?? 0) - (a.gap ?? 0));
-    for (const t of gapped) push(t);
+      thin.sort((a, b) =>
+        countAssociations(cache, a.mediaId) - countAssociations(cache, b.mediaId));
+      for (const t of thin) push(t);
+    } catch { /* library unavailable */ }
     return targets.slice(0, limit);
   }
 
