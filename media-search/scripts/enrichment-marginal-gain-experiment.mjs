@@ -1,0 +1,26 @@
+#!/usr/bin/env node
+/**
+ * Bounded read-only idle-enrichment marginal-gain experiment.
+ * Runs the same live discovery seam, but never persists releases or acquires providers.
+ */
+import { DatabaseSync } from 'node:sqlite';
+import { runLiveDiscoveryWithCounts } from '../src/lib/discovery/live-bridge.js';
+
+const discoveryPath=process.env.DISCOVERY_DB||'/home/patrick/hashsucker-data/discovery/discovery-cache.db';
+const controlPath=process.env.CONTROL_PLANE_DB||'/home/patrick/hashsucker-data/discovery/control-plane.db';
+const d=new DatabaseSync(discoveryPath,{readOnly:true});const c=new DatabaseSync(controlPath,{readOnly:true});
+const now=Number(process.env.REPLAY_NOW||Date.now());const cutoff=now-30*86400000;
+const assocRows=d.prepare('SELECT media_id,COUNT(*) n FROM candidate_media GROUP BY media_id').all();const assoc=new Map(assocRows.map(x=>[x.media_id,x.n]));
+const human=d.prepare("SELECT media_id,media_type,season,episode,MAX(created_at) at FROM media_requests WHERE created_at>=? AND source IN ('seerr','web','plex-watchlist','operator') GROUP BY media_id,media_type,season,episode ORDER BY at DESC").all(cutoff).filter(x=>(assoc.get(x.media_id)||0)>=10);
+const future=d.prepare("SELECT media_id,media_type,season,episode,expected_at,state FROM future_intents WHERE state IN ('anticipated','failed')").all().filter(x=>(assoc.get(x.media_id)||0)>=10).sort((a,b)=>(a.expected_at??Infinity)-(b.expected_at??Infinity));
+const published=c.prepare("SELECT media_id,media_type,season,episode FROM library_items WHERE desired_state='present'").all().filter(x=>(assoc.get(x.media_id)||0)>=10);
+const selected=[];const seen=new Set();const add=(x,source)=>{const k=`${x.media_id}|${x.media_type}|${x.season??''}|${x.episode??''}`;if(!seen.has(k)){seen.add(k);selected.push({...x,selectionClass:source,associationDepth:assoc.get(x.media_id)||0})}};
+for(const x of human.slice(0,8))add(x,'recent-request');for(const x of future.slice(0,6))add(x,'future-intent');for(const x of published.slice(0,6))add(x,'published-linked');
+const existing=d.prepare('SELECT DISTINCT ra.info_hash,ra.filename,ra.resolution,ra.source_type,ra.codec,ra.year,ra.season,ra.episode,ra.media_type FROM candidate_media cm JOIN release_attributes ra ON ra.info_hash=cm.info_hash AND ra.file_index_key=cm.file_index_key WHERE cm.media_id=?');
+const candidates=d.prepare('SELECT info_hash,filename,metadata FROM candidates WHERE info_hash=?');
+function quality(r){const res=String(r.resolution||'');return res.includes('2160')||res==='4k'?4:res.includes('1080')?3:res.includes('720')?2:res?1:0}
+function classify(x,releases,existingRows){const oldHashes=new Set(existingRows.map(r=>r.info_hash));const fresh=releases.filter(r=>!oldHashes.has(r.infoHash));const oldMax=Math.max(0,...existingRows.map(quality));const newMax=Math.max(0,...fresh.map(quality));const exactEpisode=x.episode!=null?fresh.filter(r=>r.season===x.season&&r.episode===x.episode):fresh;let gain='NO_GAIN',reason='no new or materially better knowledge';if(x.episode!=null&&exactEpisode.length>0&&oldHashes.size===0){gain='IDENTITY_GAIN';reason='new exact episode Release knowledge'}else if(newMax>oldMax){gain='QUALITY_GAIN';reason=`new quality tier ${newMax} above ${oldMax}`}else if(fresh.length>0&&oldHashes.size<3){gain='DEPTH_GAIN';reason='new shallow representation depth'}else if(fresh.length>0&&fresh.some(r=>r.infoHash&&!oldHashes.has(r.infoHash))){gain='NEW_BUT_REDUNDANT';reason='new Release hashes without material quality/resilience/identity evidence'}return {gain,reason,oldReleaseCount:oldHashes.size,newReleaseCount:fresh.length,exactEpisodeNew:exactEpisode.length,oldMaxQuality:oldMax,newMaxQuality:newMax};}
+const rows=[];
+for(const x of selected){const started=Date.now();let outcome;try{outcome=await runLiveDiscoveryWithCounts(x.media_id,{mediaType:x.media_type,season:x.season,episode:x.episode,title:null,year:null,wantedImdbId:x.media_id,env:process.env});}catch(error){rows.push({...x,error:String(error.message||error),latencyMs:Date.now()-started});continue}const releases=outcome.releases||[];const existingRows=existing.all(x.media_id).concat([]);const sourceCounts=Object.fromEntries(Object.entries(outcome.sources||{}).map(([k,v])=>[k,{count:v.count,disposition:v.disposition,latencyMs:v.latencyMs,error:v.error}]));rows.push({...x,latencyMs:Date.now()-started,sourceCounts,returned:releases.length,...classify(x,releases,existingRows),newHashes:releases.filter(r=>!new Set(existingRows.map(e=>e.info_hash)).has(r.infoHash)).map(r=>r.infoHash)});}
+const counts=Object.fromEntries([...new Set(rows.map(x=>x.gain||'ERROR'))].map(k=>[k,rows.filter(x=>(x.gain||'ERROR')===k).length]));const byClass={};for(const r of rows){byClass[r.selectionClass]??={count:0,gains:{}};byClass[r.selectionClass].count++;byClass[r.selectionClass].gains[r.gain||'ERROR']=(byClass[r.selectionClass].gains[r.gain||'ERROR']||0)+1;}
+console.log(JSON.stringify({status:'read-only-source-discovery',selectionMethod:'first 8 deep recent-human, first 6 deep future, first 6 deep published, deduplicated',selected:rows.length,counts,byClass,totalNewHashes:rows.reduce((n,r)=>n+(r.newReleaseCount||0),0),usefulGains:rows.filter(r=>['DEPTH_GAIN','QUALITY_GAIN','RESILIENCE_GAIN','IDENTITY_GAIN'].includes(r.gain)).length,rows},null,2));d.close();c.close();

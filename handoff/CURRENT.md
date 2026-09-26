@@ -875,6 +875,61 @@ state cannot safely prove when a demand-linked Release set is sufficient, so
 no target should be suppressed merely by candidate count.** No schema,
 telemetry, provider, UI, scheduler, ranking, or persistence change was made.
 
+### Demand-linked enrichment marginal-gain experiment — narrow, no behavior change
+
+Ran a bounded read-only experiment through the same
+`runLiveDiscoveryWithCounts()` seam used by idle enrichment. Selection was
+explicit: first 8 deep recent-human targets, first 6 deep future-intent
+targets, and first 6 deep published-linked targets, deduplicated (20 total).
+Deep meant the existing replay population with >=10 association knowledge;
+this was not a pathological-only sample. Existing associations, attributes,
+request/future linkage, and publication state were captured before each query.
+No releases were persisted, no providers were acquired, and no VFS/preparation
+state changed.
+
+Outcomes: 14/20 queries produced `NEW_BUT_REDUNDANT` results under the
+conservative comparison; 6/20 future-intent queries produced `NO_GAIN`.
+There were 0 measured `DEPTH_GAIN`, `QUALITY_GAIN`, `RESILIENCE_GAIN`, or
+`IDENTITY_GAIN` outcomes after correcting the baseline to existing
+`candidate_media` associations. The first run falsely reported quality gains
+because it compared against raw `release_attributes` without media association;
+that baseline bug was corrected before recording the result.
+
+By class: recent-human 0/8 useful, 8/8 new-but-redundant; future-intent 0/6
+useful, 6/6 no-gain; published-linked 0/6 useful, 6/6 new-but-redundant. The
+source seam returned many rows (20,382 total Stremio results, including Comet
+fast results on 14 targets), but result volume did not create measured product
+value. Torznab returned empty on all 20 calls; Prowlarr was not configured.
+This is source-yield evidence for this context, not a global source verdict.
+
+The experiment does not prove that every deep target is permanently sufficient:
+quality-envelope, exact TorrentFile viability, and provider-independent
+resilience were not fully inferable from current state. It does prove the
+burden of proof is unmet for recurring background queries on this bounded deep
+sample. Request-time discovery is the competitive simpler alternative: it can
+answer the same live question when demand exists, without recurring source
+work during idle periods. Future-intent results were uniformly no-gain here;
+recent and published queries were redundant.
+
+Required verdicts: **DEEP FUTURE-INTENT REQUERY: NOT JUSTIFIED**;
+**DEEP RECENT-REQUEST REQUERY: NOT JUSTIFIED**;
+**DEEP PUBLISHED REQUERY: NOT JUSTIFIED**;
+**CURRENT PERIODIC ENRICHMENT: NARROW** (only demand-linked targets whose
+existing evidence is visibly unresolved; do not infer a generic threshold from
+this experiment); **REQUEST-TIME DISCOVERY: PREFERRED** for deep targets;
+**NEW SUFFICIENCY STATE/MODEL: NOT EARNED**; **IMPLEMENTATION: NO CHANGE
+JUSTIFIED**.
+
+No safe existing-state suppression condition was implemented because the
+experiment did not establish a reliable predicate for episode scope, quality,
+exact TorrentFile viability, or resilience. The result is evidence to narrow
+future targeting policy, not permission to invent a score or schema.
+
+Product implication: **A demand-linked background query must answer a specific
+unresolved fulfillment question; in this deep sample, recurring queries mostly
+returned redundant rows, so request-time discovery is preferred until stronger
+uncertainty evidence exists.**
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
