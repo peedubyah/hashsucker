@@ -742,6 +742,100 @@ when no healthy exact publication exists; Tier-A requests are already
 reconciliation-first; upgrade/force discovery remains explicit; no UI, schema,
 ranking, provider, resolver, scheduler, or production behavior changed.
 
+### Demand-signal value + predictive fulfillment — verdicts (2026-09-22, no code change)
+
+Evidence: 377 media_requests (167 Seerr, 94 anticipation self-traffic, rest
+test/api/proof; 1 household web request ever), 110 handoffs, 27 future_intents
+(all synthetic proofs; 0 Arr-sourced despite configured Arrs + successful sync
+importing 0/0), 85 upgrade rows with 0 switches ever, 4598 pending enrichment
+rows, 1.58M candidates / 5.7k associations. All series "continuation" is batch
+fan-out seconds apart; zero genuine sequential N→N+1 pairs. Proof rows carry
+defer_reason, so no durable marker separates synthetic from human demand.
+Verdicts: ARR/FUTURE ANTICIPATION **REDUCE** (keep ledger+sync+wake as KNOW
+sensor; speculative rows cap at IDENTIFY; full prepare/publish/prewarm only for
+Seerr-deferred human demand). ACTIVE-NEXT-EPISODE **PARK** (no evidence).
+IDLE ENRICHMENT **REDUCE** (demand-adjacent targets only; drop
+thin/below-terminal/sparse scavenging; kill criterion: show a later-used
+release or park). PROVIDER VALIDATION **KEEP** at request time only.
+PROVIDER PRE-ACQUISITION **LIMITED** (Seerr-deferred inside publish window
+only; never for Arr speculation). UPGRADE WORKFLOW **KEEP** (cheap, gated;
+no merge). UNIFIED WORK GOVERNOR **NOT EARNED**. PREDICTIVE SCHEDULER
+**NOT EARNED**. Ladder: persist KNOW→IDENTIFY→PREPARE only; VALIDATE/HOT are
+ephemeral serve-time properties; drop published_preparing/playable as
+scheduler-owned states (publication truth already lives in VFS/library).
+No code change: steady-state costs already bounded (windows/caps/backoffs/
+quiet gates); any gate risks the genuine Seerr-deferred path. Do not reopen
+without new genuine-demand evidence.
+
+### Demand-weighted background corpus triage — DONE uncommitted (2026-09-23)
+
+Idle-enrichment `buildTargets` reordered lexicographically (uncommitted):
+future intents (expected_at asc, episode-aware depth asc) → recent HUMAN
+requests only (`seerr/web/plex-watchlist/operator`, 30d, thinnest first) →
+published fragile (`thin-diversity`, div<3). DELETED `sparse-coverage`
+(redundant slice of the DIVERSE_ENOUGH stop); PARKED `below-terminal` as an
+enrichment class (quality scouting stays in upgrade-watch; re-admit only on
+demonstrated switches). Evidence: eligible pool is 23 items (19 depth-0);
+old order spent 9/27 slots on system self-traffic + generic; corpus is 100%
+DMM bulk ingest (no live-source provenance in prod); 83/85 fulfilled medias
+already 8+ depth. Tests: idle-enrichment 13/13 + neighbors 22/22 green.
+No schema, caps/quiet/backoff untouched. Do not add generic tiers back
+without a later-used-release demonstration.
+
+### Demand-weighted background corpus triage — no change justified
+
+Audited `idle-enrichment.js`. Current flow is quiet-gated, one bounded live
+query per tick, daily-capped (`ENRICHMENT_DAILY_CAP`, default 100), source
+backoff-aware, zero-yield-aware, and persistence-limited to candidate ingest,
+media association, and release attributes. It never acquires providers,
+materializes, publishes, or probes cache state.
+
+Current target order is already demand-weighted: future intents by expected
+availability/thinness, recent HUMAN requests from `seerr`, `web`,
+`plex-watchlist`, or `operator` within 30 days, then published fragile items
+with fewer than three known associations. Generic sparse and below-terminal
+scavenging are absent by design. The target classes represent, respectively,
+known upcoming demand, recent demonstrated demand, and published keep-intent
+with weak alternate knowledge. Generic completeness is not being treated as a
+product failure.
+
+Read-only production replay found 4 anticipated + 12 failed future intents,
+170 recent human-source requests, 117 published library items, 4,598 pending
+identity-enrichment rows, and zero separately selected thin-diversity targets
+(the published items were not below the current association threshold). The
+next bounded block contains 88 deduplicated eligible targets: 16 future-intent
+and 72 recent-request. All 88 are demand-linked; 14 have zero prior eligible
+result depth, 2 have depth 2–9, and 72 have depth 10+. The diagnostic gain
+proxy classified 14 as potential `DEPTH_GAIN` and 74 as `NO_GAIN`.
+
+The offline demand-weighted replay of the same available target pool produced
+the identical 88-slot ordering and class distribution as current main. There
+were no generic sparse/below-terminal slots to demote, so no measurable
+alternative benefit exists in the current state. This is a confirmation of the
+existing local policy, not evidence for a new scorer or governor.
+
+Source-yield evidence in the production candidate corpus is dominated by DMM
+`ingestion` provenance (1,592,530 source witnesses). The audited source fields
+do not provide enrichment-query-level novel/duplicate/resilience yield for a
+safe per-source enrichment decision. No source fan-out change is justified.
+
+Required verdicts: **FUTURE-INTENT TARGETING: KEEP**; **RECENT-REQUEST
+TARGETING: KEEP**; **THIN-DIVERSITY: DEMOTE** (it is only useful when explicit
+published demand exists and is already below the current third-tier threshold);
+**BELOW-TERMINAL: PARK** in upgrade-watch, not corpus enrichment;
+**SPARSE: PARK** (generic sparsity is not a user-visible failure);
+**SOURCE FAN-OUT FOR ENRICHMENT: KEEP**; **DEMAND-WEIGHTED ORDERING: EARNED
+and already present**.
+
+No implementation change was justified. The same tiny background budget is
+already spent on demand-adjacent uncertainty, generic scavenging is absent,
+and no new demand score/table/UI/governor is warranted.
+
+Product implication: **Background enrichment should spend its bounded query
+budget on explicit upcoming or demonstrated demand with weak knowledge; this
+is already the current implementation, so the right change is to preserve it,
+not expand it.**
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
