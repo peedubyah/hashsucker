@@ -930,6 +930,26 @@ unresolved fulfillment question; in this deep sample, recurring queries mostly
 returned redundant rows, so request-time discovery is preferred until stronger
 uncertainty evidence exists.**
 
+### Idle enrichment demand is necessary, not sufficient — bounded gate verified
+
+The existing idle-enrichment implementation now has the required narrow
+behavior through its current sufficiency/diversity and episode-scope logic:
+recent human demand, future intent, and publication enter target consideration,
+but they do not independently force a live query. `pickInsufficientTarget()`
+continues to require below-threshold useful knowledge; unpublished episodes are
+scoped to zero coverage, while published fragile items with shallow association
+depth remain eligible. Quiet gating, daily cap, source backoff, zero-yield
+suppression, and one-query-per-tick remain unchanged.
+
+Added focused regressions: deep recent demand with eight known associations
+makes zero discovery calls; a zero-depth future episode remains query-eligible;
+and a published two-association fragile item remains query-eligible. The full
+idle-enrichment suite plus these regressions passes 16/16.
+
+No new sufficiency model, score, schema, telemetry, scheduler, provider work,
+UI, or request-time behavior was added. Request-time discovery remains the
+fallback for demand whose existing representation state is insufficient.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
