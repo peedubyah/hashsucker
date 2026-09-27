@@ -983,6 +983,47 @@ CANDIDATE FALLBACK IS DISTINCT: YES**; **DISCOVERY DURING ROUTE RECOVERY:
 ZERO**; **RANKING DURING ROUTE RECOVERY: ZERO**; **IMPLEMENTATION: NO CHANGE
 NEEDED**.
 
+### Live same-TorrentFile byte failover — not testable in current runtime
+
+Selected a real dual-provider object from the control plane:
+
+- TorrentFile: `tf_5de34a78-0a1a-410b-8de5-76ded2680e7d`
+- infoHash: `06bfe49fdc99ad0c6fef1f761382a8181490e456`
+- canonical internal path: `Black.Panther.2018.2160p.DV.HDR10Plus.Ai-Enhanced.HEVC.TrueHD.Atmos.7.1.MULTI-RIFE.4.18-60fps-DirtyHippie/Black.Panther.2018.2160p.DV.HDR10Plus.Ai-Enhanced.HEVC.TrueHD.Atmos.7.1.MULTI-RIFE.4.18-60fps-DirtyHippie.mkv`
+- exact size: `34319716114`
+- TorBox placement: resource `88408468`, provider file `1`
+- Real-Debrid placement: resource `5VFSK7HKPITZW`, provider file `1`
+
+Both provider files are durably mapped to the same TorrentFile and exact path.
+Added `data-plane/bench/live-same-tf-range-proof.mjs` to request deterministic
+initial, middle, and distant ranges and hash returned bytes.
+
+The live proof could not run because the local data-plane listener was not
+running (`ECONNREFUSED 127.0.0.1:3001`). No provider calls, route mutations,
+publication changes, or production writes were made. Therefore actual byte
+hash preservation and seek-after-route-change remain **NOT TESTABLE** in this
+runtime.
+
+The Rust data plane contains surgical test-only route fault controls:
+`DATA_PLANE_FORCE_PROVIDER` allowlists providers per TorrentFile and
+`DATA_PLANE_FORCE_FAIL_PROVIDER` denies a provider per TorrentFile before
+CapabilityManager construction. This is the correct seam for Test A/B/C once
+the data-plane runtime is available. It preserves the S-1 exact TorrentFile
+projection and changes only execution slots.
+
+Existing same-object semantic tests and alternate-fallback tests establish the
+non-byte behavior: no discovery/ranking during fallback, exact identity remains
+unchanged on exhaustion, and persisted alternate fallback is a separate
+mechanism. A live byte proof is still required before claiming end-to-end
+TorBox↔RD failover.
+
+Verdicts: **TORBOX → RD ACTUAL BYTE FAILOVER: NOT TESTABLE**;
+**RD → TORBOX ACTUAL BYTE FAILOVER: NOT TESTABLE**; **EXACT BYTES PRESERVED:
+NOT TESTABLE**; **SEEK AFTER ROUTE CHANGE: NOT TESTED**;
+**RESTART/REACQUIRE AFTER ROUTE CHANGE: NOT TESTED**; **DISCOVERY: ZERO in
+attempted live test**; **RANKING: ZERO**; **REPRESENTATION CHANGE: ZERO**;
+**IMPLEMENTATION: NO CHANGE NEEDED**.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
