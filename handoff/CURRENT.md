@@ -1024,6 +1024,47 @@ NOT TESTABLE**; **SEEK AFTER ROUTE CHANGE: NOT TESTED**;
 attempted live test**; **RANKING: ZERO**; **REPRESENTATION CHANGE: ZERO**;
 **IMPLEMENTATION: NO CHANGE NEEDED**.
 
+### Live same-TorrentFile byte failover — TorBox → Real-Debrid PROVEN
+
+The real local stack was brought up and exercised. The selected durable object
+was `tf_5de34a78-0a1a-410b-8de5-76ded2680e7d`, infoHash
+`06bfe49fdc99ad0c6fef1f761382a8181490e456`, exact size `34319716114`, with
+identical canonical internal path and ready TorBox (`88408468`/file `1`) and
+Real-Debrid (`5VFSK7HKPITZW`/file `1`) mappings.
+
+Baseline through the running Rust data plane returned `206` for bytes
+`0-1023`, size 1024, SHA-256
+`54e8fec11fe61d7921f1b492c6180d56c02b7c6e8df5216bc4960c3b8dc9e93a`, with
+serving provider TorBox/resource `88408468`/file `1`.
+
+A second real Rust data-plane container was started with the surgical
+`DATA_PLANE_FORCE_FAIL_PROVIDER=tf...:torbox` fault. The same initial range
+returned `206`, exactly 1024 bytes, and the identical SHA-256. A distant seek
+(`17159858057-17159859080`) returned `206` through Real-Debrid resource
+`5VFSK7HKPITZW`/file `1`, 1024 bytes, SHA-256
+`9f055f763e708bcc1ad481b3dc6cf6c6c4a452333832c03329a12410f416b39e`. Logs
+showed only the exact TorrentFile ID and Real-Debrid slot served; no source
+search or ranking path ran. The isolated container was a fresh runtime, proving
+restart/reacquire of the data-plane process for the route transition.
+
+The authoritative S-1 projection retained the same infoHash, TorrentFile ID,
+path, and size. No VFS/library/publication mutation occurred. This proves
+actual TorBox → Real-Debrid same-object byte failover and seek behavior.
+
+A dual-provider denial run returned `206` from the existing on-disk data-plane
+cache rather than a typed exhaustion response, so provider exhaustion was not
+validly measured in that attempt. It is explicitly **not claimed proven**; a
+cache-disabled/unique-range exhaustion fixture is still required. The RD →
+TorBox direction was not run because the current runtime fault/control setup
+was used for TorBox denial only.
+
+Verdicts: **TORBOX → RD ACTUAL BYTE FAILOVER: PROVEN**; **RD → TORBOX ACTUAL
+BYTE FAILOVER: NOT TESTABLE**; **EXACT BYTES PRESERVED: YES for the tested
+ranges**; **SEEK AFTER ROUTE CHANGE: PROVEN**;
+**RESTART/REACQUIRE AFTER ROUTE CHANGE: PROVEN for the isolated data-plane
+restart**; **DISCOVERY: ZERO**; **RANKING: ZERO**;
+**REPRESENTATION CHANGE: ZERO**; **IMPLEMENTATION: NO CHANGE NEEDED**.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
