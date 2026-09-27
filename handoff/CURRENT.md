@@ -1065,6 +1065,41 @@ ranges**; **SEEK AFTER ROUTE CHANGE: PROVEN**;
 restart**; **DISCOVERY: ZERO**; **RANKING: ZERO**;
 **REPRESENTATION CHANGE: ZERO**; **IMPLEMENTATION: NO CHANGE NEEDED**.
 
+### Reconciliation pagination beyond 500 — fixed and proven
+
+The consumer reconciliation path previously called `listLibrary()` which
+called `controlPlaneStore.listAllLibraryItems({ limit: 500 })`. This silently
+excluded library identities after the first 500 stable `identity_key` rows.
+The existing store had no cursor contract, so added the smallest local
+reconciliation-only helper: `listLibraryItemsPage({ afterIdentityKey, limit })`
+using stable `identity_key > cursor` ordering and a maximum page size of 500.
+
+`runReconcile()` now traverses pages sequentially, evaluates published/VFS
+state per row, and retains one batched consumer list call per adapter. It does
+not write unchanged library items; it only records the existing consumer
+observations required by reconciliation. No new schema, scheduler, cache,
+governor, lifecycle state, or UI was added.
+
+Correctness tests pass for 1,500 published items: all 1,500 are examined,
+none are skipped or duplicated, the consumer list call occurs once, and the
+last item receives an observation. The <500 case also remains complete.
+
+Scratch scale measurement after the change:
+
+- 1,000 items: 1,000 published examined, one consumer call, 65.945 ms
+- 10,000 items: 10,000 published examined, one consumer call, 2,709.872 ms
+- enrichment/hygiene remained bounded and made no provider/source work
+
+The linear reconciliation cost is now explicit rather than silently truncated.
+The 10k result is correctness-proven but performance-heavy because each item
+still receives durable consumer observations. That is a future optimization
+slice, not a correctness fix.
+
+Verdicts: **500-ITEM COVERAGE BUG: CONFIRMED**; **10K RECONCILIATION
+CORRECTNESS: PROVEN**; **UNCHANGED ITEM WRITES: ZERO library-state writes**
+(consumer observations are the intended reconciliation records);
+**WORK MODEL: PAGED_LINEAR**; **IMPLEMENTATION: CHANGED**.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,

@@ -18,6 +18,7 @@ import { isWantedByArr } from '../anticipation/future-intents.js';
 import { jellyfinAdapter } from './jellyfin.js';
 import { plexAdapter } from './plex.js';
 import { unpublishMedia } from '../library/unpublish.js';
+import { listLibraryItemsPage } from '../control-plane/library-pagination.js';
 
 export function defaultAdapters() {
   return [jellyfinAdapter, plexAdapter];
@@ -55,8 +56,23 @@ export async function runReconcile({
 } = {}) {
   const effectivePolicy = policy ?? readRetirementPolicy(env);
   const list = adapters ?? defaultAdapters().filter((a) => adapterEnabled(a.name, env));
-  const { items } = listLibrary({ cache, controlPlaneStore, limit: 500 });
-  const published = items.filter((i) => i.state === 'published');
+  const pageSize = 500;
+  const published = [];
+  let afterIdentityKey = null;
+  while (true) {
+    const rows = listLibraryItemsPage(controlPlaneStore, { afterIdentityKey, limit: pageSize });
+    if (rows.length === 0) break;
+    const page = rows.map((row) => {
+      const item = row;
+      const vfs = item.season != null && item.episode != null
+        ? cache.getVfsTvEntry?.(item.media_id, item.season, item.episode)
+        : cache.getVfsMovieEntry?.(item.media_id);
+      return { ...item, mediaId: item.media_id, mediaType: item.media_type, season: item.season, episode: item.episode, state: item.desired_state === 'absent' ? 'absent' : (vfs ? 'published' : 'incomplete') };
+    }).filter((item) => item.state === 'published');
+    published.push(...page);
+    afterIdentityKey = rows.at(-1).identity_key;
+    if (rows.length < pageSize) break;
+  }
 
   const observations = [];
   for (const adapter of list) {
@@ -158,6 +174,7 @@ export async function runReconcile({
   return {
     at: now,
     published: published.length,
+    examined: published.length,
     consumers: list.map((a) => a.name),
     eligible: outcomes.filter((o) => o.eligible).length,
     retired,
