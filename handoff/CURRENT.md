@@ -950,6 +950,39 @@ No new sufficiency model, score, schema, telemetry, scheduler, provider work,
 UI, or request-time behavior was added. Request-time discovery remains the
 fallback for demand whose existing representation state is insufficient.
 
+### Same-object route recovery proof — partial, semantics separated
+
+Added `media-search/test/same-object-route-recovery.test.js` with a dedicated
+fixture containing one Release/hash, one exact TorrentFile, canonical internal
+path, positive size, TorBox and Real-Debrid placement/file mappings, a library
+identity, and a VFS row.
+
+The fixture proves the identity invariant across the pure route semantics:
+when TorBox is unavailable and the same object would be resolved through RD,
+`infoHash`, `torrent_file_id`, internal path, and size remain unchanged. The
+fixture also proves both-provider exhaustion returns no usable fallback while
+the exact TorrentFile and VFS identity remain intact. No discovery, ranking,
+publication, or alternate Release is involved in these tests.
+
+Explicit alternate-candidate fallback is tested separately and returns a
+different persisted hash by design. It is therefore distinct from same-object
+route recovery: route recovery preserves `(infoHash, TorrentFile)`; candidate
+fallback selects another persisted representation. No semantic mixing or
+production change was required.
+
+The existing playback resolver/fallback tests also preserve the bounded
+failure behavior: provider exhaustion becomes typed fulfillment failure, and
+the alternate path consumes persisted ranked results without discovery or
+reranking. A full live HTTP TorBox↔RD two-way integration was not available in
+this scratch environment; the provider-specific route seams remain partially
+proven rather than claimed as end-to-end complete.
+
+Verdicts: **TORBOX → RD SAME OBJECT: PARTIAL**; **RD → TORBOX SAME OBJECT:
+PARTIAL**; **BOTH ROUTES EXHAUSTED PRESERVES OBJECT: YES**; **ALTERNATE
+CANDIDATE FALLBACK IS DISTINCT: YES**; **DISCOVERY DURING ROUTE RECOVERY:
+ZERO**; **RANKING DURING ROUTE RECOVERY: ZERO**; **IMPLEMENTATION: NO CHANGE
+NEEDED**.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,

@@ -1,0 +1,11 @@
+#!/usr/bin/env node
+/** Measure bounded maintenance selectors over 1k/10k synthetic published items. */
+import { DatabaseSync } from 'node:sqlite';
+import { performance } from 'node:perf_hooks';
+import { createDiscoveryCache } from '../src/lib/discovery/cache.js';
+import { createControlPlaneStore } from '../src/lib/control-plane/store.js';
+import { createIdleEnrichment } from '../src/lib/discovery/idle-enrichment.js';
+import { createCorpusHygiene } from '../src/lib/discovery/corpus-hygiene.js';
+import { runReconcile } from '../src/lib/consumers/reconcile.js';
+function setup(n){const cache=createDiscoveryCache({db:new DatabaseSync(':memory:')});const cp=createControlPlaneStore({database:new DatabaseSync(':memory:')});for(let i=0;i<n;i++){const id=`scale-${i}`;cp.ensureLibraryItem({mediaType:'movie',mediaId:id,title:id,desiredState:'present'});cache.createVfsMovieEntry({mediaId:id,releaseKey:`${String(i).padStart(40,'0')}:torrent`,infoHash:String(i).padStart(40,'0'),fileIndex:null,canonicalPath:`Movies/${id}/file.mkv`,torrentFileId:null,size:1,createdAt:1,updatedAt:1})}return{cache,cp}}
+async function run(n){const s=setup(n);let calls=0;const adapters=[{name:'stub',listLibrary:async()=>{calls++;return Array.from({length:n},(_,i)=>({mediaId:`scale-${i}`,consumerItemId:String(i)}))}}];const a=performance.now();const rec=await runReconcile({cache:s.cache,controlPlaneStore:s.cp,adapters,policy:{enabled:false}});const b=performance.now();const e=createIdleEnrichment({cache:s.cache,controlPlaneStore:s.cp,measureLag:async()=>1,now:()=>1_000_000,env:{},discoverFn:async()=>({releases:[],sources:{}})});const c=performance.now();const er=e.buildTargets(20);const d=performance.now();const h=createCorpusHygiene({cache:s.cache,controlPlaneStore:s.cp,measureLag:async()=>1,now:()=>1_000_000,env:{}});const f=performance.now();const hr=h.buildAuditBatch(20);const g=performance.now();const out={items:n,reconcile:{ms:+(b-a).toFixed(3),published:rec.published,consumerCalls:calls},enrichment:{ms:+(d-c).toFixed(3),targets:er.length},hygiene:{ms:+(g-f).toFixed(3),batch:hr.length}};s.cache.close();s.cp.close();return out}console.log(JSON.stringify({scales:[await run(1000),await run(10000)],note:'scratch-only; no provider/source/VFS writes'},null,2));
