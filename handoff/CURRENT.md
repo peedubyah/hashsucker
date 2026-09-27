@@ -1100,6 +1100,34 @@ CORRECTNESS: PROVEN**; **UNCHANGED ITEM WRITES: ZERO library-state writes**
 (consumer observations are the intended reconciliation records);
 **WORK MODEL: PAGED_LINEAR**; **IMPLEMENTATION: CHANGED**.
 
+### Reconciliation write-amplification audit — no suppression change
+
+A 10,000-item unchanged published fixture was reconciled twice with one stub
+consumer. Pass 1 examined 10,000 items and inserted 10,000
+`consumer_observations` rows. Pass 2 examined 10,000 items and changed no
+consumer state, but executed 10,000 updates against the same primary keys;
+row count remained 10,000. A sample row retained `first_checked_at=1000` while
+`last_checked_at` and `last_seen_present_at` advanced to `2000`.
+
+Repeated identical observation writes are therefore **YES**. Downstream
+retirement logic does not require a new row or a changed present/consumer ID,
+but it does require fresh `last_checked_at` to distinguish a current consumer
+observation from stale state. Suppressing the update would make healthy items
+appear stale and could change fail-closed retirement behavior. Existing
+`first_checked_at`, `last_checked_at`, and `last_seen_present_at` are semantic
+freshness/history fields, not disposable write metadata.
+
+Verdicts: **REPEATED IDENTICAL OBSERVATION WRITES: YES**;
+**DOWNSTREAM LOGIC REQUIRES THEM: PARTIAL** (state repetition is not needed,
+periodic freshness advancement is); **SAFE CHANGE-DETECTION ALREADY AVAILABLE:
+NO** for write suppression, because timestamp advancement is the change that
+reconciliation records; **10K SECOND-PASS WRITES: 10,000 UPDATE writes**;
+**IMPLEMENTATION: NO CHANGE JUSTIFIED**.
+
+A future optimization could separate freshness projection from history only if
+its retirement semantics are preserved, but that would be a schema/behavior
+change and is out of scope for this audit.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
