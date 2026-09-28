@@ -1157,6 +1157,47 @@ Verdicts: **ACTIVE PLAYBACK SURVIVES ROUTE FAILURE: NOT TESTABLE**;
 **RANKING: ZERO**; **REPRESENTATION CHANGE: ZERO**;
 **IMPLEMENTATION: NO CHANGE NEEDED**.
 
+### Plex Part same-object failover proof — TorBox → RD PROVEN
+
+Used the real Plex Part endpoint as a synthetic playback client for the
+published Black Panther item:
+
+- Rating key: `230`
+- Part: `/library/parts/527/1788680809/file.mkv`
+- TorrentFile: `tf_5de34a78-0a1a-410b-8de5-76ded2680e7d`
+- infoHash: `06bfe49fdc99ad0c6fef1f761382a8181490e456`
+- exact size: `34319716114`
+- VFS path: `/mnt/hashsucker-vfs/Movies/Black Panther (2018)/Black Panther (2018).mkv`
+
+Baseline Plex Part ranges returned HTTP 206 with the expected total size:
+
+- `0-1048575`: SHA-256 `52daa79d4aff8158b7cf8359edce7380db62ed1f68e0ecb2052b8096c31a646f`
+- `17159858057-17160906632`: SHA-256 `9dc9c719e04491e990b48faadb06ff792a820f4283ad882d2040d241b51a14a2`
+
+Started an isolated real data-plane runtime with
+`DATA_PLANE_FORCE_FAIL_PROVIDER=tf...:torbox` while leaving RD available.
+The same Plex Part URL then returned HTTP 206 for the original range, distant
+range, and a third seek range. The original and distant hashes exactly matched
+baseline. Data-plane logs showed the exact TorrentFile ID and
+`realdebrid` slot served; no source discovery, ranking, or candidate fallback
+was involved.
+
+A fresh isolated route-failed data-plane runtime was started again and the
+same Plex Part returned HTTP 206 for the initial and end ranges with matching
+hashes. The Plex Part, VFS identity, TorrentFile ID, infoHash, path, and size
+were unchanged. No publication or VFS mutation occurred.
+
+This proves Plex-server/VFS/byte-path continuity through TorBox→RD failover and
+runtime reacquire. It does not prove interactive Plex player UX: no Plex
+client was connected, so stall/retry behavior inside an active player session
+remains untested.
+
+Verdicts: **PLEX PART BASELINE: PROVEN**; **PLEX PART TORBOX → RD SAME OBJECT:
+PROVEN**; **BYTE IDENTITY THROUGH PLEX: PRESERVED**; **SEEK THROUGH PLEX AFTER
+FAILOVER: PROVEN**; **DATA-PLANE RESTART THROUGH SAME PLEX PART: PROVEN**;
+**DISCOVERY: ZERO**; **RANKING: ZERO**; **REPRESENTATION CHANGE: ZERO**;
+**REAL PLAYER SESSION: STILL UNPROVEN**; **IMPLEMENTATION: NO CHANGE NEEDED**.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
