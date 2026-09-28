@@ -1128,6 +1128,35 @@ A future optimization could separate freshness projection from history only if
 its retirement semantics are preserved, but that would be a schema/behavior
 change and is out of scope for this audit.
 
+### Plex playback route-failure proof — not testable: no active Plex client
+
+The real Plex-facing stack was inspected. Plex is configured and the published
+Black Panther item is present:
+
+- Plex rating key: `230`
+- Part key: `/library/parts/527/1788680809/file.mkv`
+- VFS path: `/mnt/hashsucker-vfs/Movies/Black Panther (2018)/Black Panther (2018).mkv`
+- size: `34319716114`
+- TorrentFile: `tf_5de34a78-0a1a-410b-8de5-76ded2680e7d`
+- infoHash: `06bfe49fdc99ad0c6fef1f761382a8181490e456`
+
+Plex library metadata and media-part lookup succeeded. However, Plex reported
+zero active clients (`/clients` size 0) and zero active sessions
+(`/status/sessions` size 0). No controllable Plex player was available to start
+an actual playback session. Therefore no real Plex playback, mid-session route
+fault, player retry/stall observation, or post-failover seek could be run.
+
+The exact data-plane route proof remains valid separately: the same item had
+already passed TorBox→RD byte-range failover and distant seek through a fresh
+Rust runtime. This slice did not fabricate a Plex result from that proof.
+
+Verdicts: **ACTIVE PLAYBACK SURVIVES ROUTE FAILURE: NOT TESTABLE**;
+**SAME TORRENTFILE PRESERVED: NOT TESTED IN PLEX SESSION**;
+**PLEX RETRY BEHAVIOR: NONE OBSERVED**; **SEEK AFTER FAILOVER: NOT TESTED**;
+**DATA-PLANE RESTART DURING PLAYBACK: NOT TESTED**; **DISCOVERY: ZERO**;
+**RANKING: ZERO**; **REPRESENTATION CHANGE: ZERO**;
+**IMPLEMENTATION: NO CHANGE NEEDED**.
+
 ## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
