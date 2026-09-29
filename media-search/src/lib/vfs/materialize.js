@@ -89,20 +89,27 @@ function tryActivateAuthoritativeBinding({
   const identity = handoff?.torrentFileIdentity;
   let placementId = identity?.placementId ?? null;
   let providerFileId = identity?.providerFileId ?? null;
+  const bindingTorrentFileId = torrentFile?.id ?? handoff?.torrentFileId ?? null;
   // Defect B repair: when torrentFileIdentity was not persisted
   // (rank-5 promotion path where only torrentFileId is in playback_handoffs),
   // derive placementId and providerFileId from the TorrentFile + control-plane state.
   // This is safe: the provider_files row exists because the same inventory
   // observation that created the TorrentFile also created the provider_file mapping.
   if ((!placementId || !providerFileId) && typeof controlPlaneStore.resolveDeliveryCoordinates === 'function') {
-    const coords = controlPlaneStore.resolveDeliveryCoordinates(handoff.infoHash, handoff.torrentFileId);
+    const coords = controlPlaneStore.resolveDeliveryCoordinates(handoff.infoHash, bindingTorrentFileId);
     if (coords) {
       placementId = coords.placementId;
       providerFileId = coords.providerFileId;
     }
   }
-  if (!placementId || !providerFileId) return null;
-  if (!torrentFile || !torrentFile.id) return null;
+  if (!placementId || !providerFileId) {
+    console.warn('[vfs] binding write skipped: missing route coordinates', JSON.stringify({ torrentFileId: bindingTorrentFileId, placementId, providerFileId, handoffIdentity: identity }));
+    return null;
+  }
+  if (!torrentFile || !torrentFile.id) {
+    console.warn('[vfs] binding write skipped: missing TorrentFile', JSON.stringify({ torrentFileId: bindingTorrentFileId }));
+    return null;
+  }
 
   const itemInput = libraryItemInputFromHandoff(handoff);
   let item;
@@ -150,12 +157,20 @@ function tryActivateAuthoritativeBinding({
   }
   let binding;
   try {
+    console.warn('[vfs] activateBinding attempt', JSON.stringify({
+      libraryItemId: item.id, libraryPathId: libraryPath.id, torrentFileId: torrentFile.id,
+      infoHash: handoff.infoHash, fileIndex: handoff.fileIndex ?? null,
+      placementId, providerFileId, exposureId: exposure.id,
+      providerFilePresent: controlPlaneStore.getProviderFile?.(placementId, providerFileId)?.present ?? null,
+      providerFileMappingState: controlPlaneStore.getProviderFile?.(placementId, providerFileId)?.mappingState ?? null,
+    }));
     binding = controlPlaneStore.activateBinding({
       libraryItemId: item.id,
       libraryPathId: libraryPath.id,
       releaseKey: handoff.releaseKey,
       infoHash: handoff.infoHash,
       fileIndex: handoff.fileIndex ?? null,
+      torrentFileId: torrentFile.id,
       placementId,
       providerFileId,
       exposureId: exposure.id,
@@ -307,7 +322,7 @@ function torrentFileForHandoff(controlPlaneStore, handoff, allowLegacy) {
 function assertExistingIdentity(existing, handoff, torrentFile) {
   if (!torrentFile) return;
   if (existing.torrentFileId !== torrentFile.id
-    || existing.infoHash.toLowerCase() !== torrentFile.infoHash.toLowerCase()
+    || String(existing.infoHash || '').toLowerCase() !== torrentFile.infoHash.toLowerCase()
     || existing.size !== torrentFile.size) {
     throw new Error(`Durable VFS entry conflicts with TorrentFile ${torrentFile.id}`);
   }
@@ -363,6 +378,17 @@ function isRejectionSupersede(existing, handoff, torrentFile) {
   // within the same physical release and is rejected (the
   // existing assertion will catch it).
   return identityChanged;
+}
+
+function hasActiveBindingForHandoff(controlPlaneStore, handoff) {
+  if (!controlPlaneStore || typeof controlPlaneStore.getLibraryItemByIdentityKey !== 'function'
+    || typeof controlPlaneStore.getActiveBindingForLibraryItem !== 'function') return false;
+  try {
+    const item = controlPlaneStore.getLibraryItemByIdentityKey(createLibraryIdentityKey(libraryItemInputFromHandoff(handoff)));
+    return item ? controlPlaneStore.getActiveBindingForLibraryItem(item.id) != null : false;
+  } catch {
+    return false;
+  }
 }
 
 function authoritativeTvFields(torrentFile, handoff, canonicalPath, timestamp) {
@@ -494,7 +520,32 @@ export async function materializeVfsEntry(
   now = () => Date.now(),
   { allowLegacy = true } = {},
 ) {
-  const torrentFile = torrentFileForHandoff(controlPlaneStore, handoff, allowLegacy);
+  let torrentFile = torrentFileForHandoff(controlPlaneStore, handoff, allowLegacy);
+  // Binding is the desired representation. Handoffs are history/runtime
+  // coordination, so a stale handoff is projected onto the active Binding
+  // before VFS publication rather than being allowed to rewrite it. An
+  // explicitly validated alternate is the representation decision itself and
+  // proceeds through the normal binding activation below.
+  if (torrentFile && isRealControlPlaneStore(controlPlaneStore)
+    && typeof controlPlaneStore.getLibraryItemByIdentityKey === 'function'
+    && typeof controlPlaneStore.getActiveBindingForLibraryItem === 'function') {
+    const itemInput = libraryItemInputFromHandoff(handoff);
+    const identityKey = createLibraryIdentityKey(itemInput);
+    const item = controlPlaneStore.getLibraryItemByIdentityKey(identityKey);
+    const active = item ? controlPlaneStore.getActiveBindingForLibraryItem(item.id) : null;
+    const explicitRepresentationDecision = handoff.selectionReason === 'alternate-bounded-byte-validated';
+    if (active && active.torrentFile.id !== torrentFile.id && !explicitRepresentationDecision) {
+      torrentFile = active.torrentFile;
+      handoff = {
+        ...handoff,
+        releaseKey: active.binding.releaseKey,
+        infoHash: active.binding.infoHash,
+        fileIndex: active.binding.fileIndex ?? null,
+        torrentFileId: active.torrentFile.id,
+        filename: active.torrentFile.internalPath,
+      };
+    }
+  }
   // The binding write needs an item factory that closes over the handoff's
   // presentation identity. We attach it as a method on the handoff so the
   // result finalization below can run tryActivateAuthoritativeBinding on
@@ -506,7 +557,10 @@ export async function materializeVfsEntry(
   };
   const finalize = (entry, reason) => {
     if (!entry) return entry;
-    const observedAt = entry.updatedAt ?? entry.createdAt ?? now();
+    // Replaying an old VFS row must refresh route evidence at the current
+    // observation time; using the row's historical updated_at would create an
+    // immediately stale exposure and prevent Binding activation.
+    const observedAt = now();
     tryActivateAuthoritativeBinding({
       controlPlaneStore,
       handoff,
@@ -526,6 +580,14 @@ export async function materializeVfsEntry(
   if (handoff.mediaType === 'movie') {
     const existing = searchCache.getVfsMovieEntry(handoff.mediaId);
     if (existing) {
+      if (torrentFile && !hasActiveBindingForHandoff(controlPlaneStore, handoff)
+        && !isLegacyVfsEntry(existing)) {
+        const replaced = searchCache.replaceVfsMovieEntry(
+          authoritativeMovieFields(torrentFile, handoff, existing.canonicalPath, now()),
+          { allowRejectionSupersede: true },
+        );
+        if (replaced) return finalize(replaced, 'vfs-movie-orphan-convergence');
+      }
       if (torrentFile && (isLegacyVfsEntry(existing) || isRejectionSupersede(existing, handoff, torrentFile))) {
         // Legacy supersede: keep the existing canonical_path so the published
         // library alias stays stable, and atomically replace the physical
@@ -623,6 +685,30 @@ export async function materializeVfsEntry(
 
   const existing = searchCache.getVfsTvEntry(handoff.mediaId, handoff.season, handoff.episode);
   if (existing) {
+    if (torrentFile && !hasActiveBindingForHandoff(controlPlaneStore, handoff)
+      && !isLegacyVfsEntry(existing)) {
+      const orphanFields = authoritativeTvFields(torrentFile, handoff, existing.canonicalPath, now());
+      const ext = path.posix.extname(torrentFile.internalPath).toLowerCase();
+      const canonicalPath = ext && ext !== '.exe'
+        ? existing.canonicalPath.replace(/\.[^.]+$/, ext)
+        : existing.canonicalPath;
+      const replaced = searchCache.replaceVfsTvEntry(
+        { ...orphanFields, canonicalPath },
+        { allowRejectionSupersede: true },
+      );
+      if (replaced) return finalize(replaced, 'vfs-tv-orphan-convergence');
+    }
+    if (torrentFile && !hasActiveBindingForHandoff(controlPlaneStore, handoff)
+      && existing.torrentFileId === torrentFile.id
+      && existing.canonicalPath.toLowerCase().endsWith('.exe')
+      && path.posix.extname(torrentFile.internalPath).toLowerCase() !== '.exe') {
+      const canonicalPath = existing.canonicalPath.replace(/\.[^.]+$/, path.posix.extname(torrentFile.internalPath).toLowerCase());
+      const replaced = searchCache.replaceVfsTvEntry(
+        authoritativeTvFields(torrentFile, handoff, canonicalPath, now()),
+        { allowRejectionSupersede: true },
+      );
+      if (replaced) return finalize(replaced, 'vfs-tv-invalid-extension-convergence');
+    }
     if (torrentFile && (isLegacyVfsEntry(existing) || isRejectionSupersede(existing, handoff, torrentFile))) {
       // Legacy supersede: keep the existing canonical_path so the published
       // library alias stays stable, and atomically replace the physical

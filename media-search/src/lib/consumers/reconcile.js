@@ -14,7 +14,7 @@
 
 import { listLibrary } from '../library/listing.js';
 import { evaluateRetirement, readRetirementPolicy } from './eligibility.js';
-import { isWantedByArr } from '../anticipation/future-intents.js';
+import { createFutureIntentStore, isWantedByArr } from '../anticipation/future-intents.js';
 import { jellyfinAdapter } from './jellyfin.js';
 import { plexAdapter } from './plex.js';
 import { unpublishMedia } from '../library/unpublish.js';
@@ -96,6 +96,19 @@ export async function runReconcile({
           now,
         };
         controlPlaneStore.recordConsumerObservation(record);
+        if (adapter.name === 'plex' && record.present === 0 && item.desired_state !== 'absent') {
+          try {
+            createFutureIntentStore({ db: cache.db }).ensureReleasedFollowUp({
+              mediaId: item.mediaId,
+              season: item.season,
+              episode: item.episode,
+              source: 'plex-absence-reconcile',
+              deferReason: 'plex-publication-pending',
+            });
+          } catch {
+            // Observation remains durable even if follow-up seeding fails.
+          }
+        }
         observations.push({ ...record, lastCheckedAt: now });
       }
     } catch (error) {

@@ -227,6 +227,7 @@ CREATE TABLE IF NOT EXISTS bindings (
   info_hash TEXT NOT NULL,
   file_index INTEGER,
   file_index_key INTEGER NOT NULL,
+  torrent_file_id TEXT NOT NULL,
   placement_id TEXT NOT NULL,
   provider_file_id TEXT NOT NULL,
   exposure_id TEXT NOT NULL,
@@ -240,6 +241,7 @@ CREATE TABLE IF NOT EXISTS bindings (
   UNIQUE (library_item_id, version),
   FOREIGN KEY (library_item_id) REFERENCES library_items(id),
   FOREIGN KEY (library_path_id) REFERENCES library_paths(id),
+  FOREIGN KEY (torrent_file_id) REFERENCES torrent_files(id),
   FOREIGN KEY (placement_id, provider_file_id) REFERENCES provider_files(placement_id, provider_file_id),
   FOREIGN KEY (exposure_id) REFERENCES exposures(id)
 );
@@ -382,6 +384,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   // fresh schema (partial unique index, FK to torrent_files) sees the
   // backfilled columns.
   migrateTorrentFileSchema(db);
+  migrateBindingTorrentFileSchema(db);
   // Temporary publication columns (watch-once tranche): publication mode
   // + retirement time. PRAGMA-guarded so existing databases migrate
   // without rebuild. Background flows never write these; only explicit
@@ -588,33 +591,24 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   }
 
   /**
-   * Resolve the authoritative (placementId, providerFileId) for a handoff's
-   * delivery coordinates. Used when a playback_handoffs row lacks embedded
-   * delivery coordinates (legacy) and materializeVfsEntry needs them to
-   * activate the binding.
-   *
-   * Strategy:
-   * 1. Use the TorrentFile to find its controlling placement (infoHash).
-   * 2. Use the placement + provider_files.present=1.mapping_state='mapped' to find
-   *    the current mapped provider_file row.
-   *
-   * Returns null when no authoritative mapping exists (e.g., expired inventory).
+   * Resolve one current provider coordinate for a TorrentFile. This is a
+   * legacy Binding-enrollment helper, not the serving path. It deliberately
+   * starts from TorrentFile X and never from Binding route history.
    */
   function resolveDeliveryCoordinates(infoHash, torrentFileId) {
     if (!torrentFileId) return null;
     const tf = getTorrentFile(torrentFileId);
-    if (!tf) return null;
-    const placement = findPlacementByInfoHash('torbox', tf.infoHash);
-    if (!placement) return null;
-    // Find the mapped present provider_file for this placement.
-    // This is the same tuple that activateBinding uses for binding validation.
-    const pf = db.prepare(`
-      SELECT provider_file_id FROM provider_files
-      WHERE placement_id = ? AND torrent_file_id = ? AND present = 1
-        AND mapping_state = 'mapped'
-    `).get(placement.id, torrentFileId);
-    if (!pf) return null;
-    return { placementId: placement.id, providerFileId: pf.provider_file_id };
+    if (!tf || (infoHash && tf.infoHash !== normalizeInfoHash(infoHash))) return null;
+    const row = db.prepare(`
+      SELECT pl.id AS placement_id, pf.provider_file_id
+      FROM provider_files pf
+      JOIN provider_placements pl ON pl.id = pf.placement_id
+      WHERE pf.torrent_file_id = ? AND pf.present = 1
+        AND pf.mapping_state = 'mapped' AND pl.state != 'removed'
+      ORDER BY pl.provider, pl.account_scope, pf.provider_file_id
+      LIMIT 1
+    `).get(torrentFileId);
+    return row ? { placementId: row.placement_id, providerFileId: row.provider_file_id } : null;
   }
 
   function markPlacementRemoved(placementId, options = {}) {
@@ -1089,12 +1083,43 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     return row ? rowToLibraryItem(row) : null;
   }
 
+  function getProviderFile(placementId, providerFileId) {
+    const row = db.prepare(`
+      SELECT * FROM provider_files WHERE placement_id = ? AND provider_file_id = ?
+    `).get(placementId, providerFileId);
+    return row ? rowToProviderFile(row) : null;
+  }
+
   function listProviderFiles(placementId, { includeMissing = false } = {}) {
     return db.prepare(`
       SELECT * FROM provider_files
       WHERE placement_id = ?${includeMissing ? '' : ' AND present = 1'}
       ORDER BY path, provider_file_id
     `).all(placementId).map(rowToProviderFile);
+  }
+
+  /**
+   * Return the active durable representation for one library item.
+   *
+   * Bindings are the representation decision. The provider file is only the
+   * current route coordinate; its mapped torrent_file_id resolves the exact
+   * immutable physical object. Callers must not use handoffs, ranked request
+   * results, or provider observations as a substitute for this lookup.
+   */
+  function getActiveBindingForLibraryItem(libraryItemId) {
+    const item = requireLibraryItem(libraryItemId);
+    const row = db.prepare(`
+      SELECT b.*
+      FROM bindings b
+      WHERE b.library_item_id = ? AND b.status = 'active'
+      ORDER BY b.version DESC
+      LIMIT 1
+    `).get(item.id);
+    if (!row || !row.torrent_file_id) return null;
+    const binding = rowToBinding(row);
+    const torrentFile = getTorrentFile(row.torrent_file_id);
+    if (!torrentFile || torrentFile.infoHash !== binding.infoHash) return null;
+    return { binding, torrentFile };
   }
 
   function getTorrentFile(id) {
@@ -1401,6 +1426,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       && providerFileMapping.mapping_state === 'mapped'
       && providerFileMapping.inventory_expires_at != null
       && providerFileMapping.inventory_expires_at > timestamp;
+    const torrentFileId = input.torrentFileId ?? mapping?.torrent_file_id ?? providerFileMapping?.torrent_file_id ?? null;
     const exposure = db.prepare(`
       SELECT * FROM exposures
       WHERE id = ? AND placement_id = ? AND provider_file_id = ?
@@ -1411,8 +1437,16 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     }
     if (exposure.state !== 'visible') throw new Error('Cannot bind a provider file without visible exposure');
     if (exposure.read_only !== 1) throw new Error('Cannot bind a provider file through writable exposure');
-    if (!mapping && !providerFileMappingIsAuthoritative) {
+    if (!mapping && !providerFileMappingIsAuthoritative && !input.torrentFileId) {
       throw new Error('Binding requires an authoritative exact file mapping');
+    }
+    const torrentFile = torrentFileId ? getTorrentFile(torrentFileId) : null;
+    if (input.torrentFileId && providerFileMapping?.torrent_file_id
+      && input.torrentFileId !== providerFileMapping.torrent_file_id) {
+      throw new Error('Binding TorrentFile identity disagrees with provider-file mapping');
+    }
+    if (!torrentFile || torrentFile.infoHash !== identity.infoHash) {
+      throw new Error('Binding requires an exact TorrentFile identity');
     }
     if (readiness) {
       if (readiness.state !== 'ready') throw new Error('Cannot bind before provider readiness');
@@ -1444,11 +1478,22 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
         && input.expectedBindingVersion !== (newest?.version ?? 0)) {
         throw new Error('Active binding version changed during reconciliation');
       }
-      if (active && active.release_key === identity.releaseKey
-        && active.placement_id === input.placementId
-        && active.provider_file_id === input.providerFileId
-        && active.exposure_id === input.exposureId) {
-        return rowToBinding(active);
+      if (active && active.torrent_file_id === torrentFileId
+        && active.release_key === identity.releaseKey
+        && active.info_hash === identity.infoHash
+        && active.file_index === identity.fileIndex) {
+        // Same TorrentFile, new route: update execution coordinates in place.
+        // Representation identity and Binding history remain unchanged.
+        db.prepare(`
+          UPDATE bindings
+          SET placement_id = ?, provider_file_id = ?, exposure_id = ?,
+              reason = ?, reconciled_at = ?, failure_category = NULL
+          WHERE id = ? AND status = 'active'
+        `).run(
+          input.placementId, input.providerFileId, input.exposureId,
+          requireString(input.reason, 'reason', 1000), timestamp, active.id,
+        );
+        return rowToBinding(db.prepare('SELECT * FROM bindings WHERE id = ?').get(active.id));
       }
 
       if (active) {
@@ -1479,12 +1524,12 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       db.prepare(`
         INSERT INTO bindings (
           id, library_item_id, library_path_id, release_key, info_hash, file_index,
-          file_index_key, placement_id, provider_file_id, exposure_id, version,
+          file_index_key, torrent_file_id, placement_id, provider_file_id, exposure_id, version,
           status, reason, valid_from, reconciled_at, failure_category
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
       `).run(
         id, item.id, libraryPath.id, identity.releaseKey, identity.infoHash,
-        identity.fileIndex, identity.fileIndex ?? -1, input.placementId,
+        identity.fileIndex, identity.fileIndex ?? -1, torrentFileId, input.placementId,
         input.providerFileId, input.exposureId, version,
         requireString(input.reason, 'reason', 1000), timestamp, timestamp,
         input.failureCategory ?? null,
@@ -2057,6 +2102,8 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     listProviderFiles,
     getProviderInventorySnapshot,
     getTorrentFile,
+    getProviderFile,
+    getActiveBindingForLibraryItem,
     findTorrentFile,
     listTorrentFilesForRelease,
     listProviderRefsForTorrentFile,
@@ -2228,7 +2275,7 @@ function rowToBinding(row) {
   return {
     id: row.id, libraryItemId: row.library_item_id, libraryPathId: row.library_path_id,
     releaseKey: row.release_key, infoHash: row.info_hash, fileIndex: row.file_index,
-    placementId: row.placement_id, providerFileId: row.provider_file_id,
+    torrentFileId: row.torrent_file_id, placementId: row.placement_id, providerFileId: row.provider_file_id,
     exposureId: row.exposure_id, version: row.version, status: row.status,
     reason: row.reason, validFrom: row.valid_from, supersededAt: row.superseded_at,
     reconciledAt: row.reconciled_at, failureCategory: row.failure_category,
@@ -2367,6 +2414,22 @@ function migrateRepairEvidenceSchema(db) {
 // Slice 1.5: collapse the legacy torrent_file_provider_refs table into
 // provider_files. The migration is non-destructive for any prior inventory
 // observation and idempotent.
+function migrateBindingTorrentFileSchema(db) {
+  const columns = db.prepare('PRAGMA table_info(bindings)').all();
+  if (columns.length === 0 || columns.some((row) => row.name === 'torrent_file_id')) return;
+  db.exec('ALTER TABLE bindings ADD COLUMN torrent_file_id TEXT');
+  db.exec(`
+    UPDATE bindings
+    SET torrent_file_id = (
+      SELECT pf.torrent_file_id
+      FROM provider_files pf
+      WHERE pf.placement_id = bindings.placement_id
+        AND pf.provider_file_id = bindings.provider_file_id
+    )
+    WHERE torrent_file_id IS NULL
+  `);
+}
+
 function migrateTorrentFileSchema(db) {
   const providerColumns = db.prepare('PRAGMA table_info(provider_files)').all();
   const hasProviderFiles = providerColumns.length > 0;

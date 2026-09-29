@@ -179,6 +179,15 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
       ORDER BY next_check_at LIMIT ?`).all(now(), limit);
   }
 
+  function ensureReleasedFollowUp({ mediaId, season = null, episode = null, source = 'release-follow-up', expectedAt = null, checkInMs = 0, deferReason = 'released-no-candidate' } = {}) {
+    const existing = findByIdentity({ mediaId, season, episode });
+    if (existing) {
+      if (existing.state === 'withdrawn' || existing.state === 'failed') revive(existing.id, { expectedAt, deferReason });
+      return findByIdentity({ mediaId, season, episode });
+    }
+    return seed({ mediaType: season != null || episode != null ? 'series' : 'movie', mediaId, season, episode, source, expectedAt, checkInMs, deferReason }).intent;
+  }
+
   /** Atomic claim: exactly one worker moves anticipated→preparing. */
   function claim(id) {
     const info = db.prepare(`UPDATE future_intents
@@ -350,7 +359,7 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
     return row?.t ?? null;
   }
 
-  return { seed, findByIdentity, hasPendingForMedia, revive, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest, wakeSeerrRequest, wakeMedia };
+return { seed, findByIdentity, hasPendingForMedia, ensureReleasedFollowUp, revive, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest, wakeSeerrRequest, wakeMedia };
 }
 
 /** Backoff for retryable intent work: 15m, 1h, 4h, cap 24h. */

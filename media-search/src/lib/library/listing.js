@@ -65,16 +65,19 @@ function hasCoords(controlPlaneStore, torrentFileId) {
   }
 }
 
-function hasActiveBinding(controlPlaneStore, libraryItemId) {
-  if (typeof controlPlaneStore?.listBindings !== 'function') {
-    return false;
+function activeBindingFor(controlPlaneStore, libraryItemId) {
+  if (typeof controlPlaneStore?.getActiveBindingForLibraryItem !== 'function') {
+    return null;
   }
   try {
-    return controlPlaneStore.listBindings(libraryItemId)
-      .some((b) => b && b.status === 'active');
+    return controlPlaneStore.getActiveBindingForLibraryItem(libraryItemId) ?? null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function hasActiveBinding(controlPlaneStore, libraryItemId) {
+  return activeBindingFor(controlPlaneStore, libraryItemId) != null;
 }
 
 /**
@@ -110,8 +113,9 @@ export function listLibrary({ cache, controlPlaneStore, promotionStore = null, l
     const episodeScoped = item.season != null && item.episode != null;
     const handoff = handoffFor(cache, item);
     const vfs = vfsRowFor(cache, item);
-    const tfId = handoff?.torrentFileId ?? null;
-    const tf = torrentFileFor(controlPlaneStore, tfId);
+    const activeBinding = activeBindingFor(controlPlaneStore, item.id);
+    const tfId = activeBinding?.torrentFile?.id ?? null;
+    const tf = activeBinding?.torrentFile ?? torrentFileFor(controlPlaneStore, tfId);
     const desiredAbsent = item.desiredState === 'absent';
     const storage = storageFor(promotionStore, item, episodeScoped);
     return {
@@ -136,7 +140,7 @@ export function listLibrary({ cache, controlPlaneStore, promotionStore = null, l
       torrentFileId: tfId,
       size: tf?.size ?? null,
       hasServingCoordinates: hasCoords(controlPlaneStore, tfId),
-      hasActiveBinding: hasActiveBinding(controlPlaneStore, item.id),
+      hasActiveBinding: activeBinding != null,
       ...storage,
     };
   });

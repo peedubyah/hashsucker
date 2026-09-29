@@ -20,7 +20,7 @@ import { createAvailabilityChecker } from '../lib/intents/availability.js';
 import { selectBestCandidate, selectBindableCandidate } from '../lib/discovery/selection.js';
 import { lookupCorpusByTitle, resolveWantedIdentity, IDENTITY_TIERS } from '../lib/discovery/corpus-identity.js';
 import { computeHistoricalAvailabilityPrior } from '../lib/discovery/confidence-projection.js';
-import { resolveTvTorrentFile } from '../lib/resolver/tv-episode-resolver.js';
+import { resolveTvTorrentFile, isPlayableVideoTorrentFile } from '../lib/resolver/tv-episode-resolver.js';
 import { buildPlaybackHandoff } from '../lib/discovery/playback-handoff.js';
 import { publishStrm, expectedStrmPath } from '../lib/requests/strm-publisher.js';
 import { createLibraryIdentityKey } from '../lib/control-plane/canonical-path.js';
@@ -28,6 +28,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { notifyJellyfin } from '../lib/requests/jellyfin-notifier.js';
 import { notifyPlex } from '../lib/requests/plex-notifier.js';
+import { confirmPlexEpisode } from '../lib/consumers/plex.js';
 import { materializeVfsEntry } from '../lib/vfs/materialize.js';
 import { DEMAND_PRIORITY } from '../lib/discovery/cache.js';
 
@@ -78,8 +79,25 @@ export function getPreparedDurableState({
   if (!isEpisode && (stored.season != null || stored.episode != null)) {
     return null;
   }
-  const infoHash = stored.infoHash ?? stored.selectedHash;
-  const torrentFileId = stored.torrentFileId ?? null;
+  let infoHash = stored.infoHash ?? stored.selectedHash;
+  let torrentFileId = stored.torrentFileId ?? null;
+  let authoritative = null;
+  if (typeof controlPlaneStore?.getLibraryItemByIdentityKey === 'function'
+    && typeof controlPlaneStore?.getActiveBindingForLibraryItem === 'function') {
+    const identityKey = createLibraryIdentityKey({
+      mediaType: isEpisode ? 'episode' : 'movie',
+      mediaId,
+      season: isEpisode ? season : null,
+      episode: isEpisode ? episode : null,
+    });
+    const item = controlPlaneStore.getLibraryItemByIdentityKey(identityKey);
+    if (item) {
+      authoritative = controlPlaneStore.getActiveBindingForLibraryItem(item.id);
+      if (!authoritative) return null;
+      infoHash = authoritative.binding.infoHash;
+      torrentFileId = authoritative.torrentFile.id;
+    }
+  }
   if (!infoHash || !stored.releaseKey || !torrentFileId || !stored.filename || !stored.provider) {
     return null;
   }
@@ -101,15 +119,18 @@ export function getPreparedDurableState({
   if (coords.length === 0) {
     return null;
   }
+  if (isEpisode && !isPlayableVideoTorrentFile(torrentFile)) {
+    return null;
+  }
   const handoff = {
     requestId: stored.requestId,
     mediaId: stored.mediaId,
     mediaType: stored.mediaType,
     season: stored.season ?? null,
     episode: stored.episode ?? null,
-    releaseKey: stored.releaseKey,
+    releaseKey: authoritative?.binding.releaseKey ?? stored.releaseKey,
     infoHash,
-    fileIndex: stored.fileIndex ?? null,
+    fileIndex: authoritative?.binding.fileIndex ?? stored.fileIndex ?? null,
     filename: stored.filename,
     provider: stored.provider,
     providerState: stored.providerState,
@@ -471,6 +492,24 @@ async function tryReuseHealthyPublication({
       reason: 'reused-healthy-publication',
     });
 
+    const confirmReuseFulfillment = async () => {
+      if (!isEpisode || !controlPlaneStore) return { fulfilled: false, retryOwned: true, unfulfilled: true, published: true, vfsPublished: true, plex: null };
+      try {
+        const plex = await confirmPlexEpisode({ mediaId, season, episode });
+        const fulfilled = plex?.visible === true && plex?.mediaPart?.file;
+        return {
+          fulfilled: !!fulfilled,
+          retryOwned: !fulfilled,
+          unfulfilled: !fulfilled,
+          published: true,
+          vfsPublished: true,
+          plex: fulfilled ? plex : null,
+        };
+      } catch {
+        return { fulfilled: false, retryOwned: true, unfulfilled: true, published: true, vfsPublished: true, plex: null };
+      }
+    };
+
     const noopResultEntry = () => ({
       rank: 1,
       infoHash,
@@ -542,6 +581,7 @@ async function tryReuseHealthyPublication({
     // falls through to full discovery.
     const noopReady = await checkPublishedNoop();
     if (noopReady) {
+      const fulfillment = await confirmReuseFulfillment();
       return {
         requestId: handoff.requestId,
         intent: { type: handoff.mediaType, mediaId: handoff.mediaId },
@@ -555,6 +595,7 @@ async function tryReuseHealthyPublication({
         selection: { selected: noopSelected(), reason: 'reused-healthy-publication', alternates: [] },
         handoff,
         demandPromotion: { enrichmentPromoted: 0, probePromoted: 0 },
+        ...fulfillment,
         reuseMode: 'noop',
       };
     }
@@ -653,6 +694,7 @@ async function tryReuseHealthyPublication({
     }
 
     const selected = noopSelected();
+    const fulfillment = await confirmReuseFulfillment();
     return {
       requestId: handoff.requestId,
       intent: { type: handoff.mediaType, mediaId: handoff.mediaId },
@@ -666,6 +708,7 @@ async function tryReuseHealthyPublication({
       selection: { selected, reason: 'reused-healthy-publication', alternates: [] },
       handoff,
       demandPromotion: { enrichmentPromoted: 0, probePromoted: 0 },
+      ...fulfillment,
       reuseMode: 'republish',
     };
   } catch (error) {
@@ -879,7 +922,7 @@ export async function searchByMedia(cache, request) {
   // already-prepared title must run fresh discovery/ranking, otherwise
   // the loop could never see a better release for exactly the titles
   // it watches. Default path unchanged.
-  if (prepareOnly && !request.forceDiscovery) {
+  if (prepareOnly && !request.forceDiscovery && !request.liveOnly) {
     const already = getPreparedDurableState({
       cache,
       controlPlaneStore: request.controlPlaneStore ?? null,
@@ -902,7 +945,7 @@ export async function searchByMedia(cache, request) {
         published: false,
       };
     }
-  } else {
+  } else if (!request.liveOnly) {
     const reuseResult = await tryReuseHealthyPublication({
       cache,
       controlPlaneStore: request.controlPlaneStore ?? null,
@@ -923,16 +966,20 @@ export async function searchByMedia(cache, request) {
   // into whichever ranking path runs (live, corpus, or title-only).
   // One FTS query plus at most one cached metadata lookup. The resolved
   // wanted identity is reused for Prowlarr live search below.
-  const { inputs: titleInputs, eligibilityByHash: titleEligibilityByHash, wanted: wantedIdentity } =
+  const { inputs: collectedTitleInputs, eligibilityByHash: titleEligibilityByHash, wanted: wantedIdentity } =
     await collectTitleIndexCandidates({
       cache, mediaId, mediaType, season, episode, mediaTitle, canonicalYear,
     });
+  const titleInputs = request.liveOnly ? [] : collectedTitleInputs;
 
-  // Stage 1: Retrieve candidates by media association
-  const candidates = cache.queryCandidatesByMedia(mediaId);
+  // Stage 1: Retrieve candidates by media association. A live-only retry is
+  // used only after persisted candidates fail exact durable binding; it keeps
+  // the same ranking/identity/binding pipeline while preventing corpus rows
+  // from suppressing the required live fallback.
+  const candidates = request.liveOnly ? [] : cache.queryCandidatesByMedia(mediaId);
 
-  if (candidates.length === 0 && !skipLiveDiscovery) {
-    // No corpus candidates — try live discovery
+  if ((candidates.length === 0 || request.liveOnly) && !skipLiveDiscovery) {
+    // No corpus candidates, or an explicit fulfillment fallback — try live discovery
     let liveCandidates = [];
     let liveEligibleCount = 0;
     const liveMetadataByHash = new Map();
@@ -1146,7 +1193,7 @@ export async function searchByMedia(cache, request) {
     const tvCoordinates = (intent.scope === 'episode' || mediaType === 'episode' || hasExplicitEpisode)
       ? { season, episode }
       : null;
-    const selection = await selectBindableCandidate(explainable, {
+    let selection = await selectBindableCandidate(explainable, {
       ensureTorBoxFileIdentityFn,
       ensureRealDebridFileIdentityFn,
       resolveTvTorrentFileFn: resolveTvTorrentFile,
@@ -1154,6 +1201,24 @@ export async function searchByMedia(cache, request) {
       controlPlaneStore: request.controlPlaneStore ?? null,
       maxTier: request.maxTier ?? null,
     });
+
+    // Corpus rows can be identity-valid yet impossible to bind. For released
+    // requests, retry the same request through live discovery exactly once
+    // before returning an unfulfilled result. This preserves Binding authority
+    // and keeps same-X recovery inside the existing selection helpers.
+    if (!selection.selected && !skipLiveDiscovery && !request.liveOnly
+      && explainable.length > 0) {
+      const liveRetry = await searchByMedia(cache, {
+        ...request,
+        liveOnly: true,
+        forceDiscovery: true,
+        skipLiveDiscovery: false,
+        persist: true,
+      });
+      if (liveRetry?.selection?.selected) {
+        return liveRetry;
+      }
+    }
 
     // Stage 8: Persist media request to obtain requestId
     if (persist) {
@@ -1170,6 +1235,7 @@ export async function searchByMedia(cache, request) {
           requestedBy,
           priority,
           requestIntent,
+          status: selection.selected ? 'completed' : 'pending',
           qualityProfile,
           mediaTitle,
           mediaYear,
@@ -1250,6 +1316,7 @@ export async function searchByMedia(cache, request) {
           cache.persistPlaybackHandoff(handoff);
           if (!prepareOnly) {
           let vfsEntry = null;
+          let durablePublicationError = null;
           try {
             vfsEntry = await materializeVfsEntry(
               cache,
@@ -1259,10 +1326,21 @@ export async function searchByMedia(cache, request) {
               { allowLegacy: false },
             );
           } catch (error) {
+            durablePublicationError = error;
             console.error(`VFS materialization failed: ${error.message}`);
           }
-          if (handoff.torrentFileId && !vfsEntry) {
-            console.error(`VFS publication blocked: TorrentFile validation failed for ${handoff.mediaId}`);
+          if (handoff.torrentFileId && !vfsEntry && !durablePublicationError) {
+            durablePublicationError = new Error(`VFS publication blocked: TorrentFile validation failed for ${handoff.mediaId}`);
+          }
+          if (durablePublicationError) {
+            return {
+              requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
+              identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
+              discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
+              availability: availabilityStats, selection, handoff,
+              unfulfilled: true, retryOwned: true, published: false,
+              reason: 'durable-publication-failed', error: durablePublicationError.message,
+            };
           }
 
           // After durable handoff, immediately publish .strm
@@ -1351,13 +1429,60 @@ export async function searchByMedia(cache, request) {
               }
             }
           } catch (strmError) {
-            // STRM publication failure must not fail the request
-            console.error(`STRM publication failed: ${strmError.message}`);
+            return {
+              requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
+              identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
+              discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
+              availability: availabilityStats, selection, handoff,
+              unfulfilled: true, retryOwned: true, published: false,
+              reason: 'adapter-publication-failed', error: strmError.message,
+            };
           }
           } // end presentation gate (prepareOnly stops after handoff persist)
         } catch (error) {
-          console.error(`Handoff persistence failed: ${error.message}`);
+          return {
+            requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
+            identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
+            discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
+            availability: availabilityStats, selection, handoff,
+            unfulfilled: true, retryOwned: true, published: false,
+            reason: 'handoff-persistence-failed', error: error.message,
+          };
         }
+      }
+    }
+
+    if (handoff && !prepareOnly) {
+      const itemKey = createLibraryIdentityKey({
+        mediaType: mediaType === 'movie' ? 'movie' : 'episode',
+        mediaId, season: mediaType === 'movie' ? null : season, episode: mediaType === 'movie' ? null : episode,
+      });
+      const item = request.controlPlaneStore?.getLibraryItemByIdentityKey?.(itemKey);
+      const binding = item ? request.controlPlaneStore?.getActiveBindingForLibraryItem?.(item.id) : null;
+      const libraryPath = item ? request.controlPlaneStore?.getActiveCanonicalPath?.(item.id) : null;
+      if (!binding || !libraryPath || binding.torrentFile.id !== handoff.torrentFileId) {
+        return {
+          requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
+          identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
+          discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
+          availability: availabilityStats, selection, handoff,
+          unfulfilled: true, retryOwned: true, fulfilled: false, published: false,
+          reason: 'authoritative-publication-incomplete',
+        };
+      }
+      let plex = null;
+      if ((mediaType === 'series' || mediaType === 'tv' || mediaType === 'episode') && season != null && episode != null) {
+        try { plex = await confirmPlexEpisode({ mediaId, season, episode }); } catch { plex = null; }
+      }
+      if (plex?.visible && plex.mediaPart?.file) {
+        return {
+          requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
+          identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
+          discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
+          availability: availabilityStats, selection, handoff,
+          published: true, vfsPublished: true, fulfilled: true, unfulfilled: false, retryOwned: false,
+          plex,
+        };
       }
     }
 
@@ -1403,7 +1528,12 @@ export async function searchByMedia(cache, request) {
       // Preparation tranche: preparation persists reusable durable truth
       // (handoff + TorrentFile + coordinates) without presentation.
       prepared: prepareOnly && handoff != null,
-      published: !prepareOnly,
+      published: !prepareOnly && handoff != null,
+      vfsPublished: !prepareOnly && handoff != null,
+      fulfilled: false,
+      unfulfilled: !prepareOnly,
+      retryOwned: !prepareOnly,
+      reason: !prepareOnly ? 'plex-confirmation-pending' : undefined,
     };
   }
 
@@ -1870,6 +2000,35 @@ export async function searchByMedia(cache, request) {
       } catch (error) {
         console.error(`Handoff persistence failed: ${error.message}`);
       }
+
+      // This corpus/live branch previously stopped after handoff persistence.
+      // That made activateBinding() unreachable: no VFS materialization meant
+      // no LibraryItem/Binding could be created. Enter the same authoritative
+      // materialization boundary used by the full publication path.
+      if (!prepareOnly) {
+        try {
+          const vfsEntry = await materializeVfsEntry(
+            cache,
+            handoff,
+            request.controlPlaneStore ?? null,
+            undefined,
+            { allowLegacy: false },
+          );
+          if (!vfsEntry) {
+            throw new Error(`VFS materialization returned no entry for ${handoff.mediaId}`);
+          }
+        } catch (error) {
+          console.error(`VFS materialization failed: ${error.message}`);
+          return {
+            requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
+            identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
+            discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
+            availability: availabilityStats, selection, handoff,
+            unfulfilled: true, retryOwned: true, published: false,
+            fulfilled: false, reason: 'durable-publication-failed', error: error.message,
+          };
+        }
+      }
     }
   }
 
@@ -1915,10 +2074,16 @@ export async function searchByMedia(cache, request) {
       enrichmentPromoted: promotion.enrichmentPromoted,
       probePromoted: promotion.probePromoted,
     },
-    // Preparation tranche: the corpus path never presents, so a prepared
-    // run through it only needs the marker.
+    // This corpus/live fallback path persists the exact handoff but does not
+    // execute the durable publication sequence above. A handoff is not a
+    // publication, so released requests must fail closed here rather than
+    // reporting `published: true`.
     prepared: prepareOnly && handoff != null,
-    published: !prepareOnly,
+    published: false,
+    fulfilled: false,
+    unfulfilled: !prepareOnly,
+    retryOwned: !prepareOnly,
+    reason: !prepareOnly ? 'durable-publication-incomplete' : undefined,
   };
 }
 

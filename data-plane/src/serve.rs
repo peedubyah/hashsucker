@@ -43,6 +43,7 @@ use crate::manager::CapabilityLease;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -198,6 +199,37 @@ pub fn range_not_satisfiable(size: u64) -> Response<Body> {
         .status(StatusCode::RANGE_NOT_SATISFIABLE)
         .header(header::CONTENT_RANGE, format!("bytes */{size}"))
         .body(Body::empty())
+        .unwrap()
+}
+
+pub async fn get_local_file(headers: HeaderMap, path: String, size: u64, tf_id: &str) -> Response<Body> {
+    let range_hdr = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    let (start, end) = match parse_range(range_hdr, size) {
+        Ok(Some(range)) => range,
+        Ok(None) => (0, size.saturating_sub(1)),
+        Err(()) => return range_not_satisfiable(size),
+    };
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(_) => return data_plane_error(StatusCode::BAD_GATEWAY, "LOCAL_ROUTE_UNAVAILABLE", tf_id, None),
+    };
+    let metadata = match file.metadata().await {
+        Ok(metadata) if metadata.is_file() && metadata.len() == size => metadata,
+        _ => return data_plane_error(StatusCode::BAD_GATEWAY, "LOCAL_ROUTE_INVALID", tf_id, None),
+    };
+    let _ = metadata;
+    let mut file = file;
+    if file.seek(SeekFrom::Start(start)).await.is_err() {
+        return data_plane_error(StatusCode::BAD_GATEWAY, "LOCAL_ROUTE_UNAVAILABLE", tf_id, None);
+    }
+    let length = end - start + 1;
+    let stream = tokio_util::io::ReaderStream::new(file.take(length));
+    Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"))
+        .header(header::CONTENT_LENGTH, length.to_string())
+        .header(header::ACCEPT_RANGES, "bytes")
+        .body(Body::from_stream(stream))
         .unwrap()
 }
 

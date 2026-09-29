@@ -13,7 +13,7 @@
  * observations.
  */
 
-const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_TIMEOUT_MS = 60_000;
 
 function baseUrl() {
   const raw = String(process.env.PLEX_URL || '').replace(/\/$/, '');
@@ -42,7 +42,7 @@ async function getJson(pathname, params = {}) {
 
 function imdbFromGuid(guid) {
   if (typeof guid !== 'string') return null;
-  const m = guid.match(/com\.plexapp\.agents\.imdb:\/\/(tt\d+)/);
+  const m = guid.match(/(?:com\.plexapp\.agents\.imdb:\/\/|imdb:\/\/)(tt\d+)/);
   return m ? m[1] : null;
 }
 
@@ -86,4 +86,29 @@ export async function listPlexLibrary() {
   return out;
 }
 
-export const plexAdapter = { name: 'plex', listLibrary: listPlexLibrary };
+export async function confirmPlexEpisode({ mediaId, season, episode }) {
+  const sectionId = process.env.PLEX_TV_SECTION_ID;
+  if (!sectionId) return { visible: false, ratingKey: null, mediaPart: null };
+  const all = await getJson(`/library/sections/${sectionId}/all`, { includeGuids: 1 });
+  const show = (all?.MediaContainer?.Metadata ?? []).find((candidate) => {
+    if (candidate.type !== 'show') return false;
+    const ids = (candidate.Guid ?? []).map((g) => imdbFromGuid(g.id));
+    return ids.includes(mediaId) || candidate.title === mediaId;
+  });
+  if (!show) return { visible: false, ratingKey: null, mediaPart: null };
+  const seasons = (await getJson(show.key.endsWith('/children') ? show.key : `${show.key}/children`))?.MediaContainer?.Metadata ?? [];
+  const seasonEntry = seasons.find((candidate) => candidate.index === season);
+  if (!seasonEntry) return { visible: false, ratingKey: null, mediaPart: null };
+  const episodes = (await getJson(seasonEntry.key.endsWith('/children') ? seasonEntry.key : `${seasonEntry.key}/children`))?.MediaContainer?.Metadata ?? [];
+  const entry = episodes.find((candidate) => candidate.index === episode);
+  if (!entry) return { visible: false, ratingKey: null, mediaPart: null };
+  const item = (await getJson(entry.key, { includeExtras: 0, includeMarkers: 0, includeRelated: 0 }))?.MediaContainer?.Metadata?.[0] ?? entry;
+  const part = item.Media?.flatMap((m) => m.Part ?? []).find((p) => p.file);
+  return {
+    visible: true,
+    ratingKey: item.ratingKey ?? null,
+    mediaPart: part ? { id: part.id ?? null, file: part.file, size: part.size ?? null, container: part.container ?? null } : null,
+  };
+}
+
+export const plexAdapter = { name: 'plex', listLibrary: listPlexLibrary, confirmPlexEpisode };

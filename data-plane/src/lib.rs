@@ -35,6 +35,8 @@ pub mod provider;
 pub mod serve;
 pub mod throughput;
 pub mod transport;
+#[cfg(test)]
+mod local_route;
 
 /// Read a runtime configuration variable with canonical `DATA_PLANE_*`
 /// naming and deprecated `HY4_*` fallback.

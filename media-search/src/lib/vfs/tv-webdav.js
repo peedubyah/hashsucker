@@ -324,7 +324,10 @@ export function createTvWebDav({
 
   async function getCatalog() {
     const handoffs = searchCache.listTvPlaybackHandoffs();
-    const entries = searchCache.listVfsTvEntries();
+    // Materialization may repair/converge rows while this catalog is being
+    // built. Do not validate a stale pre-materialization VFS snapshot against
+    // the current handoff selected below.
+    let entries = searchCache.listVfsTvEntries();
     const watermark = catalogWatermark(handoffs, entries);
     const nowMs = now();
     if (
@@ -340,6 +343,7 @@ export function createTvWebDav({
       if (isUnpublishedHandoff(controlPlaneStore, handoff)) continue;
       await materializeVfsEntry(searchCache, handoff, controlPlaneStore, now, { allowLegacy: true });
     }
+    entries = searchCache.listVfsTvEntries();
     const nextStates = [];
     for (const entry of entries) {
       const stateKey = entry.mediaId + ':' + entry.season + ':' + entry.episode;
@@ -360,11 +364,12 @@ export function createTvWebDav({
             || entry.infoHash !== handoff.infoHash
             || entry.fileIndex !== handoff.fileIndex;
         if (identityMismatch) {
-          throw new VfsError(
-            'Durable TV entry and playback handoff identify different physical files',
-            503,
-            'HANDOFF_RELEASE_MISMATCH',
-          );
+          // A divergent unrelated episode must not make the entire TV tree
+          // unservable. Keep the row out of this projection until its own
+          // reconciliation repairs it; exact requested entries continue to
+          // resolve against their matching handoff/TorrentFile.
+          console.warn(`[vfs-tv] skipping divergent entry media=${entry.mediaId} S${entry.season}E${entry.episode}`);
+          continue;
         }
         state = { entry, handoff, metadataPromise: null };
         states.set(stateKey, state);

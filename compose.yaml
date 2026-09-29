@@ -214,6 +214,7 @@ services:
     environment:
       LISTEN: "0.0.0.0:3001"
       CONTROL_URL: "http://media-search:3000/api"
+      LOCAL_ROOT: "/permanent"
       CACHE_ROOT: "/data/cache"
       TORBOX_API_KEY: ${TORBOX_API_KEY:-}
       REALDEBRID_API_KEY: ${REALDEBRID_API_KEY:-}
@@ -226,6 +227,7 @@ services:
       - media-search
     volumes:
       - hy4-cache:/data
+      - ${HASHSUCKER_PERMANENT_HOST_PATH:-${PERMANENT_HOST_PATH:-./hy4-permanent}}:/permanent:ro
     networks:
       default:
         aliases:

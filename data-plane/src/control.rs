@@ -32,12 +32,20 @@ pub struct ProviderCoord {
     pub size: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct LocalCoord {
+    pub path: String,
+    pub size: u64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlResponse {
     pub schema_version: u64,
     pub torrent_file: ControlTorrentFile,
     pub providers: Vec<ProviderCoord>,
+    #[serde(default)]
+    pub local: Option<LocalCoord>,
 }
 
 impl ControlResponse {
@@ -88,8 +96,13 @@ pub async fn fetch_control(
 
     let cr: ControlResponse =
         serde_json::from_value(j).map_err(|e| format!("control structure parse: {e}"))?;
-    if cr.providers.is_empty() {
-        return Err("control returned zero provider coordinates (nothing to acquire)".into());
+    if cr.providers.is_empty() && cr.local.is_none() {
+        return Err("control returned zero delivery coordinates (no local or provider route)".into());
+    }
+    if let Some(local) = &cr.local {
+        if local.path.is_empty() || local.size != cr.torrent_file.size {
+            return Err("control returned invalid local coordinate".into());
+        }
     }
     Ok(cr)
 }

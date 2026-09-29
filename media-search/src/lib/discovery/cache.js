@@ -1768,11 +1768,6 @@ function migrateMediaRequestEligibilityColumns(db) {
 }
 
 function migrateMediaIntents(db) {
-  const applied = db.prepare(
-    'SELECT 1 FROM schema_migrations WHERE name = ?',
-  ).get(MEDIA_INTENTS_SCHEMA);
-  if (applied) return;
-
   // Note: the media_intents table is created by SCHEMA. The identity bundle
   // columns (imdb_id, tmdb_id, tvdb_id) on a pre-SCHEMA database are
   // added by ensureMediaIntentIdentityColumns before SCHEMA runs.
@@ -1811,6 +1806,9 @@ function migrateMediaIntents(db) {
   if (!hasSourceType) {
     db.exec('ALTER TABLE media_requests ADD COLUMN source_type TEXT');
   }
+  // Re-read after legacy ALTERs; one old production database can lack the
+  // request projection columns even though the migration marker exists.
+  const currentReqInfo = db.prepare('PRAGMA table_info(media_requests)').all();
   for (const column of [
     "request_intent TEXT NOT NULL DEFAULT 'library'",
     "quality_profile TEXT NOT NULL DEFAULT 'balanced'",
@@ -1819,7 +1817,7 @@ function migrateMediaIntents(db) {
     'poster_url TEXT',
   ]) {
     const name = column.split(' ')[0];
-    if (!reqInfo.some(col => col.name === name)) db.exec(`ALTER TABLE media_requests ADD COLUMN ${column}`);
+    if (!currentReqInfo.some(col => col.name === name)) db.exec(`ALTER TABLE media_requests ADD COLUMN ${column}`);
   }
 
   // Add intent_id column to media_request_results if missing
@@ -1830,7 +1828,7 @@ function migrateMediaIntents(db) {
   }
 
   db.prepare(
-    'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+    'INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, ?)',
   ).run(MEDIA_INTENTS_SCHEMA, Date.now());
 }
 
@@ -4133,7 +4131,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       intent.mediaTitle || null,
       intent.mediaYear ?? null,
       intent.posterUrl || null,
-      'completed',
+      intent.status || 'completed',
       intent.resultsLength || 0,
       intent.now,
     ];

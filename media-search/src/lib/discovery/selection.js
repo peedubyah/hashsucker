@@ -14,6 +14,12 @@
 
 import { isPlayableVideoTorrentFile } from '../resolver/tv-episode-resolver.js';
 
+function isMediaPayloadForSelection(controlPlaneStore, torrentFileId) {
+  if (!controlPlaneStore || typeof controlPlaneStore.getTorrentFile !== 'function') return true;
+  const torrentFile = controlPlaneStore.getTorrentFile(torrentFileId);
+  return isPlayableVideoTorrentFile(torrentFile);
+}
+
 /**
  * Select the best candidate from ranked results.
  *
@@ -268,7 +274,8 @@ export async function selectBindableCandidate(results, options = {}) {
           selectedFileSize,
           releaseKey: candidate.release?.key || null,
         });
-        if (sizeResult?.torrentFileId) {
+        if (sizeResult?.torrentFileId
+          && isMediaPayloadForSelection(controlPlaneStore, sizeResult.torrentFileId)) {
           selected = formatSelection(candidate);
           selected._torrentFileId = sizeResult.torrentFileId;
           selected._binding = {
@@ -436,6 +443,9 @@ export async function selectBindableCandidate(results, options = {}) {
         // STEP 2: Resolve requested S/E from the now-persisted TorrentFiles.
         try {
           const { torrentFile } = resolveTvTorrentFileFn({ torrentFiles: placementTorrentFiles, season, episode });
+          if (!isPlayableVideoTorrentFile(torrentFile)) {
+            throw { code: 'EPISODE_NOT_PLAYABLE', message: 'Selected TorrentFile is not a playable media payload' };
+          }
           // Map the chosen TorrentFile back to its present provider_file so
           // the durable handoff carries the full (placement, providerFile,
           // torrentFile) identity triple. Without this, the handoff's
@@ -492,7 +502,8 @@ export async function selectBindableCandidate(results, options = {}) {
           season: tvCoordinates?.season ?? candidate.season ?? null,
           episode: tvCoordinates?.episode ?? candidate.episode ?? null,
         });
-        if (rdResult?.status === 'ready' && rdResult.torrentFileId) {
+        if (rdResult?.status === 'ready' && rdResult.torrentFileId
+          && isMediaPayloadForSelection(controlPlaneStore, rdResult.torrentFileId)) {
           selected = formatSelection(candidate);
           selected._torrentFileId = rdResult.torrentFileId;
           selected.rdState = 'cached';
@@ -560,7 +571,7 @@ export async function selectBindableCandidate(results, options = {}) {
   // torrent_file_id=NULL. TV still uses the fallback when no controlPlaneStore
   // is available (PATH B cannot run), preserving the original behavior for
   // that branch.
-  if (!selected && capped.length > 0 && tvCoordinates) {
+  if (!selected && capped.length > 0 && tvCoordinates && !controlPlaneStore) {
     const byState = { cached: [], unknown: [], uncached: [] };
     for (const candidate of capped) {
       const state = candidate.availability?.torbox?.state || 'unknown';

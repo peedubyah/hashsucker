@@ -1038,6 +1038,7 @@ async function handleSeerrIngress(
           priority: operationalIntent.priority,
           intentId: childIntentId,
           persist: true,
+          liveDiscoveryThreshold: 1,
           hydrateVfs,
           controlPlaneStore,
           // Slice 1.75: pre-publication TorBox file identity binding
@@ -1261,7 +1262,7 @@ function deferSeerrRequest({ store, mediaType, mediaId, season, episode, seerrSo
  */
 function unfulfilledTvDeferral({ store, mediaId, season, episode, airDate, childSourceId, result, clock = () => Date.now() }) {
   const total = result?.total ?? 0;
-  const bound = result?.handoff != null;
+  const bound = result?.handoff != null && result?.vfsPublished !== false;
   if (!store || (total !== 0 && bound)) return {};
   const classification = classifySeerrDeferral({
     dateRaw: airDate,
@@ -3152,6 +3153,20 @@ export function createRequestHandler(dependencies = {}) {
             canonicalInternalPath: coord.provider_path,
             size: coord.size,
           })),
+          local: (() => {
+            const promotionStore = getPromotionStore();
+            const promotion = promotionStore?.get(torrentFile.id);
+            if (!promotion || promotion.status !== PROMOTION_STATUS.PERMANENT || !promotion.permanentPath) return null;
+            const root = getPermanentRoot();
+            if (!root || !isWithinRoot(root, promotion.permanentPath)) return null;
+            try {
+              const stat = fsStatSync(promotion.permanentPath);
+              if (!stat.isFile() || stat.size !== torrentFile.size) return null;
+            } catch {
+              return null;
+            }
+            return { path: promotion.permanentPath, size: torrentFile.size };
+          })(),
         });
       }
       if (request.method === 'GET' && url.pathname === '/api/search/stats') {
@@ -4146,6 +4161,24 @@ export function createRequestHandler(dependencies = {}) {
               }
             }
           } catch {}
+          // Released requested media cannot become dormant after a failed
+          // request or a Plex-absence result. Preserve existing future-date
+          // information when present; otherwise create immediate retry-owned
+          // work for the exact episode identity. Anticipation calls reuse the
+          // existing row and must not create a second undated intent.
+          if (body?.source !== 'anticipation' && result?.fulfilled !== true) {
+            try {
+              getFutureIntentStore().ensureReleasedFollowUp({
+                mediaId: body.mediaId,
+                season: body.season ?? null,
+                episode: body.episode ?? null,
+                source: 'released-request-follow-up',
+                deferReason: result?.plex ? 'plex-publication-pending' : 'released-unfulfilled',
+              });
+            } catch (followUpError) {
+              console.warn(`media-search: failed to seed released follow-up: ${followUpError.message}`);
+            }
+          }
           return sendJson(response, 200, {
             ...result,
             intent: requestIntent,

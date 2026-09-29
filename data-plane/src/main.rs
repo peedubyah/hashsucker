@@ -33,7 +33,7 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,6 +62,8 @@ use data_plane::{
 struct ServiceConfig {
     /// Base URL of the north control endpoint, e.g. http://media-search:3000/api
     control_url: String,
+    /// Read-only root for verified permanent promotion output.
+    local_root: PathBuf,
     /// Where the Slice 4 cache lives. None disables the cache (cold-proxy mode).
     cache_root: Option<PathBuf>,
     /// Listen address.
@@ -74,10 +76,21 @@ struct ServiceConfig {
     realdebrid_api_key: String,
 }
 
+fn local_path_is_safe(root: &FsPath, candidate: &str, expected_size: u64) -> bool {
+    let root = match std::fs::canonicalize(root) { Ok(path) => path, Err(_) => return false };
+    let path = match std::fs::canonicalize(candidate) { Ok(path) => path, Err(_) => return false };
+    if !path.starts_with(&root) { return false; }
+    match std::fs::metadata(&path) {
+        Ok(meta) => meta.is_file() && meta.len() == expected_size,
+        Err(_) => false,
+    }
+}
+
 impl ServiceConfig {
     fn from_env() -> Result<Self, String> {
         let control_url = env::var("CONTROL_URL")
             .unwrap_or_else(|_| "http://media-search:3000/api".into());
+        let local_root = env::var("LOCAL_ROOT").unwrap_or_else(|_| "/permanent".into());
         let listen = env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:3001".into());
         let cache_root = env::var("CACHE_ROOT")
             .ok()
@@ -87,6 +100,7 @@ impl ServiceConfig {
         let realdebrid_api_key = env::var("REALDEBRID_API_KEY").unwrap_or_default();
         Ok(Self {
             control_url,
+            local_root: PathBuf::from(local_root),
             cache_root,
             listen,
             torbox_api_key,
@@ -265,6 +279,17 @@ async fn handle_files(
                     );
                 }
             }
+        }
+    }
+
+    // Verified local bytes are an exact-object route. The permanent path is
+    // projected by Node only after promotion verification; Rust still checks
+    // containment, regular-file status, and exact size before opening it.
+    if let Some(local) = resp.local.as_ref() {
+        if local_path_is_safe(&svc.cfg.local_root, &local.path, resp.torrent_file.size) {
+            return data_plane::serve::get_local_file(
+                headers, local.path.clone(), resp.torrent_file.size, &tf_id,
+            ).await;
         }
     }
 

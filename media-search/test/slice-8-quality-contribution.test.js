@@ -732,7 +732,7 @@ test('M: 720p remux-ish vs ordinary 1080p — 1080p usually retains advantage', 
 
 test('N: shadow persisted in quality_features JSON column', () => {
   const dbPath = tempDbPath('persist');
-  const cache = createDiscoveryCache(dbPath);
+  const cache = createDiscoveryCache({ dbPath });
 
   const results = [
     rankedResult({
@@ -820,7 +820,7 @@ test('N: shadow survives close/reopen', () => {
 
 test('O: shadow distribution aggregation works', () => {
   const dbPath = tempDbPath('analytics');
-  const cache = createDiscoveryCache(dbPath);
+  const cache = createDiscoveryCache({ dbPath });
 
   const results = [
     rankedResult({
@@ -871,7 +871,7 @@ test('O: shadow distribution aggregation works', () => {
 
 test('O: distribution returns null for legacy/empty corpus', () => {
   const dbPath = tempDbPath('empty');
-  const cache = createDiscoveryCache(dbPath);
+  const cache = createDiscoveryCache({ dbPath });
   const dist = cache.getQualityContributionShadowDistribution();
   assert.equal(dist, null, 'null when no quality_features rows');
   rmSync(dirname(dbPath), { recursive: true, force: true });
@@ -883,7 +883,7 @@ test('O: distribution returns null for legacy/empty corpus', () => {
 
 test('O2: hypothetical analysis groups by request_id, not globally', () => {
   const dbPath = tempDbPath('per-request');
-  const cache = createDiscoveryCache(dbPath);
+  const cache = createDiscoveryCache({ dbPath });
 
   // Request A: 3 candidates, scores tightly clustered so quality dominates
   const reqA = [
@@ -962,7 +962,7 @@ test('O2: hypothetical analysis groups by request_id, not globally', () => {
 
 test('O2: regression — two overlapping-score requests prove global sort would be wrong', () => {
   const dbPath = tempDbPath('overlap');
-  const cache = createDiscoveryCache(dbPath);
+  const cache = createDiscoveryCache({ dbPath });
 
   // Request 1: low scores 0.50/0.45, all 1080p
   // Request 2: higher scores 0.90/0.80, 720p
