@@ -8,12 +8,23 @@ import {
 import { notifyBindingActivated } from '../control-plane/durability-enroller.js';
 import { createDefaultRdPlacementRealizer } from '../control-plane/rd-placement-realizer.js';
 import { getMedia } from '../metadata/cinemeta.js';
+import { isPlayableVideoTorrentFile } from '../resolver/tv-episode-resolver.js';
 
 // P19 — one lazily-bound RD placement realizer per process. The control-plane
 // store is a singleton, so we bind on first use. When Real-Debrid is not
 // configured the factory returns null and every call below is a no-op.
 let rdRealizer = null;
 let rdRealizerBound = false;
+
+// Catalog materialization can replay the same handoff many times while a
+// provider inventory observation is stale. Keep that read/publication path
+// from hammering the binding seam; the next bounded retry still observes
+// newly refreshed provider state without changing VFS authority.
+const bindingActivationRetryAt = new Map();
+const BINDING_ACTIVATION_RETRY_MS = (() => {
+  const value = Number(process.env.BINDING_ACTIVATION_RETRY_MS ?? 30_000);
+  return Number.isFinite(value) && value >= 1_000 ? value : 30_000;
+})();
 
 function rdRealizerFor(controlPlaneStore) {
   if (!rdRealizerBound) {
@@ -155,6 +166,10 @@ function tryActivateAuthoritativeBinding({
     console.warn(`[vfs] binding write: recordExposure failed: ${error.message}`);
     return null;
   }
+  const activationKey = `${item.id}:${torrentFile.id}:${placementId}:${providerFileId}`;
+  const retryAt = bindingActivationRetryAt.get(activationKey) ?? 0;
+  if (retryAt > observedAt) return null;
+
   let binding;
   try {
     console.warn('[vfs] activateBinding attempt', JSON.stringify({
@@ -176,8 +191,18 @@ function tryActivateAuthoritativeBinding({
       exposureId: exposure.id,
       reason,
     });
+    bindingActivationRetryAt.delete(activationKey);
   } catch (error) {
-    console.warn(`[vfs] binding write: activateBinding failed: ${error.message}`);
+    const message = String(error?.message ?? error);
+    if (/stale or unbounded provider inventory observation/i.test(message)) {
+      bindingActivationRetryAt.set(activationKey, observedAt + BINDING_ACTIVATION_RETRY_MS);
+      if (bindingActivationRetryAt.size > 2048) {
+        for (const [key, expiresAt] of bindingActivationRetryAt) {
+          if (expiresAt <= observedAt) bindingActivationRetryAt.delete(key);
+        }
+      }
+    }
+    console.warn(`[vfs] binding write: activateBinding failed: ${message}`);
     return null;
   }
   try {
@@ -710,9 +735,16 @@ export async function materializeVfsEntry(
       if (replaced) return finalize(replaced, 'vfs-tv-invalid-extension-convergence');
     }
     if (torrentFile && (isLegacyVfsEntry(existing) || isRejectionSupersede(existing, handoff, torrentFile))) {
-      // Legacy supersede: keep the existing canonical_path so the published
-      // library alias stays stable, and atomically replace the physical
-      // identity with the validated TorrentFile bundle.
+      // Invalid legacy/rejected representations are superseded by the new
+      // authoritative TorrentFile. Preserve the alias only when its extension
+      // is already media-valid; otherwise converge it to the new video type.
+      const replacementExt = path.posix.extname(torrentFile.internalPath).toLowerCase();
+      const existingExt = path.posix.extname(existing.canonicalPath).toLowerCase();
+      const replacementPath = isPlayableVideoTorrentFile(torrentFile) && existingExt === '.exe'
+        ? existing.canonicalPath.replace(/\.[^.]+$/, replacementExt)
+        : existing.canonicalPath;
+      // Legacy supersede: keep the existing canonical_path when valid and
+      // atomically replace the physical identity with the validated TorrentFile bundle.
       //
       // Worker A — Defect A: rejection-supersede path is also taken
       // when the existing row's infoHash differs from the new
@@ -722,7 +754,7 @@ export async function materializeVfsEntry(
       // evidenced). The canonical_path alias stays stable.
       const supersedeOptions = { allowRejectionSupersede: !isLegacyVfsEntry(existing) };
       const replaced = searchCache.replaceVfsTvEntry(
-        authoritativeTvFields(torrentFile, handoff, existing.canonicalPath, now()),
+        authoritativeTvFields(torrentFile, handoff, replacementPath, now()),
         supersedeOptions,
       );
       if (replaced) {

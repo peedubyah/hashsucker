@@ -107,3 +107,29 @@ No planned work as completed. No vague "healthy." No speculative causes.
   was induced.
 - Next gate: canary is ready to operate as a modest-cadence regression
   sentinel; do not expand into chaos/lifecycle testing from this slice.
+
+## 2026-09-30 — stale-inventory binding retry throttle — PARTIAL / BLOCKED
+
+- Changed: `materializeVfsEntry()` now suppresses repeated authoritative
+  binding activation attempts for the same library item, TorrentFile, and
+  provider-file route for 30 seconds after the specific stale/unbounded
+  inventory failure. Other binding failures remain immediately observable;
+  successful activation clears the throttle. Added deterministic regression
+  coverage for immediate replay and retry-window expiry.
+- Verification: syntax check and 16 focused VFS/binding/convergence tests
+  passed, including fulfillment binding idempotence and orphan VFS authority.
+- Production evidence: media-search rebuilt and restarted successfully;
+  data-plane, edge, and importer remained running. The immediate post-start
+  log window contained zero binding activation/failure lines. Production
+  smoke completed its bounded checks and emitted live byte telemetry, but its
+  full verdict was not captured in the compact output.
+- Canary: the on-demand real Plex canary was invoked and all three fixtures
+  returned `CANARY_INFRA_FAILURE: CDP endpoint/app not ready`. The Plex HTPC
+  and Xvfb user services were active; no playback acceptance is claimed from
+  this run.
+- Unproven: long-run restart churn reduction under the original stale-inventory
+  workload; real playback after this deployment; autonomous recovery; PMS
+  lifecycle behavior.
+- Next gate: make the canary CDP environment ready through the approved
+  external operator path, then rerun the bounded playback rotation; do not
+  expand this slice into PMS lifecycle work.

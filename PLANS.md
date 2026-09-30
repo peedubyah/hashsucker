@@ -3,10 +3,15 @@
 Active phase: **Core playback reliability & recovery**
 → [`docs/phases/phase-core-playback-reliability.md`](docs/phases/phase-core-playback-reliability.md)
 
-Active slice: **repo documentation/control-plane reconciliation**
-(explicitly approved docs pass; no product-code change). Gate: validation
-report delivered with authority collisions resolved and no new structure
-beyond what the findings earn.
+Active slice: **bound stale-inventory binding retry churn**. Gate: focused
+regression coverage plus a deployed production restart observation showing
+stale inventory failures are bounded per exact library/TorrentFile/provider
+route while successful binding activation and VFS authority remain unchanged.
+Non-goals: PMS lifecycle, canary expansion, corpus cleanup, scheduler tuning,
+new product surface, and documentation-model redesign.
+
+Prior active slice — repo documentation/control-plane reconciliation —
+completed by the documentation lane; no product-code work is reopened here.
 
 Prior active slice — exit-condition canary — capability achieved, gate
 recorded: real Plex-library visibility, real playback, identity
