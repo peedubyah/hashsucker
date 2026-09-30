@@ -6,6 +6,8 @@ architecture belongs in [`architecture.md`](architecture.md); the verified
 checkpoint belongs in
 [`PRODUCTION-STATE-2026-09-11.md`](PRODUCTION-STATE-2026-09-11.md); the next
 agent's immediate instructions belong in [`../handoff/CURRENT.md`](../handoff/CURRENT.md).
+Sequencing authority is [`../PLANS.md`](../PLANS.md): phases below are
+backlog until moved there with a gate, never active execution truth.
 
 ## Phase A — Scheduler shipping decision
 

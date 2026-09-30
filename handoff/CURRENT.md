@@ -9,6 +9,11 @@ trust old containers or historical HY4 handoffs.
 
 ## Architecture boundaries (frozen)
 
+Non-authoritative session-local summary. Canonical:
+`docs/architecture.md` (model), `AGENTS.override.md` (invariants).
+Conflicts resolve to those files per `AGENTS.md` precedence — this section
+is never edited to settle them and never independently maintained.
+
 - **Node owns durable truth:** Release, TorrentFile, ProviderPlacement,
   ProviderFile, binding/publication/VFS semantics, discovery/ranking,
   persisted candidates, selection of another TorrentFile or Release.
@@ -24,6 +29,10 @@ trust old containers or historical HY4 handoffs.
   `/media/:infoHash/:fileIndex` are legacy compat paths, not authoritative.
 
 ## Frozen identity model
+
+Non-authoritative session-local summary. Canonical:
+`docs/architecture.md`, `AGENTS.override.md`. Conflicts resolve to those
+files; identity definitions are never maintained here.
 
 | Entity | Durable meaning |
 |---|---|
@@ -206,7 +215,7 @@ and Real-Debrid. Different bytes for one TorrentFile = identity violation.
 ## Recent important commits
 
 - 149ae66 `feat(profile): named intent quality profiles bounding selection
-  and upgrades` (HEAD, pushed).
+  and upgrades` (HEAD at that session — historical; see `git log`).
 - 82823f5 `perf(corpus): cooperative yielding in ingestion paths` (pushed).
 - 60a8935 master logo assets; f60bc45 brand docs; e9a2916 product-first README.
 - Before those: single-provider dual coverage, consumption-aware temporary
@@ -1198,7 +1207,10 @@ FAILOVER: PROVEN**; **DATA-PLANE RESTART THROUGH SAME PLEX PART: PROVEN**;
 **DISCOVERY: ZERO**; **RANKING: ZERO**; **REPRESENTATION CHANGE: ZERO**;
 **REAL PLAYER SESSION: STILL UNPROVEN**; **IMPLEMENTATION: NO CHANGE NEEDED**.
 
-## Next active slice — corpus stale-ownership recovery (IN PROGRESS, uncommitted)
+## Session work log — corpus stale-ownership recovery (uncommitted; sequencing per PLANS.md; historical/unscheduled — not in PLANS.md or ROADMAP, do not promote without explicit approval)
+
+Session log, not sequencing authority: active phase/slice/gate lives in
+`PLANS.md`. If this section and `PLANS.md` disagree, `PLANS.md` wins.
 
 Busy markers (UPDATING/BOOTSTRAPPING) carry a heartbeat (updated_at,
 refreshed by progress writes + new heartbeats in the update loop and
