@@ -48,6 +48,12 @@ cleverness are not substitutes.
    Evidence: measured latency/durability deltas on real replays vs.
    local retention cost.
 9. **Can consumer reconstruction work without becoming a media-server
-   replacement?**
+replacement?**
    Evidence: a full rebuild from HashSucker truth that stays inside
    consumer contracts (filesystem expectations quarantined in adapters).
+10. **What are the current baseline re-request, retry, repair, and
+    re-curation rates?**
+    Evidence: measured household-trace baselines before any memory,
+    healing, or preservation work lands. Without baselines, no kill
+    metric can fire and no phase can prove it mattered. This is the
+    highest-priority measurement gap in the strategy.

@@ -288,6 +288,10 @@ republication" maps to this phase's first slice (reconstruct projection
 from truth without discovery or provider selection). The phrase stays an
 engineering term owned by that lane; strategy here does not canonize it
 further until the slice lands.
+**Status (2026-10):** that slice is Codex-active (republish route in
+worktree, fail-closed delegation to the exact-reuse predicate). This
+phase remains CANDIDATE until the slice lands and the rebuild
+demonstration (exit condition) is evidenced.
 **Non-goals:** Media-server replacement; owning watch state here (see
 P5); Plex contract violations (filesystem expectations quarantined in
 the adapter).

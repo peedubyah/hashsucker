@@ -46,6 +46,11 @@ independently and still require per-slice justification to lift.
 
 Track candidate answers in retrospectives and phase context, not in code.
 
+Product strategy (2026-10, evidence-gated): see
+`docs/strategy/2026-10-post-core-product-strategy.md` for the ecosystem
+comparison, capability verdicts, phase graph, slice portfolio, metrics,
+scenarios, and veto list behind these goals.
+
 ## Non-goals (standing unless a slice proves otherwise)
 
 - Speculative acquisition/prefetch without measured demand evidence.
