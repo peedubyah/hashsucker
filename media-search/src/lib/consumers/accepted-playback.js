@@ -15,8 +15,9 @@ export function recordAcceptedPlayback({ cache = null, controlPlaneStore, sessio
   });
   const item = controlPlaneStore.getLibraryItemByIdentityKey?.(key);
   const active = item ? controlPlaneStore.getActiveBindingForLibraryItem?.(item.id) : null;
-  if (!item || !active) return null;
-  if (active.torrentFile?.id == null || !session.partFile) return null;
+  const publication = item ? controlPlaneStore.getActiveCanonicalPath?.(item.id) : null;
+  if (!item || !active || !publication || active.torrentFile?.id == null || !session.partFile) return null;
+  if (session.partFile !== `/mnt/hashsucker-vfs/${publication.canonicalPath}`) return null;
   return controlPlaneStore.recordAcceptedTorrentFile({
     libraryItemId: item.id,
     torrentFileId: active.torrentFile.id,
