@@ -22,10 +22,21 @@ playback passed after reconstruction. Missing retained truth returns 409 and
 fails closed. This is an earned continuity primitive, not a general
 consumer-replacement framework.
 
-Next product slice: not started. Product-value selection resumes from the
-roadmap after this bounded continuity proof. Non-goals: replacement consumer
-integration, new identity vocabulary, provider re-selection, and new playback
-UI.
+Active product slice: **N1 accepted representation memory**. Baseline
+instrumentation is in place and production history shows 483 recent requests,
+307 repeated decisions, 190 adjacent same-infoHash outcomes, and 37 adjacent
+same-known-size outcomes. Traffic is mixed: 126 anticipation, 7 upgrade-watch,
+190 Seerr, 77 API, and historical proof/audit sources. Persistence is GO for
+this narrow fact, but no ranking behavior changes. Gate: real successful
+playback writes an exact LibraryItem→TorrentFile acceptance fact; deterministic
+read/idempotence tests pass; request behavior remains unchanged. Non-goals:
+known-bad memory, compatibility taxonomy, route health, provider state,
+selection changes, prediction, and UI.
+
+N1 result: exact accepted-TorrentFile fact now writes from Plex-confirmed
+successful playback and is readable deterministically. No request selection
+behavior consumes it yet; this slice proves trustworthy memory, not a ranking
+optimization.
 
 Prior active slice — repo documentation/control-plane reconciliation —
 completed by the documentation lane; no product-code work is reopened here.

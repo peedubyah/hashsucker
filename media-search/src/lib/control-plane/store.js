@@ -317,6 +317,21 @@ CREATE TABLE IF NOT EXISTS lifecycle_events (
 CREATE INDEX IF NOT EXISTS idx_lifecycle_events_item
   ON lifecycle_events(library_item_id, milestone, occurred_at DESC);
 
+CREATE TABLE IF NOT EXISTS accepted_torrent_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  library_item_id TEXT NOT NULL,
+  torrent_file_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,
+  evidence TEXT,
+  UNIQUE (library_item_id, torrent_file_id),
+  FOREIGN KEY (library_item_id) REFERENCES library_items(id),
+  FOREIGN KEY (torrent_file_id) REFERENCES torrent_files(id)
+);
+CREATE INDEX IF NOT EXISTS idx_accepted_torrent_files_item
+  ON accepted_torrent_files(library_item_id, observed_at DESC);
+
 -- Terminal delivery evidence. Stores provider-specific, capability-
 -- specific, mapping-coordinate-specific evidence about a delivery
 -- capability. Used by the resolver availability revalidation ladder
@@ -502,7 +517,13 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     const existing = db.prepare(
       'SELECT * FROM library_paths WHERE library_item_id = ? AND active = 1',
     ).get(libraryItemId);
-    if (existing) return rowToLibraryPath(existing);
+    if (existing) {
+      if (options.canonicalPath && normalizeCanonicalPath(existing.canonical_path) !== preferredPath) {
+        db.prepare('UPDATE library_paths SET canonical_path = ?, preferred_path = ? WHERE id = ?').run(preferredPath, preferredPath, existing.id);
+        return rowToLibraryPath(db.prepare('SELECT * FROM library_paths WHERE id = ?').get(existing.id));
+      }
+      return rowToLibraryPath(existing);
+    }
 
     const owner = db.prepare(
       'SELECT library_item_id FROM library_paths WHERE canonical_path = ? AND active = 1',
@@ -1126,6 +1147,42 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     const row = db.prepare('SELECT * FROM torrent_files WHERE id = ?')
       .get(requireString(id, 'torrentFileId'));
     return row ? rowToTorrentFile(row) : null;
+  }
+
+  function recordAcceptedTorrentFile({ libraryItemId, torrentFileId, source = 'playback', reason = 'accepted-playback', observedAt = now(), evidence = null } = {}) {
+    requireLibraryItem(libraryItemId);
+    const torrentFile = getTorrentFile(torrentFileId);
+    if (!torrentFile) throw new Error('Unknown TorrentFile for accepted representation');
+    db.prepare(`INSERT INTO accepted_torrent_files
+      (library_item_id, torrent_file_id, source, reason, observed_at, evidence)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(library_item_id, torrent_file_id) DO UPDATE SET
+        source = excluded.source, reason = excluded.reason,
+        observed_at = excluded.observed_at, evidence = excluded.evidence`).run(
+      libraryItemId, torrentFileId, requireString(source, 'source'), requireString(reason, 'reason'),
+      observedAt, evidence == null ? null : JSON.stringify(evidence));
+    return getAcceptedTorrentFile(libraryItemId, torrentFileId);
+  }
+
+  function getAcceptedTorrentFile(libraryItemId, torrentFileId = null) {
+    requireLibraryItem(libraryItemId);
+    const row = torrentFileId == null
+      ? db.prepare('SELECT * FROM accepted_torrent_files WHERE library_item_id = ? ORDER BY observed_at DESC, id DESC LIMIT 1').get(libraryItemId)
+      : db.prepare('SELECT * FROM accepted_torrent_files WHERE library_item_id = ? AND torrent_file_id = ?').get(libraryItemId, torrentFileId);
+    return row ? {
+      id: row.id, libraryItemId: row.library_item_id, torrentFileId: row.torrent_file_id,
+      source: row.source, reason: row.reason, observedAt: row.observed_at,
+      evidence: row.evidence ? JSON.parse(row.evidence) : null,
+    } : null;
+  }
+
+  function listAcceptedTorrentFiles(libraryItemId) {
+    requireLibraryItem(libraryItemId);
+    return db.prepare('SELECT * FROM accepted_torrent_files WHERE library_item_id = ? ORDER BY observed_at DESC, id DESC').all(libraryItemId).map((row) => ({
+      id: row.id, libraryItemId: row.library_item_id, torrentFileId: row.torrent_file_id,
+      source: row.source, reason: row.reason, observedAt: row.observed_at,
+      evidence: row.evidence ? JSON.parse(row.evidence) : null,
+    }));
   }
 
   function findTorrentFile(infoHash, internalPath) {
@@ -2102,6 +2159,9 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     listProviderFiles,
     getProviderInventorySnapshot,
     getTorrentFile,
+    recordAcceptedTorrentFile,
+    getAcceptedTorrentFile,
+    listAcceptedTorrentFiles,
     getProviderFile,
     getActiveBindingForLibraryItem,
     findTorrentFile,

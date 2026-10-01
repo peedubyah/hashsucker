@@ -256,3 +256,46 @@ No planned work as completed. No vague "healthy." No speculative causes.
   continuity primitive. This proves consumer projection reconstruction for the
   existing Plex-backed publication path; it does not prove arbitrary consumer
   replacement or a general consumer-neutral framework.
+
+## 2026-10-01 — N1 accepted representation memory — ACTIVE / GO
+
+- Baseline instrumentation: request results now expose bounded `requestWork`
+  fields for reuse, discovery, ranking, candidate counts, selected infoHash,
+  selected TorrentFile, source, and latency. Existing evidence-query rows also
+  record `healthy_exact_reuse` versus `ranked_request` dispositions where the
+  path reaches those boundaries. No ranking or selection behavior changed.
+- Baseline history: 483 recent `media_requests` were sampled across 176 media
+  identities. There were 307 repeated request decisions and 190 adjacent
+  same-infoHash outcomes; 37 adjacent outcomes retained the same known exact
+  selected size. Source mix was 126 anticipation, 7 upgrade-watch, 190 Seerr,
+  77 API, and remaining historical/test/audit sources. The denominator is
+  imperfect because older rows lack uniform source metadata and selected
+  TorrentFile IDs; the result is sufficient to show repeated decisions beyond
+  healthy reuse, but not sufficient to claim household-only frequency.
+- Decision gate: **GO**, narrowly. Repeated same-release decisions exist in
+  ordinary Seerr/API traffic, while exact reuse does not cover every recorded
+  repeat. The fact is initially observational; no ranking behavior is changed.
+- Minimal fact: added control-plane `accepted_torrent_files`, keyed by exact
+  `library_item_id + torrent_file_id`, storing source, reason, observed time,
+  and bounded evidence. It is exact-object scoped and contains no provider,
+  route, compatibility, confidence, or TTL state.
+- Write trigger: successful Plex-confirmed publication path with visible
+  MediaPart records the fact. The positive fact is deliberately narrow: this
+  exact TorrentFile was observed to work in the recorded playback context.
+- Read path: control-plane store exposes deterministic exact-item reads and
+  ordered accepted-fact listing. No selection/ranking consumer exists yet.
+- Verification: 4 focused tests passed, including exact identity,
+  idempotent update, deterministic read, request-work instrumentation, and
+  existing republication fail-closed coverage.
+- Production write: after deploying the corrected reuse-path trigger, one E01
+  repeat request retained the exact path and wrote accepted fact id `1` for
+  LibraryItem `li_e6af7605a44108916869ba81` and TorrentFile
+  `tf_426aa723-3dfc-427a-8cc2-3871f231ff6c`. Evidence recorded Plex ratingKey
+  `497`, Part `1042`, and the exact VFS path. The request's baseline
+  instrumentation still reported `reuse=false`, `ranking=true`, and 88
+  candidates because this explicit request shape did not enter the healthy
+  reuse fast path; no selection behavior was changed to manufacture a win.
+- Production playback: the prior deployed N1 E01 canary passed after the
+  instrumentation deployment (`PASS`, 48.434 s, session-to-first-read 138 ms).
+  The accepted fact was then confirmed by the normal Plex-confirmed reuse
+  path on the deployed corrected trigger.

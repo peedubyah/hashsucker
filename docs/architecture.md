@@ -120,6 +120,7 @@ WAL mode, `foreign_keys=ON`. 16 tables. The ones that define the durable relatio
 | `repair_steps` | `running` \| `succeeded` \| `failed` |
 | `lifecycle_events` | append-only event log (also used for resolver telemetry) |
 | `provider_delivery_evidence` | durable provider-delivery evidence, separate from byte identity |
+| `accepted_torrent_files` | narrow positive playback evidence: exact LibraryItem + TorrentFile observed working; no provider, route, compatibility, confidence, or TTL semantics. Current consumers are deterministic reads only; ranking does not consume this fact. |
 
 Placements are **torrent-level** and have no file index. A `ProviderFile` is keyed within a
 placement by `(placement_id, provider_file_id)` and records the provider's current path, size, and
