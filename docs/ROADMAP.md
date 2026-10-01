@@ -288,10 +288,12 @@ republication" maps to this phase's first slice (reconstruct projection
 from truth without discovery or provider selection). The phrase stays an
 engineering term owned by that lane; strategy here does not canonize it
 further until the slice lands.
-**Status (2026-10):** that slice is Codex-active (republish route in
-worktree, fail-closed delegation to the exact-reuse predicate). This
-phase remains CANDIDATE until the slice lands and the rebuild
-demonstration (exit condition) is evidenced.
+**Status (2026-10):** republication slice LANDED (E01 VFS removed and
+recreated via `/api/library/republish` with same Binding/TorrentFile/
+placement, canary-passed; missing truth 409s fail-closed). Phase remains
+CANDIDATE until the rebuild demonstration (exit condition: levels 2–3,
+consumer sees and plays) is evidenced. See proof-of-need §5 for the
+leveled value model — levels 4–6 stay research-gated, never auto-commit.
 **Non-goals:** Media-server replacement; owning watch state here (see
 P5); Plex contract violations (filesystem expectations quarantined in
 the adapter).

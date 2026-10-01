@@ -57,3 +57,9 @@ replacement?**
     healing, or preservation work lands. Without baselines, no kill
     metric can fire and no phase can prove it mattered. This is the
     highest-priority measurement gap in the strategy.
+    Partially observed 2026-10-01 (production snapshot, not a trace
+    study): 63 repeat groups / 482 requests; 3 lifetime upgrade-watch
+    firings / 95 rows; anticipation-sourced 125 requests with no attached
+    win measurement. Per-decision instrumentation (discovery invoked?
+    ranking invoked? exact reuse? wall-clock? failure class?) still
+    missing — see proof-of-need §3 baseline.

@@ -2,9 +2,11 @@
 
 **Status: CANDIDATE. Graduation has been declared READY in `PLANS.md`,
 so entry conditions are met — but activation is Codex's sequencing call,
-not the docs lane's. The currently selected next product slice
-(consumer-neutral republication, see `PLANS.md`) takes precedence; this
-candidate waits behind it. Not active work. No code implied.**
+not the docs lane's. Republication has since LANDED; proof-of-need
+analysis (`docs/strategy/2026-10-capability-proof-of-need.md` §§1–3, 9)
+holds slices 1–2 (persist accept/known-bad) as next-ready candidates
+behind Codex's queue, with experiment design, negative-evidence rules,
+and kill conditions specified there. Not active work. No code implied.**
 
 ## Why
 
