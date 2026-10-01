@@ -279,23 +279,22 @@ No planned work as completed. No vague "healthy." No speculative causes.
   `library_item_id + torrent_file_id`, storing source, reason, observed time,
   and bounded evidence. It is exact-object scoped and contains no provider,
   route, compatibility, confidence, or TTL state.
-- Write trigger: successful Plex-confirmed publication path with visible
-  MediaPart records the fact. The positive fact is deliberately narrow: this
-  exact TorrentFile was observed to work in the recorded playback context.
+- Write trigger: the existing PMS active-session polling path now maps the
+  session's exact Part path, requires positive `viewOffset/duration` progress,
+  resolves the LibraryItem's active Binding, and records that Binding's exact
+  TorrentFile. Publication visibility alone no longer writes the fact.
 - Read path: control-plane store exposes deterministic exact-item reads and
   ordered accepted-fact listing. No selection/ranking consumer exists yet.
 - Verification: 4 focused tests passed, including exact identity,
   idempotent update, deterministic read, request-work instrumentation, and
   existing republication fail-closed coverage.
-- Production write: after deploying the corrected reuse-path trigger, one E01
-  repeat request retained the exact path and wrote accepted fact id `1` for
-  LibraryItem `li_e6af7605a44108916869ba81` and TorrentFile
-  `tf_426aa723-3dfc-427a-8cc2-3871f231ff6c`. Evidence recorded Plex ratingKey
-  `497`, Part `1042`, and the exact VFS path. The request's baseline
-  instrumentation still reported `reuse=false`, `ranking=true`, and 88
-  candidates because this explicit request shape did not enter the healthy
-  reuse fast path; no selection behavior was changed to manufacture a win.
-- Production playback: the prior deployed N1 E01 canary passed after the
-  instrumentation deployment (`PASS`, 48.434 s, session-to-first-read 138 ms).
-  The accepted fact was then confirmed by the normal Plex-confirmed reuse
-  path on the deployed corrected trigger.
+- Production write: an earlier deployment wrote fact id `1` from publication
+  confirmation; that path was then removed as semantically too weak. The
+  committed N1 correction no longer permits publication-only writes. A fresh
+  post-correction accepted-fact write still requires an observed PMS session
+  with positive progress and exact Part-path correlation; it is pending the
+  next normal playback-observation polling tick.
+- Production playback: the prior deployed N1 E01 canary passed (`PASS`,
+  48.434 s, session-to-first-read 138 ms). That canary proves playback, but
+  the current durable fact row must be treated as historical publication-only
+  evidence until a post-correction polling observation replaces/updates it.

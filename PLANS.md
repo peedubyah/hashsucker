@@ -33,10 +33,10 @@ read/idempotence tests pass; request behavior remains unchanged. Non-goals:
 known-bad memory, compatibility taxonomy, route health, provider state,
 selection changes, prediction, and UI.
 
-N1 result: exact accepted-TorrentFile fact now writes from Plex-confirmed
-successful playback and is readable deterministically. No request selection
-behavior consumes it yet; this slice proves trustworthy memory, not a ranking
-optimization.
+N1 result: exact accepted-TorrentFile fact now writes from an observed PMS
+session with positive progression and the exact active Binding/TorrentFile.
+No request selection behavior consumes it yet; this slice proves trustworthy
+memory, not a ranking optimization.
 
 Prior active slice — repo documentation/control-plane reconciliation —
 completed by the documentation lane; no product-code work is reopened here.
