@@ -74,6 +74,29 @@ in-flight map, capability pools/permits/limiters/breakers, managers map,
 metrics, lane state, prefetch state. Boot starts at zero TorrentFiles;
 managers rebuild from fresh S-1 per request.
 
+## Range / seek path
+
+```mermaid
+flowchart LR
+    CL[client Range] --> EDGE[edge: transparent]
+    EDGE --> APP[Node: resolve TF + coords]
+    APP --> S1[S-1 projection]
+    S1 --> MGR[CapabilityManager per TF]
+    MGR --> HIT{chunk cached?}
+    HIT -->|yes| SERVE[206 from grid]
+    HIT -->|no| COAL[join or claim in-flight]
+    COAL --> CAP[acquire capability]
+    CAP --> CDN[provider CDN range]
+    CDN --> GRID[stage to grid]
+    GRID --> SERVE
+    SERVE --> CL2[client]
+    SEEK[seek = new Range] --> APP
+```
+
+Single-byte probes bypass the cache. Out-of-bounds is 416, never silent
+truncation. Backfill is staged, never served speculatively. Consumer
+disconnect aborts in-flight fills for that reader; staged chunks stay.
+
 ## Source references
 
 - `data-plane/src/{main,lib,serve,cache,capability,manager,provider,

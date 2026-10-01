@@ -24,6 +24,30 @@ overlap; corpus lifecycle persists progress so restarts resume rather
 than repeat. Deprecated/removed work is deleted, not left dormant —
 the V1 repair loop is the template.
 
+## Topology
+
+```mermaid
+flowchart TB
+    BOOT[server boot] --> T1[reconcile 15m]
+    BOOT --> T2[corpus 6h]
+    BOOT --> T3[anticipation 15m]
+    BOOT --> T4[upgrade-watch 60m]
+    BOOT --> T5[promotion 30s]
+    BOOT --> T6[download 30s]
+    BOOT --> T7[arr-sync 6h]
+    BOOT --> T8[enrichment 60m]
+    BOOT --> T9[hygiene 2h]
+    T3 --> PROV[provider calls]
+    T4 --> PROV
+    T8 --> DISC[discovery calls]
+    T2 --> GH[github reads]
+    T1 --> CON[consumer reads]
+```
+
+Every arrow toward providers/consumers is optional, bounded, and
+killable via `*_ENABLED=0`. Nothing here is on the playback critical
+path.
+
 ## Source references
 
 - `media-search/src/server/index.js` (all `arm*Timer`),

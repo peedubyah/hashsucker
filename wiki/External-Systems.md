@@ -61,6 +61,27 @@ Compose services/ports: media-search `:3000` (host-loopback), data-plane
 Canary fixtures, CDP environment, benchmark drivers (`scripts/`,
 `data-plane/bench/*.mjs`), scratch DB copies. Never production paths.
 
+## Replaceability model
+
+```mermaid
+flowchart TB
+    CORE[HashSucker core\nidentity + truth]
+    CORE --> P1[TorBox adapter]
+    CORE --> P2[Real-Debrid adapter]
+    CORE --> P3[Local disk route]
+    CORE --> C1[Plex projection]
+    CORE --> C2[Jellyfin projection]
+    CORE --> D1[Stremio/Comet/Prowlarr sensors]
+    CORE --> D2[DMM corpus bulk]
+    P1 -.->|same placement contract| PX[any future provider]
+    C1 -.->|same VFS contract| CX[any future consumer]
+```
+
+Swapping a provider means implementing placement/observation/capability
+against the existing contracts — identity rows don't move. Swapping a
+consumer means projecting the same VFS truth elsewhere. Sensors are
+additive: removing one narrows candidate pools, never breaks the pipeline.
+
 ## Source references
 
 - `media-search/src/lib/stremio/`, `media-search/src/lib/torznab/`,

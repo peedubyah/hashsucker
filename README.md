@@ -99,6 +99,10 @@ Docker + GHCR images (`latest` tracks stable releases, `main` is the dev channel
 
 ## Docs for the curious
 
+- [GitHub Wiki](https://github.com/peedubyah/hashsucker/wiki) — full
+  technical documentation: pipeline, identity model, providers,
+  consumers, persistence, operations, testing, failure recovery.
+  Human-readable projection; repo docs stay canonical.
 - [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) — what the current release improved.
 - [`docs/architecture.md`](docs/architecture.md) — services, identity model, data model, HTTP surface.
 - [`docs/operations.md`](docs/operations.md) — deployment, environment variables, health checks.
