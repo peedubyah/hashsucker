@@ -159,13 +159,16 @@ concrete production defect or measured regression promotes it.
 
 ---
 
-# Post-core ladder — CANDIDATE (activates only after core graduation)
+# Post-core ladder — CANDIDATE (Codex owns activation)
 
-None of the phases below are active. Each activates only by explicit
-sequencing in `PLANS.md` after Codex declares core graduation, with its
-entry conditions met. Long-horizon items stay here as sections, not phase
-files, until they are coherent enough to be actionable. Order is
-dependency order, not a schedule: each phase must earn the next.
+None of the phases below are active. Core graduation is declared; activation
+remains Codex's sequencing call in `PLANS.md`. Long-horizon items stay here
+as sections, not phase files, until coherent enough to be actionable.
+
+Value filter over everything below: *which candidate capability measurably
+saves the household time or interaction — fewer selections, fewer retries,
+less waiting, fewer repairs, less re-curation?* Any phase that cannot pass
+this becomes research or dies.
 
 Right-to-exist test applied to every phase: *why would someone use this
 instead of Plex + Arr + rdt-client or Stremio today, and if the phase
@@ -178,6 +181,13 @@ were deleted or demoted to research (see RESEARCH items).
 request and relearns nothing from real playback. A household that has
 successfully played an object knows something no filename parse can
 provide — and currently throws it away.
+**Acceptance semantics (refined):** an acceptance record means
+(exact representation + observed context + reason/evidence). A Plex
+success is not a global goodness verdict: context includes
+consumer/client class where outcomes diverge, and route-dependent facts
+(e.g. "this provider served it fast") are stored as route knowledge,
+not representation knowledge. Confidence ages out only on contradictory
+evidence, never on a timer.
 **Product outcome:** Re-requests prefer previously accepted exact
 representations with stated reasons; known-bad representations (transcode
 traps, stallers, incompatible encodes) are avoided without rediscovery.
@@ -200,20 +210,27 @@ TRaSH-format drift if community knowledge is consumed.
 **Why not Stremio instead:** Stremio re-resolves every play from zero and
 remembers nothing; this phase is precisely the memory Stremio lacks.
 
-## P2 — Self-Healing Playable Object — CANDIDATE
+## P2 — Self-Healing Playable Object — CANDIDATE (reframed as completion)
 
-**Why:** Provider death today is survivable by failover, but only if a
-healthy route already exists. A single-route intent whose provider
-filters, purges, or throttles becomes unplayable until a human-adjacent
-process notices.
+**Why:** Failover, reacquisition, stable Bindings, and provider-outside-
+identity already exist as core capabilities. What does not exist is the
+standing posture: an intent with *zero* healthy routes at failure time is
+reacquired (not merely failed over), with route-health knowledge and
+stale-placement detection maintained continuously rather than discovered
+per incident.
+**New observable capability after P2 that does not exist today:**
+automatic recovery of an intent that had no usable route when the failure
+occurred — same TorrentFile, Binding unchanged, typed evidence — without
+a request-time trigger. If that sentence cannot be demonstrated, P2
+merges back into core hardening follow-ups and disappears as a phase.
 **Product outcome:** An intent stays playable across route loss without
-representation drift: same-TorrentFile reacquisition, route-health
-knowledge, stale-placement detection, automatic execution-route
-replacement, authoritative Binding preserved throughout.
-**Entry conditions:** Core graduation; P1 acceptance memory exists (it
-tells healing which representation is worth saving).
+representation drift, including the zero-healthy-route case.
+**Entry conditions:** Core graduation (met). P1 acceptance memory is
+useful compounding (knows which representation is worth saving) but not
+a hard dependency — the Binding already states that.
 **Exit conditions:** Demonstrated recovery of single-route intents after
-real route loss (filter/purge/throttle), with Binding unchanged and
+real route loss (filter/purge/throttle), including at least one
+zero-healthy-route reacquisition, with Binding unchanged and
 typed evidence per recovery.
 **Non-goals:** Generic route abstraction frameworks; multi-route
 striping; racing providers per playback without latency evidence.
@@ -228,15 +245,20 @@ explicitly bounded rather than fully solved.
 ## P3 — Preservation Policy — CANDIDATE
 
 **Why:** Local storage today is acquisition exhaust (downloads, staging),
-not a deliberate route. A household cannot currently say "keep this
-playable regardless of providers" and have the system honor it as policy.
-**Product outcome:** REMOTE / CACHE / KEEP / AUTO as route preferences on
-exact objects: local retention decisions, remote↔local migration,
-reconstitution after storage loss, policy attached to intent/object.
-**Entry conditions:** Core graduation; P2 route-health knowledge (tells
-policy what fragility costs).
-**Exit conditions:** Household-expressible keep policy honored end to end,
-including at least one demonstrated reconstitution after storage loss.
+not a deliberate route. Nothing preserves an exact object *because it is
+worth preserving* — and nothing decides that automatically either.
+**Product outcome:** Exact objects worth keeping stay playable regardless
+of providers, with minimal explicit policy: sensible automatic retention
+driven by demand, fragility, and recreation cost, plus a keep/remove
+expression for the cases automation cannot resolve. No REMOTE/CACHE/KEEP/
+AUTO button grid is presumed — buttons appear only if the automatic
+behavior demonstrably needs overrides.
+**Entry conditions:** Core graduation (met). P2 route-health knowledge is
+useful input (what fragility costs) but not a hard dependency.
+**Exit conditions:** Demonstrated preservation behavior end to end,
+including at least one reconstitution after storage loss, with the
+explicit-policy surface no larger than keep/remove (or documented proof
+that more was necessary).
 **Non-goals:** Becoming archival storage; mirroring the library locally
 by default; any storage-management UI beyond keep/remove.
 **Kill criteria:** If households never express keep-intent, or local
@@ -254,11 +276,18 @@ even though HashSucker knows every representation choice already made.
 **Product outcome:** Consumer projections disposable and rebuildable from
 HashSucker truth: replace the server, re-project the library, lose no
 representation decisions.
-**Entry conditions:** Core graduation; P1 acceptance memory (what to
-re-project), P2 healing (projections must survive route churn).
+**Entry conditions:** Core graduation (met). P1 acceptance memory tells
+what to re-project; P2 healing keeps projections alive through route
+churn — both useful compounding, neither a hard gate on the first
+rebuild demonstration.
 **Exit conditions:** Demonstrated rebuild of a consumer library from
 HashSucker truth after wiping consumer state, with representation
 choices preserved and verified playable.
+**Note on terminology:** Codex's selected slice "consumer-neutral
+republication" maps to this phase's first slice (reconstruct projection
+from truth without discovery or provider selection). The phrase stays an
+engineering term owned by that lane; strategy here does not canonize it
+further until the slice lands.
 **Non-goals:** Media-server replacement; owning watch state here (see
 P5); Plex contract violations (filesystem expectations quarantined in
 the adapter).
@@ -270,31 +299,49 @@ splitting the projection layer in two.
 **Carried debt:** Partial consumer-state coverage explicitly listed per
 consumer.
 
-## P5 — Consumer-Neutral Media Continuity — RESEARCH
+## P5 — Consumer-Neutral Media Continuity — RESEARCH (per-class kill rule)
 
-Not implementable yet: which consumer state (watched, resume,
-favorites, collections, preferred representation, preservation intent)
-HashSucker must own for no-re-curation replacement is unanswered.
-Research first; implementation only where a question earns it. See
+Not implementable yet: which consumer state HashSucker must own for
+no-re-curation replacement is unanswered. Evaluate each class
+separately — watched, resume, favorites, collections, representation
+preference, preservation intent — against one test: *if this state
+disappears with the consumer, does the household meaningfully have to
+re-curate its media life?* A "no" kills that class's ownership candidacy
+permanently. No bundled continuity database. Research first;
+implementation only where a question earns it. See
 `docs/research/open-questions.md`. Do not assume all state belongs here.
 
-## P6 — Predictive Fulfillment — CONDITIONAL (measurement-gated)
+## Prediction as mechanism, not a phase (P6 deleted)
 
-Only if measurement earns it: move uncertainty and expensive work ahead
-of demand (demand-weighted enrichment, pre-validation, route readiness,
-representation confidence for likely demand). Entry condition: a
-measured time-to-play or API-cost win on real household traces. No
-taste/recommendation engine, ever, without a new explicit decision.
-Kill criterion: no measured win within bounded experiments — the
-existing demand-driven behavior is already the product.
+P6 is removed from the ladder: predictive fulfillment is a
+measurement-gated capability available to multiple phases (discovery,
+enrichment, preservation, route readiness, representation selection),
+not a linear phase and not a product. Standing rule: taste, profiling,
+and prediction-like inference are allowed as implementation tools when
+they measurably reduce interaction, waiting, failed selection, or
+preparation latency — never as product identity. No taste engine, no
+recommendation UX, no social graphs, no "AI phase." Kill criterion for
+any predictive spend: no measured win on real traces within bounded
+experiments.
 
-## Continuity compounding (hypotheses, not promises)
+## Continuity compounding (audited dependencies, not narrative)
 
-exact identity → accepted representation memory (P1) → route-independent
-playable object (P2) → preservation policy (P3) → consumer
-reconstruction (P4) → continuity state (P5) → household media continuity.
-Each arrow is a hypothesis: the upstream phase must demonstrably enable
-the downstream one, or the chain breaks and the downstream stays research.
+- identity → memory: **useful compounding, not hard** — selection works
+  today without memory; memory improves it if the win measures out.
+- identity → route-independence: **already coexists** — failover and
+  provider-outside-identity predate any memory work.
+- memory → route-independence: **hypothesis** — acceptance knowledge may
+  tell healing what is worth saving, unproven.
+- route-independence → preservation: **useful, not hard** — fragility
+  costs inform what to preserve; preservation can start from demand alone.
+- preservation → reconstruction: **false dependency** — rebuild needs
+  bindings plus acceptance, not local bytes.
+- memory → reconstruction: **useful, not hard** — acceptance says what
+  to re-project; a bindings-only rebuild is still meaningful without it.
+- reconstruction → continuity state: **hypothesis** — owning projections
+  may force owning adjacent state, or may not.
+- anything → household media continuity: **hypothesis** until a
+  replacement-without-recuration is demonstrated end to end.
 
 ## Acquisition-era vocabulary ledger (cleanup opportunities, not renames)
 

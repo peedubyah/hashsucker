@@ -21,9 +21,13 @@ and clients without re-curating household media life.
    human babysitting: request → publication → real playback → recovery.
 2. Exact-object identity is never regressed: the same bytes are the same
    object across providers, restarts, and refactors.
-3. Provider/runtime failure is a routing event, never a library event.
+3. Provider/runtime failure should not change media identity or user
+   intent; handle it as route/reconstruction state whenever possible.
 4. No human decision required → no human interface required (product
    principle; operator tooling is separate from product UX).
+5. Reduce household effort and time-to-play: prefer remembered decisions,
+   automatic preparation, and invisible recovery wherever they reliably
+   remove interaction or waiting.
 
 ## Core reliability exit condition (met — graduation READY per PLANS.md)
 
@@ -44,9 +48,15 @@ Track candidate answers in retrospectives and phase context, not in code.
 
 ## Non-goals (standing unless a slice proves otherwise)
 
-- New product surface before the exit condition is met.
 - Speculative acquisition/prefetch without measured demand evidence.
 - Second implementations of identity, ranking, or reuse paths.
 - Rewriting working subsystems without a failing acceptance proof.
 - Dashboards, predictions, or automation that substitute for end-to-end
-  playable evidence.
+  playable evidence. (Prediction, profiling, and taste-like inference
+  are allowed as implementation tools when they measurably reduce user
+  interaction, waiting, failed selection, or preparation latency — never
+  as product identity. The stance is "prediction must earn measurable
+  value," not anti-prediction.)
+- Retired 2026-10-01: blanket "no new product surface before the exit
+  condition" (condition met; product surface now needs per-slice
+  justification instead).

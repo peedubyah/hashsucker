@@ -46,9 +46,13 @@ data.
 ## Earned slices (in order, each gated, stop anytime)
 
 ### Slice 1 — Persist accepted representations
-Record known-good acceptance (TorrentFile + client/client-class +
-outcome) from real successful playback only. Gate: rows exist with
-stated reasons; zero synthetic or inferred acceptances.
+Record known-good acceptance as (exact representation + observed
+context + reason/evidence) from real successful playback only:
+TorrentFile + client/client-class where outcomes diverge; route-
+dependent facts (e.g. "this provider served it fast") stored as route
+knowledge, not representation knowledge. Confidence ages out only on
+contradictory evidence, never on a timer. Gate: rows exist with stated
+reasons; zero synthetic or inferred acceptances.
 
 ### Slice 2 — Persist known-bad reasons
 Record rejections/failures with typed reasons (transcode trap,

@@ -4,6 +4,18 @@ Unresolved questions that must be answered by evidence before
 implementation. Each states what evidence would answer it. Guesses are
 not answers.
 
+## Top-level value question (kill criterion across phases)
+
+> Which candidate capability measurably saves the household time or
+> interaction?
+
+Evidence: fewer selections, fewer retries, less waiting, fewer repair
+actions, less re-curation. Any phase or mechanism that cannot pass this
+becomes research or dies — elegance, sophistication, and predictive
+cleverness are not substitutes.
+
+## Questions
+
 1. **What consumer state truly belongs in HashSucker?**
    Evidence: a real consumer loss/migration where reconstructing from
    HashSucker truth demonstrably restores the household vs. what had to
@@ -24,9 +36,13 @@ not answers.
    correlated filtering?**
    Evidence: a real correlated-filtering event where alternate routes
    covered demand vs. where they failed together.
-7. **What storage policy is understandable to a household?**
-   Evidence: comprehension tests — users predict what keep/remove does
-   correctly, or the policy is wrong regardless of elegance.
+7. **How much preservation policy must the user ever express explicitly?**
+   Evidence: behavioral, not survey-based — how often users must express
+   policy for correct outcomes, whether defaults/automation handle most
+   cases without intervention, and the specific cases where explicit
+   override proved necessary. If automation decides reliably, buttons
+   are clutter; if it decides wrongly in ways users notice, find exactly
+   where and only there add expression.
 8. **At what point is a local preserved object more valuable than remote
    reacquisition?**
    Evidence: measured latency/durability deltas on real replays vs.
