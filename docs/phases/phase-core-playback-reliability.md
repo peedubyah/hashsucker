@@ -1,4 +1,4 @@
-# Phase: Core playback reliability & recovery (ACTIVE)
+# Phase: Core playback reliability & recovery (CLOSED — graduation READY per PLANS.md)
 
 Why: `GOALS.md` exit condition is unmet — nothing else earns priority.
 Scope: deterministic canary, seek/startup/EOF correctness, Rust + Node +
@@ -18,23 +18,32 @@ implementations, scheduler throughput tuning (see ROADMAP Phase A gate).
 - [x] Demand-weighted enrichment triage + marginal-gain measurement
   (`4fbaf55`–`0029857`, `8c535a0`, `df8a0a3`).
 - [x] Fulfillment-truth + recent-release recovery hardening (`552450b`).
-- [ ] ACTIVE: close the exit-condition canary — single deterministic
-  run proving request → publication → real Plex playback → provider or
-  restart recovery with range/hash verification and no manual repair.
-  Gate: recorded in `docs/BUILD-LOG.md` with measurements; failure
-  attribution retained in telemetry.
-  Standing of this gate (2026-09-30, from BUILD-LOG evidence): canary
-  *capability* is achieved (real playback, identity, seeks, near-EOF,
-  clean teardown, attribution) and the sentinel is fit for on-demand
-  regression use at modest cadence. Not proven: continuous scheduled
-  operation, lifecycle recovery, PMS outage continuity — tracked as
-  engineering session work, not as this gate. Do not reopen capability
-  proof; do not invent new playback work here.
+- [x] Bound stale-inventory binding retry churn (evidence passed;
+  retrospective `2026-09-30-stale-inventory-binding-throttle.md`).
+- [ ] SUPERSEDED: graduation declared READY in `PLANS.md`; this
+  phase is CLOSED and no slice here is active. The selected next product
+  slice (consumer-neutral republication) lives in `PLANS.md` sequencing.
+  Do not invent work from the docs lane.
+- [x] Exit-condition canary and core playback reliability — closed by
+  host-only E01/E05/MobLand real Plex playback, exact identity attribution,
+  seek/EOF/stop proof, same-object provider recovery, and recorded Rust/Node
+  restart/reacquisition evidence (`docs/BUILD-LOG.md`, 2026-09-30/10-01).
+  Carried debt: PMS lifecycle remains partial, long-run stale-inventory
+  reproduction was not repeated after the narrow throttle, and isolated
+  latency tails are observational debt. None currently forces manual repair
+  during normal request/playback/recovery.
 
-  Lifecycle proof slices (Rust/data-plane, Node/media-search) are
-  Codex-owned active engineering in the live worktree as of this writing;
-  completion is recorded by that lane in `docs/BUILD-LOG.md`, not here.
-  PMS lifecycle stands at PARTIAL / STOPPED per its BUILD-LOG entry.
+  Core hardening is no longer the primary engineering lane. Future reliability
+  work requires a newly observed product defect or regression; do not reopen
+  this phase for theoretical gaps or bookkeeping alone.
+
+## Graduation decision
+
+Core is READY for product evolution: request → exact representation →
+publication → real Plex playback → runtime recovery is proven well enough to
+make continued hardening lower value than product work. The next product
+slice is consumer-neutral republication from retained exact durable truth;
+this phase remains closed while that work proceeds elsewhere.
 
 ## Evidence required (gate)
 

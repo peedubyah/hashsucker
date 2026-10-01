@@ -1,17 +1,25 @@
 # PLANS.md — living execution index
 
-Active phase: **Core playback reliability & recovery**
+Active phase: **Core playback reliability & recovery — CLOSED**.
 → [`docs/phases/phase-core-playback-reliability.md`](docs/phases/phase-core-playback-reliability.md)
 
-Active slice: **bound stale-inventory binding retry churn** — **CLOSED**.
-Implementation/test evidence passed; the host-only canary now autonomously
-prepares the isolated HTPC services, rejects container execution, establishes
-fresh per-TorrentFile telemetry baselines, and passed clean E01 plus the full
-E01/E05/MobLand consumer rotation against deployed `57bbfe1`. The 30-second
-suppression bounds immediate replay/restart churn; it does not prove the
-original long-run workload root cause is eliminated. Non-goals remain PMS
-lifecycle, retry-throttle changes, canary expansion, corpus cleanup, scheduler
-tuning, and documentation-model redesign.
+Core graduation decision: **READY**. Request → exact representation →
+publication → real Plex playback → runtime recovery is proven sufficiently for
+product evolution. Continued hardening requires a newly observed defect; no
+open theoretical gap is primary work.
+
+Completed final slice: **bound stale-inventory binding retry churn** —
+**CLOSED**. The host-only canary passed clean E01 plus the full E01/E05/MobLand
+rotation against deployed `57bbfe1`; immediate replay/restart churn is bounded
+by the narrow suppression. Long-run reproduction remains observational debt,
+not a current blocker.
+
+Selected next product slice: **consumer-neutral republication from retained
+exact durable truth**. Gate: a replacement/missing consumer projection can be
+recreated through one exact-truth path without discovery or provider selection,
+while absent/divergent durable truth fails closed. Non-goals: replacement
+consumer integration, new identity vocabulary, provider re-selection, and
+new playback UI.
 
 Prior active slice — repo documentation/control-plane reconciliation —
 completed by the documentation lane; no product-code work is reopened here.
@@ -33,7 +41,9 @@ active until moved here with a gate).
 
 Parked (explicitly not active): scheduler throughput tuning beyond the
 ROADMAP Phase A gate; speculative acquisition; second identity/ranking/
-reuse implementations; new product surface before the exit condition.
+reuse implementations; new product surface beyond the sequenced slice
+(core exit condition met — parked status now needs per-slice justification,
+not the blanket gate).
 
 Session/production state: [`handoff/CURRENT.md`](handoff/CURRENT.md).
 Half-life rule: CURRENT.md answers "what does a fresh agent need about the
