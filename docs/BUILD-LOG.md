@@ -123,16 +123,33 @@ No planned work as completed. No vague "healthy." No speculative causes.
   log window contained zero binding activation/failure lines. Production
   smoke completed its bounded checks and emitted live byte telemetry, but its
   full verdict was not captured in the compact output.
-- Canary: the on-demand real Plex canary was invoked and all three fixtures
-  returned `CANARY_INFRA_FAILURE: CDP endpoint/app not ready`. The Plex HTPC
-  and Xvfb user services were active; no playback acceptance is claimed from
-  this run.
+- Canary readiness investigation: the host CDP endpoint was present on
+  `127.0.0.1:9222`, and restarting only the isolated HTPC was allowed. The
+  existing container invocation could not reach that loopback listener;
+  host-side invocation reached the application but did not produce a clean
+  three-fixture acceptance run. A temporary host-gateway experiment was
+  reverted; no persistent harness/config change was kept.
+- Consumer-path evidence: the exact rotation reached the native playback
+  screen but failed before a real PMS session/read for all three fixtures with
+  `VFS_OR_BYTE_PATH_FAILURE` and `no exact/distant reads`. A direct bounded
+  MobLand VFS probe returned `206`; retained data-plane stage records show
+  exact reads for all three TorrentFiles, so this run does not establish a
+  product regression and does not satisfy consumer acceptance. A separate
+  host attempt passed E01 and E05 before MobLand failed, but it was not the
+  required clean rotation and is not promoted to a slice pass.
+- Harness correction: current PMS metadata identifies MobLand S02E02 as
+  ratingKey `512`, Part `1057`, with parent `510` and grandparent `509`; the
+  existing fixture's `510`/`511` hierarchy was not changed because the
+  resulting playback failure was not proven to be caused by that mismatch.
+- Verdict: `IMPLEMENTATION_TEST_GATE = PASS`; `CONSUMER_PATH_REGRESSION =
+  BLOCKED_FOR_ACCEPTANCE`; `ORIGINAL_LONG_RUN_CHURN_REPRODUCTION = UNPROVEN`;
+  overall slice = `BLOCKED_FOR_ACCEPTANCE`.
 - Unproven: long-run restart churn reduction under the original stale-inventory
-  workload; real playback after this deployment; autonomous recovery; PMS
-  lifecycle behavior.
-- Next gate: make the canary CDP environment ready through the approved
-  external operator path, then rerun the bounded playback rotation; do not
-  expand this slice into PMS lifecycle work.
+  workload; clean real playback acceptance after this deployment; autonomous
+  recovery; PMS lifecycle behavior.
+- Next gate: restore a supported, clean isolated HTPC/CDP invocation path and
+  rerun the exact three-fixture rotation; do not expand this slice into PMS
+  lifecycle work.
 
 ## 2026-10-01 — full technical wiki projection — PUBLISHED
 
