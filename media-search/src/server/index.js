@@ -245,15 +245,14 @@ function armUpgradeWatchTimer(delayMs) {
           // adopt permanent instead. Runs before upgrade evaluation so
           // retired items are never seeded.
           try {
-            const { retireDuePublications, observePlaybackSessions, countTemporaryPublications } =
+            const { retireDuePublications, observePlaybackSessions, countTemporaryPublications, countPlaybackObservablePublications } =
               await import('../lib/library/retirement.js');
             // Consumption-aware retention: fold live Plex sessions into
             // temporary publications first (started extends the horizon,
-            // completed shortens to a grace period). Skipped entirely
-            // when nothing temporary is published (zero-cost default) or
-            // Plex is unconfigured (TTL stands as fallback).
+            // completed shortens to a grace period). The same bounded polling
+            // pass records accepted exact TorrentFiles for any published item.
             try {
-              if (countTemporaryPublications(controlPlaneStore) > 0
+              if ((countTemporaryPublications(controlPlaneStore) > 0 || countPlaybackObservablePublications(controlPlaneStore) > 0)
                 && process.env.PLEX_URL && process.env.PLEX_TOKEN) {
                 const { fetchPlexSessions } = await import('../lib/consumers/plex-sessions.js');
                 const { recordAcceptedPlayback } = await import('../lib/consumers/accepted-playback.js');
@@ -264,8 +263,8 @@ function armUpgradeWatchTimer(delayMs) {
                   const adj = observePlaybackSessions({
                     controlPlaneStore, sessions: seen.sessions,
                   });
-                  if (adj.observed > 0) {
-                    const accepted = seen.sessions.map((session) => recordAcceptedPlayback({ controlPlaneStore, session })).filter(Boolean).length;
+                  const accepted = seen.sessions.map((session) => recordAcceptedPlayback({ controlPlaneStore, session })).filter(Boolean).length;
+                  if (adj.observed > 0 || accepted > 0) {
                     console.log(`media-search: playback observed=${adj.observed} accepted=${accepted} extended=${adj.extended} completed=${adj.completed}`);
                   }
                 }

@@ -163,6 +163,17 @@ export function countTemporaryPublications(controlPlaneStore) {
   }
 }
 
+/** Count published items eligible for read-only playback acceptance polling. */
+export function countPlaybackObservablePublications(controlPlaneStore) {
+  try {
+    return controlPlaneStore.db.prepare(`SELECT COUNT(*) AS n FROM library_items i
+      JOIN bindings b ON b.library_item_id = i.id AND b.status = 'active'
+      WHERE i.desired_state = 'present'`).get()?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * Fold playback session sightings into temporary publications. Pure
  * clock, all state durable. Returns counts; never retires here (the
