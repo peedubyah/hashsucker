@@ -17,7 +17,9 @@ Post-core strategy lives in `strategy/2026-10-post-core-product-strategy.md`
 (identities, scenarios, vetoes), proof-of-need analysis in
 `strategy/2026-10-capability-proof-of-need.md`, and the engineering-usable
 program in `strategy/2026-10-post-core-roadmap.md` (near-term slices,
-gates, kill criteria, decision log). This file keeps phase-level truth;
+gates, kill criteria, decision log), superseded for engineering purposes
+by `strategy/2026-10-engineering-roadmap.md` (NOW/NEXT/LATER/NO, code-ready
+slices, branch conditions). This file keeps phase-level truth;
 slice-level truth lives there.
 
 ## Phase A — Scheduler shipping decision — CLOSED
