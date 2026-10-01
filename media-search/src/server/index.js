@@ -256,6 +256,7 @@ function armUpgradeWatchTimer(delayMs) {
               if (countTemporaryPublications(controlPlaneStore) > 0
                 && process.env.PLEX_URL && process.env.PLEX_TOKEN) {
                 const { fetchPlexSessions } = await import('../lib/consumers/plex-sessions.js');
+                const { recordAcceptedPlayback } = await import('../lib/consumers/accepted-playback.js');
                 const seen = await fetchPlexSessions({
                   plexUrl: process.env.PLEX_URL, plexToken: process.env.PLEX_TOKEN,
                 });
@@ -264,7 +265,8 @@ function armUpgradeWatchTimer(delayMs) {
                     controlPlaneStore, sessions: seen.sessions,
                   });
                   if (adj.observed > 0) {
-                    console.log(`media-search: playback observed=${adj.observed} extended=${adj.extended} completed=${adj.completed}`);
+                    const accepted = seen.sessions.map((session) => recordAcceptedPlayback({ controlPlaneStore, session })).filter(Boolean).length;
+                    console.log(`media-search: playback observed=${adj.observed} accepted=${accepted} extended=${adj.extended} completed=${adj.completed}`);
                   }
                 }
               }

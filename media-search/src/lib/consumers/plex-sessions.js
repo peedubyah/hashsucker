@@ -49,11 +49,14 @@ export function mapSessionEntry(entry) {
   const duration = Number(entry.duration) || 0;
   const progress = duration > 0 ? viewOffset / duration : 0;
   const state = entry.Player?.state ?? entry.playerState ?? null;
+  const part = entry.Media?.flatMap((media) => media.Part ?? []).find((candidate) => candidate.file);
   return {
     mediaId,
     mediaType: isEpisode ? 'episode' : 'movie',
     season, episode,
     viewOffset, duration, progress,
+    partFile: part?.file ?? null,
+    partId: part?.id ?? null,
     playerState: typeof state === 'string' ? state : null,
     sessionId: entry.Session?.id ?? entry.sessionId ?? null,
     ratingKey: entry.ratingKey != null ? String(entry.ratingKey) : null,

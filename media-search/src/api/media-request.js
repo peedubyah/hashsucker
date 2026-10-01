@@ -582,6 +582,7 @@ async function tryReuseHealthyPublication({
     const noopReady = await checkPublishedNoop();
     if (noopReady) {
       const fulfillment = await confirmReuseFulfillment();
+      cache.recordEvidenceQuery?.({ queryKey: `media:${mediaId}:${season ?? ''}:${episode ?? ''}`, observer: 'hashsucker', sourceClass: request.source || 'request', disposition: 'healthy_exact_reuse', observedAt: Date.now(), latencyMs: Date.now() - requestStartedAt, candidateCount: 0, selectedCount: 1 });
       return {
         requestId: handoff.requestId,
         intent: { type: handoff.mediaType, mediaId: handoff.mediaId },
@@ -826,6 +827,7 @@ async function attemptTorBoxFileBinding({ ensureTorBoxFileIdentityFn, selected, 
  * @returns {Promise<Object>} Ranked results with identity state and score breakdown
  */
 export async function searchByMedia(cache, request) {
+  const requestStartedAt = Date.now();
   const mediaId = String(request.mediaId || '').trim();
   const mediaType = request.mediaType || 'movie';
   const limit = Math.min(parseInt(request.limit, 10) || 50, 100);
@@ -1757,6 +1759,7 @@ export async function searchByMedia(cache, request) {
 
   // Stage 3: Rank within tier (with eligibility overrides)
   // Merge eligibility maps for ranking
+  const rankingStartedAt = Date.now();
   const allEligibilityByHash = new Map([...eligibilityByHash, ...liveEligibilityByHash, ...titleEligibilityByHash]);
   // Corpus title-index merge (same mechanism as the live path).
   {
@@ -1768,6 +1771,7 @@ export async function searchByMedia(cache, request) {
     }
   }
   const { ranked, tierMeta } = rankHitsTiered(rankingInputs, { season, episode, mediaTitle }, mediaId, allEligibilityByHash);
+  const rankingLatencyMs = Date.now() - rankingStartedAt;
 
   // Stage 4: Paginate
   const total = ranked.length;
@@ -2045,6 +2049,10 @@ export async function searchByMedia(cache, request) {
     { reason: `media-request:${mediaId}` }
   );
 
+  cache.recordEvidenceQuery?.({
+    queryKey: `media:${mediaId}:${season ?? ''}:${episode ?? ''}`, observer: 'hashsucker', sourceClass: source || 'request', disposition: 'ranked_request', observedAt: Date.now(), latencyMs: Date.now() - requestStartedAt, candidateCount: rankingInputs.length, selectedCount: selection.selected ? 1 : 0,
+  });
+
   // If there's a selected release, promote it further to selected-release priority
   if (selection.selected && selection.selected.infoHash) {
     cache.promoteDemand(
@@ -2062,6 +2070,7 @@ export async function searchByMedia(cache, request) {
     query: { mediaId, mediaType, season, episode },
     identitySummary: summarizeIdentity(explainable),
     ranking: tierMeta,
+    requestWork: { reuse: false, discovery: liveDiscoveryTriggered, ranking: true, candidateCount: rankingInputs.length, rankedCount: ranked.length, rankingLatencyMs, latencyMs: Date.now() - requestStartedAt, source: source || 'request', selectedInfoHash: selection.selected?.infoHash ?? null, selectedTorrentFileId: selection.selected?._torrentFileId ?? handoff?.torrentFileId ?? null },
     discovery: {
       liveDiscoveryTriggered,
       liveCandidates: liveCandidates.length,
