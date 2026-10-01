@@ -94,12 +94,18 @@ per-class re-curation test. Import-on-migration beats continuous sync
 in every class until proven otherwise.
 
 **Predictive preparation** — Frequency of *successful* prediction:
-HYPOTHETICAL (anticipation volume exists — 125 requests — but no
-measured time-to-play win). Pain addressed: startup waiting. Partially
-solved: anticipation scheduler + reuse fast path already capture the
-repeat case without prediction. Unique advantage: none demonstrated.
-Verdict: measure existing machinery with controls before any expansion;
-kill on no delta.
+HYPOTHETICAL. [CORRECTED 2026-10-01: the "125 anticipation requests"
+figure previously cited here is scheduler executions (113
+future-intent prepare + 12 publish rows) across 41 intents / 21 media,
+dominated by proof/drill traffic — not household demand volume and not
+waste evidence. Retries are bounded by design (15m→1h→4h→24h backoff,
+MAX_ATTEMPTS=6, 7-day park; 87 intents resolved in 1 attempt). Zero
+cases observed where anticipation preceded an explicit request, so
+time-to-fulfillment benefit is unmeasured — not disproven.] Pain
+addressed: startup waiting. Partially solved: anticipation scheduler +
+reuse fast path already capture the repeat case without prediction.
+Unique advantage: none demonstrated. Verdict: measure existing
+machinery with controls before any expansion; kill on no delta.
 
 **Enrichment/background intelligence** — already narrowed to unresolved
 demand. Frequency of payoff: INFERRED (no later-use attribution
@@ -114,7 +120,7 @@ recorded). Verdict: audit sufficiency, expand never without numbers.
 | Provider observation | observations.js, budgets, cooldowns, breaker | durable per-route history consulted by decisions | a decision reads history older than uptime |
 | Binding reuse | exact reuse predicate, republication route | whole-library rebuild demo | rebuild timed with zero drift |
 | Pre-validation | availability revalidation paths | fail-closed readiness as product guarantee | prevented failures exceed probe cost |
-| Anticipation | scheduler, quality gates, prewarm, 125 requests | measured win | controlled trace delta |
+| Anticipation | scheduler, quality gates, prewarm; 125 execution rows across 41 intents (mostly proof media), bounded retries by design | measured win | controlled trace delta |
 | Upgrade sensing | hourly watch, durability veto | firing→watch correlation | watched upgrades beat static profiles |
 | Promotion/local path | promotion/download workers, materialize+verify | policy deciding *what* deserves locality | retained bytes watched more than cost |
 
@@ -296,9 +302,11 @@ governor (vetoed), taste engine (vetoed), watched-state sync (deferred).
 
 ## 10. Explicit next-step vetoes (do not follow the republication slice)
 
-1. **Predictive prewarming expansion** — unmeasured provider spend;
-   anticipation volume (125 requests) has no attached win. Reopen on
-   controlled trace delta.
+1. **Predictive prewarming expansion** — unmeasured provider spend and
+   no controlled win measurement; note this is about the *expansion*,
+   not the existing scheduler, whose execution volume is normal
+   scheduled probing (bounded retries, stop conditions work) and is
+   not waste evidence. Reopen on controlled trace delta.
 2. **Watched-state ownership/sync** — server-scope creep with zero
    recorded migration loss. Reopen on demonstrated loss only.
 3. **Preservation UI beyond keep/remove** — automation-first posture;

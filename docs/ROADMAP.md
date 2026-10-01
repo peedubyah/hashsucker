@@ -13,6 +13,13 @@ Status legend: `CLOSED` (exited with recorded outcome), `BACKLOG`
 (gated, not active), `CANDIDATE` (needs graduation + explicit activation),
 `RESEARCH` (questions first, implementation only on evidence).
 
+Post-core strategy lives in `strategy/2026-10-post-core-product-strategy.md`
+(identities, scenarios, vetoes), proof-of-need analysis in
+`strategy/2026-10-capability-proof-of-need.md`, and the engineering-usable
+program in `strategy/2026-10-post-core-roadmap.md` (near-term slices,
+gates, kill criteria, decision log). This file keeps phase-level truth;
+slice-level truth lives there.
+
 ## Phase A — Scheduler shipping decision — CLOSED
 
 **Production problem:** Cold provider-backed playback can experience request
