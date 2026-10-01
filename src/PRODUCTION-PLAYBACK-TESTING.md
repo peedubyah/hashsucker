@@ -225,7 +225,9 @@ The current `test:dev-canary -- --fast` path is CDP-only for start, seek, and
 stop. It bootstraps the loaded HTPC webpack registry through CDP, invokes the
 registered-server navigation route, waits for the native playback controller
 to become loaded/playing (navigation resolves before that point), then checks
-PMS and data-plane evidence. It performs no screenshot capture or coordinate
+PMS and data-plane evidence. The same canary may be run after an exact
+`/api/library/republish` operation to prove the reconstructed publication is
+consumer-playable; it does not broaden the canary's ownership or repair scope. It performs no screenshot capture or coordinate
 automation during a normal run. Set `HASHSUCKER_CANARY_RUNS=10` for the E01
 reliability gate; omit `--fixture` for the three-fixture matrix (three runs by
 default), or use `--fixture=e05` / `--fixture=mobland` for one fixture.

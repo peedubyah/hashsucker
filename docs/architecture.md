@@ -165,7 +165,7 @@ routes; host binding and the trusted Compose/reverse-proxy boundary are the acce
 | `GET /api/data-plane/files/:tfId` | Internal S-1 projection of one TorrentFile and its usable mapped provider coordinates |
 | `GET /api/library` | Product library listing: per movie/episode desired state, published/absent/incomplete state, presentation path, TorrentFile, size, and serving-coordinate presence |
 | `POST /api/library/unpublish` | Remove VFS/STRM presentation for an exact movie, episode, or season; retains Release/TorrentFile/provider truth for cheap republish |
-| `POST /api/library/republish` | Recreate consumer presentation from the active exact Binding/TorrentFile without discovery or provider selection; fails closed when retained truth is unavailable |
+| `POST /api/library/republish` | Recreate the existing consumer presentation from the active exact Binding/TorrentFile without discovery or provider selection; fails closed when retained truth is unavailable. This is a narrow exact durable-truth continuity primitive, not arbitrary consumer replacement. |
 | `POST /api/library/reconcile` | Record consumer-library presence/absence/UNKNOWN observations for published items; retires ELIGIBLE items only when the retirement policy enables it (default OFF) |
 | `GET /api/library/retirement` | Dry-run retirement planner: per-item presence, absence age, eligibility, exact ineligibility reason; read-only |
 | `GET /api/diagnostics` | Rollout readiness: storage, data-plane, providers, consumers, publication, lifecycle in one payload (`ready|degraded|not_ready`); cheap checks only, no secrets |

@@ -14,12 +14,18 @@ rotation against deployed `57bbfe1`; immediate replay/restart churn is bounded
 by the narrow suppression. Long-run reproduction remains observational debt,
 not a current blocker.
 
-Selected next product slice: **consumer-neutral republication from retained
-exact durable truth**. Gate: a replacement/missing consumer projection can be
-recreated through one exact-truth path without discovery or provider selection,
-while absent/divergent durable truth fails closed. Non-goals: replacement
-consumer integration, new identity vocabulary, provider re-selection, and
-new playback UI.
+Completed product slice: **exact durable-truth republication** — **CLOSED**.
+E01 VFS publication was genuinely removed, then recreated through
+`POST /api/library/republish` with the same Binding, TorrentFile, placement,
+representation, and Plex path. No discovery/reselection ran; host E01 canary
+playback passed after reconstruction. Missing retained truth returns 409 and
+fails closed. This is an earned continuity primitive, not a general
+consumer-replacement framework.
+
+Next product slice: not started. Product-value selection resumes from the
+roadmap after this bounded continuity proof. Non-goals: replacement consumer
+integration, new identity vocabulary, provider re-selection, and new playback
+UI.
 
 Prior active slice — repo documentation/control-plane reconciliation —
 completed by the documentation lane; no product-code work is reopened here.

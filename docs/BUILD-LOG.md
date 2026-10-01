@@ -217,3 +217,42 @@ No planned work as completed. No vague "healthy." No speculative causes.
   that exact reuse predicate; focused route coverage passes for missing truth.
 - Slice status: implementation started; production consumer replacement is not
   yet claimed. No provider or consumer state was mutated for this selection.
+
+## 2026-10-01 — exact durable-truth republication — CLOSED
+
+- Publication-loss setup: E01's VFS publication row was removed directly from
+  the discovery DB using the bounded test operation. Only
+  `vfs_tv_entries(media_id=tt26545992, season=1, episode=1)` was removed.
+  LibraryItem, active Binding, playback handoff, TorrentFile, ProviderPlacement,
+  ProviderFile, exposure, and serving coordinates were retained. No product
+  repair path or rediscovery was used to create the loss condition.
+- Durable truth retained: LibraryItem
+  `li_e6af7605a44108916869ba81`; active Binding
+  `bd_5e150cc9-5620-40e5-8672-ddb91a7e4ce6`; TorrentFile
+  `tf_426aa723-3dfc-427a-8cc2-3871f231ff6c`; infoHash
+  `5bf127a164dd1b06dff1d69e5508b43ef1233398`; ProviderPlacement
+  `pl_691373b3-9464-4e00-9865-9ac0ccc193a1`; exact size `8660679535`.
+- Republish: after deploying the committed route, `POST
+  /api/library/republish` for E01 returned HTTP 200 with
+  `reuseMode=republish`, `republished=true`, `selection.reason=
+  reused-healthy-publication`, and `fulfilled=true`. The recreated VFS row
+  used the same TorrentFile, infoHash, size, and canonical path. Binding ID,
+  version, placement, provider file, and exposure remained unchanged.
+- External work avoided: response reported zero discovery/ranking/availability
+  work; no alternate Release or provider coordinate was selected. Durable row
+  counts remained stable after reconstruction (`playback_handoffs=122`,
+  `candidates=1593028`, `library_items=132`, `bindings=105`).
+- Consumer result: Plex visibility returned ratingKey `497`, Part `1042`,
+  path `/mnt/hashsucker-vfs/TV/tt26545992/Season 01/tt26545992 - S01E01.mkv`,
+  size `8660679535`.
+- Playback: existing host-only E01 canary passed after reconstruction with
+  expected identity, progression, forward/backward/near-EOF seeks, exact
+  TorrentFile evidence, and clean teardown. Total latency `19.527 s`; session-
+  to-first-read `257 ms`. No manual product-state repair occurred.
+- Negative path: republishing `tt_missing_republish` returned HTTP 409 with
+  `exact durable publication is not reusable; explicit media request required`.
+  No publication was fabricated and no rediscovery/reselection was invoked.
+- Product value: **KEEP**, narrowly classified as an earned exact durable-truth
+  continuity primitive. This proves consumer projection reconstruction for the
+  existing Plex-backed publication path; it does not prove arbitrary consumer
+  replacement or a general consumer-neutral framework.
