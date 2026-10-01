@@ -151,6 +151,34 @@ No planned work as completed. No vague "healthy." No speculative causes.
   rerun the exact three-fixture rotation; do not expand this slice into PMS
   lifecycle work.
 
+## 2026-10-01 — host-only canary execution boundary and retry-throttle acceptance — CLOSED
+
+- Changed: the production HTPC canary controller now runs only in the host
+  namespace. It prepares the isolated Xvfb, audio, and HTPC services, verifies
+  loopback CDP/internal navigation readiness, rejects container execution with
+  an actionable `CANARY_INFRA_FAILURE`, and reads only fresh per-TorrentFile
+  stage-ring records after each fixture baseline. The telemetry subprocess
+  buffer was increased to retain the complete metrics response; no product
+  service or HashSucker state was restarted or repaired.
+- E01 proof: clean host-side run passed with expected PMS session, ratingKey
+  `497`, Part `1042`, canonical path, exact TorrentFile, progression, forward
+  seek, backward seek, near-EOF, clean stop, and fresh attribution. Reported
+  latency was 18.751 s and session-to-first-read was 142 ms.
+- Rotation proof: host-side deterministic E01/E05/MobLand rotation passed.
+  E01: 18.158 s / 166 ms; E05: 28.358 s / 187 ms; MobLand: 83.927 s /
+  177 ms. MobLand was marked abnormal for latency only; its identity, session,
+  byte evidence, seek behavior, and teardown passed. Buffered/cache-served
+  seeks were accepted without manufacturing backend reads.
+- Container boundary proof: invocation through `docker compose exec
+  media-search` remains unsupported and cannot control host-loopback CDP. The
+  runner is host-only by design.
+- Verdict: `IMPLEMENTATION_TEST_GATE = PASS`; `CONSUMER_PATH_REGRESSION =
+  PASS`; `ORIGINAL_LONG_RUN_CHURN_REPRODUCTION = UNPROVEN`; overall slice =
+  `CLOSED`.
+- Narrow production claim: immediate replay/restart churn is bounded by the
+  stale/unbounded retry suppression; long-run behavior under the original
+  workload remains observational debt.
+
 ## 2026-10-01 — full technical wiki projection — PUBLISHED
 
 - Changed: no product code. Built `wiki/` technical documentation from

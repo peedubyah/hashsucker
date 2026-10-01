@@ -3,15 +3,15 @@
 Active phase: **Core playback reliability & recovery**
 → [`docs/phases/phase-core-playback-reliability.md`](docs/phases/phase-core-playback-reliability.md)
 
-Active slice: **bound stale-inventory binding retry churn** —
-**BLOCKED_FOR_ACCEPTANCE**. Implementation/test and deployed immediate-replay
-observation passed, but the established consumer-path rotation is blocked:
-Plex HTPC CDP listens on host loopback while the existing container invocation
-runs inside `media-search`; host-side retries also encounter stale playback
-state before a clean three-fixture acceptance run. Gate remains focused
-regression coverage plus real three-fixture playback evidence. Non-goals: PMS
-lifecycle, retry-throttle changes, canary feature expansion, corpus cleanup,
-scheduler tuning, and documentation-model redesign.
+Active slice: **bound stale-inventory binding retry churn** — **CLOSED**.
+Implementation/test evidence passed; the host-only canary now autonomously
+prepares the isolated HTPC services, rejects container execution, establishes
+fresh per-TorrentFile telemetry baselines, and passed clean E01 plus the full
+E01/E05/MobLand consumer rotation against deployed `57bbfe1`. The 30-second
+suppression bounds immediate replay/restart churn; it does not prove the
+original long-run workload root cause is eliminated. Non-goals remain PMS
+lifecycle, retry-throttle changes, canary expansion, corpus cleanup, scheduler
+tuning, and documentation-model redesign.
 
 Prior active slice — repo documentation/control-plane reconciliation —
 completed by the documentation lane; no product-code work is reopened here.
