@@ -133,6 +133,15 @@ Metadata existence, a rating key, a `MediaPart`, a direct VFS `206`, `playbackIn
 - **MobLand S02E02**: recent fulfilled Dolby-Vision representation; prove playback/seek and byte identity, not color-rendering behavior.
 - Add a known-healthy movie or dual-provider fixture only when one already exists in the authoritative control plane.
 
+## Core graduation status
+
+The core reliability phase is closed. The accepted bar is real request/publication
+truth, Plex-client playback, exact TorrentFile attribution, provider/runtime
+recovery, and on-demand canary regression detection. PMS lifecycle remains
+partial and isolated latency tails remain debt; neither currently blocks normal
+unattended request/playback/recovery. New reliability work requires a fresh
+observed defect, not a theoretical gap.
+
 ## Security and ownership
 
 Plex tokens are runtime secrets: never commit, print, or persist new copies. The local/private PMS HTTP path is an explicit canary-only exception and must never be exposed through a public relay or proxy. HashSucker's durable identity remains Release/TorrentFile/Binding. Plex is an observed consumer, not media-identity authority.

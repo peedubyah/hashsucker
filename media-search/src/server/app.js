@@ -1041,6 +1041,11 @@ async function handleSeerrIngress(
           liveDiscoveryThreshold: 1,
           hydrateVfs,
           controlPlaneStore,
+          // Bloodhound opt-out: the Seerr season call already carries each
+          // episode's air date — a future date marks the child unreleased
+          // so the fulfillment gate does not burn live queries on unaired
+          // episodes. Absent dates default to released (bloodhound allowed).
+          ...(ep.airDate ? { airDate: ep.airDate } : {}),
           // Slice 1.75: pre-publication TorBox file identity binding
           // for TV episodes. TV episodes typically have exact per-file
           // size on the candidate (behaviorHints.videoSize). When
@@ -1333,6 +1338,10 @@ async function runSingleSearchByMedia({
       // instead of inheriting the noisy provider release name.
       ...(canonicalMediaTitle ? { canonicalTitle: canonicalMediaTitle } : {}),
       ...(canonicalMediaYear != null ? { canonicalYear: canonicalMediaYear } : {}),
+      // Bloodhound opt-out: a future releaseDate marks the title
+      // unreleased (no live fallback); anything else defaults to
+      // released.
+      ...(canonicalReleaseDate ? { releaseDate: canonicalReleaseDate } : {}),
     });
     searchCache.db.prepare(
       'UPDATE media_intents SET last_processed_at = ?, last_result_count = ?, last_error = NULL WHERE id = ?'
@@ -1800,6 +1809,7 @@ export function createRequestHandler(dependencies = {}) {
   const mediaLookup = dependencies.getMedia || getMedia;
   const combinedSearchFn = dependencies.combinedSearch || combinedSearch;
   const virtualFulfillment = dependencies.fulfillVirtualSelection || fulfillVirtualSelection;
+  const searchByMediaFn = dependencies.searchByMedia || searchByMedia;
   // Internal search uses a persistent discovery cache.
   // dbPath can be injected via dependencies or DISCOVERY_DB env var.
   // Defaults to in-memory for testing (when no dbPath provided).
@@ -3359,6 +3369,49 @@ export function createRequestHandler(dependencies = {}) {
           return sendJson(response, 200, result);
         } catch (err) {
           return sendJson(response, 400, { error: err.message });
+        }
+      }
+      // Republish from retained exact durable truth. This is intentionally
+      // separate from discovery: searchByMedia's reuse path validates the
+      // active Binding/TorrentFile and republishes only when presentation is
+      // absent or divergent. It never chooses a new Release merely because a
+      // consumer projection was replaced.
+      if (request.method === 'POST' && url.pathname === '/api/library/republish') {
+        const body = await readBody(request);
+        const mediaType = body?.mediaType === 'episode' ? 'series' : body?.mediaType;
+        const hasEpisode = Number.isSafeInteger(body?.season) && Number.isSafeInteger(body?.episode);
+        if (!body?.mediaId || !['movie', 'series'].includes(mediaType)
+          || (mediaType === 'series' && !hasEpisode)) {
+          return sendJson(response, 400, { error: 'mediaId, mediaType, and episode coordinates are required' });
+        }
+        try {
+          const requestEnsureFn = buildRequestScopedEnsureFn({
+            fallbackFn: ensureTorBoxFileIdentityFn,
+            explicitFn: hasExplicitEnsureFn,
+            controlPlaneStore,
+            torBoxProvider,
+            apiKey: env.TORBOX_API_KEY,
+            apiBase: env.TORBOX_API_URL,
+            clock,
+            scope: 'library-republish',
+          });
+          const result = await searchByMediaFn(searchCache, {
+            mediaId: body.mediaId,
+            mediaType,
+            season: hasEpisode ? body.season : null,
+            episode: hasEpisode ? body.episode : null,
+            source: 'library-republish',
+            controlPlaneStore,
+            hydrateVfs: hydrateVfsForRequest,
+            ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
+            ...rdEnsureForRequest({ rdClient, controlPlaneStore, clock }),
+          });
+          if (result?.reuseMode !== 'noop' && result?.reuseMode !== 'republish') {
+            return sendJson(response, 409, { error: 'exact durable publication is not reusable; explicit media request required' });
+          }
+          return sendJson(response, 200, { ...result, republished: result.reuseMode === 'republish' });
+        } catch (err) {
+          return sendJson(response, 409, { error: err?.message || String(err) });
         }
       }
       // Permanent-storage promotion: one explicit human decision that

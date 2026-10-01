@@ -193,3 +193,27 @@ No planned work as completed. No vague "healthy." No speculative causes.
 - Unproven: wiki accuracy against future code drift; projection stays
   current only by regeneration from canonical repo docs.
 - Next gate: none — wiki maintenance is on-demand regeneration, never scheduled.
+
+## 2026-10-01 — core graduation and consumer-neutral republication slice — ACTIVE
+
+- Graduation decision: **READY**. The core product bar is met well enough to
+  stop making reliability/hardening the primary engineering lane. Observed
+  request/publication/playback evidence, exact TorrentFile identity, provider
+  route reacquisition, Rust/Node restart evidence, and the host-only canary
+  show no current normal-path defect requiring manual repair.
+- Carried debt: PMS lifecycle remains partial; the original long-run stale
+  inventory workload was not reproduced after the narrow throttle; isolated
+  latency tails remain observational debt. These are not current graduation
+  blockers because they are either bounded, non-recurring, or outside normal
+  canary ownership, and no manual intervention was required in the accepted
+  request/playback/recovery proofs.
+- Selected next product slice: consumer-neutral republication from retained
+  exact durable truth. Product value: replacing or rebuilding a consumer
+  projection should not require rediscovery, provider selection, or
+  re-curation when HashSucker already owns an accepted exact TorrentFile.
+- Current implementation seam: existing `searchByMedia()` reuse can republish
+  exact retained truth, but it is exposed only through a general request path.
+  The new narrow `/api/library/republish` route is fail-closed and delegates to
+  that exact reuse predicate; focused route coverage passes for missing truth.
+- Slice status: implementation started; production consumer replacement is not
+  yet claimed. No provider or consumer state was mutated for this selection.
