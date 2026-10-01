@@ -33,6 +33,9 @@ providers, disks, and media servers as interchangeable routes.
 - [Current-State](Current-State) — proven / partial / active / parked, honestly graded.
 - [Product-Direction](Product-Direction) — household media continuity thesis.
 - [Not-Building](Not-Building) — things deliberately refused.
+- [Pipeline-Overview](Pipeline-Overview) — full technical pipeline,
+  module reference, contracts, persistence, runbook. Start here to
+  contribute.
 
 > Projection note: this wiki summarizes. Repo docs are canonical —
 > see [_Footer](_Footer) for the rule and canonical pointers.

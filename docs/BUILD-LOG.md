@@ -133,3 +133,18 @@ No planned work as completed. No vague "healthy." No speculative causes.
 - Next gate: make the canary CDP environment ready through the approved
   external operator path, then rerun the bounded playback rotation; do not
   expand this slice into PMS lifecycle work.
+
+## 2026-10-01 — full technical wiki projection — PUBLISHED
+
+- Changed: no product code. Built `wiki/` technical documentation from
+  read-only inventory of Node request/discovery/ranking/provider/VFS
+  paths, Rust data-plane execution, DB schemas, timers, and operator
+  surfaces; published the same content to the GitHub wiki remote.
+- Verification: four independent read-only subsystem inventories;
+  targeted re-reads of entry points, timers, and runbook commands;
+  uncertain contracts explicitly marked UNKNOWN, disagreements called
+  out, no schemas invented.
+- Production evidence: none applicable (documentation only).
+- Unproven: wiki accuracy against future code drift; projection stays
+  current only by regeneration from canonical repo docs.
+- Next gate: none — wiki maintenance is on-demand regeneration, never scheduled.
