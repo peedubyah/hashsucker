@@ -226,7 +226,7 @@ if (anticipationOn) {
 function upgradeWatchIntervalMs() {
   return envNumber(process.env, 'UPGRADE_WATCH_INTERVAL_MIN', { fallback: 60, min: 5 }) * 60 * 1000;
 }
-const playbackObservationIntervalMs = envNumber(process.env, 'PLAYBACK_OBSERVATION_INTERVAL_SEC', { fallback: 30, min: 10 }) * 1000;
+const playbackObservationIntervalMs = envNumber(process.env, 'PLAYBACK_OBSERVATION_INTERVAL_SEC', { fallback: 10, min: 5 }) * 1000;
 let playbackObservationTimer = null;
 let playbackObservationInFlight = false;
 async function observePlaybackOnce() {
