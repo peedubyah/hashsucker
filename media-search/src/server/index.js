@@ -226,6 +226,38 @@ if (anticipationOn) {
 function upgradeWatchIntervalMs() {
   return envNumber(process.env, 'UPGRADE_WATCH_INTERVAL_MIN', { fallback: 60, min: 5 }) * 60 * 1000;
 }
+const playbackObservationIntervalMs = envNumber(process.env, 'PLAYBACK_OBSERVATION_INTERVAL_SEC', { fallback: 30, min: 10 }) * 1000;
+let playbackObservationTimer = null;
+let playbackObservationInFlight = false;
+async function observePlaybackOnce() {
+  if (playbackObservationInFlight || !process.env.PLEX_URL || !process.env.PLEX_TOKEN) return;
+  const { countPlaybackObservablePublications } = await import('../lib/library/retirement.js');
+  if (countPlaybackObservablePublications(controlPlaneStore) <= 0) return;
+  playbackObservationInFlight = true;
+  try {
+    const { observePlaybackSessions } = await import('../lib/library/retirement.js');
+    const { fetchPlexSessions } = await import('../lib/consumers/plex-sessions.js');
+    const { recordAcceptedPlayback } = await import('../lib/consumers/accepted-playback.js');
+    const seen = await fetchPlexSessions({ plexUrl: process.env.PLEX_URL, plexToken: process.env.PLEX_TOKEN });
+    if (seen.ok && seen.sessions.length > 0) {
+      const adj = observePlaybackSessions({ controlPlaneStore, sessions: seen.sessions });
+      const accepted = seen.sessions.map((session) => recordAcceptedPlayback({ controlPlaneStore, session })).filter(Boolean).length;
+      if (adj.observed > 0 || accepted > 0) console.log(`media-search: playback observed=${adj.observed} accepted=${accepted}`);
+    }
+  } catch (error) {
+    console.warn('media-search: playback observation failed', error?.message);
+  } finally {
+    playbackObservationInFlight = false;
+  }
+}
+function armPlaybackObservation(delayMs) {
+  playbackObservationTimer = setTimeout(async () => {
+    await observePlaybackOnce();
+    armPlaybackObservation(playbackObservationIntervalMs);
+  }, delayMs);
+  if (playbackObservationTimer.unref) playbackObservationTimer.unref();
+}
+armPlaybackObservation(5_000);
 let upgradeWatchTimer = null;
 let upgradeWatchInFlight = false;
 const upgradeWatchOn = (() => {
@@ -746,6 +778,7 @@ function shutdown(signal) {
   shuttingDown = true;
   console.log(`media-search received ${signal}; shutting down`);
   if (reconcileTimer) clearTimeout(reconcileTimer);
+  if (playbackObservationTimer) clearTimeout(playbackObservationTimer);
   server.close(() => {
     discoveryCache.close();
     controlPlaneStore.close();
