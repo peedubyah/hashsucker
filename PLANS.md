@@ -36,7 +36,9 @@ selection changes, prediction, and UI.
 N1 result: exact accepted-TorrentFile fact now writes from an observed PMS
 session with positive progression and the exact active Binding/TorrentFile.
 No request selection behavior consumes it yet; this slice proves trustworthy
-memory, not a ranking optimization.
+memory, not a ranking optimization. Observation uses a bounded 10-second
+Plex-session poll only when published active bindings exist; it is not a
+continuous one-second loop.
 
 Prior active slice — repo documentation/control-plane reconciliation —
 completed by the documentation lane; no product-code work is reopened here.

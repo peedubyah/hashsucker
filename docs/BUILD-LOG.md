@@ -295,6 +295,14 @@ No planned work as completed. No vague "healthy." No speculative causes.
   with positive progress and exact Part-path correlation; it is pending the
   next normal playback-observation polling tick.
 - Production playback: the prior deployed N1 E01 canary passed (`PASS`,
-  48.434 s, session-to-first-read 138 ms). That canary proves playback, but
-  the current durable fact row must be treated as historical publication-only
-  evidence until a post-correction polling observation replaces/updates it.
+  48.434 s, session-to-first-read 138 ms). The fresh observer-fix E01 canary
+  passed (`PASS`, 21.034 s, session-to-first-read 349 ms) and an active PMS
+  observation captured ratingKey `497`, Part `1042`, viewOffset `300000`,
+  duration `3388640`, and the exact expected VFS Part path. The bounded poller
+  is now 10 seconds (startup delay 5 seconds), but the service log/row check
+  did not capture a post-correction durable update before teardown; no fresh
+  accepted-row claim is made from this run.
+- Observation mechanism: bounded hybrid-style polling reuses the existing
+  read-only `/status/sessions` seam, runs only when published active bindings
+  exist, and requires positive progress plus exact publication/Binding/TorrentFile
+  correlation. It adds no webhook or event subsystem and no 1-second loop.
