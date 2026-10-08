@@ -411,14 +411,26 @@ export function createAnticipationScheduler({
   /** One bounded tick: claim a single due intent and process it. */
   async function tickOnce() {
     const dueList = store.due(5);
-    for (const intent of dueList) {
+    for (const original of dueList) {
+      let intent = original;
+      // A released future-not-released row may have exhausted its pre-release
+      // retry budget. Re-arm it and continue through the normal claim in this
+      // same bounded tick; otherwise the rearm would add another full
+      // scheduler interval before released fulfillment can begin.
+      if (intent.state === INTENT_STATES.FAILED
+        && intent.defer_reason === DEFER_REASONS.FUTURE_NOT_RELEASED
+        && intent.expected_at != null && intent.expected_at <= now()
+        && intent.attempts >= MAX_ATTEMPTS) {
+        store.retry(intent.id, now());
+        intent = store.findByIdentity({ mediaId: intent.media_id, season: intent.season, episode: intent.episode });
+      }
       // Fresh anticipated work needs the atomic claim; mid-flow states
       // are already single-flight via the tick loop (plus crash recovery
       // in lifecycle tick semantics — a dead worker leaves a retryable
       // preparing row, reaped below).
-      if (intent.state === INTENT_STATES.ANTICIPATED) {
+      if (intent?.state === INTENT_STATES.ANTICIPATED) {
         if (!store.claim(intent.id)) continue;
-      } else if (intent.state === 'preparing') {
+      } else if (intent?.state === 'preparing') {
         // Orphaned preparing row (worker died after claim): requeue once.
         store.transition(intent.id, INTENT_STATES.ANTICIPATED, {
           last_error: 'orphaned-preparing-requeued',
