@@ -229,12 +229,19 @@ function upgradeWatchIntervalMs() {
 const playbackObservationIntervalMs = envNumber(process.env, 'PLAYBACK_OBSERVATION_INTERVAL_SEC', { fallback: 2, min: 2 }) * 1000;
 let playbackObservationTimer = null;
 let playbackObservationInFlight = false;
+let playbackObservationTick = 0;
 async function observePlaybackOnce() {
-  if (playbackObservationInFlight || !process.env.PLEX_URL || !process.env.PLEX_TOKEN) return;
-  const { countPlaybackObservablePublications } = await import('../lib/library/retirement.js');
-  if (countPlaybackObservablePublications(controlPlaneStore) <= 0) return;
+  const tick = ++playbackObservationTick;
+  console.log(`media-search: playback observer tick=${tick} entered`);
+  if (playbackObservationInFlight || !process.env.PLEX_URL || !process.env.PLEX_TOKEN) {
+    console.log(`media-search: playback observer tick=${tick} skipped`);
+    return;
+  }
   playbackObservationInFlight = true;
   try {
+    const { countPlaybackObservablePublications } = await import('../lib/library/retirement.js');
+    const gateCount = countPlaybackObservablePublications(controlPlaneStore);
+    if (gateCount <= 0) return;
     const { observePlaybackSessions } = await import('../lib/library/retirement.js');
     const { fetchPlexSessions } = await import('../lib/consumers/plex-sessions.js');
     const { recordAcceptedPlayback } = await import('../lib/consumers/accepted-playback.js');
@@ -262,10 +269,16 @@ function armPlaybackObservation(delayMs) {
     console.log(`media-search: playback observer enabled intervalMs=${playbackObservationIntervalMs}`);
   }
   playbackObservationTimer = setTimeout(async () => {
-    await observePlaybackOnce();
-    armPlaybackObservation(playbackObservationIntervalMs);
+    console.log('media-search: playback observer timer fired');
+    try {
+      await observePlaybackOnce();
+    } catch (error) {
+      console.warn('media-search: playback observer tick failed', error?.stack || error?.message);
+    } finally {
+      console.log(`media-search: playback observer next tick scheduled delayMs=${playbackObservationIntervalMs}`);
+      armPlaybackObservation(playbackObservationIntervalMs);
+    }
   }, delayMs);
-  if (playbackObservationTimer.unref) playbackObservationTimer.unref();
 }
 armPlaybackObservation(5_000);
 let upgradeWatchTimer = null;
