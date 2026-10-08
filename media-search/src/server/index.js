@@ -240,8 +240,11 @@ async function observePlaybackOnce() {
     const { recordAcceptedPlayback } = await import('../lib/consumers/accepted-playback.js');
     const seen = await fetchPlexSessions({ plexUrl: process.env.PLEX_URL, plexToken: process.env.PLEX_TOKEN });
     if (seen.ok && seen.sessions.length > 0) {
+      const qualifying = seen.sessions.filter((session) => session.progress > 0 && session.partFile);
+      console.log(`media-search: playback session-count=${seen.sessions.length} qualifying=${qualifying.length}`);
       const adj = observePlaybackSessions({ controlPlaneStore, sessions: seen.sessions });
-      const accepted = seen.sessions.map((session) => recordAcceptedPlayback({ controlPlaneStore, session })).filter(Boolean).length;
+      const results = seen.sessions.map((session) => recordAcceptedPlayback({ controlPlaneStore, session }));
+      const accepted = results.filter(Boolean).length;
       if (adj.observed > 0 || accepted > 0) console.log(`media-search: playback observed=${adj.observed} accepted=${accepted}`);
     } else if (!seen.ok) {
       console.warn(`media-search: playback observation failed: ${seen.reason}`);
