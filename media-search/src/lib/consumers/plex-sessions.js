@@ -20,7 +20,7 @@ function imdbFromGuids(session) {
     const m = v.match(/(tt\d{7,})/);
     if (m) ids.push(m[1]);
   };
-  const guid = session?.guid ?? session?.Guid;
+  const guid = session?.Guid ?? session?.guid;
   if (Array.isArray(guid)) {
     for (const g of guid) push(g?.id ?? g);
   } else {

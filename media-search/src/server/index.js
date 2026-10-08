@@ -252,8 +252,12 @@ async function observePlaybackOnce() {
     playbackObservationInFlight = false;
   }
 }
+let playbackObservationLogged = false;
 function armPlaybackObservation(delayMs) {
-  console.log(`media-search: playback observer enabled intervalMs=${playbackObservationIntervalMs}`);
+  if (!playbackObservationLogged) {
+    playbackObservationLogged = true;
+    console.log(`media-search: playback observer enabled intervalMs=${playbackObservationIntervalMs}`);
+  }
   playbackObservationTimer = setTimeout(async () => {
     await observePlaybackOnce();
     armPlaybackObservation(playbackObservationIntervalMs);
