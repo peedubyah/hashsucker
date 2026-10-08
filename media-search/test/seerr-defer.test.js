@@ -198,6 +198,19 @@ function memScheduler(store) {
   });
 }
 
+test('scheduler: released future row re-arms immediately at expected release', async () => {
+  const { cache, store } = memStore();
+  const { intent } = store.seed({ mediaType: 'series', mediaId: 'ttFuture', season: 1, episode: 8, source: 'seerr:req-future', expectedAt: 900_000, deferReason: 'future-not-released' });
+  store.transition(intent.id, 'failed', { last_error: 'prepare-http-200', next_check_at: 9_999_999 });
+  cache.db.prepare('UPDATE future_intents SET attempts = 6 WHERE id = ?').run(intent.id);
+  const sched = createAnticipationScheduler({ store, baseUrl: 'http://test:3000', fetchFn: async () => { throw new Error('must-not-call-network'); }, clock: () => 1_000_000, log: () => {} });
+  const row = { ...store.findByIdentity({ mediaId: 'ttFuture', season: 1, episode: 8 }) };
+  const r = await sched.processIntent(row);
+  assert.equal(r.released, true);
+  assert.equal(store.findByIdentity({ mediaId: 'ttFuture', season: 1, episode: 8 }).state, 'anticipated');
+  assert.equal(store.findByIdentity({ mediaId: 'ttFuture', season: 1, episode: 8 }).next_check_at, 1_000_000);
+});
+
 test('scheduler: exhausted deferred row re-arms at low cadence, never dies', async () => {
   const { cache, store } = memStore();
   const { intent } = store.seed({

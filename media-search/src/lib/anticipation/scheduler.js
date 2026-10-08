@@ -385,10 +385,13 @@ export function createAnticipationScheduler({
         // rows, deterministic failures) keep the old exhaustion behavior.
         const d = intent.defer_reason;
         if (d === DEFER_REASONS.RELEASED_NO_CANDIDATE
-          || d === DEFER_REASONS.CANDIDATE_NOT_FULFILLABLE
-          || d === DEFER_REASONS.FUTURE_NOT_RELEASED) {
+          || d === DEFER_REASONS.CANDIDATE_NOT_FULFILLABLE) {
           store.retry(intent.id, now() + PARKED_MS);
           return { acted: true, intentId: intent.id, from: 'failed', to: 'anticipated', ms: now() - t0, rearmed: true };
+        }
+        if (d === DEFER_REASONS.FUTURE_NOT_RELEASED) {
+          store.retry(intent.id, now());
+          return { acted: true, intentId: intent.id, from: 'failed', to: 'anticipated', ms: now() - t0, rearmed: true, released: true };
         }
         return { acted: false, intentId: intent.id, reason: 'attempts-exhausted' };
       }

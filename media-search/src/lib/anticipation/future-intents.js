@@ -173,10 +173,14 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
 
   function due({ limit = 10 } = {}) {
     // 'preparing' rows visible here are orphaned (ticks run serially, so
-    // no worker can be inside one); the scheduler requeues them.
+    // no worker can be inside one); the scheduler requeues them. A failed
+    // future-not-released row becomes due at its authoritative release time,
+    // even if an earlier pre-release retry parked it farther out.
     return db.prepare(`SELECT * FROM future_intents
-      WHERE state IN ('anticipated', 'failed', 'prepared', 'published_preparing', 'preparing') AND next_check_at <= ?
-      ORDER BY next_check_at LIMIT ?`).all(now(), limit);
+      WHERE state IN ('anticipated', 'failed', 'prepared', 'published_preparing', 'preparing')
+        AND (next_check_at <= ? OR (state = 'failed' AND defer_reason = 'future-not-released' AND expected_at IS NOT NULL AND expected_at <= ?))
+      ORDER BY CASE WHEN state = 'failed' AND defer_reason = 'future-not-released' AND expected_at IS NOT NULL AND expected_at <= ? THEN expected_at ELSE next_check_at END
+      LIMIT ?`).all(now(), now(), now(), limit);
   }
 
   function ensureReleasedFollowUp({ mediaId, season = null, episode = null, source = 'release-follow-up', expectedAt = null, checkInMs = 0, deferReason = 'released-no-candidate' } = {}) {
