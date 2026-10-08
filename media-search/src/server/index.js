@@ -241,11 +241,14 @@ async function observePlaybackOnce() {
   try {
     const { countPlaybackObservablePublications } = await import('../lib/library/retirement.js');
     const gateCount = countPlaybackObservablePublications(controlPlaneStore);
+    console.log(`media-search: playback observer tick=${tick} gate=${gateCount}`);
     if (gateCount <= 0) return;
     const { observePlaybackSessions } = await import('../lib/library/retirement.js');
     const { fetchPlexSessions } = await import('../lib/consumers/plex-sessions.js');
     const { recordAcceptedPlayback } = await import('../lib/consumers/accepted-playback.js');
+    console.log(`media-search: playback observer tick=${tick} fetch=start`);
     const seen = await fetchPlexSessions({ plexUrl: process.env.PLEX_URL, plexToken: process.env.PLEX_TOKEN });
+    console.log(`media-search: playback observer tick=${tick} fetch=${seen.ok ? 'ok' : `failed:${seen.reason}`} sessions=${seen.sessions.length}`);
     if (seen.ok && seen.sessions.length > 0) {
       const qualifying = seen.sessions.filter((session) => session.progress > 0 && session.partFile);
       console.log(`media-search: playback session-count=${seen.sessions.length} qualifying=${qualifying.length}`);
