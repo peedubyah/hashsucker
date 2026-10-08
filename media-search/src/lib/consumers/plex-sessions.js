@@ -82,7 +82,18 @@ export async function fetchPlexSessions({ plexUrl, plexToken, fetchFn = fetch, t
     if (!Array.isArray(entries)) return { ok: false, reason: 'bad-shape', sessions: [] };
     const sessions = [];
     for (const e of entries) {
-      const mapped = mapSessionEntry(e);
+      let mapped = mapSessionEntry(e);
+      if (!mapped && e?.ratingKey != null) {
+        const metadataRes = await fetchFn(`${String(plexUrl).replace(/\/+$/, '')}/library/metadata/${encodeURIComponent(e.ratingKey)}`, {
+          headers: { 'X-Plex-Token': plexToken, Accept: 'application/json' },
+          signal: ctl.signal,
+        });
+        if (metadataRes.ok) {
+          const metadata = await metadataRes.json().catch(() => null);
+          const identity = metadata?.MediaContainer?.Metadata?.[0];
+          mapped = mapSessionEntry({ ...identity, ...e, Guid: identity?.Guid ?? e.Guid });
+        }
+      }
       if (mapped) sessions.push(mapped);
     }
     return { ok: true, sessions, total: entries.length };

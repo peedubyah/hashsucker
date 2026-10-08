@@ -39,3 +39,28 @@ test('Plex session mapper prefers the Guid IMDb identity array', () => {
   assert.equal(mapped.partId, '1042');
   assert.equal(mapped.progress, 0.041);
 });
+
+test('session fetch enriches a real status session missing Guid from library metadata', async () => {
+  const statusEntry = {
+    ratingKey: '497', type: 'episode', parentIndex: 1, index: 1, viewOffset: 41, duration: 1000,
+    guid: 'plex://episode/example',
+    Media: [{ Part: [{ id: '1042', file: '/mnt/hashsucker-vfs/e01.mkv' }] }],
+    Player: { state: 'playing' }, Session: { id: 'session-1' }, User: { title: 'user' },
+  };
+  const metadata = { MediaContainer: { Metadata: [{ Guid: [{ id: 'imdb://tt26545992' }] }] } };
+  const calls = [];
+  const result = await fetchPlexSessions({
+    plexUrl: 'http://plex', plexToken: 'token',
+    fetchFn: async (url) => { calls.push(url); return url.endsWith('/status/sessions') ? response({ MediaContainer: { size: 1, Metadata: [statusEntry] } }) : response(metadata); },
+  });
+  assert.deepEqual(calls, ['http://plex/status/sessions', 'http://plex/library/metadata/497']);
+  assert.equal(result.ok, true);
+  assert.equal(result.total, 1);
+  assert.equal(result.sessions.length, 1);
+  assert.deepEqual(result.sessions[0], {
+    mediaId: 'tt26545992', mediaType: 'episode', season: 1, episode: 1,
+    viewOffset: 41, duration: 1000, progress: 0.041,
+    partFile: '/mnt/hashsucker-vfs/e01.mkv', partId: '1042',
+    playerState: 'playing', sessionId: 'session-1', ratingKey: '497',
+  });
+});
