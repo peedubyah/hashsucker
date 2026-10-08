@@ -91,7 +91,18 @@ export async function fetchPlexSessions({ plexUrl, plexToken, fetchFn = fetch, t
         if (metadataRes.ok) {
           const metadata = await metadataRes.json().catch(() => null);
           const identity = metadata?.MediaContainer?.Metadata?.[0];
-          mapped = mapSessionEntry({ ...identity, ...e, Guid: identity?.Guid ?? e.Guid });
+          let seriesIdentity = identity?.Guid ?? e.Guid;
+          if (String(e.type || e.mediaType) === 'episode' && e.grandparentRatingKey != null) {
+            const seriesRes = await fetchFn(`${String(plexUrl).replace(/\/+$/, '')}/library/metadata/${encodeURIComponent(e.grandparentRatingKey)}`, {
+              headers: { 'X-Plex-Token': plexToken, Accept: 'application/json' },
+              signal: ctl.signal,
+            });
+            if (seriesRes.ok) {
+              const series = await seriesRes.json().catch(() => null);
+              seriesIdentity = series?.MediaContainer?.Metadata?.[0]?.Guid ?? seriesIdentity;
+            }
+          }
+          mapped = mapSessionEntry({ ...identity, ...e, Guid: seriesIdentity });
         }
       }
       if (mapped) sessions.push(mapped);
