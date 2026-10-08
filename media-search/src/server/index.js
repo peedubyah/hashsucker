@@ -226,57 +226,34 @@ if (anticipationOn) {
 function upgradeWatchIntervalMs() {
   return envNumber(process.env, 'UPGRADE_WATCH_INTERVAL_MIN', { fallback: 60, min: 5 }) * 60 * 1000;
 }
-const playbackObservationIntervalMs = envNumber(process.env, 'PLAYBACK_OBSERVATION_INTERVAL_SEC', { fallback: 10, min: 5 }) * 1000;
+const playbackObservationIntervalMs = envNumber(process.env, 'PLAYBACK_OBSERVATION_INTERVAL_SEC', { fallback: 2, min: 2 }) * 1000;
 let playbackObservationTimer = null;
 let playbackObservationInFlight = false;
-let playbackObservationTick = 0;
 async function observePlaybackOnce() {
-  const tick = ++playbackObservationTick;
-  console.log(`media-search: playback observer tick=${tick} entered`);
-  if (playbackObservationInFlight) {
-    console.log(`media-search: playback observer tick=${tick} skipped=in-flight`);
-    return;
-  }
-  if (!process.env.PLEX_URL || !process.env.PLEX_TOKEN) {
-    console.log(`media-search: playback observer tick=${tick} skipped=plex-not-configured`);
-    return;
-  }
+  if (playbackObservationInFlight || !process.env.PLEX_URL || !process.env.PLEX_TOKEN) return;
   const { countPlaybackObservablePublications } = await import('../lib/library/retirement.js');
-  const gateCount = countPlaybackObservablePublications(controlPlaneStore);
-  console.log(`media-search: playback observer tick=${tick} gate=${gateCount}`);
-  if (gateCount <= 0) {
-    console.log(`media-search: playback observer tick=${tick} skipped=no-publications`);
-    return;
-  }
+  if (countPlaybackObservablePublications(controlPlaneStore) <= 0) return;
   playbackObservationInFlight = true;
   try {
     const { observePlaybackSessions } = await import('../lib/library/retirement.js');
     const { fetchPlexSessions } = await import('../lib/consumers/plex-sessions.js');
     const { recordAcceptedPlayback } = await import('../lib/consumers/accepted-playback.js');
-    console.log(`media-search: playback observer tick=${tick} fetch=start`);
     const seen = await fetchPlexSessions({ plexUrl: process.env.PLEX_URL, plexToken: process.env.PLEX_TOKEN });
-    console.log(`media-search: playback observer tick=${tick} fetch=${seen.ok ? 'ok' : `failed:${seen.reason}`} sessions=${seen.sessions.length}`);
     if (seen.ok && seen.sessions.length > 0) {
-      const qualifying = seen.sessions.filter((session) => session.progress > 0 && session.partFile).length;
-      console.log(`media-search: playback observer tick=${tick} qualifying=${qualifying}`);
       const adj = observePlaybackSessions({ controlPlaneStore, sessions: seen.sessions });
-      const results = seen.sessions.map((session) => {
-        console.log(`media-search: playback observer tick=${tick} record-attempt ratingKey=${session.ratingKey ?? 'none'} part=${session.partId ?? 'none'} progress=${session.progress}`);
-        const accepted = recordAcceptedPlayback({ controlPlaneStore, session });
-        console.log(`media-search: playback observer tick=${tick} record-result=${accepted ? 'updated' : 'no-write'}`);
-        return accepted;
-      });
-      const accepted = results.filter(Boolean).length;
+      const accepted = seen.sessions.map((session) => recordAcceptedPlayback({ controlPlaneStore, session })).filter(Boolean).length;
       if (adj.observed > 0 || accepted > 0) console.log(`media-search: playback observed=${adj.observed} accepted=${accepted}`);
+    } else if (!seen.ok) {
+      console.warn(`media-search: playback observation failed: ${seen.reason}`);
     }
   } catch (error) {
-    console.warn(`media-search: playback observation tick=${tick} failed`, error?.stack || error?.message);
+    console.warn('media-search: playback observation failed', error?.stack || error?.message);
   } finally {
     playbackObservationInFlight = false;
   }
 }
 function armPlaybackObservation(delayMs) {
-  console.log(`media-search: playback observer timer scheduled delayMs=${delayMs} intervalMs=${playbackObservationIntervalMs}`);
+  console.log(`media-search: playback observer enabled intervalMs=${playbackObservationIntervalMs}`);
   playbackObservationTimer = setTimeout(async () => {
     await observePlaybackOnce();
     armPlaybackObservation(playbackObservationIntervalMs);

@@ -75,7 +75,10 @@ export async function fetchPlexSessions({ plexUrl, plexToken, fetchFn = fetch, t
     });
     if (!res.ok) return { ok: false, reason: `plex-http-${res.status}`, sessions: [] };
     const data = await res.json().catch(() => null);
-    const entries = data?.MediaContainer?.Metadata;
+    const container = data?.MediaContainer;
+    const entries = container?.Metadata;
+    const empty = container && Number(container.size) === 0 && entries == null;
+    if (empty) return { ok: true, sessions: [], total: 0 };
     if (!Array.isArray(entries)) return { ok: false, reason: 'bad-shape', sessions: [] };
     const sessions = [];
     for (const e of entries) {
