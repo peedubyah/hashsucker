@@ -253,7 +253,11 @@ async function observePlaybackOnce() {
       const qualifying = seen.sessions.filter((session) => session.progress > 0 && session.partFile);
       console.log(`media-search: playback session-count=${seen.sessions.length} qualifying=${qualifying.length}`);
       const adj = observePlaybackSessions({ controlPlaneStore, sessions: seen.sessions });
-      const results = seen.sessions.map((session) => recordAcceptedPlayback({ controlPlaneStore, session }));
+      const results = seen.sessions.map((session) => {
+        const accepted = recordAcceptedPlayback({ controlPlaneStore, session });
+        console.log(`media-search: playback session mediaId=${session.mediaId} season=${session.season ?? ''} episode=${session.episode ?? ''} ratingKey=${session.ratingKey ?? ''} part=${session.partId ?? ''} progress=${session.progress} accepted=${accepted ? 'yes' : 'no'}`);
+        return accepted;
+      });
       const accepted = results.filter(Boolean).length;
       if (adj.observed > 0 || accepted > 0) console.log(`media-search: playback observed=${adj.observed} accepted=${accepted}`);
     } else if (!seen.ok) {
