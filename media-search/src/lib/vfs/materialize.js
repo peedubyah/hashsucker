@@ -192,8 +192,17 @@ function tryActivateAuthoritativeBinding({
       reason,
     });
     bindingActivationRetryAt.delete(activationKey);
-  } catch (error) {
-    const message = String(error?.message ?? error);
+  } catch (error) {    // A modern authoritative VFS entry cannot remain consumer-visible without
+    // its exact active Binding. Remove only this exact orphaned TV projection;
+    // durable TorrentFile/provider truth and the LibraryItem/path history stay.
+    try {
+      if (handoff.mediaType === 'series' && typeof controlPlaneStore.getActiveBindingForLibraryItem === 'function'
+        && !controlPlaneStore.getActiveBindingForLibraryItem(item.id)) {
+        searchCache.deleteVfsTvEntry?.(handoff.mediaId, handoff.season, handoff.episode);
+      }
+    } catch (cleanupError) {
+      console.warn(`[vfs] orphan VFS cleanup failed: ${cleanupError.message}`);
+    }    const message = String(error?.message ?? error);
     if (/stale or unbounded provider inventory observation/i.test(message)) {
       bindingActivationRetryAt.set(activationKey, observedAt + BINDING_ACTIVATION_RETRY_MS);
       if (bindingActivationRetryAt.size > 2048) {
