@@ -454,6 +454,7 @@ async function tryReuseHealthyPublication({
   episode,
   canonicalTitle = null,
   canonicalYear = null,
+  ensureTorBoxFileIdentityFn = null,
 }) {
   try {
     // Prepared durable truth (shared with preparation): stored handoff +
@@ -601,9 +602,18 @@ async function tryReuseHealthyPublication({
       };
     }
 
-    // Idempotent republication. materializeVfsEntry re-asserts the stored
-    // identity against the existing row (throws on divergence → fall
-    // through to full discovery). publishStrm is idempotent.
+    // Idempotent republication. Refresh the exact provider inventory first so
+    // the authoritative Binding freshness guard can pass on a prepared handoff.
+    // This remains same-TorrentFile only; no selection or discovery occurs.
+    if (typeof ensureTorBoxFileIdentityFn === 'function' && torrentFileId) {
+      try {
+        await ensureTorBoxFileIdentityFn({ infoHash, skipSizeMatch: true });
+      } catch (error) {
+        console.warn(`Reuse binding inventory refresh failed: ${error.message}`);
+      }
+    }
+    // materializeVfsEntry re-asserts the stored identity against the existing
+    // row (throws on divergence → fall through to full discovery). publishStrm is idempotent.
     let vfsEntry = null;
     try {
       vfsEntry = await materializeVfsEntry(
@@ -959,6 +969,7 @@ export async function searchByMedia(cache, request) {
       episode,
       canonicalTitle,
       canonicalYear,
+      ensureTorBoxFileIdentityFn,
     });
     if (reuseResult) {
       return reuseResult;
