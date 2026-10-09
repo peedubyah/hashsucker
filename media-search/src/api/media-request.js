@@ -837,6 +837,7 @@ export async function searchByMedia(cache, request) {
     ? parseInt(request.liveDiscoveryThreshold, 10)
     : DEFAULT_LIVE_DISCOVERY_THRESHOLD;
   const skipLiveDiscovery = request.skipLiveDiscovery === true;
+  const bloodhound = request.bloodhound === true;
   const skipAvailability = request.skipAvailability === true;
   // Preparation tranche: run discovery/ranking/selection/binding and persist
   // reusable durable truth WITHOUT presentation (no VFS, no STRM, no
@@ -1208,14 +1209,18 @@ export async function searchByMedia(cache, request) {
     // requests, retry the same request through live discovery exactly once
     // before returning an unfulfilled result. This preserves Binding authority
     // and keeps same-X recovery inside the existing selection helpers.
-    if (!selection.selected && !skipLiveDiscovery && !request.liveOnly
-      && explainable.length > 0) {
+    if (!selection.selected && !skipLiveDiscovery && !request.liveOnly) {
+      // Bloodhound fallback: only after the normal ranked candidate set has
+      // failed exact binding. It re-enters this same search/rank/select/
+      // fulfillment pipeline with corpus candidates suppressed; it does not
+      // create a second ranking or publication path.
       const liveRetry = await searchByMedia(cache, {
         ...request,
         liveOnly: true,
         forceDiscovery: true,
         skipLiveDiscovery: false,
         persist: true,
+        bloodhound: true,
       });
       if (liveRetry?.selection?.selected) {
         return liveRetry;
@@ -1642,11 +1647,22 @@ export async function searchByMedia(cache, request) {
     };
   });
 
-  // Stage 2b: Determine corpus eligible count
+  // Stage 2b: Determine corpus eligible count. For an exact TV request,
+  // generic season-pack rows do not prove that the requested episode can be
+  // fulfilled; let the existing bindable selection attempt them, but do not
+  // let them suppress the bounded live fallback.
   const corpusEligibleCount = rankingInputs.filter(input => {
     const eligibility = eligibilityByHash.get(input.releaseKey);
     return eligibility ? eligibility.eligible : true;
   }).length;
+  const exactEpisodeCorpusCount = (season != null && episode != null)
+    ? rankingInputs.filter((input) => {
+      const eligibility = eligibilityByHash.get(input.releaseKey);
+      if (eligibility && !eligibility.eligible) return false;
+      const release = input.releaseAttributes || {};
+      return release.season === season && release.episode === episode;
+    }).length
+    : corpusEligibleCount;
 
   // Stage 2c: Live discovery fallback
   let liveDiscoveryTriggered = false;
@@ -1662,7 +1678,7 @@ export async function searchByMedia(cache, request) {
   // ranking set never contains two equal (hash, fileIndex) pairs.
   const seenLiveKeys = new Set();
 
-  if (!skipLiveDiscovery && corpusEligibleCount < liveDiscoveryThreshold) {
+  if (!skipLiveDiscovery && exactEpisodeCorpusCount < liveDiscoveryThreshold) {
     liveDiscoveryTriggered = true;
     try {
       const liveResults = await runLiveDiscovery(mediaId, {
