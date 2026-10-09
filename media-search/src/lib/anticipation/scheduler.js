@@ -45,6 +45,7 @@ export function createAnticipationScheduler({
   tvPrepareDays = 3,
   tvPublishDays = 1,
   confirmConsumerPublicationFn = null,
+  reconcileRequestedSeasonFn = null,
   sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   // Near-release quality protection horizon: the speculative-publication
   // quality floor applies while the release is upcoming or fresh.
@@ -54,6 +55,7 @@ export function createAnticipationScheduler({
   if (!store) throw new Error('anticipation scheduler requires store');
   if (!baseUrl) throw new Error('anticipation scheduler requires baseUrl');
   const now = () => clock();
+  let seasonReconciledLastTick = false;
 
   async function post(path, body, timeoutMs) {
     const ctl = new AbortController();
@@ -459,20 +461,23 @@ export function createAnticipationScheduler({
 
   /** One bounded tick: claim a single due intent and process it. */
   async function tickOnce() {
-    if (typeof reconcileRequestedSeasonFn === 'function') {
+    if (typeof reconcileRequestedSeasonFn === 'function' && !seasonReconciledLastTick) {
       const seasons = store.listDueRequestedSeasons?.(1) ?? [];
       if (seasons.length > 0) {
         const season = seasons[0];
         try {
           const result = await reconcileRequestedSeasonFn(season);
           store.scheduleRequestedSeason(season.id, now() + 15 * 60 * 1000);
+          seasonReconciledLastTick = true;
           return { acted: true, seasonId: season.id, season: `${season.media_id}:s${season.season}`, result };
         } catch (error) {
           store.scheduleRequestedSeason(season.id, now() + intentBackoffMs(0));
+          seasonReconciledLastTick = true;
           return { acted: true, seasonId: season.id, error: String(error?.message || error).slice(0, 200) };
         }
       }
     }
+    seasonReconciledLastTick = false;
     const dueList = store.due(5);
     for (const original of dueList) {
       let intent = original;

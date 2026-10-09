@@ -249,6 +249,55 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
     return db.prepare('SELECT * FROM requested_seasons WHERE active = 1 AND next_check_at <= ? ORDER BY next_check_at LIMIT ?').all(now(), limit);
   }
 
+  /**
+   * Recover requested-season ownership after this feature is deployed. The
+   * source is only durable Seerr fan-out provenance: a series parent plus
+   * child media_intents named `<parent>:sNN:eNN`. Historical playback and
+   * unrelated direct episode rows are deliberately excluded.
+   */
+  function backfillRequestedSeasonsFromSeerr({ mediaIntentDb = db } = {}) {
+    const parents = mediaIntentDb.prepare(`SELECT media_id, tmdb_id, source_id
+      FROM media_intents WHERE source = 'seerr' AND media_type = 'series'
+        AND season IS NULL AND episode IS NULL AND source_id IS NOT NULL`).all();
+    let seasons = 0;
+    let episodes = 0;
+    for (const parent of parents) {
+      const children = mediaIntentDb.prepare(`SELECT season, episode
+        FROM media_intents WHERE source = 'seerr' AND media_id = ?
+          AND media_type = 'tv' AND source_id LIKE ? ESCAPE '\\'
+          AND season IS NOT NULL AND episode IS NOT NULL`)
+        .all(parent.media_id, `${String(parent.source_id).replace(/[%_\\]/g, '\\$&')}:s%:e%`);
+      const grouped = new Map();
+      for (const child of children) {
+        if (!grouped.has(child.season)) grouped.set(child.season, []);
+        grouped.get(child.season).push(child.episode);
+      }
+      for (const [season, episodeNumbers] of grouped) {
+        const row = ensureRequestedSeason({
+          mediaId: parent.media_id,
+          tmdbId: Number(parent.tmdb_id),
+          season: Number(season),
+          source: `seerr:${parent.source_id}`,
+        });
+        seasons += row ? 1 : 0;
+        const owner = row.owner;
+        for (const episode of episodeNumbers) {
+          const existing = findByIdentity({ mediaId: parent.media_id, season: Number(season), episode: Number(episode) });
+          const result = ensureSeasonEpisode({
+            mediaId: parent.media_id,
+            season: Number(season),
+            episode: Number(episode),
+            owner,
+            source: `seerr:${parent.source_id}:s${season}:e${episode}`,
+            expectedAt: existing?.expected_at ?? null,
+          });
+          if (result?.intent) episodes += 1;
+        }
+      }
+    }
+    return { seasons, episodes };
+  }
+
   function scheduleRequestedSeason(id, nextCheckAt) {
     db.prepare('UPDATE requested_seasons SET next_check_at = ?, updated_at = ? WHERE id = ?').run(nextCheckAt, now(), id);
   }
@@ -442,7 +491,7 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
     return row?.t ?? null;
   }
 
-return { seed, findByIdentity, hasPendingForMedia, ensureReleasedFollowUp, ensureRequestedSeason, listDueRequestedSeasons, scheduleRequestedSeason, ensureSeasonEpisode, withdrawSeasonEpisodes, revive, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest, wakeSeerrRequest, wakeMedia };
+return { seed, findByIdentity, hasPendingForMedia, ensureReleasedFollowUp, ensureRequestedSeason, listDueRequestedSeasons, backfillRequestedSeasonsFromSeerr, scheduleRequestedSeason, ensureSeasonEpisode, withdrawSeasonEpisodes, revive, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest, wakeSeerrRequest, wakeMedia };
 }
 
 /** Backoff for retryable intent work: 15m, 1h, 4h, cap 24h. */

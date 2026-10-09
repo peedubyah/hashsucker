@@ -178,6 +178,8 @@ let anticipationTimer = null;
 let anticipationInFlight = false;
 let anticipationTick = 0;
 const anticipationStore = createFutureIntentStore({ db: discoveryCache.db });
+const seasonBackfill = anticipationStore.backfillRequestedSeasonsFromSeerr({ mediaIntentDb: discoveryCache.db });
+console.log(`media-search: requested-season backfill seasons=${seasonBackfill.seasons} episodes=${seasonBackfill.episodes}`);
 const seasonReconciler = process.env.SEERR_URL && process.env.SEERR_API_KEY
   ? createSeasonReconciler({
     store: anticipationStore,
