@@ -182,7 +182,16 @@ export function createAnticipationScheduler({
     if (r.status !== 200 || !r.json?.handoff?.torrentFileId) {
       return { ok: false, error: r.json?.error || `publish-http-${r.status}` };
     }
-    return { ok: true, torrentFileId: r.json.handoff.torrentFileId, reuseMode: r.json.reuseMode ?? null, published: r.json.published === true };
+    // `fulfilled` is the normal media-request contract for consumer
+    // publication: it is returned only after the configured consumer can
+    // see the item. `published`/`vfsPublished` describe internal progress
+    // and are intentionally insufficient for playable intent state.
+    return {
+      ok: true,
+      torrentFileId: r.json.handoff.torrentFileId,
+      reuseMode: r.json.reuseMode ?? null,
+      fulfilled: r.json.fulfilled === true,
+    };
   }
 
   async function byteProbe(torrentFileId) {
@@ -349,8 +358,16 @@ export function createAnticipationScheduler({
       if (!pub.ok) {
         return done(intent.state, { last_error: pub.error, next_check_at: now() + intentBackoffMs(intent.attempts) });
       }
-      if (!pub.published) {
+      if (!pub.fulfilled) {
+        // Handoff/VFS/byte readiness are not consumer publication. Keep the
+        // exact prepared truth retryable and do not probe or mark playable
+        // until the normal request path confirms fulfillment.
         log(`anticipation publication not confirmed media=${intent.media_id} intent=${intent.id}`);
+        return done(INTENT_STATES.PUBLISHED_PREPARING, {
+          torrent_file_id: pub.torrentFileId,
+          last_error: 'consumer-publication-unconfirmed',
+          next_check_at: now() + intentBackoffMs(intent.attempts),
+        });
       }
       // Divergence (not failure): prepared truth decayed between prepare
       // and publish (stale placement/coords), so the publish path bound a

@@ -212,7 +212,7 @@ function prepareResponse({ winner = null, alreadyPrepared = false, tf = 'tf_w1' 
   };
 }
 
-function policyScheduler(store, { prepareWinner = null, probeWinner = null, publishTf = 'tf_w1' } = {}) {
+function policyScheduler(store, { prepareWinner = null, probeWinner = null, publishTf = 'tf_w1', publicationConfirmed = true } = {}) {
   const calls = [];
   const fetchFn = async (url, opts = {}) => {
     const body = opts.body ? JSON.parse(opts.body) : {};
@@ -236,7 +236,7 @@ function policyScheduler(store, { prepareWinner = null, probeWinner = null, publ
       return prepareResponse({ winner: prepareWinner });
     }
     if (url.endsWith('/api/media-request')) {
-      return { status: 200, text: async () => JSON.stringify({ handoff: { torrentFileId: publishTf }, reuseMode: 'republish' }) };
+      return { status: 200, text: async () => JSON.stringify({ handoff: { torrentFileId: publishTf }, reuseMode: 'republish', fulfilled: publicationConfirmed }) };
     }
     if (url.includes('/files/')) {
       const chunks = [Buffer.from('x'.repeat(70000))];
@@ -301,6 +301,22 @@ test('scheduler: acceptable winner prepares and publishes', async () => {
   const r2 = await sched.tickOnce();
   assert.equal(r2.to, 'playable');
   assert.ok(calls.some((c) => c.url.endsWith('/api/media-request')), 'publish fired for acceptable winner');
+});
+
+test('scheduler: handoff and byte probe without consumer publication stays retryable', async () => {
+  const store = memStore();
+  store.seed({ mediaType: 'movie', mediaId: 'ttNoConsumer', expectedAt: NOW + 3 * DAY });
+  const { sched } = policyScheduler(store, {
+    prepareWinner: { filename: 'Movie.2026.1080p.WEB-DL-GROUP', source: 'WEB-DL' },
+    probeWinner: { filename: 'Movie.2026.1080p.WEB-DL-GROUP', source: 'WEB-DL' },
+    publicationConfirmed: false,
+  });
+  const row = store.findByIdentity({ mediaId: 'ttNoConsumer' });
+  await sched.tickOnce();
+  store.transition(row.id, 'prepared', { torrent_file_id: 'tf_w1', next_check_at: 0 });
+  const result = await sched.tickOnce();
+  assert.equal(result.to, 'published_preparing');
+  assert.equal(store.findByIdentity({ mediaId: 'ttNoConsumer' }).last_error, 'consumer-publication-unconfirmed');
 });
 
 test('scheduler: reuse-blind CAM probes the market, upgrades on WEB', async () => {
