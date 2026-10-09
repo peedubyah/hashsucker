@@ -509,7 +509,9 @@ export function createAnticipationScheduler({
       try {
         const result = await processIntent(intent);
         // Continue through the bounded due snapshot when a terminal/parked
-        // row made no progress, so another episode can still advance.
+        // row made no progress, so another episode can still advance. An
+        // attempts-exhausted row is parked state, not useful work.
+        if (result?.reason === 'attempts-exhausted') continue;
         if (result?.acted || result?.exhausted) return result;
         continue;
       } catch (err) {
