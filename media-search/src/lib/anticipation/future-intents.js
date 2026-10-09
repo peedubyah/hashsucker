@@ -62,6 +62,9 @@ function ensureSchema(db) {
     if (!cols.includes('defer_reason')) {
       db.exec('ALTER TABLE future_intents ADD COLUMN defer_reason TEXT');
     }
+    if (!cols.includes('season_owners')) {
+      db.exec("ALTER TABLE future_intents ADD COLUMN season_owners TEXT NOT NULL DEFAULT ''");
+    }
   } catch {}
 }
 
@@ -220,6 +223,41 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
   }
 
   /** Arr-managed rows only (radarr:/sonarr: sources). */
+  function ensureSeasonEpisode({ mediaId, season, episode, owner, source = owner, expectedAt = null } = {}) {
+    const existing = findByIdentity({ mediaId, season, episode });
+    const t = now();
+    if (!existing) {
+      const seeded = seed({ mediaType: 'series', mediaId, season, episode, source, expectedAt, deferReason: expectedAt != null && expectedAt > t ? 'future-not-released' : 'released-no-candidate' });
+      db.prepare('UPDATE future_intents SET season_owners = ? WHERE id = ?').run(owner, seeded.intent.id);
+      return { intent: findByIdentity({ mediaId, season, episode }), changed: true };
+    }
+    const owners = new Set(String(existing.season_owners || '').split(',').filter(Boolean));
+    owners.add(owner);
+    const nextExpected = expectedAt != null ? expectedAt : existing.expected_at;
+    const nextCheck = nextExpected != null && nextExpected > t ? nextExpected : Math.min(existing.next_check_at, t);
+    db.prepare(`UPDATE future_intents
+      SET season_owners = ?, expected_at = ?, next_check_at = ?,
+          defer_reason = CASE WHEN state IN ('playable', 'withdrawn') THEN defer_reason ELSE CASE WHEN ? > ? THEN 'future-not-released' ELSE defer_reason END END,
+          updated_at = ? WHERE id = ?`).run([...owners].sort().join(','), nextExpected, nextCheck, nextExpected ?? 0, t, t, existing.id);
+    return { intent: findByIdentity({ mediaId, season, episode }), changed: true };
+  }
+
+  function withdrawSeasonEpisodes({ mediaId, season, owner, keepEpisodes = [] } = {}) {
+    const keep = new Set(keepEpisodes.map(Number));
+    const rows = db.prepare('SELECT * FROM future_intents WHERE media_id = ? AND season = ? AND episode IS NOT NULL').all(mediaId, season);
+    let withdrawn = 0;
+    for (const row of rows) {
+      if (keep.has(Number(row.episode))) continue;
+      const owners = new Set(String(row.season_owners || '').split(',').filter(Boolean));
+      if (!owners.delete(owner)) continue;
+      const nextOwners = [...owners].sort().join(',');
+      if (nextOwners) db.prepare('UPDATE future_intents SET season_owners = ?, updated_at = ? WHERE id = ?').run(nextOwners, now(), row.id);
+      else if (['anticipated', 'failed'].includes(row.state)) db.prepare("UPDATE future_intents SET state = 'withdrawn', last_error = 'season-owner-withdrawn', season_owners = '', updated_at = ? WHERE id = ?").run(now(), row.id);
+      withdrawn += 1;
+    }
+    return withdrawn;
+  }
+
   function listArrSources() {
     ensureSchema(db);
     try {
@@ -374,7 +412,7 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
     return row?.t ?? null;
   }
 
-return { seed, findByIdentity, hasPendingForMedia, ensureReleasedFollowUp, revive, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest, wakeSeerrRequest, wakeMedia };
+return { seed, findByIdentity, hasPendingForMedia, ensureReleasedFollowUp, ensureSeasonEpisode, withdrawSeasonEpisodes, revive, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest, wakeSeerrRequest, wakeMedia };
 }
 
 /** Backoff for retryable intent work: 15m, 1h, 4h, cap 24h. */
