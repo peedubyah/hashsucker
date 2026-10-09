@@ -178,9 +178,10 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
     // even if an earlier pre-release retry parked it farther out.
     return db.prepare(`SELECT * FROM future_intents
       WHERE state IN ('anticipated', 'failed', 'prepared', 'published_preparing', 'preparing')
-        AND (next_check_at <= ? OR (state = 'failed' AND defer_reason = 'future-not-released' AND expected_at IS NOT NULL AND expected_at <= ?))
-      ORDER BY CASE WHEN state = 'failed' AND defer_reason = 'future-not-released' AND expected_at IS NOT NULL AND expected_at <= ? THEN expected_at ELSE next_check_at END
-      LIMIT ?`).all(now(), now(), now(), limit);
+        AND (next_check_at <= ? OR (defer_reason = 'future-not-released' AND expected_at IS NOT NULL AND expected_at <= ?))
+      ORDER BY CASE WHEN defer_reason = 'future-not-released' AND expected_at IS NOT NULL AND expected_at <= ? THEN 0 ELSE 1 END,
+        CASE WHEN defer_reason = 'future-not-released' AND expected_at IS NOT NULL AND expected_at <= ? THEN expected_at ELSE next_check_at END
+      LIMIT ?`).all(now(), now(), now(), now(), limit);
   }
 
   function ensureReleasedFollowUp({ mediaId, season = null, episode = null, source = 'release-follow-up', expectedAt = null, checkInMs = 0, deferReason = 'released-no-candidate' } = {}) {
