@@ -182,7 +182,7 @@ export function createAnticipationScheduler({
     if (r.status !== 200 || !r.json?.handoff?.torrentFileId) {
       return { ok: false, error: r.json?.error || `publish-http-${r.status}` };
     }
-    return { ok: true, torrentFileId: r.json.handoff.torrentFileId, reuseMode: r.json.reuseMode ?? null };
+    return { ok: true, torrentFileId: r.json.handoff.torrentFileId, reuseMode: r.json.reuseMode ?? null, published: r.json.published === true };
   }
 
   async function byteProbe(torrentFileId) {
@@ -348,6 +348,9 @@ export function createAnticipationScheduler({
       const pub = await publishIntent(intent);
       if (!pub.ok) {
         return done(intent.state, { last_error: pub.error, next_check_at: now() + intentBackoffMs(intent.attempts) });
+      }
+      if (!pub.published) {
+        log(`anticipation publication not confirmed media=${intent.media_id} intent=${intent.id}`);
       }
       // Divergence (not failure): prepared truth decayed between prepare
       // and publish (stale placement/coords), so the publish path bound a

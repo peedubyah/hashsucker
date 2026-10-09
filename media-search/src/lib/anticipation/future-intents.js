@@ -341,11 +341,12 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
 
   function transition(id, state, patch = {}) {
     const allowed = Object.values(INTENT_STATES);
+    if (state === INTENT_STATES.PLAYABLE && !Object.hasOwn(patch, 'defer_reason')) patch.defer_reason = null;
     if (!allowed.includes(state)) throw new Error(`bad intent state ${state}`);
     const cols = ['state'];
     const vals = [state];
     for (const [k, v] of Object.entries(patch)) {
-      if (['torrent_file_id', 'next_check_at', 'last_error'].includes(k)) {
+      if (['torrent_file_id', 'next_check_at', 'last_error', 'defer_reason'].includes(k)) {
         cols.push(k);
         vals.push(v);
       }
