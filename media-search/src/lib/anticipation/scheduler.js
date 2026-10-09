@@ -22,6 +22,8 @@ import { probeByteReady, prewarmRanges } from './prewarm.js';
 import { unpublishMedia } from '../library/unpublish.js';
 
 const PREPARE_TIMEOUT_MS = 5 * 60 * 1000;
+const PLEX_CONFIRM_ATTEMPTS = 6;
+const PLEX_CONFIRM_INTERVAL_MS = 500;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 6;
 const PARKED_MS = 7 * 24 * 60 * 60 * 1000;
@@ -42,6 +44,8 @@ export function createAnticipationScheduler({
   // internal windows (no new env surface — one media-type policy).
   tvPrepareDays = 3,
   tvPublishDays = 1,
+  confirmConsumerPublicationFn = null,
+  sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   // Near-release quality protection horizon: the speculative-publication
   // quality floor applies while the release is upcoming or fresh.
   // Older catalog falls back to the ranker's existing behavior bit-for-bit.
@@ -203,6 +207,26 @@ export function createAnticipationScheduler({
     }
   }
 
+  async function confirmConsumerPublication(intent) {
+    if (typeof confirmConsumerPublicationFn !== 'function') return false;
+    const expectedPartFile = intent.media_type === 'series' && intent.season != null && intent.episode != null
+      ? `/mnt/hashsucker-vfs/TV/${intent.media_id}/Season ${String(intent.season).padStart(2, '0')}/${intent.media_id} - S${String(intent.season).padStart(2, '0')}E${String(intent.episode).padStart(2, '0')}.mp4`
+      : null;
+    for (let attempt = 0; attempt < PLEX_CONFIRM_ATTEMPTS; attempt += 1) {
+      try {
+        const result = await confirmConsumerPublicationFn({
+          mediaId: intent.media_id,
+          season: intent.season,
+          episode: intent.episode,
+          expectedPartFile,
+        });
+        if (result?.visible === true && result.mediaPart?.file === expectedPartFile) return true;
+      } catch {}
+      if (attempt + 1 < PLEX_CONFIRM_ATTEMPTS) await sleepFn(PLEX_CONFIRM_INTERVAL_MS);
+    }
+    return false;
+  }
+
   async function revalidateUncached(infoHashHint, torrentFileId) {
     // Same-hash availability revalidation (read-only). Without a checker
     // we cannot prove exhaustion — fail closed (no withdrawal).
@@ -359,15 +383,17 @@ export function createAnticipationScheduler({
         return done(intent.state, { last_error: pub.error, next_check_at: now() + intentBackoffMs(intent.attempts) });
       }
       if (!pub.fulfilled) {
-        // Handoff/VFS/byte readiness are not consumer publication. Keep the
-        // exact prepared truth retryable and do not probe or mark playable
-        // until the normal request path confirms fulfillment.
-        log(`anticipation publication not confirmed media=${intent.media_id} intent=${intent.id}`);
-        return done(INTENT_STATES.PUBLISHED_PREPARING, {
-          torrent_file_id: pub.torrentFileId,
-          last_error: 'consumer-publication-unconfirmed',
-          next_check_at: now() + intentBackoffMs(intent.attempts),
-        });
+        const confirmed = await confirmConsumerPublication(intent);
+        if (!confirmed) {
+          // Handoff/VFS/byte readiness are not consumer publication. Keep the
+          // exact prepared truth retryable and do not probe or mark playable.
+          log(`anticipation publication not confirmed media=${intent.media_id} intent=${intent.id}`);
+          return done(INTENT_STATES.PUBLISHED_PREPARING, {
+            torrent_file_id: pub.torrentFileId,
+            last_error: 'consumer-publication-unconfirmed',
+            next_check_at: now() + intentBackoffMs(intent.attempts),
+          });
+        }
       }
       // Divergence (not failure): prepared truth decayed between prepare
       // and publish (stale placement/coords), so the publish path bound a

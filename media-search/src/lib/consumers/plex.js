@@ -86,7 +86,7 @@ export async function listPlexLibrary() {
   return out;
 }
 
-export async function confirmPlexEpisode({ mediaId, season, episode }) {
+export async function confirmPlexEpisode({ mediaId, season, episode, expectedPartFile = null }) {
   const sectionId = process.env.PLEX_TV_SECTION_ID;
   if (!sectionId) return { visible: false, ratingKey: null, mediaPart: null };
   const all = await getJson(`/library/sections/${sectionId}/all`, { includeGuids: 1 });
@@ -104,10 +104,11 @@ export async function confirmPlexEpisode({ mediaId, season, episode }) {
   if (!entry) return { visible: false, ratingKey: null, mediaPart: null };
   const item = (await getJson(entry.key, { includeExtras: 0, includeMarkers: 0, includeRelated: 0 }))?.MediaContainer?.Metadata?.[0] ?? entry;
   const part = item.Media?.flatMap((m) => m.Part ?? []).find((p) => p.file);
+  const exactPart = part && (!expectedPartFile || part.file === expectedPartFile) ? part : null;
   return {
-    visible: true,
+    visible: exactPart != null,
     ratingKey: item.ratingKey ?? null,
-    mediaPart: part ? { id: part.id ?? null, file: part.file, size: part.size ?? null, container: part.container ?? null } : null,
+    mediaPart: exactPart ? { id: exactPart.id ?? null, file: exactPart.file, size: exactPart.size ?? null, container: exactPart.container ?? null } : null,
   };
 }
 

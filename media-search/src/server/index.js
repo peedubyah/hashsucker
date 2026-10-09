@@ -52,6 +52,7 @@ import { getMediaById } from '../lib/metadata/unified-search.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
 import { createArrClient } from '../lib/anticipation/arr-client.js';
 import { createArrSync } from '../lib/anticipation/arr-sync.js';
+import { confirmPlexEpisode } from '../lib/consumers/plex.js';
 
 // ─── consumer reconciliation ticker ─────────────────────────────────────
 // Read-only consumer presence checks on a slow cadence (default 15 min,
@@ -191,6 +192,7 @@ const anticipationScheduler = anticipationOn
         state: r.cached.has(String(h).toLowerCase()) ? 'cached' : (r.failed.has(String(h).toLowerCase()) ? 'unknown' : 'uncached'),
       }));
     },
+    confirmConsumerPublicationFn: confirmPlexEpisode,
   })
   : null;
 console.log(`media-search: anticipation scheduler enabled=${anticipationOn} intervalMs=${anticipationIntervalMs()} initialDelayMs=120000`);

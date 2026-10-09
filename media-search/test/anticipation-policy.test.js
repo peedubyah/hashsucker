@@ -212,8 +212,9 @@ function prepareResponse({ winner = null, alreadyPrepared = false, tf = 'tf_w1' 
   };
 }
 
-function policyScheduler(store, { prepareWinner = null, probeWinner = null, publishTf = 'tf_w1', publicationConfirmed = true } = {}) {
+function policyScheduler(store, { prepareWinner = null, probeWinner = null, publishTf = 'tf_w1', publicationConfirmed = true, confirmation = null } = {}) {
   const calls = [];
+  let confirmationCalls = 0;
   const fetchFn = async (url, opts = {}) => {
     const body = opts.body ? JSON.parse(opts.body) : {};
     calls.push({ url, persist: body.persist });
@@ -252,9 +253,14 @@ function policyScheduler(store, { prepareWinner = null, probeWinner = null, publ
   const sched = createAnticipationScheduler({
     store, baseUrl: 'http://t', dataPlaneBaseUrl: 'http://d',
     fetchFn, clock: () => NOW, log: () => {},
+    confirmConsumerPublicationFn: async () => {
+      confirmationCalls += 1;
+      return typeof confirmation === 'function' ? confirmation(confirmationCalls) : confirmation;
+    },
+    sleepFn: async () => {},
     checkTorBoxCachedFn: async (hashes) => hashes.map((h) => ({ infoHash: h, state: 'cached' })),
   });
-  return { sched, calls };
+  return { sched, calls, getConfirmationCalls: () => confirmationCalls };
 }
 
 test('scheduler: fresh CAM winner parks alive with reason, keeps truth', async () => {
@@ -317,6 +323,26 @@ test('scheduler: handoff and byte probe without consumer publication stays retry
   const result = await sched.tickOnce();
   assert.equal(result.to, 'published_preparing');
   assert.equal(store.findByIdentity({ mediaId: 'ttNoConsumer' }).last_error, 'consumer-publication-unconfirmed');
+});
+
+test('scheduler: bounded Plex confirmation accepts exact Part after refresh lag', async () => {
+  const store = memStore();
+  store.seed({ mediaType: 'series', mediaId: 'ttExact', season: 1, episode: 8, expectedAt: NOW + 3 * 60 * 60 * 1000 });
+  const confirmation = (attempt) => attempt < 3
+    ? { visible: false, mediaPart: null }
+    : { visible: true, mediaPart: { file: '/mnt/hashsucker-vfs/TV/ttExact/Season 01/ttExact - S01E08.mp4' } };
+  const { sched, getConfirmationCalls } = policyScheduler(store, {
+    prepareWinner: { filename: 'Exact.2026.1080p.WEB-DL-GROUP', source: 'WEB-DL' },
+    probeWinner: { filename: 'Exact.2026.1080p.WEB-DL-GROUP', source: 'WEB-DL' },
+    publicationConfirmed: false,
+    confirmation,
+  });
+  const row = store.findByIdentity({ mediaId: 'ttExact', season: 1, episode: 8 });
+  await sched.tickOnce();
+  store.transition(row.id, 'prepared', { torrent_file_id: 'tf_w1', next_check_at: 0 });
+  const result = await sched.tickOnce();
+  assert.equal(result.to, 'playable');
+  assert.equal(getConfirmationCalls(), 3);
 });
 
 test('intent due repair requeues legacy playable future classification', async () => {
