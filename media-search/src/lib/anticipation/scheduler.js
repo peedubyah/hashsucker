@@ -507,7 +507,11 @@ export function createAnticipationScheduler({
         return { acted: true, intentId: intent.id, from: 'preparing', to: 'anticipated', ms: 0 };
       }
       try {
-        return await processIntent(intent);
+        const result = await processIntent(intent);
+        // Continue through the bounded due snapshot when a terminal/parked
+        // row made no progress, so another episode can still advance.
+        if (result?.acted || result?.exhausted) return result;
+        continue;
       } catch (err) {
         store.transition(intent.id, INTENT_STATES.ANTICIPATED, {
           last_error: String(err?.message || err).slice(0, 200),
