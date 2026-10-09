@@ -1210,6 +1210,7 @@ export async function searchByMedia(cache, request) {
     // before returning an unfulfilled result. This preserves Binding authority
     // and keeps same-X recovery inside the existing selection helpers.
     if (!selection.selected && !skipLiveDiscovery && !request.liveOnly) {
+      console.log(`media-search: bloodhound trigger media=${mediaId} season=${season ?? ''} episode=${episode ?? ''} candidates=${explainable.length} reason=${selection.reason}`);
       // Bloodhound fallback: only after the normal ranked candidate set has
       // failed exact binding. It re-enters this same search/rank/select/
       // fulfillment pipeline with corpus candidates suppressed; it does not
@@ -1680,6 +1681,7 @@ export async function searchByMedia(cache, request) {
 
   if (!skipLiveDiscovery && exactEpisodeCorpusCount < liveDiscoveryThreshold) {
     liveDiscoveryTriggered = true;
+    console.log(`media-search: bloodhound live-start media=${mediaId} season=${season ?? ''} episode=${episode ?? ''} corpus=${exactEpisodeCorpusCount}`);
     try {
       const liveResults = await runLiveDiscovery(mediaId, {
         season,
@@ -1689,6 +1691,7 @@ export async function searchByMedia(cache, request) {
         wantedImdbId: mediaId,
       });
 
+      console.log(`media-search: bloodhound live-results media=${mediaId} count=${liveResults.length}`);
       for (const live of liveResults) {
         const key = live.releaseKey;
         if (!key || !live.infoHash) continue;
