@@ -319,6 +319,22 @@ test('scheduler: handoff and byte probe without consumer publication stays retry
   assert.equal(store.findByIdentity({ mediaId: 'ttNoConsumer' }).last_error, 'consumer-publication-unconfirmed');
 });
 
+test('intent due repair requeues legacy playable future classification', async () => {
+  const store = memStore();
+  const seeded = store.seed({ mediaType: 'movie', mediaId: 'ttLegacy', expectedAt: 0 });
+  store.transition(seeded.intent.id, 'playable', {
+    torrent_file_id: 'tf_existing',
+    defer_reason: 'future-not-released',
+    next_check_at: NOW + 30 * DAY,
+  });
+  const due = store.due({ limit: 5 });
+  const row = store.findByIdentity({ mediaId: 'ttLegacy' });
+  assert.equal(row.state, 'prepared');
+  assert.equal(row.torrent_file_id, 'tf_existing');
+  assert.equal(row.defer_reason, 'future-not-released');
+  assert.ok(due.some((item) => item.id === seeded.intent.id));
+});
+
 test('scheduler: reuse-blind CAM probes the market, upgrades on WEB', async () => {
   const store = memStore();
   store.seed({ mediaType: 'movie', mediaId: 'ttG', expectedAt: NOW + 10 * DAY });

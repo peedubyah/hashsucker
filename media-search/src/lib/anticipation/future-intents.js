@@ -172,6 +172,14 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
   }
 
   function due({ limit = 10 } = {}) {
+    // A previous scheduler could incorrectly mark a row playable after only
+    // handoff/byte readiness. Once the row is released, retain its exact
+    // TorrentFile but re-enter the normal publication path when the old
+    // future classification is still present. This is a bounded convergence
+    // repair, not a second acquisition path.
+    db.prepare(`UPDATE future_intents
+      SET state = 'prepared', next_check_at = ?, last_error = 'consumer-publication-reconciliation', updated_at = ?
+      WHERE state = 'playable' AND defer_reason = 'future-not-released'`).run(now(), now());
     // 'preparing' rows visible here are orphaned (ticks run serially, so
     // no worker can be inside one); the scheduler requeues them. A failed
     // future-not-released row becomes due at its authoritative release time,
