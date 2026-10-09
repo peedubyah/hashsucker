@@ -173,9 +173,11 @@ const anticipationFlag = String(process.env.ANTICIPATION_ENABLED ?? '').toLowerC
 const anticipationOn = anticipationFlag !== '0' && anticipationFlag !== 'false';
 let anticipationTimer = null;
 let anticipationInFlight = false;
+let anticipationTick = 0;
+const anticipationStore = createFutureIntentStore({ db: discoveryCache.db });
 const anticipationScheduler = anticipationOn
   ? createAnticipationScheduler({
-    store: createFutureIntentStore({ db: discoveryCache.db }),
+    store: anticipationStore,
     cache: discoveryCache,
     controlPlaneStore,
     baseUrl: `http://127.0.0.1:${port}`,
@@ -189,29 +191,32 @@ const anticipationScheduler = anticipationOn
         state: r.cached.has(String(h).toLowerCase()) ? 'cached' : (r.failed.has(String(h).toLowerCase()) ? 'unknown' : 'uncached'),
       }));
     },
-  })
-  : null;
+  });
+console.log(`media-search: anticipation scheduler enabled=${anticipationOn} intervalMs=${anticipationIntervalMs()} initialDelayMs=120000`);
 function armAnticipationTimer(delayMs) {
+  console.log(`media-search: anticipation scheduler armed delayMs=${delayMs}`);
   anticipationTimer = setTimeout(async () => {
+    const tick = ++anticipationTick;
+    console.log(`media-search: anticipation tick=${tick} entered`);
     try {
+      const due = anticipationStore.due({ limit: 5 });
+      console.log(`media-search: anticipation tick=${tick} due=${due.length}`);
       if (anticipationScheduler && !anticipationInFlight) {
         anticipationInFlight = true;
         try {
           const result = await anticipationScheduler.tickOnce();
-          if (result.acted) {
-            console.log(`media-search: anticipation tick intent=${result.intentId} ${result.from || ''}->${result.to || result.reason || ''} (${result.ms ?? 0}ms)`);
-          }
+          console.log(`media-search: anticipation tick=${tick} result=${JSON.stringify(result)}`);
         } finally {
           anticipationInFlight = false;
         }
       }
     } catch (error) {
-      console.warn('media-search: anticipation tick failed', error?.message);
+      console.warn(`media-search: anticipation tick=${tick} error=${error?.stack || error?.message}`);
     } finally {
       armAnticipationTimer(anticipationIntervalMs());
+      console.log(`media-search: anticipation tick=${tick} completed nextMs=${anticipationIntervalMs()}`);
     }
   }, delayMs);
-  if (anticipationTimer.unref) anticipationTimer.unref();
 }
 if (anticipationOn) {
   armAnticipationTimer(2 * 60_000);
