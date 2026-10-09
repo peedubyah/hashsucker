@@ -459,6 +459,20 @@ export function createAnticipationScheduler({
 
   /** One bounded tick: claim a single due intent and process it. */
   async function tickOnce() {
+    if (typeof reconcileRequestedSeasonFn === 'function') {
+      const seasons = store.listDueRequestedSeasons?.(1) ?? [];
+      if (seasons.length > 0) {
+        const season = seasons[0];
+        try {
+          const result = await reconcileRequestedSeasonFn(season);
+          store.scheduleRequestedSeason(season.id, now() + 15 * 60 * 1000);
+          return { acted: true, seasonId: season.id, season: `${season.media_id}:s${season.season}`, result };
+        } catch (error) {
+          store.scheduleRequestedSeason(season.id, now() + intentBackoffMs(0));
+          return { acted: true, seasonId: season.id, error: String(error?.message || error).slice(0, 200) };
+        }
+      }
+    }
     const dueList = store.due(5);
     for (const original of dueList) {
       let intent = original;

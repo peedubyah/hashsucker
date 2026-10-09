@@ -45,6 +45,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_future_intents_identity
   ON future_intents(media_id, COALESCE(season, -1), COALESCE(episode, -1));
 CREATE INDEX IF NOT EXISTS idx_future_intents_due
   ON future_intents(state, next_check_at);
+CREATE TABLE IF NOT EXISTS requested_seasons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  media_id TEXT NOT NULL,
+  tmdb_id INTEGER NOT NULL,
+  season INTEGER NOT NULL,
+  owner TEXT NOT NULL,
+  source TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  next_check_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(media_id, season)
+);
 `;
 
 function ensureSchema(db) {
@@ -223,6 +235,24 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
   }
 
   /** Arr-managed rows only (radarr:/sonarr: sources). */
+  function ensureRequestedSeason({ mediaId, tmdbId, season, source = 'seerr', nextCheckAt = null } = {}) {
+    const owner = `season:${mediaId}:s${String(season).padStart(2, '0')}`;
+    const t = now();
+    db.prepare(`INSERT INTO requested_seasons (media_id, tmdb_id, season, owner, source, active, next_check_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+      ON CONFLICT(media_id, season) DO UPDATE SET tmdb_id=excluded.tmdb_id, active=1, next_check_at=excluded.next_check_at, updated_at=excluded.updated_at`)
+      .run(mediaId, Number(tmdbId), Number(season), owner, source, nextCheckAt ?? t, t);
+    return db.prepare('SELECT * FROM requested_seasons WHERE media_id = ? AND season = ?').get(mediaId, season);
+  }
+
+  function listDueRequestedSeasons(limit = 10) {
+    return db.prepare('SELECT * FROM requested_seasons WHERE active = 1 AND next_check_at <= ? ORDER BY next_check_at LIMIT ?').all(now(), limit);
+  }
+
+  function scheduleRequestedSeason(id, nextCheckAt) {
+    db.prepare('UPDATE requested_seasons SET next_check_at = ?, updated_at = ? WHERE id = ?').run(nextCheckAt, now(), id);
+  }
+
   function ensureSeasonEpisode({ mediaId, season, episode, owner, source = owner, expectedAt = null } = {}) {
     const existing = findByIdentity({ mediaId, season, episode });
     const t = now();
@@ -412,7 +442,7 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
     return row?.t ?? null;
   }
 
-return { seed, findByIdentity, hasPendingForMedia, ensureReleasedFollowUp, ensureSeasonEpisode, withdrawSeasonEpisodes, revive, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest, wakeSeerrRequest, wakeMedia };
+return { seed, findByIdentity, hasPendingForMedia, ensureReleasedFollowUp, ensureRequestedSeason, listDueRequestedSeasons, scheduleRequestedSeason, ensureSeasonEpisode, withdrawSeasonEpisodes, revive, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest, wakeSeerrRequest, wakeMedia };
 }
 
 /** Backoff for retryable intent work: 15m, 1h, 4h, cap 24h. */

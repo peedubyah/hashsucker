@@ -14,6 +14,7 @@ export function createSeasonReconciler({ store, resolveEpisodes, clock = () => D
     }
     const seasonNumber = Number(season);
     const owner = ownerKey(mediaId, seasonNumber);
+    store.ensureRequestedSeason({ mediaId, tmdbId, season: seasonNumber, source: source || owner });
     const episodes = await resolveEpisodes(tmdbId, seasonNumber);
     const known = new Set();
     let created = 0;

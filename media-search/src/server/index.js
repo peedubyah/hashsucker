@@ -52,6 +52,8 @@ import { getMediaById } from '../lib/metadata/unified-search.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
 import { createArrClient } from '../lib/anticipation/arr-client.js';
 import { createArrSync } from '../lib/anticipation/arr-sync.js';
+import { createSeasonReconciler } from '../lib/anticipation/season-reconciliation.js';
+import { resolveSeerrSeasonEpisodes } from '../lib/intents/providers/seerr.js';
 import { confirmPlexEpisode } from '../lib/consumers/plex.js';
 
 // ─── consumer reconciliation ticker ─────────────────────────────────────
@@ -176,6 +178,12 @@ let anticipationTimer = null;
 let anticipationInFlight = false;
 let anticipationTick = 0;
 const anticipationStore = createFutureIntentStore({ db: discoveryCache.db });
+const seasonReconciler = process.env.SEERR_URL && process.env.SEERR_API_KEY
+  ? createSeasonReconciler({
+    store: anticipationStore,
+    resolveEpisodes: (tmdbId, season) => resolveSeerrSeasonEpisodes(tmdbId, season, process.env),
+  })
+  : null;
 const anticipationScheduler = anticipationOn
   ? createAnticipationScheduler({
     store: anticipationStore,
@@ -193,6 +201,14 @@ const anticipationScheduler = anticipationOn
       }));
     },
     confirmConsumerPublicationFn: confirmPlexEpisode,
+    reconcileRequestedSeasonFn: seasonReconciler
+      ? (season) => seasonReconciler.reconcileSeason({
+        mediaId: season.media_id,
+        tmdbId: season.tmdb_id,
+        season: season.season,
+        source: season.source,
+      })
+      : null,
   })
   : null;
 console.log(`media-search: anticipation scheduler enabled=${anticipationOn} intervalMs=${anticipationIntervalMs()} initialDelayMs=120000`);

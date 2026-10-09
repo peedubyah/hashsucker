@@ -938,6 +938,17 @@ async function handleSeerrIngress(
   //    whole attempt; per-episode failures below are isolated.
   const childResults = [];
   let structurallyFailed = null;
+  // Persist requested-season ownership before enumerating episodes. The
+  // scheduler reconciles this durable definition repeatedly, so later
+  // announcements and moved air dates are not lost after this webhook.
+  for (const seasonNum of seasonParse.seasons) {
+    futureIntentStore?.ensureRequestedSeason({
+      mediaId: operationalIntent.mediaId,
+      tmdbId: Number(operationalIntent.tmdbId),
+      season: seasonNum,
+      source: `seerr:${operationalIntent.sourceId}`,
+    });
+  }
   // Open a season fan-out scope so every per-child notifyPlex() call
   // for this mediaId is buffered; on close() the coalescer dispatches
   // exactly one targeted Plex partial-refresh per (collection, scanPath)
