@@ -191,7 +191,8 @@ const anticipationScheduler = anticipationOn
         state: r.cached.has(String(h).toLowerCase()) ? 'cached' : (r.failed.has(String(h).toLowerCase()) ? 'unknown' : 'uncached'),
       }));
     },
-  });
+  })
+  : null;
 console.log(`media-search: anticipation scheduler enabled=${anticipationOn} intervalMs=${anticipationIntervalMs()} initialDelayMs=120000`);
 function armAnticipationTimer(delayMs) {
   console.log(`media-search: anticipation scheduler armed delayMs=${delayMs}`);
