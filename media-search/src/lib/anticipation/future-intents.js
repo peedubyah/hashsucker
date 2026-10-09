@@ -201,11 +201,12 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
   }
 
   /** Bounded retry: failed→anticipated with incremented attempts. */
-  function retry(id, nextCheckAt) {
+  function retry(id, nextCheckAt, deferReason = null) {
     const info = db.prepare(`UPDATE future_intents
       SET state = 'anticipated', attempts = attempts + 1,
-          last_error = NULL, next_check_at = ?, updated_at = ?
-      WHERE id = ? AND state = 'failed'`).run(nextCheckAt, now(), id);
+          last_error = NULL, next_check_at = ?,
+          defer_reason = COALESCE(?, defer_reason), updated_at = ?
+      WHERE id = ? AND state = 'failed'`).run(nextCheckAt, deferReason, now(), id);
     return info.changes === 1;
   }
 

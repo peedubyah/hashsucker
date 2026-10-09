@@ -390,7 +390,10 @@ export function createAnticipationScheduler({
           return { acted: true, intentId: intent.id, from: 'failed', to: 'anticipated', ms: now() - t0, rearmed: true };
         }
         if (d === DEFER_REASONS.FUTURE_NOT_RELEASED) {
-          store.retry(intent.id, now());
+          // Release wake is one-time. Clear the pre-release classification so
+          // subsequent normal failures obey the ordinary released-work park
+          // and cannot be reselected by the expected_at override forever.
+          store.retry(intent.id, now(), DEFER_REASONS.RELEASED_NO_CANDIDATE);
           return { acted: true, intentId: intent.id, from: 'failed', to: 'anticipated', ms: now() - t0, rearmed: true, released: true };
         }
         return { acted: false, intentId: intent.id, reason: 'attempts-exhausted' };
@@ -421,7 +424,7 @@ export function createAnticipationScheduler({
         && intent.defer_reason === DEFER_REASONS.FUTURE_NOT_RELEASED
         && intent.expected_at != null && intent.expected_at <= now()
         && intent.attempts >= MAX_ATTEMPTS) {
-        store.retry(intent.id, now());
+        store.retry(intent.id, now(), DEFER_REASONS.RELEASED_NO_CANDIDATE);
         intent = store.findByIdentity({ mediaId: intent.media_id, season: intent.season, episode: intent.episode });
       }
       // Fresh anticipated work needs the atomic claim; mid-flow states
