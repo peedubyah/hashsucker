@@ -693,11 +693,14 @@ async function tryReuseHealthyPublication({
         }
       }
       if (hydratedEntry) {
-        notifyPlex({
+        // The prepared replay contract must not race its own consumer
+        // notification. Await the targeted refresh dispatch so fulfillment
+        // confirmation observes the publication attempt before returning.
+        await notifyPlex({
           mediaId: handoff.mediaId,
           mediaType: handoff.mediaType,
           canonicalPath: hydratedEntry.canonicalPath,
-        }).catch(() => {});
+        });
       }
     } catch (error) {
       console.error(`Reuse republication failed, falling back to discovery: ${error.message}`);
