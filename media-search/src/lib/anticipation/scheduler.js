@@ -464,6 +464,7 @@ export function createAnticipationScheduler({
 
   /** One bounded tick: claim a single due intent and process it. */
   async function tickOnce() {
+    const ordinaryTickStartedAt = now();
     if (typeof reconcileRequestedSeasonFn === 'function' && !seasonReconciledLastTick) {
       const seasons = store.listDueRequestedSeasons?.(1) ?? [];
       if (seasons.length > 0) {
@@ -485,6 +486,7 @@ export function createAnticipationScheduler({
     // terminal/parked backlog rows be skipped without allowing them to pin
     // later retryable publication work indefinitely.
     const dueList = store.due(DUE_SCAN_LIMIT);
+    log(`scheduler due-snapshot limit=${DUE_SCAN_LIMIT} count=${dueList.length} ids=${dueList.map((row) => row.id).join(',')}`);
     for (const original of dueList) {
       let intent = original;
       // A released future-not-released row may have exhausted its pre-release
@@ -514,11 +516,15 @@ export function createAnticipationScheduler({
       }
       try {
         const result = await processIntent(intent);
+        log(`scheduler due-row id=${intent.id} state=${intent.state} attempts=${intent.attempts} next=${intent.next_check_at} result=${JSON.stringify(result)}`);
         // Continue through the bounded due snapshot when a terminal/parked
-        // row made no progress, so another episode can still advance. An
-        // attempts-exhausted row is parked state, not useful work.
+        // row made no progress, so another episode can still advance.
+        // An attempts-exhausted row is parked state, not useful work.
         if (result?.reason === 'attempts-exhausted') continue;
-        if (result?.acted || result?.exhausted) return result;
+        if (result?.acted || result?.exhausted) {
+          log(`scheduler selected id=${intent.id} durationMs=${now() - ordinaryTickStartedAt}`);
+          return result;
+        }
         continue;
       } catch (err) {
         store.transition(intent.id, INTENT_STATES.ANTICIPATED, {
