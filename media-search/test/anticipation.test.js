@@ -47,7 +47,7 @@ function stubHttp({ prepareTf = 'tf_prep1', publishTf = null, probeOk = true } =
       return { status: 200, text: async () => JSON.stringify({ prepared: true, handoff: { torrentFileId: prepareTf } }) };
     }
     if (url.endsWith('/api/media-request')) {
-      return { status: 200, text: async () => JSON.stringify({ handoff: { torrentFileId: publishTf ?? prepareTf }, reuseMode: 'republish' }) };
+      return { status: 200, text: async () => JSON.stringify({ handoff: { torrentFileId: publishTf ?? prepareTf }, reuseMode: 'republish', fulfilled: true, published: true, vfsPublished: true }) };
     }
     if (url.includes('/files/')) {
       if (!probeOk) return { status: 503, text: async () => '', body: stubBody() };
@@ -123,7 +123,7 @@ test('prepare failure backs off, terminal failure parks', async () => {
 test('prepared tick publishes same winner and reaches playable on probe', async () => {
   const store = createFutureIntentStore({ db: memDb() });
   const { intent } = store.seed({ mediaType: 'movie', mediaId: 'tt1' });
-  const { sched } = scheduler({ store });
+  const { sched, calls } = scheduler({ store });
   await sched.tickOnce(); // anticipate -> prepared
   // Make prepared due immediately.
   store.transition(intent.id, INTENT_STATES.PREPARED, { torrent_file_id: 'tf_prep1', next_check_at: 0 });
@@ -131,6 +131,8 @@ test('prepared tick publishes same winner and reaches playable on probe', async 
   assert.equal(r2.to, INTENT_STATES.PLAYABLE);
   const row = store.list({})[0];
   assert.equal(row.torrent_file_id, 'tf_prep1');
+  const publish = calls.find((c) => c.url.endsWith('/api/media-request'));
+  assert.equal(publish.body.sourceType, 'future-intent-publish');
 });
 
 test('winner change converges explicitly with recorded evidence', async () => {

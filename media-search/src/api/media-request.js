@@ -455,6 +455,7 @@ async function tryReuseHealthyPublication({
   canonicalTitle = null,
   canonicalYear = null,
   ensureTorBoxFileIdentityFn = null,
+  source = 'request',
 }) {
   try {
     // Prepared durable truth (shared with preparation): stored handoff +
@@ -583,7 +584,7 @@ async function tryReuseHealthyPublication({
     const noopReady = await checkPublishedNoop();
     if (noopReady) {
       const fulfillment = await confirmReuseFulfillment();
-      cache.recordEvidenceQuery?.({ queryKey: `media:${mediaId}:${season ?? ''}:${episode ?? ''}`, observer: 'hashsucker', sourceClass: request.source || 'request', disposition: 'healthy_exact_reuse', observedAt: Date.now(), latencyMs: Date.now() - requestStartedAt, candidateCount: 0, selectedCount: 1 });
+      cache.recordEvidenceQuery?.({ queryKey: `media:${mediaId}:${season ?? ''}:${episode ?? ''}`, observer: 'hashsucker', sourceClass: source, disposition: 'healthy_exact_reuse', observedAt: Date.now(), latencyMs: Date.now() - requestStartedAt, candidateCount: 0, selectedCount: 1 });
       return {
         requestId: handoff.requestId,
         intent: { type: handoff.mediaType, mediaId: handoff.mediaId },
@@ -973,6 +974,7 @@ export async function searchByMedia(cache, request) {
       canonicalTitle,
       canonicalYear,
       ensureTorBoxFileIdentityFn,
+      source,
     });
     if (reuseResult) {
       return reuseResult;
