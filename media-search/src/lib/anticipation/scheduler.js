@@ -31,6 +31,24 @@ const PARKED_MS = 7 * 24 * 60 * 60 * 1000;
 // prefix. The loop still performs at most one actionable intent per tick.
 const DUE_SCAN_LIMIT = 50;
 
+export function classifyIntentPriority(intent, nowMs, maxAttempts = MAX_ATTEMPTS) {
+  if (!intent || intent.state === INTENT_STATES.WITHDRAWN || intent.state === INTENT_STATES.PLAYABLE) return { className: 'P5', rank: 5, actionable: false };
+  if (intent.state === INTENT_STATES.FAILED && intent.attempts >= maxAttempts) return { className: 'P5', rank: 5, actionable: false };
+  if (intent.defer_reason === DEFER_REASONS.FUTURE_NOT_RELEASED && intent.expected_at != null && intent.expected_at > nowMs) {
+    return { className: 'P5', rank: 5, actionable: false };
+  }
+  if (intent.state === INTENT_STATES.PUBLISHED_PREPARING) return { className: 'P0', rank: 0, actionable: true };
+  if (intent.season_owners && intent.expected_at != null && intent.expected_at <= nowMs) {
+    return { className: 'P1', rank: 1, actionable: true };
+  }
+  if (intent.state === INTENT_STATES.PREPARED) return { className: 'P2', rank: 2, actionable: true };
+  if (intent.state === INTENT_STATES.ANTICIPATED && (intent.expected_at == null || intent.expected_at <= nowMs)) {
+    return { className: 'P3', rank: 3, actionable: true };
+  }
+  if (intent.state === INTENT_STATES.FAILED) return { className: 'P4', rank: 4, actionable: true };
+  return { className: 'P5', rank: 5, actionable: false };
+}
+
 export function createAnticipationScheduler({
   store,
   baseUrl,
@@ -486,8 +504,13 @@ export function createAnticipationScheduler({
     // terminal/parked backlog rows be skipped without allowing them to pin
     // later retryable publication work indefinitely.
     const dueList = store.due({ limit: DUE_SCAN_LIMIT });
+    const classified = dueList.map((row, index) => ({ row, index, priority: classifyIntentPriority(row, now()) }));
     log(`scheduler due-snapshot limit=${DUE_SCAN_LIMIT} count=${dueList.length} ids=${dueList.map((row) => row.id).join(',')}`);
-    for (const original of dueList) {
+    classified.forEach(({ row, priority }) => log(`scheduler classify id=${row.id} state=${row.state} class=${priority.className} actionable=${priority.actionable}`));
+    const orderedDue = classified
+      .filter(({ priority }) => priority.actionable)
+      .sort((a, b) => (a.priority.rank - b.priority.rank) || (a.index - b.index));
+    for (const { row: original } of orderedDue) {
       let intent = original;
       // A released future-not-released row may have exhausted its pre-release
       // retry budget. Re-arm it and continue through the normal claim in this

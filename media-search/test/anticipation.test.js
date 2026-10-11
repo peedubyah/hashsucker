@@ -18,7 +18,7 @@ import {
   INTENT_STATES,
   intentBackoffMs,
 } from '../src/lib/anticipation/future-intents.js';
-import { createAnticipationScheduler } from '../src/lib/anticipation/scheduler.js';
+import { createAnticipationScheduler, classifyIntentPriority } from '../src/lib/anticipation/scheduler.js';
 import { __rangesForTests } from '../src/lib/anticipation/prewarm.js';
 import { createDiscoveryCache } from '../src/lib/discovery/cache.js';
 
@@ -232,6 +232,17 @@ test('scheduler passes the configured due limit and reaches work beyond ten rows
   assert.equal(result.intentId, target.id);
   assert.equal(result.acted, true);
   assert.notEqual(store.findByIdentity({ mediaId: 'tt-retryable-after-prefix' }).state, INTENT_STATES.ANTICIPATED);
+});
+
+test('priority classifier uses durable intent state and ownership fields', () => {
+  const nowMs = 1_000_000;
+  assert.equal(classifyIntentPriority({ state: 'published_preparing' }, nowMs).className, 'P0');
+  assert.equal(classifyIntentPriority({ state: 'anticipated', season_owners: 'season:x:s01', expected_at: nowMs }, nowMs).className, 'P1');
+  assert.equal(classifyIntentPriority({ state: 'prepared' }, nowMs).className, 'P2');
+  assert.equal(classifyIntentPriority({ state: 'anticipated', expected_at: nowMs }, nowMs).className, 'P3');
+  assert.equal(classifyIntentPriority({ state: 'failed', attempts: 1 }, nowMs).className, 'P4');
+  assert.equal(classifyIntentPriority({ state: 'failed', attempts: 6 }, nowMs).actionable, false);
+  assert.equal(classifyIntentPriority({ state: 'anticipated', expected_at: nowMs + 1, defer_reason: 'future-not-released' }, nowMs).actionable, false);
 });
 
 test('future-not-released rows retain priority over ordinary backlog', () => {
