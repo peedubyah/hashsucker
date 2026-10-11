@@ -200,6 +200,60 @@ test('episode intents are isolated', () => {
   assert.ok(dueIds.includes(e1.intent.id) && dueIds.includes(e2.intent.id));
 });
 
+test('scheduler scans past more than five exhausted rows to reach retryable work', async () => {
+  const store = createFutureIntentStore({ db: memDb() });
+  for (let i = 0; i < 12; i += 1) {
+    const { intent } = store.seed({ mediaType: 'movie', mediaId: `tt-exhausted-${i}` });
+    store.claim(intent.id);
+    store.transition(intent.id, INTENT_STATES.FAILED, {
+      last_error: 'attempts-exhausted:parked',
+      next_check_at: 0,
+    });
+    for (let attempt = 1; attempt < 6; attempt += 1) {
+      store.retry(intent.id, 0);
+      store.claim(intent.id);
+      store.transition(intent.id, INTENT_STATES.FAILED, {
+        last_error: 'attempts-exhausted:parked',
+        next_check_at: 0,
+      });
+    }
+  }
+  const target = store.seed({ mediaType: 'movie', mediaId: 'tt-retryable-after-prefix' }).intent;
+  store.transition(target.id, INTENT_STATES.ANTICIPATED, { next_check_at: 0 });
+  const { sched } = scheduler({ store });
+  const result = await sched.tickOnce();
+  assert.equal(result.intentId, target.id);
+  assert.equal(result.acted, true);
+  assert.notEqual(store.findByIdentity({ mediaId: 'tt-retryable-after-prefix' }).state, INTENT_STATES.ANTICIPATED);
+});
+
+test('future-not-released rows retain priority over ordinary backlog', () => {
+  const store = createFutureIntentStore({ db: memDb() });
+  const future = store.seed({ mediaType: 'series', mediaId: 'tt-future-priority', season: 1, episode: 1, expectedAt: 900_000, deferReason: 'future-not-released' }).intent;
+  const ordinary = store.seed({ mediaType: 'movie', mediaId: 'tt-ordinary-priority' }).intent;
+  const due = store.due({ limit: 2 });
+  assert.equal(due[0].id, future.id);
+  assert.equal(due[1].id, ordinary.id);
+});
+
+test('season reconciliation and ordinary work alternate without starvation', async () => {
+  const store = createFutureIntentStore({ db: memDb() });
+  const season = store.ensureRequestedSeason({ mediaId: 'tt-season-fair', tmdbId: 1, season: 1, nextCheckAt: 0 });
+  const ordinary = store.seed({ mediaType: 'movie', mediaId: 'tt-ordinary-fair' }).intent;
+  const calls = [];
+  const { fetchFn } = stubHttp();
+  const sched = createAnticipationScheduler({
+    store, baseUrl: 'http://test:3000', dataPlaneBaseUrl: 'http://dp:3001', fetchFn,
+    clock: () => 1_000_000, log: () => {},
+    reconcileRequestedSeasonFn: async (row) => { calls.push(row.id); return { ok: true }; },
+  });
+  const first = await sched.tickOnce();
+  assert.equal(first.seasonId, season.id);
+  store.scheduleRequestedSeason(season.id, 2_000_000);
+  const second = await sched.tickOnce();
+  assert.equal(second.intentId, ordinary.id);
+});
+
 test('prewarm ranges cover head and tail without overlap', async () => {
   const GB = 1024 * 1024 * 1024;
   const big = __rangesForTests(40 * GB);

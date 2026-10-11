@@ -27,6 +27,9 @@ const PLEX_CONFIRM_INTERVAL_MS = 500;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 6;
 const PARKED_MS = 7 * 24 * 60 * 60 * 1000;
+// Keep the per-tick scan bounded, but large enough to pass a parked/exhausted
+// prefix. The loop still performs at most one actionable intent per tick.
+const DUE_SCAN_LIMIT = 50;
 
 export function createAnticipationScheduler({
   store,
@@ -478,7 +481,10 @@ export function createAnticipationScheduler({
       }
     }
     seasonReconciledLastTick = false;
-    const dueList = store.due(5);
+    // Scan a bounded window rather than the old five-row prefix. This lets
+    // terminal/parked backlog rows be skipped without allowing them to pin
+    // later retryable publication work indefinitely.
+    const dueList = store.due(DUE_SCAN_LIMIT);
     for (const original of dueList) {
       let intent = original;
       // A released future-not-released row may have exhausted its pre-release
