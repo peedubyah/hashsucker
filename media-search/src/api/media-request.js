@@ -456,6 +456,7 @@ async function tryReuseHealthyPublication({
   canonicalYear = null,
   ensureTorBoxFileIdentityFn = null,
   source = 'request',
+  requestStartedAt = Date.now(),
 }) {
   try {
     // Prepared durable truth (shared with preparation): stored handoff +
