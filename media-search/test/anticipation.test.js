@@ -200,8 +200,14 @@ test('episode intents are isolated', () => {
   assert.ok(dueIds.includes(e1.intent.id) && dueIds.includes(e2.intent.id));
 });
 
-test('scheduler scans past more than five exhausted rows to reach retryable work', async () => {
+test('scheduler passes the configured due limit and reaches work beyond ten rows', async () => {
   const store = createFutureIntentStore({ db: memDb() });
+  const dueCalls = [];
+  const originalDue = store.due.bind(store);
+  store.due = (options) => {
+    dueCalls.push(options);
+    return originalDue(options);
+  };
   for (let i = 0; i < 12; i += 1) {
     const { intent } = store.seed({ mediaType: 'movie', mediaId: `tt-exhausted-${i}` });
     store.claim(intent.id);
@@ -222,6 +228,7 @@ test('scheduler scans past more than five exhausted rows to reach retryable work
   store.transition(target.id, INTENT_STATES.ANTICIPATED, { next_check_at: 0 });
   const { sched } = scheduler({ store });
   const result = await sched.tickOnce();
+  assert.equal(dueCalls[0].limit, 50);
   assert.equal(result.intentId, target.id);
   assert.equal(result.acted, true);
   assert.notEqual(store.findByIdentity({ mediaId: 'tt-retryable-after-prefix' }).state, INTENT_STATES.ANTICIPATED);

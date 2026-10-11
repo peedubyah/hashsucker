@@ -485,7 +485,7 @@ export function createAnticipationScheduler({
     // Scan a bounded window rather than the old five-row prefix. This lets
     // terminal/parked backlog rows be skipped without allowing them to pin
     // later retryable publication work indefinitely.
-    const dueList = store.due(DUE_SCAN_LIMIT);
+    const dueList = store.due({ limit: DUE_SCAN_LIMIT });
     log(`scheduler due-snapshot limit=${DUE_SCAN_LIMIT} count=${dueList.length} ids=${dueList.map((row) => row.id).join(',')}`);
     for (const original of dueList) {
       let intent = original;
