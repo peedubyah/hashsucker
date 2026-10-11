@@ -211,6 +211,7 @@ const anticipationScheduler = anticipationOn
         source: season.source,
       })
       : null,
+    log: (msg) => console.log(`media-search: ${msg}`),
   })
   : null;
 console.log(`media-search: anticipation scheduler enabled=${anticipationOn} intervalMs=${anticipationIntervalMs()} initialDelayMs=120000`);
@@ -221,7 +222,7 @@ function armAnticipationTimer(delayMs) {
     console.log(`media-search: anticipation tick=${tick} entered`);
     try {
       const due = anticipationStore.due({ limit: 5 });
-      console.log(`media-search: anticipation tick=${tick} due=${due.length}`);
+      console.log(`media-search: anticipation tick=${tick} preflight-due-limit=5 preflight-due-count=${due.length}`);
       if (anticipationScheduler && !anticipationInFlight) {
         anticipationInFlight = true;
         try {
