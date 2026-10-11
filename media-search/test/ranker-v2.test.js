@@ -172,6 +172,11 @@ test('v2: year gate matches, mismatches, and never guesses', () => {
     evaluateIdentityEligibility(tvHit, { mediaType: 'series', season: 1, episode: 1, mediaTitle: 'Show', year: 2011 }).eligible,
     true,
   );
+  const movieResidue = evaluateIdentityEligibility({
+    releaseAttributes: { title: 'MobLand S01', mediaType: 'movie' },
+  }, { mediaType: 'series', season: 2, episode: 4, mediaTitle: 'MobLand' });
+  assert.equal(movieResidue.eligible, false);
+  assert.equal(movieResidue.code, 'media_type_mismatch');
 });
 
 // ---------------------------------------------------------------------------

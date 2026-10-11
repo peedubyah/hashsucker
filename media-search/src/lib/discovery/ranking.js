@@ -255,7 +255,7 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
     }
   }
 
-  // Movies: no episode constraints possible
+  // Movies: no episode constraints possible.
   if (mediaType === 'movie' || !querySeason) {
     // Year disambiguation (ranker V2 fix 4, movies only): remakes share
     // titles, so a confidently-known conflicting year is an identity
@@ -279,6 +279,16 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
 
   // Series with specific season+episode requested
   if (querySeason != null && queryEpisode != null) {
+    // A parser classification of movie is not episode evidence. Do not allow
+    // a title-index movie association to become the bindable winner for an
+    // exact TV episode request.
+    if (parsedMediaType === 'movie') {
+      return {
+        eligible: false,
+        reason: 'media_type_mismatch: movie candidate for episode request',
+        code: 'media_type_mismatch',
+      };
+    }
     // Prowlarr scope guard (ranker V2 fix 7): Prowlarr season/episode
     // query hints are unenforced by indexers (observed live: majority
     // wrong-S/E responses, plus ~40% with no parseable S/E at all).
