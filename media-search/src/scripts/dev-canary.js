@@ -21,6 +21,7 @@ const fixtures = {
   e05: { label: 'Lanterns S01E05', ratingKey: '514', part: '1061', tf: 'tf_1355e37f-143d-4703-8a53-23827089afbe', path: '/mnt/hashsucker-vfs/TV/tt26545992/Season 01/tt26545992 - S01E05.mp4', server: '1c622b259a95aebb46228e9661409b7656539c53', grandparent: '495', parent: '496' },
   e08: { label: 'Lanterns S01E08', ratingKey: '520', part: '1067', tf: 'tf_8eb97c57-b426-4a69-b082-3109a31745bd', path: '/mnt/hashsucker-vfs/TV/tt26545992/Season 01/tt26545992 - S01E08.mp4', server: '1c622b259a95aebb46228e9661409b7656539c53', grandparent: '495', parent: '496' },
   mobland: { label: 'MobLand S02E02', ratingKey: '512', part: '1057', tf: 'tf_8d9d4437-03e9-440b-8b80-db36f9dd22af', path: '/mnt/hashsucker-vfs/TV/MobLand/Season 02/MobLand - S02E02.mkv', server: '1c622b259a95aebb46228e9661409b7656539c53', grandparent: '509', parent: '510' },
+  e04: { label: 'MobLand S02E04', ratingKey: '534', part: '1085', tf: 'tf_ca408d82-ffa6-442e-88ef-19c72e35ae02', path: '/mnt/hashsucker-vfs/TV/tt31510819/Season 02/tt31510819 - S02E04.mkv', server: '1c622b259a95aebb46228e9661409b7656539c53', grandparent: null, parent: null },
 };
 if (explicitFixture && !rotate && !fixtures[explicitFixture]) { console.error(`CANARY_HARNESS_FAILURE: INVALID_FIXTURE ${explicitFixture}; use e01, e05, e08, mobland, or rotate`); process.exit(2); }
 let fixture = fixtures[requested];
