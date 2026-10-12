@@ -93,6 +93,7 @@ const CLASSIFY = {
   SEEK_NEAR_EOF_FAILED: 'SEEK_NEAR_EOF',
   APP_STOP_FAILED: 'CLEAN_STOP',
   PMS_TEARDOWN_FAILED: 'PMS_TEARDOWN_FAILED',
+  STOP_DRAIN_TIMEOUT: 'PMS_TEARDOWN_FAILED',
   CANARY_TIMEOUT: 'TIMEOUT',
 };
 
@@ -326,13 +327,19 @@ async function ensurePlayerAlive(player) {
 }
 
 /**
- * Stop whatever the client currently has playing, via the application layer.
- * A near-EOF seek can auto-advance into the next episode of the play queue, so
- * every controller the session manager still holds is stopped rather than only
- * the video one, with a retry because the first stop may not take effect while a
- * transition is in flight.
+ * Stop whatever the client currently has playing, via the application layer,
+ * then drain any deferred auto-advance.
+ *
+ * A near-EOF seek can auto-advance into the next episode of the play queue.
+ * Observed behaviour: stopping playback clears the session, then seconds later
+ * the client advances the queue and starts the next item, leaving a stale
+ * session behind after the canary has finished. Draining therefore retries
+ * until sessions stay at zero for a settle window, and stops every controller
+ * the session manager still holds rather than only the video one.
+ *
+ * Returns true when PMS is empty at the end of the settle window.
  */
-async function stopEverything(app, attempts = 3) {
+async function stopEverything(app, { attempts = 3, settleMs = 8000 } = {}) {
   for (let i = 0; i < attempts; i += 1) {
     let stoppedAny = false;
     try {
@@ -340,10 +347,18 @@ async function stopEverything(app, attempts = 3) {
     } catch {
       stoppedAny = false;
     }
-    if ((await plexSessions()).length === 0) return;
-    if (!stoppedAny && i === 0) return;
+    const settled = await waitFor(async () => {
+      const rows = await plexSessions();
+      return rows.length === 0 ? { stillGoneSince: Date.now() } : null;
+    }, settleMs, 'session drain settle', 'STOP_DRAIN_TIMEOUT').catch(() => null);
+    if (settled) return true;
+    if (!stoppedAny && i === 0) {
+      // Nothing to stop and nothing to drain: the absence is not a leak.
+      return (await plexSessions()).length === 0;
+    }
     await sleep(1000);
   }
+  return (await plexSessions()).length === 0;
 }
 
 async function preflight() {
@@ -483,11 +498,19 @@ async function runFixture(runNo, { app, player, dataPlane, fixture: fx }) {
   // 9. App-level stop (exactly one CDP evaluate) + PMS teardown.
   marks.stop = Date.now();
   const stopResult = await app.stopPlayback();
+  // The client can advance the play queue after the stop lands, so drain the
+  // session and only then measure teardown. A session reappearing here means
+  // teardown was not clean.
+  const drained = await stopEverything(app);
+  if (!drained) throw fail('PMS_TEARDOWN_FAILED', 'a PMS session reappeared after app-level stop (deferred queue advance)');
   await waitFor(async () => ((await plexSessions()).length === 0 ? true : null), 20000, 'PMS session teardown', 'PMS_TEARDOWN_FAILED');
   marks.gone = Date.now();
   phases.stopToPmsGone = marks.gone - marks.stop;
   await waitFor(() => player.isIdle(), 20000, 'libmpv idle after app-level stop', 'APP_STOP_FAILED');
   phases.stopToIdle = Date.now() - marks.stop;
+  // confirm the drain actually held: no session may reappear in the settle window
+  const recheck = await waitFor(async () => ((await plexSessions()).length === 0 ? true : null), 8000, 'post-stop session stability', 'PMS_TEARDOWN_FAILED').catch(() => null);
+  if (!recheck) throw fail('PMS_TEARDOWN_FAILED', 'a PMS session appeared after teardown was confirmed');
 
   return {
     run: runNo,
