@@ -40,6 +40,11 @@ No planned work as completed. No vague "healthy." No speculative causes.
     ~10.5 s per seek. Inherent to the client, not the canary.
   - the remaining bridge couples to the client build via one webpack module id
     (verified, with a precise failure if the build changes).
+- Fixed during the slice (observed, not theorised): a session leak where the
+  client advanced the play queue after the canary's stop, leaving a stale PMS
+  session post-PASS. Stop is now a drain with a settle window; verified zero
+  sessions immediately and after 12 s across three consecutive runs and the
+  full matrix.
 - Repo note: this slice's stash test collided with concurrent commits in the
   same working tree. Three conflicted files were restored to their committed
   state; the stashed work is intact in `stash@{0}`. Nothing owned by this slice

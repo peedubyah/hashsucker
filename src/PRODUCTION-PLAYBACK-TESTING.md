@@ -204,6 +204,14 @@ because the canary launcher sets `QTWEBENGINE_REMOTE_DEBUGGING=9222`; it is
 loopback-only. Seek execution, position/duration/pause observation, EOF
 positioning and all playback polling are native mpv IPC and use no CDP.
 
+**Deferred play-queue advance.** Observed: after the canary's app-level stop
+clears the session, the client can advance the play queue seconds later and
+start the next episode, leaving a stale PMS session once the run has already
+reported PASS. A near-EOF seek makes this more likely because it drives
+playback to the end. The stop is now a **drain** — it retries until sessions
+stay at zero for a settle window, and teardown is only reported clean when no
+session reappears after confirmation.
+
 **Confined cosplay of the historical E04 issue.** The old start primitive did
 not close transient UI state; the internal Plex path (used by Companion
 `playMedia`) calls `modal.closeAll()` before navigating. The new start mirrors
