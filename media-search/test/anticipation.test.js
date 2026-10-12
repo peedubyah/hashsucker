@@ -234,6 +234,23 @@ test('scheduler passes the configured due limit and reaches work beyond ten rows
   assert.notEqual(store.findByIdentity({ mediaId: 'tt-retryable-after-prefix' }).state, INTENT_STATES.ANTICIPATED);
 });
 
+test('ordinary drain executes up to four actionable rows in priority order', async () => {
+  const store = createFutureIntentStore({ db: memDb() });
+  for (let i = 0; i < 4; i += 1) store.seed({ mediaType: 'movie', mediaId: `tt-drain-${i}` });
+  const logs = [];
+  const { fetchFn } = stubHttp();
+  const sched = createAnticipationScheduler({
+    store, baseUrl: 'http://test:3000', dataPlaneBaseUrl: 'http://dp:3001', fetchFn,
+    clock: () => 1_000_000, log: (msg) => logs.push(msg),
+  });
+  await sched.tickOnce();
+  assert.equal(logs.filter((msg) => msg.startsWith('scheduler due-row')).length, 4);
+  assert.ok(logs.some((msg) => msg.includes('scheduler drain actions=4')));
+  assert.deepEqual(store.list({ state: INTENT_STATES.PREPARED, limit: 10 }).map((row) => row.media_id), [
+    'tt-drain-0', 'tt-drain-1', 'tt-drain-2', 'tt-drain-3',
+  ]);
+});
+
 test('priority classifier uses durable intent state and ownership fields', () => {
   const nowMs = 1_000_000;
   assert.equal(classifyIntentPriority({ state: 'published_preparing' }, nowMs).className, 'P0');
@@ -243,6 +260,26 @@ test('priority classifier uses durable intent state and ownership fields', () =>
   assert.equal(classifyIntentPriority({ state: 'failed', attempts: 1 }, nowMs).className, 'P4');
   assert.equal(classifyIntentPriority({ state: 'failed', attempts: 6 }, nowMs).actionable, false);
   assert.equal(classifyIntentPriority({ state: 'anticipated', expected_at: nowMs + 1, defer_reason: 'future-not-released' }, nowMs).actionable, false);
+});
+
+test('P0 drains before P1 and exhausted rows consume no action slots', async () => {
+  const store = createFutureIntentStore({ db: memDb() });
+  const exhausted = store.seed({ mediaType: 'movie', mediaId: 'tt-drain-exhausted' }).intent;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    store.claim(exhausted.id);
+    store.transition(exhausted.id, INTENT_STATES.FAILED, { last_error: 'attempts-exhausted:parked', next_check_at: 0 });
+    if (attempt < 5) store.retry(exhausted.id, 0);
+  }
+  store.seed({ mediaType: 'movie', mediaId: 'tt-drain-p1', season: 1, episode: 1, expectedAt: 1_000_000, deferReason: 'candidate-not-fulfillable' });
+  const p0 = store.seed({ mediaType: 'movie', mediaId: 'tt-drain-p0' }).intent;
+  store.transition(p0.id, INTENT_STATES.PUBLISHED_PREPARING, { next_check_at: 0 });
+  const logs = [];
+  const { fetchFn } = stubHttp();
+  const sched = createAnticipationScheduler({ store, baseUrl: 'http://test:3000', dataPlaneBaseUrl: 'http://dp:3001', fetchFn, clock: () => 1_000_000, log: (msg) => logs.push(msg) });
+  await sched.tickOnce();
+  const rows = logs.filter((msg) => msg.startsWith('scheduler due-row'));
+  assert.match(rows[0], /id=\d+ state=published_preparing class=P0/);
+  assert.ok(!rows.some((msg) => msg.includes('attempts-exhausted')));
 });
 
 test('future-not-released rows retain priority over ordinary backlog', () => {

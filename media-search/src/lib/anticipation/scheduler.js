@@ -27,6 +27,8 @@ const PLEX_CONFIRM_INTERVAL_MS = 500;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 6;
 const PARKED_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_ACTIONS_PER_TICK = 4;
+const MAX_TICK_WORK_MS = 30_000;
 // Keep the per-tick scan bounded, but large enough to pass a parked/exhausted
 // prefix. The loop still performs at most one actionable intent per tick.
 const DUE_SCAN_LIMIT = 50;
@@ -510,7 +512,12 @@ export function createAnticipationScheduler({
     const orderedDue = classified
       .filter(({ priority }) => priority.actionable)
       .sort((a, b) => (a.priority.rank - b.priority.rank) || (a.index - b.index));
-    for (const { row: original } of orderedDue) {
+    let actions = 0;
+    let lastResult = null;
+    let stopReason = 'snapshot-exhausted';
+    for (const { row: original, priority } of orderedDue) {
+      if (actions >= MAX_ACTIONS_PER_TICK) { stopReason = 'action-cap'; break; }
+      if (now() - ordinaryTickStartedAt >= MAX_TICK_WORK_MS) { stopReason = 'wall-clock-cap'; break; }
       let intent = original;
       // A released future-not-released row may have exhausted its pre-release
       // retry budget. Re-arm it and continue through the normal claim in this
@@ -539,15 +546,14 @@ export function createAnticipationScheduler({
       }
       try {
         const result = await processIntent(intent);
-        log(`scheduler due-row id=${intent.id} state=${intent.state} attempts=${intent.attempts} next=${intent.next_check_at} result=${JSON.stringify(result)}`);
+        lastResult = result;
+        actions += 1;
+        log(`scheduler due-row id=${intent.id} state=${intent.state} class=${priority.className} attempts=${intent.attempts} next=${intent.next_check_at} result=${JSON.stringify(result)}`);
         // Continue through the bounded due snapshot when a terminal/parked
         // row made no progress, so another episode can still advance.
         // An attempts-exhausted row is parked state, not useful work.
         if (result?.reason === 'attempts-exhausted') continue;
-        if (result?.acted || result?.exhausted) {
-          log(`scheduler selected id=${intent.id} durationMs=${now() - ordinaryTickStartedAt}`);
-          return result;
-        }
+        if (now() - ordinaryTickStartedAt >= MAX_TICK_WORK_MS) { stopReason = 'wall-clock-cap'; break; }
         continue;
       } catch (err) {
         store.transition(intent.id, INTENT_STATES.ANTICIPATED, {
@@ -557,7 +563,8 @@ export function createAnticipationScheduler({
         return { acted: true, intentId: intent.id, from: intent.state, to: 'anticipated', ms: 0, error: true };
       }
     }
-    return { acted: false };
+    log(`scheduler drain actions=${actions} stopReason=${stopReason} durationMs=${now() - ordinaryTickStartedAt}`);
+    return lastResult ?? { acted: actions > 0, actions, stopReason, durationMs: now() - ordinaryTickStartedAt };
   }
 
   return { tickOnce, processIntent, checkExhaustion, withdrawIntent, launchPrewarm };
