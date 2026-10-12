@@ -72,6 +72,7 @@ export function createAnticipationScheduler({
   tvPrepareDays = 3,
   tvPublishDays = 1,
   confirmConsumerPublicationFn = null,
+  notifyConsumerPublicationFn = null,
   reconcileRequestedSeasonFn = null,
   sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   // Near-release quality protection horizon: the speculative-publication
@@ -418,6 +419,19 @@ export function createAnticipationScheduler({
         return done(intent.state, { last_error: pub.error, next_check_at: now() + intentBackoffMs(intent.attempts) });
       }
       if (!pub.fulfilled) {
+        if (intent.last_error === PUBLICATION_UNCONFIRMED && typeof notifyConsumerPublicationFn === 'function') {
+          try {
+            const refresh = await notifyConsumerPublicationFn({
+              mediaId: intent.media_id,
+              mediaType: intent.media_type,
+              season: intent.season,
+              episode: intent.episode,
+            });
+            log(`anticipation publication retry refresh media=${intent.media_id} intent=${intent.id} result=${JSON.stringify(refresh)}`);
+          } catch (error) {
+            log(`anticipation publication retry refresh failed media=${intent.media_id} intent=${intent.id} error=${String(error?.message || error).slice(0, 200)}`);
+          }
+        }
         const initialConfirmation = intent.last_error !== PUBLICATION_UNCONFIRMED;
         const confirmed = await confirmConsumerPublication(intent, { initial: initialConfirmation });
         if (!confirmed) {

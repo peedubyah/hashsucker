@@ -55,6 +55,7 @@ import { createArrSync } from '../lib/anticipation/arr-sync.js';
 import { createSeasonReconciler } from '../lib/anticipation/season-reconciliation.js';
 import { resolveSeerrSeasonEpisodes } from '../lib/intents/providers/seerr.js';
 import { confirmPlexEpisode } from '../lib/consumers/plex.js';
+import { notifyPlex } from '../lib/requests/plex-notifier.js';
 
 // ─── consumer reconciliation ticker ─────────────────────────────────────
 // Read-only consumer presence checks on a slow cadence (default 15 min,
@@ -203,6 +204,13 @@ const anticipationScheduler = anticipationOn
       }));
     },
     confirmConsumerPublicationFn: confirmPlexEpisode,
+    notifyConsumerPublicationFn: async ({ mediaId, mediaType, season, episode }) => {
+      const entry = mediaType === 'series' || mediaType === 'tv'
+        ? discoveryCache.getVfsTvEntry?.(mediaId, season, episode)
+        : null;
+      if (!entry?.canonicalPath) return { notified: false, error: 'missing-authoritative-vfs-path' };
+      return notifyPlex({ mediaId, mediaType, canonicalPath: entry.canonicalPath });
+    },
     reconcileRequestedSeasonFn: seasonReconciler
       ? (season) => seasonReconciler.reconcileSeason({
         mediaId: season.media_id,
