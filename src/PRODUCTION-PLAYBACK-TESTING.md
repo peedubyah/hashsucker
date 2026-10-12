@@ -211,17 +211,26 @@ that. This is a robustness improvement, **not** a claimed root cause for the
 historical E04 failure — that was not reproduced here. E04 now passes session
 creation with full identity verification.
 
-### Known failure mode: transient PMS metadata timeout
+### Known failure modes: intermittent PMS-side session creation
 
-One observed intermittent failure is worth recording because the canary now
-surfaces it precisely. A start can reach the playback screen with
-`state: stopped, loaded: false` while the app reports
-`Http request failed: https://<pms>.plex.direct:32400/library/metadata/<rk>?…
-statusText: "timeout of 30000ms exceeded"`. That is the client's own 30 s HTTP
-timeout against PMS, not canary machinery: the canary classifies it
-`PMS_SESSION_NOT_CREATED` and records the client's reported error. Retrying the
-same fixture succeeded in six of six subsequent attempts. Do not paper over this
-as flaky automation; it is a real PMS-side latency observation.
+Two distinct client-visible failures have been observed at start, both
+classified `PMS_SESSION_NOT_CREATED`, both recorded with the client's own
+reported error, and neither attributable to canary machinery:
+
+1. **Metadata HTTP timeout.** The client's 30 s HTTP timeout against
+   `/library/metadata/<rk>`: `statusCode: 0`,
+   `statusText: "timeout of 30000ms exceeded"`, playback screen at
+   `state: stopped, loaded: false`. Observed once among ~15 runs; the same
+   fixture then passed six of six.
+2. **Play queue session creation 500.** `FailedToCreateSession`,
+   `"An error occurred loading items into the play queue."`,
+   `statusCode: 500` on `/playQueues`. Observed once in the final validation
+   matrix; the same fixture then passed four of four.
+
+Both are PMS-side HTTP failures surfaced through the client. Neither should be
+treated as flaky automation, and neither was reproduced enough to characterise
+as a latency tail versus a genuine PMS defect. Keep them in the evidence: the
+canary's job is to notice them, not to absorb them.
 
 ## Authoritative playback PASS criteria
 

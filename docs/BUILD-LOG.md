@@ -29,10 +29,11 @@ No planned work as completed. No vague "healthy." No speculative causes.
   session alive with no application notification. Start and teardown must be
   app-level; seek/observe is honestly native.
 - Unproven / still brittle:
-  - one intermittent `PMS_SESSION_NOT_CREATED` caused by the client's own 30 s
-    HTTP timeout against PMS metadata (surfaced with the client's error); not
-    reproduced since, retry succeeded. Needs a longer observation window to
-    decide whether it is a real PMS latency tail.
+  - two intermittent `PMS_SESSION_NOT_CREATED` failures observed at start, both
+    PMS-side HTTP errors surfaced through the client: one 30 s metadata timeout
+    (`statusCode: 0`), one `/playQueues` 500 (`FailedToCreateSession`). Neither
+    reproduced in subsequent runs; neither characterised as latency tail versus
+    defect. Documented as known failure modes rather than absorbed.
   - near-EOF seek can auto-advance into the next episode; mitigated by
     stopping every live controller, not just video.
   - PMS timeline reporting is ~10 s periodic, so seek→PMS-confirmation costs
