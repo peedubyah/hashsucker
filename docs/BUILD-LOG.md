@@ -4,6 +4,36 @@ Format per entry: date / phase-slice / status / observed changes /
 verification / production evidence / unproven / artifacts / next gate.
 No planned work as completed. No vague "healthy." No speculative causes.
 
+## 2026-10-12 — PMS session-creation failures diagnosed — LANDED
+
+- Changed: the canary now classifies a PMS-side session-creation rejection
+  separately (`PMS_SESSION_CREATE_REJECTED`) instead of collapsing it into a
+  generic start failure. Diagnostic only: it changes no control behaviour and
+  performs no retry or workaround.
+- Root cause PROVEN for the `/playQueues` 500 `FailedToCreateSession` from the
+  PMS request log: `Waited over 10 seconds for a busy database; giving up` →
+  500. The lock holder is the library scanner, which runs because the rclone
+  FUSE VFS reports directory change times that are always current
+  (`Directory change time … is in the future`, `Last refresh … older than
+  directory change time`), so PMS's freshness check never passes; HashSucker's
+  own `/library/sections/3/refresh?path=` calls amplify this (14 calls in two
+  minutes during the failure window, scanner actively inserting item IDs
+  549/550).
+- Deliberately NOT merged: the ~30 s `statusCode 0` metadata timeout. No
+  matching PMS-side error was found and the same request completed normally in
+  captured windows; a shared cause is plausible but unproven, so it stays a
+  separate class. A regression test pins that `pmsSessionCreateRejection` does
+  not fire for `statusCode 0`.
+- Refuted: stale sessions/lingering playQueues as a cause. The canary already
+  drains both; the failure is scanner DB contention, not prior queue state.
+- Verification: `test/plex-htpc-canary-seam.test.js` 13/13. Natural
+  reproduction only — 54 hybrid-canary starts in this session, 0 failures
+  (the proven instance came from PMS's own log history); E04 and MobLand S02E02
+  re-verified green with 0 leaked sessions.
+- Not fixed: the root cause is HashSucker-side (FUSE mount mtimes, refresh
+  cadence). No canary workaround, because a client-side guard would mask a
+  condition real users can also hit.
+
 ## 2026-10-12 — hybrid native/app Plex HTPC playback canary — LANDED
 
 - Changed: replaced the CDP-only playback control/observation path with a
