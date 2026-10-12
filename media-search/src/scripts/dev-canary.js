@@ -62,7 +62,7 @@ export const CANARY_FAILURE_CLASSES = [
   'PREFLIGHT', 'EVIDENCE_UNAVAILABLE', 'STALE_SESSION',
   'MPV_IPC_UNAVAILABLE', 'MPV_IPC_NOT_PLEX', 'MPV_IPC_DISCONNECTED', 'MPV_IPC_COMMAND_FAILED',
   'APP_BRIDGE_UNAVAILABLE', 'APP_START_FAILED', 'APP_STOP_FAILED',
-  'PMS_SESSION_NOT_CREATED', 'PLEX_IDENTITY_MISMATCH', 'MPV_IDENTITY_MISMATCH',
+  'PMS_SESSION_NOT_CREATED', 'PMS_SESSION_CREATE_REJECTED', 'PLEX_IDENTITY_MISMATCH', 'MPV_IDENTITY_MISMATCH',
   'PLAYBACK_START_TIMEOUT', 'NO_POST_SESSION_READ', 'NO_PROGRESSION', 'BYTE_CORRELATION',
   'SEEK_FORWARD', 'SEEK_BACKWARD', 'SEEK_NEAR_EOF',
   'CLEAN_STOP', 'PMS_TEARDOWN_FAILED', 'TIMEOUT', 'UNKNOWN_WITH_SNAPSHOT',
@@ -82,6 +82,7 @@ const CLASSIFY = {
   [APP_ERRORS.START_FAILED]: 'APP_START_FAILED',
   [APP_ERRORS.STOP_FAILED]: 'APP_STOP_FAILED',
   PMS_SESSION_NOT_CREATED: 'PMS_SESSION_NOT_CREATED',
+  PMS_SESSION_CREATE_REJECTED: 'PMS_SESSION_CREATE_REJECTED',
   PLEX_IDENTITY_MISMATCH: 'PLEX_IDENTITY_MISMATCH',
   MPV_IDENTITY_MISMATCH: 'MPV_IDENTITY_MISMATCH',
   PLAYBACK_START_TIMEOUT: 'PLAYBACK_START_TIMEOUT',
@@ -269,6 +270,37 @@ export function findSeekRead(rows, { targetMs, durationMs, mediaSize, toleranceM
   return [{ ...match, strictWindow: inWindow(match) }, cache[0] || null];
 }
 
+/**
+ * Detect a PMS-side rejection of session creation from the client's reported
+ * playback error. Plex HTPC surfaces the PMS HTTP status and the handler reason
+ * in `playbackError`; an HTTP 500 carrying `FailedToCreateSession` is the
+ * observed signature of PMS giving up on a busy library database.
+ * Diagnostic only — used to classify, never to retry.
+ */
+export function pmsSessionCreateRejection(clientError) {
+  if (!clientError) return null;
+  const text = safeJson(clientError);
+  const status = clientError?.error?.error?.response?.statusCode
+    ?? clientError?.error?.response?.statusCode
+    ?? null;
+  const reason = clientError?.error?.logMessage || clientError?.error?.message || '';
+  if (status === 500 && /FailedToCreateSession/i.test(text)) {
+    return `status=500 ${String(reason).slice(0, 160)}`;
+  }
+  if (/FailedToCreateSession/i.test(text)) {
+    return `${status ? `status=${status} ` : ''}${String(reason).slice(0, 160)}`;
+  }
+  return null;
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value).slice(0, 600);
+  } catch {
+    return String(value).slice(0, 600);
+  }
+}
+
 export function classifyRead(read) {
   if (!read) return { classification: 'SEEK_PASS_BUFFERED', backendRequired: false };
   return {
@@ -400,7 +432,27 @@ async function runFixture(runNo, { app, player, dataPlane, fixture: fx }) {
   });
 
   // 3. PMS session creation and identity.
-  const active = await waitFor(() => sessionFor(fx.ratingKey), timeoutMs, 'PMS session creation', 'PMS_SESSION_NOT_CREATED');
+  //    A PMS-rejected create is a different defect from "no session arrived",
+  //    and the distinction is diagnostic only — it changes no behaviour. PMS
+  //    rejects session creation with HTTP 500 `FailedToCreateSession` when it
+  //    gives up waiting on a busy library database during scanner activity;
+  //    "no session arrived" with no client error is a separate condition. Both
+  //    are reported verbatim; neither is retried or worked around here.
+  let active = null;
+  try {
+    active = await waitFor(() => sessionFor(fx.ratingKey), timeoutMs, 'PMS session creation', 'PMS_SESSION_NOT_CREATED');
+  } catch (err) {
+    if (err.code === 'PMS_SESSION_NOT_CREATED') {
+      const clientError = await app.diagnose();
+      const rejected = pmsSessionCreateRejection(clientError);
+      if (rejected) {
+        throw fail('PMS_SESSION_CREATE_REJECTED', `PMS rejected session creation: ${rejected}`, {
+          evidence: { clientError: safeJson(clientError) },
+        });
+      }
+    }
+    throw err;
+  }
   marks.session = Date.now();
   const part = (active.Media || []).flatMap((m) => m.Part || []).find((p) => String(p.id) === String(fx.part));
   const clientInfo = active.Player || {};

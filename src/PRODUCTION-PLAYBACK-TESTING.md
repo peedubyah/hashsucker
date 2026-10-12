@@ -118,7 +118,8 @@ Failure classification is per-stage, not generic: `APP_START_FAILED`,
 `PMS_SESSION_NOT_CREATED`, `MPV_IPC_UNAVAILABLE`, `MPV_IPC_NOT_PLEX`,
 `MPV_IDENTITY_MISMATCH`, `PLEX_IDENTITY_MISMATCH`, `NO_POST_SESSION_READ`,
 `NO_PROGRESSION`, `SEEK_FORWARD` / `SEEK_BACKWARD` / `SEEK_NEAR_EOF`,
-`APP_STOP_FAILED`, `PMS_TEARDOWN_FAILED`, `EVIDENCE_UNAVAILABLE`,
+`APP_STOP_FAILED`, `PMS_TEARDOWN_FAILED`, `PMS_SESSION_CREATE_REJECTED`,
+`EVIDENCE_UNAVAILABLE`,
 `STALE_SESSION`. A wrong Plex item is never accepted as the expected fixture.
 All canary output is redacted for `X-Plex-Token`; resolved media URLs carry the
 token, so evidence must never reach a transcript unredacted.
@@ -524,3 +525,82 @@ the active Plex session remained usable across the tested restart window.
 - playback after Rust/data-plane restart;
 - Plex forward and reverse library audits;
 - playback start/seek latency measurements.
+
+## PMS-side session-creation failures (diagnosed 2026-10-12)
+
+Two intermittent start failures were investigated using the hybrid canary as
+the trigger/observer. Findings, with the exact failing transaction:
+
+### The `/playQueues` 500 (`FailedToCreateSession`) — root cause proven
+
+PMS request log, all from Plex HTPC on loopback:
+
+```
+16:40:59.563  GET  /library/metadata/501?includeUserState=1   [Req#198bb]
+16:40:59.824  POST /playQueues?own=1&excludeElements=...&uri=server://<pms>/com.plexapp.plugins.library/library/metadata/509&type=video&continuous=1&includeRelated=0&repeat=0&key=/library/metadata/534   [Req#198c3]
+16:41:02.753  [Req#198c3] PlayQueue: Start index: 0 End index: 3 Count: 4
+16:41:09.590  ERROR [Req#198bb] Waited over 10 seconds for a busy database; giving up.
+16:41:09.590  ERROR [Req#198bb] Saving activity history aborted with DB exception
+16:41:12.765  ERROR [Req#198c3] Waited over 10 seconds for a busy database; giving up.
+16:41:12.765  ERROR Got exception from request handler: std::exception
+16:41:12.765  Completed: 500 POST /playQueues
+```
+
+`FailedToCreateSession` is **not a play-queue defect**. It is PMS's SQLite
+busy-database wait expiring: the request waits up to 10 s, PMS gives up, and
+returns 500. The lock holder is the **library scanner**.
+
+**What held the lock, and why it runs at all.** Two proven amplifiers:
+
+1. **The rclone FUSE VFS mount reports directory change times that are always
+   current.** PMS logs `WARN … Directory change time at: "/mnt/hashsucker-vfs/…"
+   is in the future: <now>` and `Last refresh (T) appears to be older than
+   directory change time (<now>)`, so PMS's freshness check can never be
+   satisfied. It perpetually decides "need to refresh local media agent" and
+   schedules scanner work.
+2. **HashSucker's own Plex section refresh** — `GET
+   /library/sections/3/refresh?path=/mnt/hashsucker-vfs/TV/<show>/Season NN`
+   — which directly launches a scanner. During the failure window there were 14
+   such calls in two minutes (4 distinct paths, several for the same path
+   seconds apart, consistent with the coalescer's debounce semantics rather than
+   a defect).
+
+During the window the scanner was actively inserting items (`Added new metadata
+item … with ID 549/550`, `Scanner activity on section 3: 6 added …`), holding the
+SQLite write lock for tens of seconds.
+
+**Failure boundary:** play queue creation stalls on a busy library database
+(scanner-held write lock), not in queue/metadata/media/session logic. The
+narrowest proven subsystem is **PMS library-scanner DB contention**, entered via
+PMS's own freshness check on a FUSE mount whose directory mtimes never age.
+
+### The ~30 s `statusCode 0` metadata timeout — separate, unproven cause
+
+The client reports a 30 s HTTP timeout against
+`/library/metadata/<rk>?checkFiles=1` with `statusCode: 0` and no server-side
+error. In the captured PMS windows the same request completed normally (200 in
+~160 ms), and no matching PMS-side error was found. A shared cause is *plausible*
+(scanner contention stalling the request past the client's timeout) but is **not
+proven**, so it is deliberately **not merged** with the 500 class. The canary
+classifies them separately: `PMS_SESSION_CREATE_REJECTED` (HTTP 500 +
+`FailedToCreateSession`, evidence-backed) versus `PMS_SESSION_NOT_CREATED` /
+client timeout (unclassified cause). `pmsSessionCreateRejection` only fires on
+the 500 signature, and regression tests pin that it does not fire for
+`statusCode 0`.
+
+### Session-queue interaction — refuted as a cause
+
+The canary already drains stale sessions and handles deferred queue advance. In
+the captured failure there was no stale session or lingering playQueue
+contributing: the failure is PMS-side database contention, correlated with
+scanner activity, not with prior session/queue state.
+
+### Mitigation assessment
+
+**No canary workaround is implemented or recommended.** The failure is
+HashSucker-infrastructure-driven (rclone FUSE directory mtimes + refresh
+cadence), so any client-side guard — e.g. waiting for scan completion — would
+mask a condition real users can also hit. The honest options are HashSucker-side:
+fix or accept the mount's directory mtime behaviour, or reduce refresh
+frequency. The canary's only change is diagnostic: it now names the PMS
+rejection separately instead of collapsing it into a generic start failure.

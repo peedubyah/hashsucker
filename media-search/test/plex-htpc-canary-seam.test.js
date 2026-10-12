@@ -8,6 +8,7 @@ import {
   fail,
   findSeekRead,
   freshFor,
+  pmsSessionCreateRejection,
   redactSecrets,
   stageKey,
 } from '../src/scripts/dev-canary.js';
@@ -128,4 +129,39 @@ test('ensureMpvConfig creates the Plex user-data directory when absent', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('pmsSessionCreateRejection recognises only the PMS 500 FailedToCreateSession signature', () => {
+  const rejected = {
+    error: {
+      error: { response: { statusCode: 500, statusText: 'Internal Server Error' } },
+      logMessage: 'Reason: FailedToCreateSession, Failed to create playback session!',
+      message: 'An error occurred loading items into the play queue.',
+    },
+  };
+  assert.match(pmsSessionCreateRejection(rejected), /status=500 .*FailedToCreateSession/);
+});
+
+test('pmsSessionCreateRejection does not merge the client 30s-timeout failure class', () => {
+  // A 30 s client HTTP timeout (statusCode 0) is a distinct failure with no
+  // proven shared cause; it must NOT be classified as a PMS rejection.
+  const timedOut = {
+    error: {
+      response: { statusCode: 0, statusText: 'timeout of 30000ms exceeded' },
+      message: 'Http request failed: https://<pms>/library/metadata/514?checkFiles=1',
+    },
+  };
+  assert.equal(pmsSessionCreateRejection(timedOut), null);
+  // A 500 that is NOT FailedToCreateSession is also a different defect.
+  const other500 = { error: { response: { statusCode: 500 }, message: 'unrelated handler error' } };
+  assert.equal(pmsSessionCreateRejection(other500), null);
+  assert.equal(pmsSessionCreateRejection(null), null);
+});
+
+test('PMS_SESSION_CREATE_REJECTED is a first-class, separately classified failure', () => {
+  const err = fail('PMS_SESSION_CREATE_REJECTED', 'PMS rejected session creation: status=500 ...');
+  assert.equal(classify(err), 'PMS_SESSION_CREATE_REJECTED');
+  assert.ok(CANARY_FAILURE_CLASSES.includes('PMS_SESSION_CREATE_REJECTED'));
+  // and it stays distinct from the generic class
+  assert.notEqual(classify(err), classify(fail('PMS_SESSION_NOT_CREATED', 'x')));
 });
