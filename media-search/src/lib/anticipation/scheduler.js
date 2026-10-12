@@ -238,9 +238,14 @@ export function createAnticipationScheduler({
 
   async function confirmConsumerPublication(intent, { initial = false } = {}) {
     if (typeof confirmConsumerPublicationFn !== 'function') return false;
-    const expectedPartFile = intent.media_type === 'series' && intent.season != null && intent.episode != null
-      ? `/mnt/hashsucker-vfs/TV/${intent.media_id}/Season ${String(intent.season).padStart(2, '0')}/${intent.media_id} - S${String(intent.season).padStart(2, '0')}E${String(intent.episode).padStart(2, '0')}.mp4`
+    const vfsEntry = intent.media_type === 'series' && intent.season != null && intent.episode != null
+      ? cache?.getVfsTvEntry?.(intent.media_id, intent.season, intent.episode)
       : null;
+    const expectedPartFile = vfsEntry?.canonicalPath
+      ? `/mnt/hashsucker-vfs/${String(vfsEntry.canonicalPath).replace(/^\/+/, '')}`
+      : intent.media_type === 'series' && intent.season != null && intent.episode != null
+        ? `/mnt/hashsucker-vfs/TV/${intent.media_id}/Season ${String(intent.season).padStart(2, '0')}/${intent.media_id} - S${String(intent.season).padStart(2, '0')}E${String(intent.episode).padStart(2, '0')}.mp4`
+        : null;
     const attempts = initial ? PLEX_CONFIRM_ATTEMPTS : 1;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
