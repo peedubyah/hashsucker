@@ -29,6 +29,8 @@ const MAX_ATTEMPTS = 6;
 const PARKED_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ACTIONS_PER_TICK = 8;
 const MAX_TICK_WORK_MS = 30_000;
+const PUBLISHED_CONFIRMATION_RETRY_MS = 60 * 60 * 1000;
+const PUBLICATION_UNCONFIRMED = 'consumer-publication-unconfirmed';
 // Keep the per-tick scan bounded, but large enough to pass a parked/exhausted
 // prefix. The loop still performs at most one actionable intent per tick.
 const DUE_SCAN_LIMIT = 50;
@@ -234,12 +236,13 @@ export function createAnticipationScheduler({
     }
   }
 
-  async function confirmConsumerPublication(intent) {
+  async function confirmConsumerPublication(intent, { initial = false } = {}) {
     if (typeof confirmConsumerPublicationFn !== 'function') return false;
     const expectedPartFile = intent.media_type === 'series' && intent.season != null && intent.episode != null
       ? `/mnt/hashsucker-vfs/TV/${intent.media_id}/Season ${String(intent.season).padStart(2, '0')}/${intent.media_id} - S${String(intent.season).padStart(2, '0')}E${String(intent.episode).padStart(2, '0')}.mp4`
       : null;
-    for (let attempt = 0; attempt < PLEX_CONFIRM_ATTEMPTS; attempt += 1) {
+    const attempts = initial ? PLEX_CONFIRM_ATTEMPTS : 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
         const result = await confirmConsumerPublicationFn({
           mediaId: intent.media_id,
@@ -249,7 +252,7 @@ export function createAnticipationScheduler({
         });
         if (result?.visible === true && result.mediaPart?.file === expectedPartFile) return true;
       } catch {}
-      if (attempt + 1 < PLEX_CONFIRM_ATTEMPTS) await sleepFn(PLEX_CONFIRM_INTERVAL_MS);
+      if (initial && attempt + 1 < attempts) await sleepFn(PLEX_CONFIRM_INTERVAL_MS);
     }
     return false;
   }
@@ -410,15 +413,16 @@ export function createAnticipationScheduler({
         return done(intent.state, { last_error: pub.error, next_check_at: now() + intentBackoffMs(intent.attempts) });
       }
       if (!pub.fulfilled) {
-        const confirmed = await confirmConsumerPublication(intent);
+        const initialConfirmation = intent.last_error !== PUBLICATION_UNCONFIRMED;
+        const confirmed = await confirmConsumerPublication(intent, { initial: initialConfirmation });
         if (!confirmed) {
           // Handoff/VFS/byte readiness are not consumer publication. Keep the
           // exact prepared truth retryable and do not probe or mark playable.
-          log(`anticipation publication not confirmed media=${intent.media_id} intent=${intent.id}`);
+          log(`anticipation publication not confirmed media=${intent.media_id} intent=${intent.id} mode=${initialConfirmation ? 'initial' : 'retry'}`);
           return done(INTENT_STATES.PUBLISHED_PREPARING, {
             torrent_file_id: pub.torrentFileId,
-            last_error: 'consumer-publication-unconfirmed',
-            next_check_at: now() + intentBackoffMs(intent.attempts),
+            last_error: PUBLICATION_UNCONFIRMED,
+            next_check_at: now() + (initialConfirmation ? intentBackoffMs(intent.attempts) : PUBLISHED_CONFIRMATION_RETRY_MS),
           });
         }
       }

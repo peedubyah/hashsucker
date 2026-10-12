@@ -355,6 +355,28 @@ test('far-future expectations sleep to window without provider calls', async () 
   assert.equal(after.next_check_at, nowMs + 60 * day - 30 * day, 'pushed to prepare window start');
 });
 
+test('published retry uses one Plex confirmation and longer durable backoff', async () => {
+  const store = createFutureIntentStore({ db: memDb() });
+  const { intent } = store.seed({ mediaType: 'series', mediaId: 'tt-confirm', season: 1, episode: 1 });
+  store.transition(intent.id, INTENT_STATES.PUBLISHED_PREPARING, { torrent_file_id: 'tf_confirm', next_check_at: 0, last_error: 'consumer-publication-unconfirmed' });
+  let confirms = 0;
+  const sched = createAnticipationScheduler({
+    store, baseUrl: 'http://test:3000', dataPlaneBaseUrl: 'http://dp:3001', clock: () => 1_000_000,
+    sleepFn: async () => {},
+    fetchFn: async (url) => {
+      if (url.endsWith('/api/media-request')) return { status: 200, text: async () => JSON.stringify({ handoff: { torrentFileId: 'tf_confirm' }, fulfilled: false }) };
+      if (url.includes('/files/')) return { status: 206, text: async () => '', body: stubBody() };
+      throw new Error(`unexpected ${url}`);
+    },
+    confirmConsumerPublicationFn: async () => { confirms += 1; return { visible: false, mediaPart: null }; },
+  });
+  await sched.tickOnce();
+  assert.equal(confirms, 1);
+  const row = store.list({}).find((r) => r.id === intent.id);
+  assert.equal(row.state, INTENT_STATES.PUBLISHED_PREPARING);
+  assert.equal(row.next_check_at, 1_000_000 + 60 * 60 * 1000);
+});
+
 test('satisfied intents park without fulfillment action', async () => {
   const store = createFutureIntentStore({ db: memDb() });
   store.seed({ mediaType: 'movie', mediaId: 'ttS', source: 'radarr:movie:9' });
