@@ -27,7 +27,7 @@ const PLEX_CONFIRM_INTERVAL_MS = 500;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 6;
 const PARKED_MS = 7 * 24 * 60 * 60 * 1000;
-const MAX_ACTIONS_PER_TICK = 4;
+const MAX_ACTIONS_PER_TICK = 8;
 const MAX_TICK_WORK_MS = 30_000;
 // Keep the per-tick scan bounded, but large enough to pass a parked/exhausted
 // prefix. The loop still performs at most one actionable intent per tick.
@@ -40,14 +40,16 @@ export function classifyIntentPriority(intent, nowMs, maxAttempts = MAX_ATTEMPTS
     return { className: 'P5', rank: 5, actionable: false };
   }
   if (intent.state === INTENT_STATES.PUBLISHED_PREPARING) return { className: 'P0', rank: 0, actionable: true };
-  if (intent.season_owners && intent.expected_at != null && intent.expected_at <= nowMs) {
+  const airedRequested = intent.season_owners && intent.expected_at != null && intent.expected_at <= nowMs;
+  if (airedRequested && intent.state === INTENT_STATES.PREPARED) {
     return { className: 'P1', rank: 1, actionable: true };
   }
-  if (intent.state === INTENT_STATES.PREPARED) return { className: 'P2', rank: 2, actionable: true };
-  if (intent.state === INTENT_STATES.ANTICIPATED && (intent.expected_at == null || intent.expected_at <= nowMs)) {
-    return { className: 'P3', rank: 3, actionable: true };
+  if (airedRequested && (intent.state === INTENT_STATES.ANTICIPATED || intent.state === INTENT_STATES.FAILED)) {
+    return { className: 'P2', rank: 2, actionable: true };
   }
-  if (intent.state === INTENT_STATES.FAILED) return { className: 'P4', rank: 4, actionable: true };
+  if (intent.state === INTENT_STATES.PREPARED) return { className: 'P3', rank: 3, actionable: true };
+  if (intent.state === INTENT_STATES.ANTICIPATED) return { className: 'P4', rank: 4, actionable: true };
+  if (intent.state === INTENT_STATES.FAILED) return { className: 'P5', rank: 5, actionable: true };
   return { className: 'P5', rank: 5, actionable: false };
 }
 

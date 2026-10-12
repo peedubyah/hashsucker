@@ -254,10 +254,11 @@ test('ordinary drain executes up to four actionable rows in priority order', asy
 test('priority classifier uses durable intent state and ownership fields', () => {
   const nowMs = 1_000_000;
   assert.equal(classifyIntentPriority({ state: 'published_preparing' }, nowMs).className, 'P0');
-  assert.equal(classifyIntentPriority({ state: 'anticipated', season_owners: 'season:x:s01', expected_at: nowMs }, nowMs).className, 'P1');
-  assert.equal(classifyIntentPriority({ state: 'prepared' }, nowMs).className, 'P2');
-  assert.equal(classifyIntentPriority({ state: 'anticipated', expected_at: nowMs }, nowMs).className, 'P3');
-  assert.equal(classifyIntentPriority({ state: 'failed', attempts: 1 }, nowMs).className, 'P4');
+  assert.equal(classifyIntentPriority({ state: 'prepared', season_owners: 'season:x:s01', expected_at: nowMs }, nowMs).className, 'P1');
+  assert.equal(classifyIntentPriority({ state: 'anticipated', season_owners: 'season:x:s01', expected_at: nowMs }, nowMs).className, 'P2');
+  assert.equal(classifyIntentPriority({ state: 'prepared' }, nowMs).className, 'P3');
+  assert.equal(classifyIntentPriority({ state: 'anticipated', expected_at: nowMs }, nowMs).className, 'P4');
+  assert.equal(classifyIntentPriority({ state: 'failed', attempts: 1 }, nowMs).className, 'P5');
   assert.equal(classifyIntentPriority({ state: 'failed', attempts: 6 }, nowMs).actionable, false);
   assert.equal(classifyIntentPriority({ state: 'anticipated', expected_at: nowMs + 1, defer_reason: 'future-not-released' }, nowMs).actionable, false);
 });
