@@ -317,7 +317,10 @@ export function createMovieWebDav({
 
   async function getCatalog() {
     const handoffs = searchCache.listMoviePlaybackHandoffs();
-    const entries = searchCache.listVfsMovieEntries();
+    // Materialization may repair/converge rows while this catalog is being
+    // built. Do not validate a stale pre-materialization VFS snapshot against
+    // the current handoff selected below.
+    let entries = searchCache.listVfsMovieEntries();
     const watermark = catalogWatermark(handoffs, entries);
     const nowMs = now();
     if (
@@ -334,6 +337,7 @@ export function createMovieWebDav({
       if (isUnpublishedHandoff(controlPlaneStore, handoff)) continue;
       await materializeVfsEntry(searchCache, handoff, controlPlaneStore, now, { allowLegacy: true });
     }
+    entries = searchCache.listVfsMovieEntries();
     const nextStates = [];
     for (const entry of entries) {
       let state = states.get(entry.releaseKey);

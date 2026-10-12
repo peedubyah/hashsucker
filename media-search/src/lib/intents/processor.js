@@ -28,6 +28,9 @@ import { searchByMedia } from '../../api/media-request.js';
  * @property {boolean} [dryRun=false] - If true, don't persist results
  * @property {Function} [log] - Optional logging function
  * @property {number} [minIntervalMs=0] - Minimum ms since last processing (0 = process all)
+ * @property {Function} [liveDiscoveryFn] - Live discovery seam override,
+ *   threaded to searchByMedia (default: bloodhound runner). Injectable for
+ *   deterministic tests; production omits it.
  */
 
 export class MediaIntentProcessor {
@@ -47,7 +50,8 @@ export class MediaIntentProcessor {
    * @returns {Promise<ProcessingResult>}
    */
   async process(options = {}) {
-    const { limit = 50, dryRun = false, log, minIntervalMs = 0 } = options;
+    const { limit = 50, dryRun = false, log, minIntervalMs = 0, liveDiscoveryFn = null } = options;
+    const liveSeam = typeof liveDiscoveryFn === 'function' ? { liveDiscoveryFn } : {};
     const startedAt = Date.now();
 
     const result = {
@@ -83,6 +87,8 @@ export class MediaIntentProcessor {
             sourceLabel: intent.sourceLabel,
             requestedBy: intent.requestedBy,
             priority: intent.priority,
+            intentId: intent.id,
+            ...liveSeam,
             persist: false,
           });
 
@@ -92,7 +98,10 @@ export class MediaIntentProcessor {
           result.successful++;
           result.resultsFound += searchResult.total;
         } else {
-          // Execute search and persist results
+          // Execute search and persist results. The originating intent id
+          // is threaded through so persistence links (not duplicates) the
+          // intent row — otherwise every worker pass upserts a phantom
+          // duplicate (series/tv media-type duality defeats the dedupe).
           const searchResult = await searchByMedia(this.cache, {
             mediaId: intent.mediaId,
             mediaType: intent.mediaType,
@@ -104,6 +113,8 @@ export class MediaIntentProcessor {
             sourceLabel: intent.sourceLabel,
             requestedBy: intent.requestedBy,
             priority: intent.priority,
+            intentId: intent.id,
+            ...liveSeam,
             persist: true,
           });
 

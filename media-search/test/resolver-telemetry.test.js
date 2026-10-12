@@ -201,6 +201,12 @@ test('integration: successful 307 redirect records telemetry', async () => {
     controlPlaneStore: controlPlane,
     eventStore,
     revalidator,
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://torbox.test/torrents/requestdl?token=test&torrent_id=1',
+      placementId: 'pl_test',
+      providerFileId: 'pf_test',
+      recovered: false,
+    }),
   });
 
   const input = Readable.from([]);
@@ -241,6 +247,7 @@ test('integration: missing selection records failed telemetry', async () => {
 
   const handler = createRequestHandler({
     searchCache: cache,
+    controlPlaneStore: createControlPlaneStore(),
     eventStore,
   });
 
@@ -312,6 +319,12 @@ test('integration: provider check failure records telemetry without blocking', a
     controlPlaneStore: controlPlane,
     eventStore,
     revalidator,
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://torbox.test/torrents/requestdl?token=test&torrent_id=1',
+      placementId: 'pl_test',
+      providerFileId: 'pf_test',
+      recovered: false,
+    }),
   });
 
   const input = Readable.from([]);
@@ -400,6 +413,12 @@ test('integration: telemetry failure does not block resolution', async () => {
     controlPlaneStore: controlPlane,
     eventStore: brokenEventStore,
     revalidator,
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://torbox.test/torrents/requestdl?token=test&torrent_id=1',
+      placementId: 'pl_test',
+      providerFileId: 'pf_test',
+      recovered: false,
+    }),
   });
 
   const input = Readable.from([]);
@@ -462,6 +481,12 @@ test('integration: uncached result records failed telemetry', async () => {
     controlPlaneStore: controlPlane,
     eventStore,
     revalidator,
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://torbox.test/torrents/requestdl?token=test&torrent_id=1',
+      placementId: 'pl_test',
+      providerFileId: 'pf_test',
+      recovered: false,
+    }),
   });
 
   const input = Readable.from([]);
@@ -544,6 +569,12 @@ test('integration: debug endpoint returns resolver telemetry', async () => {
     controlPlaneStore: controlPlane,
     eventStore,
     revalidator,
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://torbox.test/torrents/requestdl?token=test&torrent_id=1',
+      placementId: 'pl_test',
+      providerFileId: 'pf_test',
+      recovered: false,
+    }),
   });
 
   // First, make a resolver request to generate telemetry

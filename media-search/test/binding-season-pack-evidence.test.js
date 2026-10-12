@@ -203,14 +203,14 @@ function expectedCanonicalPath(ep) {
   return `TV/${TITLE}/Season 01/${TITLE} - S01E${String(ep.episode).padStart(2, '0')}.mkv`;
 }
 
-test('A1 — season pack: 4 episodes with shared releaseKey:hash:torrent each materialize a distinct binding', (t) => {
+test('A1 — season pack: 4 episodes with shared releaseKey:hash:torrent each materialize a distinct binding', async (t) => {
   const { cache, store } = buildStoreAndCache(t);
   const { placementId } = seedSeasonPackFixture(store);
 
   // Materialize all 4 episodes in sequence (live replay order).
   for (const ep of EPISODES) {
     const handoff = seasonPackHandoff(ep, placementId);
-    const entry = materializeVfsEntry(cache, handoff, store, () => 1_000, { allowLegacy: false });
+    const entry = await materializeVfsEntry(cache, handoff, store, () => 1_000, { allowLegacy: false });
     assert.ok(entry, `E${String(ep.episode).padStart(2, '0')} must materialize a VFS row`);
     assert.equal(entry.torrentFileId, ep.torrentFileId);
     assert.equal(entry.canonicalPath, expectedCanonicalPath(ep));
@@ -278,14 +278,14 @@ test('A1 — season pack: 4 episodes with shared releaseKey:hash:torrent each ma
   }
 });
 
-test('A2 — replay of a single episode is idempotent (no duplicate library_item, no new binding version)', (t) => {
+test('A2 — replay of a single episode is idempotent (no duplicate library_item, no new binding version)', async (t) => {
   const { cache, store } = buildStoreAndCache(t);
   const { placementId } = seedSeasonPackFixture(store);
   const ep = EPISODES[0];
   const handoff = seasonPackHandoff(ep, placementId);
 
-  const first = materializeVfsEntry(cache, handoff, store, () => 1_000, { allowLegacy: false });
-  const second = materializeVfsEntry(cache, handoff, store, () => 1_500, { allowLegacy: false });
+  const first = await materializeVfsEntry(cache, handoff, store, () => 1_000, { allowLegacy: false });
+  const second = await materializeVfsEntry(cache, handoff, store, () => 1_500, { allowLegacy: false });
   assert.equal(first.torrentFileId, second.torrentFileId);
   assert.equal(first.canonicalPath, second.canonicalPath);
 
@@ -342,13 +342,13 @@ test('A3 — concurrent replay of all 4 episodes converges to exactly 1 binding 
   assert.equal(vfsRows.length, 4, 'concurrent replay must not duplicate vfs_tv_entries');
 });
 
-test('A4 — provider ID churn preserves TorrentFile identity through re-activation', (t) => {
+test('A4 — provider ID churn preserves TorrentFile identity through re-activation', async (t) => {
   const { cache, store } = buildStoreAndCache(t);
   const { placementId } = seedSeasonPackFixture(store);
 
   // First wave: 4 episodes bind to provider_file_id 0..3.
   for (const ep of EPISODES) {
-    const entry = materializeVfsEntry(
+    const entry = await materializeVfsEntry(
       cache,
       seasonPackHandoff(ep, placementId),
       store,
@@ -390,7 +390,7 @@ test('A4 — provider ID churn preserves TorrentFile identity through re-activat
       providerFileId: `p${i + 1}`,
     };
     handoff.torrentFileIdentity.torrentFileId = ep.torrentFileId;
-    const entry = materializeVfsEntry(
+    const entry = await materializeVfsEntry(
       cache,
       handoff,
       store,
@@ -403,9 +403,11 @@ test('A4 — provider ID churn preserves TorrentFile identity through re-activat
 
   // Each episode has exactly 1 active binding pointing at the new
   // provider_file_id but the same torrent_file_id (the durable identity
-  // survives provider churn). The version increments because the
-  // provider_file_id changed and activateBinding's identity-reuse path
-  // keys on (release_key, placement_id, provider_file_id, exposure_id).
+  // survives provider churn). Same-TorrentFile route changes update the
+  // execution coordinates IN PLACE — version unchanged, no superseded
+  // history — because representation identity (the TorrentFile/bytes) did
+  // not change; only the route did. Version history is reserved for
+  // representation changes.
   const active = store.db.prepare(
     "SELECT * FROM bindings WHERE status = 'active' ORDER BY library_item_id",
   ).all();
@@ -432,23 +434,19 @@ test('A4 — provider ID churn preserves TorrentFile identity through re-activat
       'torrent_file_id must be stable across provider ID churn',
     );
     assert.equal(providerFileRow.mapping_state, 'mapped');
-    // Version bumped because the provider_file_id differs from the
-    // pre-churn binding.
-    assert.ok(
-      binding.version >= 2,
-      `version must increment on provider_id churn, got ${binding.version}`,
-    );
-    // The pre-churn binding is marked superseded, not deleted.
+    // Version unchanged: same TorrentFile, new route updates coordinates
+    // in place (no superseded history for route-only churn).
+    assert.equal(binding.version, 1, 'version unchanged on route-only churn');
+    assert.equal(binding.torrent_file_id, ep.torrentFileId, 'binding still names the same TorrentFile');
     const allVersions = store.db.prepare(
       'SELECT version, status FROM bindings WHERE library_item_id = ? ORDER BY version',
     ).all(libItem.id);
-    assert.equal(allVersions.length, 2, 'churn produces exactly 1 superseded + 1 active');
-    assert.equal(allVersions[0].status, 'superseded');
-    assert.equal(allVersions[1].status, 'active');
+    assert.equal(allVersions.length, 1, 'route churn produces no extra binding versions');
+    assert.equal(allVersions[0].status, 'active');
   }
 });
 
-test('A5 — ambiguous / non-authoritative provider mapping fails closed (no binding written)', (t) => {
+test('A5 — ambiguous / non-authoritative provider mapping fails closed (no binding written)', async (t) => {
   const { cache, store } = buildStoreAndCache(t);
   // Seed the placement/inventory but mark every provider file as
   // 'conflict' (canonical-path collision) — the mapping is NOT
@@ -461,44 +459,33 @@ test('A5 — ambiguous / non-authoritative provider mapping fails closed (no bin
 
   // No candidate_file_mappings row was ever written for this torrent-
   // level releaseKey (the fixture never calls recordFileMapping).
-  // Demote any seed-row that materialized a provider_files.torrent_file_id.
-  // Belt and suspenders: also mark placement as not ready so that the
-  // freshness/readiness guards hold too — except we want to test the
-  // mapping guard specifically, not the readiness guard. The
-  // `seedSeasonPackFixture({ mappingState: 'conflict' })` already sets
-  // mapping_state='conflict' which fails the provider_files evidence
-  // path; combined with no candidate_file_mappings row, both evidence
-  // paths are empty.
   const mapping = store.db.prepare(
     'SELECT * FROM candidate_file_mappings WHERE release_key = ? AND placement_id = ?',
   ).get(TORRENT_LEVEL_RELEASE_KEY, placementId);
   assert.equal(mapping, undefined, 'precondition: no resolver candidate_file_mappings row');
 
+  // Handoffs carry NO independent proof here (no torrentFileId, no
+  // identity triple): nothing was ever bound for these episodes, so
+  // there is no durable truth to replay. (A handoff that already
+  // carries a proven TorrentFile identity triple replays that truth by
+  // design — see A1/A4 — so testing the mapping guard requires
+  // unproven handoffs.)
   for (const ep of EPISODES) {
-    // Materialize the VFS row — this should still succeed (the VFS row
-    // is the published presentation; it does not depend on the binding).
-    const entry = materializeVfsEntry(
-      cache,
-      seasonPackHandoff(ep, placementId),
-      store,
-      () => 1_000,
-      { allowLegacy: false },
+    const handoff = seasonPackHandoff(ep, placementId);
+    delete handoff.torrentFileId;
+    delete handoff.torrentFileIdentity;
+    await assert.rejects(
+      materializeVfsEntry(cache, handoff, store, () => 1_000, { allowLegacy: false }),
+      /TorrentFile identity is required/,
+      `E${String(ep.episode).padStart(2, '0')} must fail closed without mapping evidence`,
     );
-    assert.ok(entry, `E${String(ep.episode).padStart(2, '0')} VFS row must be created even without a binding`);
   }
 
-  // 4 VFS rows exist.
-  const vfsRows = [];
+  // 0 VFS rows and 0 bindings — fail closed throughout.
   for (const ep of EPISODES) {
-    vfsRows.push(cache.getVfsTvEntry(MEDIA_ID, 1, ep.episode));
+    assert.equal(cache.getVfsTvEntry(MEDIA_ID, 1, ep.episode), null,
+      `E${String(ep.episode).padStart(2, '0')} VFS row must not exist`);
   }
-  for (let i = 0; i < EPISODES.length; i += 1) {
-    const vfs = vfsRows[i];
-    assert.ok(vfs, `E${String(EPISODES[i].episode).padStart(2, '0')} VFS row must exist`);
-    assert.equal(vfs.torrentFileId, EPISODES[i].torrentFileId);
-  }
-
-  // 0 active bindings — fail closed at the evidence-seam check.
   const bindings = store.db.prepare("SELECT * FROM bindings WHERE status = 'active'").all();
   assert.equal(bindings.length, 0, 'no binding may leak when provider mapping is not authoritative');
   // And no superseded bindings either (none were ever written).
@@ -506,7 +493,7 @@ test('A5 — ambiguous / non-authoritative provider mapping fails closed (no bin
   assert.equal(allBindings.length, 0, 'no binding row at all when evidence is empty');
 });
 
-test('A6 — provider_files.torrent_file_id alone is sufficient when candidate_file_mappings is empty', (t) => {
+test('A6 — provider_files.torrent_file_id alone is sufficient when candidate_file_mappings is empty', async (t) => {
   const { cache, store } = buildStoreAndCache(t);
   const { placementId } = seedSeasonPackFixture(store);
 
@@ -523,7 +510,7 @@ test('A6 — provider_files.torrent_file_id alone is sufficient when candidate_f
   );
 
   for (const ep of EPISODES) {
-    const entry = materializeVfsEntry(
+    const entry = await materializeVfsEntry(
       cache,
       seasonPackHandoff(ep, placementId),
       store,

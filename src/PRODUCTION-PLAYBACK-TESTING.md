@@ -6,6 +6,16 @@ Metadata visibility is not playback proof. A Plex rating key or `MediaPart`, a d
 
 ## Canary architecture
 
+Two control surfaces, in order of preference:
+
+1. **libmpv native IPC socket** — the player's own truth. Position, duration,
+   pause state and seek execution all come from the client's in-process libmpv
+   (see "Hybrid native/app canary" below). No browser automation, no injection,
+   no binary patch.
+2. **Plex application layer (one CDP evaluate each for start and stop)** —
+   required because only the application can create and tear down a real PMS
+   session. Everything between them is native mpv IPC.
+
 - Official Plex HTPC for Linux `1.71.1.346-f62ce923` (`/usr/bin/Plex`).
 - Private Xvfb display `:86` (`1920x1080`, TCP disabled).
 - Private PipeWire/Pulse null sink `hashsucker_canary`.
@@ -93,23 +103,125 @@ rotation is intentionally small and known-good, not random library traversal.
 Detailed output is emitted for failures, identity mismatches, and materially
 abnormal latency; slow-start snapshots remain bounded and token-free.
 
-`test:dev-canary` (`src/scripts/dev-canary.js`) preflights the three host user
-services, drives the loopback CDP endpoint and isolated HTPC display, starts
-fixtures through the native navigation path, polls `/status/sessions`, reads
-only fresh per-TorrentFile `stages_by_tf` records after each fixture baseline,
-seeks forward/backward, stops through the native controller, and requires
-session termination. It never calls Companion `playMedia` and never accepts
-retained telemetry from a prior fixture as causal evidence. `--fast` runs E01;
-default runs E01, E05, and MobLand. It emits JSON evidence and returns nonzero
-on any failed assertion. Running it inside the media-search container fails
-fast because the host-loopback CDP boundary is intentional.
+`test:production-canary` (`src/scripts/dev-canary.js`) runs the hybrid
+native/app canary described below. It preflights the three host user services,
+makes the libmpv IPC socket deterministic, starts each fixture through the
+Plex application layer, then observes and controls playback through the mpv
+socket, polls `/status/sessions`, reads only fresh per-TorrentFile
+`stages_by_tf` records taken after each fixture baseline, seeks
+forward/backward/near-EOF, stops through the application layer, and requires
+session termination. Default runs E01, E05, E08 and MobLand; `--fast` runs E01;
+`--fixture=<key>` runs one. Running it inside the media-search container fails
+fast because the host-loopback boundary is intentional.
 
-The driver classifies `CANARY_CONTROL_FAILURE`, `PLEX_SESSION_FAILURE`, and
-`IDENTITY_DRIFT_FAILURE` separately. It uses the fixed Xvfb TV-library grid
-instead of Continue Watching order, resolves the HTPC window dynamically,
-verifies the profile screen before selecting it, records all observed sessions
-on failure, and captures one failure screenshot plus the UI action trace. A
-wrong Plex item is never accepted as the expected fixture.
+Failure classification is per-stage, not generic: `APP_START_FAILED`,
+`PMS_SESSION_NOT_CREATED`, `MPV_IPC_UNAVAILABLE`, `MPV_IPC_NOT_PLEX`,
+`MPV_IDENTITY_MISMATCH`, `PLEX_IDENTITY_MISMATCH`, `NO_POST_SESSION_READ`,
+`NO_PROGRESSION`, `SEEK_FORWARD` / `SEEK_BACKWARD` / `SEEK_NEAR_EOF`,
+`APP_STOP_FAILED`, `PMS_TEARDOWN_FAILED`, `EVIDENCE_UNAVAILABLE`,
+`STALE_SESSION`. A wrong Plex item is never accepted as the expected fixture.
+All canary output is redacted for `X-Plex-Token`; resolved media URLs carry the
+token, so evidence must never reach a transcript unredacted.
+
+### Hybrid native/app canary
+
+Reverse-engineered facts for Plex HTPC `1.71.1.346-f62ce923`:
+
+- The UI is a webpack application loaded over `file://` from
+  `/opt/plex-htpc/resources/web-client/`; it talks to the native side over
+  **QtWebChannel** (`player.queue`, `player.play`, `player.seekTo`, `player.stop`,
+  `player.teardown`, …).
+- Playback is served by **libmpv 0.38.0 running in-process** inside
+  `/opt/plex-htpc/bin/Plex`. There is no mpv child process and no mpv socket by
+  default.
+- The client reads `<PLEX_USERDATA_DIR>/mpv.conf` at engine init. Adding
+
+  ```
+  input-ipc-server=/tmp/hs-mpv-ipc.sock
+  ```
+
+  to the canary's own Plex user-data `mpv.conf` exposes libmpv's native JSON
+  control socket. This is a Plex-specific user-data config, never machine-wide
+  `~/.config/mpv`, and requires no binary patch, no injection and no CDP.
+
+The resulting control path:
+
+```
+app-level start (1 CDP evaluate: modal.closeAll + navigation.navigate)
+   ↓
+PMS session exists / ratingKey + Part + media path + client identity verified
+   ↓
+libmpv IPC: path (identity), duration, pause, time-pos, seek
+   ↓
+PMS viewOffset progression + fresh exact-TorrentFile byte reads per seek
+   ↓
+app-level stop (1 CDP evaluate: playbackSessionManager stop)
+   ↓
+PMS session teardown + libmpv idle confirmed
+```
+
+**What mpv IPC proves.** That the real client's own decoder is playing the
+expected Part (`path` contains the Part id), at the requested position, with the
+requested pause state, and that a seek actually moved that decoder. It is
+player truth, not UI truth.
+
+**What PMS session checks prove.** That the *application* created a session for
+the expected ratingKey and Part, attributed to the expected client, on the
+expected Plex media path, and that `viewOffset` followed the player — i.e. the
+session is genuinely driven by this playback and not merely left over.
+
+**Why raw `loadfile` is insufficient for start.** Verified against this build:
+loading a PMS part URL directly on the mpv socket decodes bytes but creates no
+PMS playback session. Decoder activity is not a session, and the acceptance bar
+requires a real client session.
+
+**Why raw `mpv stop` is insufficient for teardown.** Verified against this
+build: `stop` on the mpv socket unloads the file (libmpv goes idle) but the
+application layer is never notified — zero new lines in the client log — and the
+PMS session survives, frozen. Teardown must go through the application.
+
+**Seek byte-evidence semantics.** The delivery path reads in 64 MiB chunks and
+reads ahead of the exact requested position (observed up to ~370 MiB, ≈36 s of
+media, past a target), so requiring an exact byte window produces false
+negatives for seeks that land near already-buffered data. Seek evidence
+therefore requires a read that is genuinely distant from the start of the file
+(a plain offset-0 probe never satisfies it) and whose implied media position is
+within 180 s of the target; the record is additionally marked `strictWindow`
+when it falls inside one 64 MiB window of the exact expected offset.
+
+**Latency semantics.** The data-plane records relative timings only
+(`T0_received_ms` is always 0). `observedSessionToFirstRead` is therefore the
+canary's *observation* latency — how long after the canary saw the PMS session it
+saw the byte read — not a browser-visible latency. The byte path's own timing is
+reported separately as `bytePath.firstReadTtfbMs` (and per-seek
+`seekTtfbMs`), which is the honest first-byte-to-client number. Nothing here is
+a synthetic latency claim.
+
+**Remaining CDP dependency — exactly two evaluates per fixture.** Cleanup stop
+before start, start, and final stop. Bridge setup costs two further evaluates
+(webpack registry bootstrap + DI container verification). CDP is only enabled
+because the canary launcher sets `QTWEBENGINE_REMOTE_DEBUGGING=9222`; it is
+loopback-only. Seek execution, position/duration/pause observation, EOF
+positioning and all playback polling are native mpv IPC and use no CDP.
+
+**Confined cosplay of the historical E04 issue.** The old start primitive did
+not close transient UI state; the internal Plex path (used by Companion
+`playMedia`) calls `modal.closeAll()` before navigating. The new start mirrors
+that. This is a robustness improvement, **not** a claimed root cause for the
+historical E04 failure — that was not reproduced here. E04 now passes session
+creation with full identity verification.
+
+### Known failure mode: transient PMS metadata timeout
+
+One observed intermittent failure is worth recording because the canary now
+surfaces it precisely. A start can reach the playback screen with
+`state: stopped, loaded: false` while the app reports
+`Http request failed: https://<pms>.plex.direct:32400/library/metadata/<rk>?…
+statusText: "timeout of 30000ms exceeded"`. That is the client's own 30 s HTTP
+timeout against PMS, not canary machinery: the canary classifies it
+`PMS_SESSION_NOT_CREATED` and records the client's reported error. Retrying the
+same fixture succeeded in six of six subsequent attempts. Do not paper over this
+as flaky automation; it is a real PMS-side latency observation.
 
 ## Authoritative playback PASS criteria
 
@@ -182,7 +294,12 @@ PMS is streamer (`1c622b259a95aebb46228e9661409b7656539c53`). The transient path
 bypasses normal registered-server association even though it uses the same
 client identifier.
 
-### Native HTPC control seam (2026-09-30)
+### Native HTPC control seam (superseded 2026-10-12)
+
+> The section below is retained as historical evidence for how the canary
+> previously drove the client. It is no longer the control path: playback
+> observation and seeks now come from the libmpv IPC socket, and only app-level
+> start/stop still use CDP. See "Hybrid native/app canary" above.
 
 HTPC exposes a localhost-only Chrome DevTools Protocol listener on
 `127.0.0.1:9222`. This is the unattended control seam for the canary; it does

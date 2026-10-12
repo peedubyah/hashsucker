@@ -291,12 +291,14 @@ test('degraded/recovery flow: active → placement degraded → rebound to alter
 
   const binding2 = executeReconciliation(plan2, store);
   assert.equal(binding2.status, 'active', 'recovered binding is active');
-  assert.equal(binding2.version, 2, 'recovered binding version is 2');
+  // Same TorrentFile, new route: coordinates update in place (no new
+  // version — representation identity did not change).
+  assert.equal(binding2.version, 1, 'recovered binding keeps version 1 (same TorrentFile)');
 
-  // Old binding superseded
+  // No superseded history for a route-only change: exactly one binding.
   const allBindings = store.listBindings(item.id);
-  const superseded = allBindings.find(b => b.status === 'superseded');
-  assert.ok(superseded, 'old binding superseded');
+  assert.equal(allBindings.length, 1, 'route recovery produces no extra binding versions');
+  assert.equal(allBindings[0].status, 'active');
 
   // Trace the degraded/recovery flow
   const trace = buildPipelineTrace({

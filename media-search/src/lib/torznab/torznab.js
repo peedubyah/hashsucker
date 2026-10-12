@@ -145,7 +145,7 @@ export async function loadTorznabIndexers() {
     .filter((c) => c && c.url);
 }
 
-export async function searchTorznab({ type, mediaId, indexers, concurrency = 3 }) {
+export async function searchTorznab({ type, mediaId, indexers, concurrency = 3, onSourceResult = null }) {
   if (!['movie', 'series'].includes(type)) {
     throw new Error(`Invalid search type: ${type}`);
   }
@@ -155,6 +155,22 @@ export async function searchTorznab({ type, mediaId, indexers, concurrency = 3 }
 
   const results = await Promise.allSettled(
     enabledIndexers.map(async (indexer) => {
+      const startedAt = Date.now();
+      const sourceMeta = {
+        addonId: indexer.addonId,
+        addonName: indexer.name,
+        provider: 'torznab',
+        debridProvider: null,
+      };
+      const report = (partial) => {
+        if (typeof onSourceResult === 'function') {
+          try {
+            onSourceResult({ ...sourceMeta, latencyMs: Date.now() - startedAt, ...partial });
+          } catch {
+            // Observer must never break discovery.
+          }
+        }
+      };
       try {
         const url = new URL(indexer.url);
         url.searchParams.set('t', 'search');
@@ -176,16 +192,30 @@ export async function searchTorznab({ type, mediaId, indexers, concurrency = 3 }
           });
         } catch (err) {
           discoveryAccounting.recordError(indexer.addonId);
-          console.error(`Torznab search failed for ${indexer.name}: ${err.message}`);
+          const message = `Torznab search failed for ${indexer.name}: ${err.message}`;
+          console.error(message);
+          report({ rawCount: 0, parsedCount: 0, error: message });
           return [];
         }
 
         if (!response.ok) {
           discoveryAccounting.recordError(indexer.addonId);
+          const message = `Torznab search failed for ${indexer.name}: HTTP ${response.status}`;
+          console.error(message);
+          report({ rawCount: 0, parsedCount: 0, error: message });
           return [];
         }
 
-        const data = await response.json();
+        let data;
+        try {
+          data = await response.json();
+        } catch (err) {
+          discoveryAccounting.recordError(indexer.addonId);
+          const message = `Torznab search failed for ${indexer.name}: invalid JSON: ${err.message}`;
+          console.error(message);
+          report({ rawCount: 0, parsedCount: 0, error: message });
+          return [];
+        }
         const items = data.rss?.channel?.item || [];
         const rawItems = Array.isArray(items) ? items : [items];
 
@@ -198,10 +228,13 @@ export async function searchTorznab({ type, mediaId, indexers, concurrency = 3 }
           }))
           .filter(Boolean);
         discoveryAccounting.recordCandidates(indexer.addonId, normalized.length);
+        report({ rawCount: rawItems.length, parsedCount: normalized.length, error: null });
         return normalized;
       } catch (error) {
         discoveryAccounting.recordError(indexer.addonId);
-        console.error(`Torznab search failed for ${indexer.name}: ${error.message}`);
+        const message = `Torznab search failed for ${indexer.name}: ${error.message}`;
+        console.error(message);
+        report({ rawCount: 0, parsedCount: 0, error: message });
         return [];
       }
     })

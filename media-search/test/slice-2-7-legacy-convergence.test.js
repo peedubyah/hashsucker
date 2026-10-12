@@ -186,7 +186,7 @@ test('classifyVfsLegacyState mirrors production observation: 20 legacy movie row
   assert.equal(classification.totals.rows, 42);
 });
 
-test('materializeVfsEntry supersedes a legacy movie row when authoritative publication arrives', (t) => {
+test('materializeVfsEntry supersedes a legacy movie row when authoritative publication arrives', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -198,7 +198,7 @@ test('materializeVfsEntry supersedes a legacy movie row when authoritative publi
   const before = 1_788_300_500_000;
   const after = 1_788_300_500_500;
 
-  const entry = materializeVfsEntry(
+  const entry = await materializeVfsEntry(
     cache,
     authoritativeInceptionHandoff(),
     controlPlaneStore,
@@ -229,14 +229,14 @@ test('materializeVfsEntry supersedes a legacy movie row when authoritative publi
   assert.equal(all.length, 1, 'legacy movie row superseded in place — no duplicate');
 });
 
-test('materializeVfsEntry is idempotent for movies when an identical authoritative publication is replayed', (t) => {
+test('materializeVfsEntry is idempotent for movies when an identical authoritative publication is replayed', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
   seedLegacyMovieRow(cache, { size: 67_234_500_000 });
   const controlPlaneStore = controlPlaneStoreMock([inceptionTorrentFile()]);
 
-  const first = materializeVfsEntry(
+  const first = await materializeVfsEntry(
     cache,
     authoritativeInceptionHandoff(),
     controlPlaneStore,
@@ -244,7 +244,7 @@ test('materializeVfsEntry is idempotent for movies when an identical authoritati
     { allowLegacy: false },
   );
 
-  const second = materializeVfsEntry(
+  const second = await materializeVfsEntry(
     cache,
     authoritativeInceptionHandoff(),
     controlPlaneStore,
@@ -264,7 +264,7 @@ test('materializeVfsEntry is idempotent for movies when an identical authoritati
   assert.equal(all.length, 1, 'replay does not create a second movie row');
 });
 
-test('materializeVfsEntry remains fail-closed for movies when an existing authoritative row has a differing TorrentFile identity', (t) => {
+test('materializeVfsEntry remains fail-closed for movies when an existing authoritative row has a differing TorrentFile identity', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -288,7 +288,7 @@ test('materializeVfsEntry remains fail-closed for movies when an existing author
   });
   const controlPlaneStore = controlPlaneStoreMock([firstTf, conflictingTf]);
 
-  assert.throws(
+  await assert.rejects(
     () => materializeVfsEntry(
       cache,
       authoritativeInceptionHandoff({ torrentFileId: conflictingTf.id, size: conflictingTf.size }),
@@ -306,14 +306,14 @@ test('materializeVfsEntry remains fail-closed for movies when an existing author
   assert.equal(persisted.canonicalPath, INCEPTION_AUTH_PATH);
 });
 
-test('materializeVfsEntry inserts a fresh authoritative movie row when no legacy state exists', (t) => {
+test('materializeVfsEntry inserts a fresh authoritative movie row when no legacy state exists', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
   const controlPlaneStore = controlPlaneStoreMock([inceptionTorrentFile()]);
   assert.equal(cache.getVfsMovieEntry(INCEPTION_MEDIA_ID), null);
 
-  const entry = materializeVfsEntry(
+  const entry = await materializeVfsEntry(
     cache,
     authoritativeInceptionHandoff(),
     controlPlaneStore,
@@ -330,7 +330,7 @@ test('materializeVfsEntry inserts a fresh authoritative movie row when no legacy
   assert.equal(entry.canonicalPath, INCEPTION_AUTH_PATH);
 });
 
-test('materializeVfsEntry race-recovery reconciles a UNIQUE first-publication race for a movie', (t) => {
+test('materializeVfsEntry race-recovery reconciles a UNIQUE first-publication race for a movie', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -354,7 +354,7 @@ test('materializeVfsEntry race-recovery reconciles a UNIQUE first-publication ra
     return realInsert(entry);
   };
 
-  const entry = materializeVfsEntry(
+  const entry = await materializeVfsEntry(
     cache,
     authoritativeInceptionHandoff(),
     controlPlaneStore,
@@ -370,7 +370,7 @@ test('materializeVfsEntry race-recovery reconciles a UNIQUE first-publication ra
   assert.equal(all.length, 1, 'race recovery converges on a single row');
 });
 
-test('materializeVfsEntry refuses to supersede an authoritative row with a different movie identity', (t) => {
+test('materializeVfsEntry refuses to supersede an authoritative row with a different movie identity', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -399,7 +399,7 @@ test('materializeVfsEntry refuses to supersede an authoritative row with a diffe
   // CANNOT have its authoritative identity migrated under Inception's
   // media_id.
   seedLegacyMovieRow(cache);
-  const entry = materializeVfsEntry(
+  const entry = await materializeVfsEntry(
     cache,
     authoritativeInceptionHandoff(),
     controlPlaneStore,
@@ -459,13 +459,13 @@ test('classifyVfsLegacyState reports zero legacy rows after full authoritative u
   assert.equal(classification.totals.legacy, 0, 'no legacy rows in either table');
 });
 
-test('allowLegacy=false rejects a movie handoff that has no TorrentFile', (t) => {
+test('allowLegacy=false rejects a movie handoff that has no TorrentFile', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
   const controlPlaneStore = controlPlaneStoreMock([]);
 
-  assert.throws(
+  await assert.rejects(
     () => materializeVfsEntry(
       cache,
       {
@@ -492,7 +492,7 @@ test('allowLegacy=false rejects a movie handoff that has no TorrentFile', (t) =>
   );
 });
 
-test('materializeVfsEntry preserves a legacy movie canonical path even when a fresh request carries a different canonicalTitle', (t) => {
+test('materializeVfsEntry preserves a legacy movie canonical path even when a fresh request carries a different canonicalTitle', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -513,7 +513,7 @@ test('materializeVfsEntry preserves a legacy movie canonical path even when a fr
   });
 
   const controlPlaneStore = controlPlaneStoreMock([inceptionTorrentFile()]);
-  const entry = materializeVfsEntry(
+  const entry = await materializeVfsEntry(
     cache,
     {
       ...authoritativeInceptionHandoff(),

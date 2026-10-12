@@ -55,7 +55,7 @@ test('resolveTorBoxRedirect: resolves valid selection to TorBox permalink', () =
   };
 
   const cp = createMockControlPlane(placement, mapping);
-  const result = resolveTorBoxRedirect(selection, cp);
+  const result = resolveTorBoxRedirect(selection, cp, { apiKey: 'test-key' });
 
   assert.equal(result.status, 'redirect');
   assert.equal(result.provider, 'torbox');
@@ -95,7 +95,7 @@ test('resolveTorBoxRedirect: uses fileIndex in releaseKey when not null', () => 
   };
 
   const cp = createMockControlPlane(placement, mapping);
-  const result = resolveTorBoxRedirect(selection, cp);
+  const result = resolveTorBoxRedirect(selection, cp, { apiKey: 'test-key' });
 
   assert.equal(result.releaseKey, `${HASH}:7`);
   assert.equal(result.providerFileId, '42');
@@ -134,7 +134,7 @@ test('resolveTorBoxRedirect: null fileIndex is NOT coerced to 0', () => {
   };
 
   const cp = createMockControlPlane(placement, mapping);
-  const result = resolveTorBoxRedirect(selection, cp);
+  const result = resolveTorBoxRedirect(selection, cp, { apiKey: 'test-key' });
 
   // fileIndex stays null — never coerced to 0
   assert.equal(result.fileIndex, null);
@@ -170,7 +170,7 @@ test('resolveTorBoxRedirect: throws PROVIDER_NOT_TORBOX for non-TorBox provider'
 
   const cp = createMockControlPlane(null, null);
   assert.throws(
-    () => resolveTorBoxRedirect(selection, cp),
+    () => resolveTorBoxRedirect(selection, cp, { apiKey: 'test-key' }),
     (err) => {
       assert.ok(err instanceof RedirectResolutionError);
       assert.equal(err.code, 'PROVIDER_NOT_TORBOX');
@@ -194,7 +194,7 @@ test('resolveTorBoxRedirect: throws MISSING_TORRENT_MAPPING when no placement', 
 
   const cp = createMockControlPlane(null, null);
   assert.throws(
-    () => resolveTorBoxRedirect(selection, cp),
+    () => resolveTorBoxRedirect(selection, cp, { apiKey: 'test-key' }),
     (err) => {
       assert.ok(err instanceof RedirectResolutionError);
       assert.equal(err.code, 'MISSING_TORRENT_MAPPING');
@@ -225,7 +225,7 @@ test('resolveTorBoxRedirect: throws MISSING_FILE_MAPPING when no mapping', () =>
 
   const cp = createMockControlPlane(placement, null);
   assert.throws(
-    () => resolveTorBoxRedirect(selection, cp),
+    () => resolveTorBoxRedirect(selection, cp, { apiKey: 'test-key' }),
     (err) => {
       assert.ok(err instanceof RedirectResolutionError);
       assert.equal(err.code, 'MISSING_FILE_MAPPING');
@@ -264,7 +264,7 @@ test('resolveTorBoxRedirect: throws MAPPING_NOT_MAPPED for non-mapped state', ()
 
   const cp = createMockControlPlane(placement, mapping);
   assert.throws(
-    () => resolveTorBoxRedirect(selection, cp),
+    () => resolveTorBoxRedirect(selection, cp, { apiKey: 'test-key' }),
     (err) => {
       assert.ok(err instanceof RedirectResolutionError);
       assert.equal(err.code, 'MAPPING_NOT_MAPPED');
@@ -343,7 +343,7 @@ test('resolveTorBoxRedirect: uses redirect=true permalink (regression for compan
   };
 
   const cp = createMockControlPlane(placement, mapping);
-  const result = resolveTorBoxRedirect(selection, cp);
+  const result = resolveTorBoxRedirect(selection, cp, { apiKey: 'test-key' });
 
   // CRITICAL: redirect=true must be in the permalink.
   // Without this, TorBox returns JSON and Jellyfin fails with Fatal Player Error.

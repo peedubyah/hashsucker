@@ -4873,6 +4873,7 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
         // last 64 so concurrent bursts stay attributable.
         "stages_last": m.stage_last.lock().unwrap().as_ref().map(|r| r.to_json()),
         "stages_recent": m.stage_reports_json(),
+        "stages_by_tf": m.stage_reports_by_tf_json(),
         // P9 — playback-intelligence (sequential prefetch) telemetry. Surfaced so
         // the benchmark can attribute "later chunk served locally" to prefetch
         // rather than guessing, and so ON/OFF runs are directly comparable.
@@ -4884,4 +4885,3 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
         .body(Body::from(body))
         .unwrap()
 }
-

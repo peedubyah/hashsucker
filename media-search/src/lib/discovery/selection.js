@@ -324,6 +324,11 @@ export async function selectBindableCandidate(results, options = {}) {
         && controlPlaneStore) {
       let placementId = null;
       let placementTorrentFiles = null;
+      // With an RD seam configured, a failed TorBox movie path must fall
+      // through to the RD path (PATH C) for the SAME candidate — never to
+      // the remainder of this block, which assumes a usable inventory.
+      // Without an RD seam, any failure moves to the next candidate.
+      let moviePathBFailed = false;
       try {
         const result = await ensureTorBoxFileIdentityFn({
           infoHash: candidate.infoHash,
@@ -349,9 +354,10 @@ export async function selectBindableCandidate(results, options = {}) {
           reason: 'movie-cached-placement-failed',
         });
         if (!hasRdSeam) continue;
+        moviePathBFailed = true;
       }
 
-      if (!Array.isArray(placementTorrentFiles) || placementTorrentFiles.length === 0) {
+      if (!moviePathBFailed && (!Array.isArray(placementTorrentFiles) || placementTorrentFiles.length === 0)) {
         skipped.push({
           infoHash: candidate.infoHash,
           rank: candidate.rank,
@@ -359,44 +365,48 @@ export async function selectBindableCandidate(results, options = {}) {
           reason: 'movie-no-torrent-files',
         });
         if (!hasRdSeam) continue;
+        moviePathBFailed = true;
       }
 
-      // Use the same playable-video filter as TV PATH B so the project
-      // rules (video extensions + non-sample + positive integer size) are
-      // honored uniformly across media types.
-      const playable = placementTorrentFiles.filter(isPlayableVideoTorrentFile);
-      if (playable.length !== 1) {
-        skipped.push({
-          infoHash: candidate.infoHash,
-          rank: candidate.rank,
-          torboxState: candidate.availability?.torbox?.state || 'unknown',
-          reason: playable.length === 0 ? 'movie-no-playable' : 'movie-ambiguous',
-        });
-        if (!hasRdSeam) continue;
+      if (!moviePathBFailed) {
+        // Use the same playable-video filter as TV PATH B so the project
+        // rules (video extensions + non-sample + positive integer size) are
+        // honored uniformly across media types.
+        const playable = placementTorrentFiles.filter(isPlayableVideoTorrentFile);
+        if (playable.length !== 1) {
+          skipped.push({
+            infoHash: candidate.infoHash,
+            rank: candidate.rank,
+            torboxState: candidate.availability?.torbox?.state || 'unknown',
+            reason: playable.length === 0 ? 'movie-no-playable' : 'movie-ambiguous',
+          });
+          if (!hasRdSeam) continue;
+          moviePathBFailed = true;
+        } else {
+          // Cardinality == 1 → bind authoritatively. Map the chosen
+          // TorrentFile back to its present provider_file (within the placement
+          // we just created) so the durable handoff carries the full
+          // (placement, providerFile, torrentFile) identity triple.
+          const torrentFile = playable[0];
+          let providerFileId = null;
+          if (placementId && typeof controlPlaneStore.listProviderRefsForTorrentFile === 'function') {
+            const refs = controlPlaneStore.listProviderRefsForTorrentFile(torrentFile.id) || [];
+            const present = refs.find((r) => r.placementId === placementId && r.present);
+            providerFileId = present?.providerFileId ?? null;
+          }
+          selected = formatSelection(candidate);
+          selected._torrentFileId = torrentFile.id;
+          selected._binding = {
+            status: 'movie-cached-single-file',
+            torrentFileId: torrentFile.id,
+            placementId,
+            providerFileId,
+            size: torrentFile.size,
+          };
+          reason = 'movie-cached-single-file bound';
+          break;
+        }
       }
-
-      // Cardinality == 1 → bind authoritatively. Map the chosen
-      // TorrentFile back to its present provider_file (within the placement
-      // we just created) so the durable handoff carries the full
-      // (placement, providerFile, torrentFile) identity triple.
-      const torrentFile = playable[0];
-      let providerFileId = null;
-      if (placementId && typeof controlPlaneStore.listProviderRefsForTorrentFile === 'function') {
-        const refs = controlPlaneStore.listProviderRefsForTorrentFile(torrentFile.id) || [];
-        const present = refs.find((r) => r.placementId === placementId && r.present);
-        providerFileId = present?.providerFileId ?? null;
-      }
-      selected = formatSelection(candidate);
-      selected._torrentFileId = torrentFile.id;
-      selected._binding = {
-        status: 'movie-cached-single-file',
-        torrentFileId: torrentFile.id,
-        placementId,
-        providerFileId,
-        size: torrentFile.size,
-      };
-      reason = 'movie-cached-single-file bound';
-      break;
     }
 
     // ---- PATH B: TV episode resolution from cached-only TorBox inventory ----

@@ -133,7 +133,7 @@ function authoritativeHandoff(placementId) {
   };
 }
 
-test('production-style fulfillment writes a durable control-plane binding (not just VFS)', (t) => {
+test('production-style fulfillment writes a durable control-plane binding (not just VFS)', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'fwd-proof-'));
   const discoveryPath = join(tmp, 'discovery.db');
   const controlPath = join(tmp, 'control-plane.db');
@@ -152,7 +152,7 @@ test('production-style fulfillment writes a durable control-plane binding (not j
 
   // Production path: media-request.js calls materializeVfsEntry with
   // allowLegacy=false and the real controlPlaneStore.
-  const vfsEntry = materializeVfsEntry(
+  const vfsEntry = await materializeVfsEntry(
     cache,
     authoritativeHandoff(placementId),
     store,
@@ -208,7 +208,7 @@ test('production-style fulfillment writes a durable control-plane binding (not j
   );
 });
 
-test('replaying the same fulfillment is idempotent — no duplicate library_items, no new binding version', (t) => {
+test('replaying the same fulfillment is idempotent — no duplicate library_items, no new binding version', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'fwd-proof-'));
   const discoveryPath = join(tmp, 'discovery.db');
   const controlPath = join(tmp, 'control-plane.db');
@@ -226,8 +226,8 @@ test('replaying the same fulfillment is idempotent — no duplicate library_item
   const { placementId } = seedAuthoritativeFulfillmentFixture(store);
 
   const handoff = authoritativeHandoff(placementId);
-  const first = materializeVfsEntry(cache, handoff, store, () => 1_000, { allowLegacy: false });
-  const second = materializeVfsEntry(cache, handoff, store, () => 1_500, { allowLegacy: false });
+  const first = await materializeVfsEntry(cache, handoff, store, () => 1_000, { allowLegacy: false });
+  const second = await materializeVfsEntry(cache, handoff, store, () => 1_500, { allowLegacy: false });
 
   assert.equal(first.torrentFileId, second.torrentFileId);
   assert.equal(first.canonicalPath, second.canonicalPath);

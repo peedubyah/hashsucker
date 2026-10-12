@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 const CADDYFILE_PATH = new URL('../../edge/Caddyfile', import.meta.url);
-const CONTRACT_PATH = new URL('../docs/architecture/EDGE-PROXY-CONTRACT.md', import.meta.url);
+const COMPOSE_PATH = new URL('../../compose.yaml', import.meta.url);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -20,44 +20,54 @@ function readCaddyfile() {
   return fs.readFileSync(CADDYFILE_PATH, 'utf8');
 }
 
-function readContract() {
-  return fs.readFileSync(CONTRACT_PATH, 'utf8');
+function readCompose() {
+  return fs.readFileSync(COMPOSE_PATH, 'utf8');
 }
 
 // ---------------------------------------------------------------------------
-// Test: Contract exists and is valid
+// Test: Routing contract lives in the Caddyfile (consolidated topology)
 // ---------------------------------------------------------------------------
 
-test('EDGE-PROXY-CONTRACT.md exists and defines routing table', () => {
-  const contract = readContract();
-  assert.match(contract, /EP-ROUTE-1/);
-  assert.match(contract, /EP-ROUTE-2/);
-  assert.match(contract, /EP-ROUTE-3/);
-  assert.match(contract, /MUST NOT.*parse.*Range/i);
-  assert.match(contract, /MUST NOT.*access.*SQLite/i);
+test('Caddyfile documents the routing contract', () => {
+  // The standalone EDGE-PROXY-CONTRACT.md was retired when the config was
+  // consolidated (Aug 2026): the Caddyfile is the single source of truth.
+  // It must route /api/* explicitly and send everything else (including
+  // /media/* and /stream/*) to media-search:3000 through the catch-all.
+  const caddyfile = readCaddyfile();
+  assert.ok(caddyfile.length > 0, 'Caddyfile should not be empty');
+  assert.match(caddyfile, /@api path \/api\/\*/);
+  assert.match(caddyfile, /reverse_proxy media-search:3000/);
 });
 
 // ---------------------------------------------------------------------------
 // Test: Caddyfile exists and has correct structure
 // ---------------------------------------------------------------------------
 
-test('Caddyfile exists and defines three route classes', () => {
+test('Caddyfile defines two route classes (api + catch-all)', () => {
   const caddyfile = readCaddyfile();
   assert.ok(caddyfile.length > 0, 'Caddyfile should not be empty');
-  assert.match(caddyfile, /@media path \/media\/\*/);
   assert.match(caddyfile, /@api path \/api\/\*/);
   assert.match(caddyfile, /reverse_proxy media-search:3000/);
+  // No dedicated @media matcher: /media/* and /stream/* fall through to
+  // the catch-all, which targets the same backend.
+  assert.doesNotMatch(caddyfile, /@media/);
 });
 
 // ---------------------------------------------------------------------------
-// Test: /media/* routes to media gateway
+// Test: /media/* reaches media-search through the catch-all
 // ---------------------------------------------------------------------------
 
-test('/media/* routes to media gateway backend', () => {
+test('/media/* routes to media-search backend via catch-all', () => {
   const caddyfile = readCaddyfile();
-  // /media/* must be routed to media-search:3000
-  const mediaBlock = caddyfile.match(/@media[\s\S]*?reverse_proxy @media media-search:3000/);
-  assert.ok(mediaBlock, '/media/* should route to media-search:3000');
+  // No split backend for media: the single catch-all reverse_proxy serves
+  // /media/*, /stream/* and /* alike.
+  const lines = caddyfile.split('\n');
+  const catchAllIndex = lines.findIndex(line =>
+    line.includes('reverse_proxy media-search:3000') &&
+    !line.includes('@media') &&
+    !line.includes('@api')
+  );
+  assert.ok(catchAllIndex >= 0, 'catch-all reverse_proxy serves /media/*');
 });
 
 // ---------------------------------------------------------------------------
@@ -90,26 +100,37 @@ test('/* routes to UI/static backend', () => {
 // Test: Range headers survive proxy traversal
 // ---------------------------------------------------------------------------
 
-test('Range headers are forwarded unchanged for /media/*', () => {
+test('Range headers pass through to upstream by default', () => {
   const caddyfile = readCaddyfile();
-  // Range header must be forwarded in the media block
-  // Match the full reverse_proxy block (closing } at start of line)
-  const mediaBlock = caddyfile.match(/@media[\s\S]*?reverse_proxy @media media-search:3000[\s\S]*?\n\}/);
-  assert.ok(mediaBlock, 'Should find media block');
-  assert.match(mediaBlock[0], /header_up Range/);
-  assert.match(mediaBlock[0], /header_up If-Range/);
-  assert.match(mediaBlock[0], /header_up If-Modified-Since/);
+  // Caddy reverse_proxy forwards request headers unchanged by default, so
+  // Range/conditional headers reach media-search without explicit
+  // directives. The contract, checked on the catch-all block that serves
+  // /media/*: no Range stripping or fabrication there.
+  const lines = caddyfile.split('\n');
+  const catchAllIndex = lines.findIndex(line =>
+    line.includes('reverse_proxy media-search:3000') &&
+    !line.includes('@media') &&
+    !line.includes('@api')
+  );
+  assert.ok(catchAllIndex >= 0, 'catch-all reverse_proxy exists');
+  const catchAllBlock = lines.slice(catchAllIndex, catchAllIndex + 25).join('\n');
+  assert.doesNotMatch(catchAllBlock, /header_down.*Range/i);
+  assert.doesNotMatch(catchAllBlock, /bytes=/);
+  assert.doesNotMatch(catchAllBlock, /content-range/i);
+  // The API block explicitly forwards Range upstream.
+  assert.match(caddyfile, /header_up Range/);
 });
 
 // ---------------------------------------------------------------------------
 // Test: Media responses are not buffered
 // ---------------------------------------------------------------------------
 
-test('Media responses are not buffered (flush_interval -1)', () => {
+test('Media responses stream without proxy buffering', () => {
   const caddyfile = readCaddyfile();
-  const mediaBlock = caddyfile.match(/@media[\s\S]*?reverse_proxy @media media-search:3000[\s\S]*?\}/);
-  assert.ok(mediaBlock, 'Should find media block');
-  assert.match(mediaBlock[0], /flush_interval -1/);
+  // Caddy streams proxied responses by default. The contract is the
+  // absence of buffering directives anywhere in the file.
+  assert.doesNotMatch(caddyfile, /flush_interval/);
+  assert.doesNotMatch(caddyfile, /request_body.*buffer|response.*buffer/i);
 });
 
 // ---------------------------------------------------------------------------
@@ -266,29 +287,30 @@ test('Rate limiting is not implemented', () => {
 // ---------------------------------------------------------------------------
 
 test('Proxy runs as separate container in compose', () => {
-  const compose = fs.readFileSync(new URL('../../compose.yaml', import.meta.url), 'utf8');
-  assert.match(compose, /edge:\s*\n\s*image: caddy/);
-  // Has its own service definition
+  const compose = readCompose();
+  assert.match(compose, /edge:\s*\n\s*image:.*hashsucker-edge/);
+  // Has its own service definition, ordered after media-search
   assert.match(compose, /depends_on:\s*\n\s*- media-search/);
 });
 
 // ---------------------------------------------------------------------------
-// Test: Transitional topology — /media/* targets media-search:3000
+// Test: Consolidated topology — everything backend-bound targets media-search:3000
 // ---------------------------------------------------------------------------
 
-test('Transitional topology: /media/* routes to media-search:3000 (EP-TOPO-1)', () => {
+test('Consolidated topology: all backend routes target media-search:3000', () => {
   const caddyfile = readCaddyfile();
-  const contract = readContract();
-  // Contract must document the transitional topology
-  assert.match(contract, /EP-TOPO-1/);
-  assert.match(contract, /media gateway.*logical endpoint/i);
-  assert.match(contract, /media-search:3000/);
-  // Caddyfile must route /media/* to media-search:3000
-  const mediaBlock = caddyfile.match(/@media[\s\S]*?reverse_proxy @media media-search:3000/);
-  assert.ok(mediaBlock, '/media/* should route to media-search:3000');
+  // No hardcoded IPs — Docker service name only.
+  assert.doesNotMatch(caddyfile, /192\.168\./);
+  assert.doesNotMatch(caddyfile, /127\.0\.0\.1/);
+  assert.match(caddyfile, /media-search:3000/);
+  // No split media-gateway backend: a single backend serves api + media.
+  const backends = [...caddyfile.matchAll(/reverse_proxy\s+(?:@\w+\s+)?([a-z0-9.-]+:\d+)/gi)]
+    .map((m) => m[1]);
+  assert.ok(backends.length > 0, 'at least one backend route exists');
+  assert.ok(backends.every((b) => b === 'media-search:3000'), 'single backend for all routes');
 });
 
-test('Transitional topology: proxy does not assume co-location (EP-TOPO-2)', () => {
+test('Consolidated topology: proxy does not assume co-location (EP-TOPO-2)', () => {
   const caddyfile = readCaddyfile();
   // No hardcoded IP addresses — must use Docker service name
   assert.doesNotMatch(caddyfile, /192\.168\./);
@@ -297,28 +319,27 @@ test('Transitional topology: proxy does not assume co-location (EP-TOPO-2)', () 
   assert.match(caddyfile, /media-search:3000/);
 });
 
-test('Transitional topology: extraction readiness (EP-TOPO-3)', () => {
-  const contract = readContract();
-  // Contract must allow for future extraction
-  assert.match(contract, /EP-TOPO-3/);
-  assert.match(contract, /MAY.*retarget/);
-  assert.match(contract, /media-gateway/);
+test('Consolidated topology: single image carries the baked config', () => {
+  // The edge image bakes the Caddyfile in (no repo mount at runtime), so
+  // pulled deployments need no repo files. The compose build context and
+  // the Dockerfile COPY are the contract.
+  const compose = readCompose();
+  assert.match(compose, /context: \.\/edge/);
+  const dockerfile = fs.readFileSync(new URL('../../edge/Dockerfile', import.meta.url), 'utf8');
+  assert.match(dockerfile, /COPY Caddyfile/);
 });
 
 // ---------------------------------------------------------------------------
 // Test: Routing order is correct (media first, then api, then catch-all)
 // ---------------------------------------------------------------------------
 
-test('Routing order: /media/* first, then /api/*, then /*', () => {
+test('Routing order: /api/* first, then catch-all', () => {
   const caddyfile = readCaddyfile();
-  const mediaIndex = caddyfile.indexOf('@media');
   const apiIndex = caddyfile.indexOf('@api');
   const catchAllIndex = caddyfile.lastIndexOf('reverse_proxy media-search:3000');
-  
-  assert.ok(mediaIndex >= 0, '/media/* route should exist');
+
   assert.ok(apiIndex >= 0, '/api/* route should exist');
   assert.ok(catchAllIndex >= 0, 'catch-all route should exist');
-  assert.ok(mediaIndex < apiIndex, '/media/* should come before /api/*');
   assert.ok(apiIndex < catchAllIndex, '/api/* should come before catch-all');
 });
 
@@ -326,26 +347,14 @@ test('Routing order: /media/* first, then /api/*, then /*', () => {
 // Test: Contract compliance summary
 // ---------------------------------------------------------------------------
 
-test('Contract compliance: all MUST NOT constraints are satisfied', () => {
+test('Contract compliance: behavioral MUST NOTs hold on the live config', () => {
+  // The retired contract doc's prohibitions are enforced directly against
+  // the Caddyfile here (same assertions as the dedicated behavioral
+  // tests above, aggregated as one compliance gate).
   const caddyfile = readCaddyfile();
-  const contract = readContract();
-  
-  // Extract all MUST NOT constraints from contract
-  const mustNotConstraints = contract.match(/EP-FORBID-\d+.*\n.*MUST NOT.*/g) || [];
-  
-  // Verify each forbidden responsibility is not implemented
-  for (const constraint of mustNotConstraints) {
-    if (constraint.includes('parse.*Range') || constraint.includes('Range.*parse')) {
-      assert.doesNotMatch(caddyfile, /bytes=/, 'Should not parse Range');
-    }
-    if (constraint.includes('Content-Length')) {
-      assert.doesNotMatch(caddyfile, /Content-Length/, 'Should not set Content-Length');
-    }
-    if (constraint.includes('Content-Type')) {
-      assert.doesNotMatch(caddyfile, /Content-Type/, 'Should not set Content-Type');
-    }
-    if (constraint.includes('SQLite') || constraint.includes('database')) {
-      assert.doesNotMatch(caddyfile, /sqlite/i, 'Should not access SQLite');
-    }
-  }
+  assert.doesNotMatch(caddyfile, /bytes=/, 'must not parse Range');
+  assert.doesNotMatch(caddyfile, /Content-Length/, 'must not set Content-Length');
+  assert.doesNotMatch(caddyfile, /Content-Type/, 'must not set Content-Type');
+  assert.doesNotMatch(caddyfile, /sqlite/i, 'must not access SQLite');
+  assert.doesNotMatch(caddyfile, /\.db/, 'must not access databases');
 });

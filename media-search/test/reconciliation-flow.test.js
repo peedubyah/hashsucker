@@ -108,7 +108,7 @@ test('rebind: current placement becoming unavailable triggers rebind to alternat
   const rdIdentity = createReleaseIdentity(HASH, 0);
   const rd = setupBindable(store, item, rdIdentity, { provider: 'realdebrid' });
   const tbIdentity = createReleaseIdentity(HASH, 0);
-  setupBindable(store, item, tbIdentity, {
+  const tb = setupBindable(store, item, tbIdentity, {
     provider: 'torbox',
     resourceId: 'tb-22',
     providerFileId: 'tb-file',
@@ -142,13 +142,16 @@ test('rebind: current placement becoming unavailable triggers rebind to alternat
 
   const secondBinding = executeReconciliation(secondPlan, store);
   assert.equal(secondBinding.status, 'active');
-  assert.equal(secondBinding.version, 2);
+  // Same TorrentFile, new route: coordinates update in place (no new
+  // version — representation identity did not change, only the provider
+  // route behind it).
+  assert.equal(secondBinding.version, 1);
+  assert.equal(secondBinding.placementId, tb.placement.id);
 
-  // Old binding must be superseded
+  // No superseded history for a route-only change: exactly one binding.
   const allBindings = store.listBindings(item.id);
-  assert.equal(allBindings.length, 2);
-  assert.equal(allBindings[0].status, 'superseded');
-  assert.equal(allBindings[1].status, 'active');
+  assert.equal(allBindings.length, 1);
+  assert.equal(allBindings[0].status, 'active');
 
   store.close();
 });

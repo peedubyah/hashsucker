@@ -48,9 +48,9 @@ function torBoxDownloadUrlCache() {
   };
 }
 
-function tvHandoff({ torrentFileId, infoHash = INFO_HASH, size = 5_000_000_000 } = {}) {
+function tvHandoff({ mediaId = 'tt0000001', torrentFileId, infoHash = INFO_HASH, size = 5_000_000_000 } = {}) {
   return {
-    mediaId: 'tt0000001',
+    mediaId,
     mediaType: 'tv',
     season: 1,
     episode: 1,
@@ -131,7 +131,7 @@ test('hydrateVfsTvEntry returns TorrentFile-backed size without invoking the pro
   assert.equal(persisted.size, 5_000_000_000);
 });
 
-test('catalog hydration refuses to bind when the VFS row disagrees with the authoritative handoff', (t) => {
+test('catalog hydration refuses to bind when the VFS row disagrees with the authoritative handoff', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -161,10 +161,15 @@ test('catalog hydration refuses to bind when the VFS row disagrees with the auth
   // The handoff has torrentFileId = 'tf_correct'; the VFS row has
   // torrentFileId = 'tf_stale'. Re-running materialize with the handoff
   // must observe the identity mismatch and fail closed via
-  // assertExistingIdentity. This is the same check that the catalog
-  // builder's identity-mismatch guard performs before binding state.
-  const controlPlane = { getTorrentFile: () => null };
-  assert.throws(
+  // assertExistingIdentity. The control plane carries the handoff's TF
+  // (valid identity) so the flow reaches the existing-row conflict guard
+  // rather than failing earlier on TF validation.
+  const controlPlane = {
+    getTorrentFile: (id) => (id === 'tf_correct'
+      ? torrentFile({ id: 'tf_correct', size: 5_000_000_000 })
+      : null),
+  };
+  await assert.rejects(
     () => materializeVfsEntry(
       cache,
       cache.getTvPlaybackHandoff('tt0000002', 1, 1),
@@ -180,7 +185,7 @@ test('catalog hydration refuses to bind when the VFS row disagrees with the auth
   assert.equal(persisted.torrentFileId, 'tf_stale', 'existing authoritative row preserved on conflict');
 });
 
-test('catalog re-materialization does not regress the authoritative identity', (t) => {
+test('catalog re-materialization does not regress the authoritative identity', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -195,14 +200,14 @@ test('catalog re-materialization does not regress the authoritative identity', (
 
   // First materialization: writes the durable VFS row.
   const handoff = cache.getTvPlaybackHandoff('tt0000003', 1, 1);
-  const first = materializeVfsEntry(
+  const first = await materializeVfsEntry(
     cache, handoff, controlPlane, () => 1_788_000_000_000, { allowLegacy: false },
   );
   assert.equal(first.size, 7_777_777_777);
 
   // Second materialization with the same handoff: must return the same row
   // (idempotent). The re-derived identity must equal the original.
-  const second = materializeVfsEntry(
+  const second = await materializeVfsEntry(
     cache, handoff, controlPlane, () => 1_788_000_500_000, { allowLegacy: false },
   );
   assert.equal(second.torrentFileId, first.torrentFileId);

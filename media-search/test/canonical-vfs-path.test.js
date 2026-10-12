@@ -102,7 +102,7 @@ test('materializeVfsEntry uses canonical title/year when present on handoff', as
   }, buildHandoffRequest({ canonicalTitle: 'Dune: Part Two', canonicalYear: 2024 }));
   persistHandoff(cache, handoff);
 
-  const entry = materializeVfsEntry(cache, handoff);
+  const entry = await materializeVfsEntry(cache, handoff);
   assert.equal(entry.canonicalPath, 'Movies/Dune Part Two (2024)/Dune Part Two (2024).mkv');
   // The provider identity is preserved
   assert.equal(entry.infoHash, HASH);
@@ -117,6 +117,9 @@ test('materializeVfsEntry falls back to filename-derived identity when no canoni
   // collapse to a known stable path. The exact path the parser picks
   // is not the assertion under test — the assertion is that canonical
   // title/year are NOT used and the filename-derived path is taken.
+  // The mediaId is synthetic (unresolvable by Cinemeta) so the metadata
+  // fallback (priority 2) deterministically misses with or without
+  // network, and the filename-derived identity (priority 3) is exercised.
   const handoff = buildPlaybackHandoff({
     selected: {
       infoHash: HASH,
@@ -127,10 +130,10 @@ test('materializeVfsEntry falls back to filename-derived identity when no canoni
       release: { resolution: '2160p' },
     },
     reason: 'test',
-  }, buildHandoffRequest());
+  }, buildHandoffRequest({ mediaId: 'tt0000000' }));
   persistHandoff(cache, handoff);
 
-  const entry = materializeVfsEntry(cache, handoff);
+  const entry = await materializeVfsEntry(cache, handoff);
   // Without canonical fields, the existing filename-derived path is used
   assert.equal(entry.canonicalPath, 'Movies/Knives Out (2019)/Knives Out (2019).mkv');
 });
@@ -152,8 +155,8 @@ test('materializeVfsEntry is idempotent when canonical fields are absent and ent
   }, buildHandoffRequest());
   persistHandoff(cache, handoff);
 
-  const first = materializeVfsEntry(cache, handoff);
-  const second = materializeVfsEntry(cache, handoff);
+  const first = await materializeVfsEntry(cache, handoff);
+  const second = await materializeVfsEntry(cache, handoff);
   assert.equal(first.canonicalPath, second.canonicalPath);
 });
 
@@ -173,7 +176,7 @@ test('PROPFIND after canonical-path materialization advertises the canonical tit
     reason: 'test',
   }, buildHandoffRequest({ canonicalTitle: 'Dune: Part Two', canonicalYear: 2024 }));
   persistHandoff(cache, handoff);
-  materializeVfsEntry(cache, handoff);
+  await materializeVfsEntry(cache, handoff);
 
   const handler = createMovieWebDav({
     searchCache: cache,

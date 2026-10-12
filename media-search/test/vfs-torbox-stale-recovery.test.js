@@ -28,7 +28,10 @@ const FILENAME = 'Movie.2024.1080p.mkv';
 const RELEASE_KEY = `${HASH}:0`;
 const FILE_INDEX = 0;
 const NOW = 10_000;
-const MEDIA_ID = 'tt1234567';
+// Synthetic unresolvable ID: the Cinemeta fallback must miss
+// deterministically (with or without network) so VFS paths derive from
+// the release filename (real tt1234567 resolves to an unrelated title).
+const MEDIA_ID = 'tt0000000';
 
 function persistMovie(cache, handoffInput) {
   const requestId = cache.persistMediaRequest(

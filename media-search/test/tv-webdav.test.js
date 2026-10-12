@@ -840,9 +840,17 @@ function buildFallbackHarness({
   },
   torrentFileId = FALLBACK_TORRENT_FILE_ID,
   setHandoffTorrentFileId = true,
+  // Legacy Node byte path (resolveBacking + RD fallback) serves only
+  // entries WITHOUT a durable TorrentFile; tfId-present entries are
+  // Rust-served and never consult RD/TorBox seams. RD-fallback tests
+  // opt into legacy entries explicitly.
+  legacyEntry = false,
 } = {}) {
   const cache = createDiscoveryCache({ dbPath: ':memory:' });
-  persistFallbackEpisode(cache, { torrentFileId, setHandoffTorrentFileId });
+  persistFallbackEpisode(cache, {
+    torrentFileId: legacyEntry ? null : torrentFileId,
+    setHandoffTorrentFileId: legacyEntry ? false : setHandoffTorrentFileId,
+  });
 
   let rdAttempt = 0;
   const rdCallLog = [];
@@ -923,6 +931,7 @@ test('A1 TV VFS same-TorrentFile RD fallback: TorBox protocol-invalid twice, RD 
   const rdResolvedUrl = 'https://rd.test/playback';
   let fetchCalls = 0;
   const { cache, handler, rdCallLog, getTorBoxDeliveryCalls } = buildFallbackHarness({
+    legacyEntry: true,
     rdOutcomes: [
       // 1st resolveBacking call: RD unresolvable for the SAME (infoHash, fileIndex).
       { status: 'failed', reason: 'not_cached' },
@@ -992,6 +1001,7 @@ test('A2 TV VFS same-TorrentFile RD fallback: no placement repair beyond initial
   providerAccounting.reset();
   let seamCallCount = 0;
   const { cache, handler, getTorBoxDeliveryCalls } = buildFallbackHarness({
+    legacyEntry: true,
     rdOutcomes: [
       { status: 'failed', reason: 'not_cached' },
       { status: 'failed', reason: 'not_cached' },
@@ -1100,6 +1110,7 @@ test('A4 TV VFS same-TorrentFile RD fallback: retains VFS logical path and exact
 test('A5 TV VFS same-TorrentFile RD fallback: TorBox bad + RD exhausted → existing fail-closed 502', async (t) => {
   providerAccounting.reset();
   const { cache, handler, rdCallLog, getTorBoxDeliveryCalls } = buildFallbackHarness({
+    legacyEntry: true,
     rdOutcomes: [
       { status: 'failed', reason: 'not_cached' },
       { status: 'failed', reason: 'cooldown' },
@@ -1138,6 +1149,7 @@ test('A5 TV VFS same-TorrentFile RD fallback: TorBox bad + RD exhausted → exis
 test('A6 TV VFS healthy TorBox delivery → zero alternate-provider fallback work', async (t) => {
   providerAccounting.reset();
   const { cache, handler, rdCallLog, getTorBoxDeliveryCalls } = buildFallbackHarness({
+    legacyEntry: true,
     rdOutcomes: [
       // 1st RD probe happens BEFORE the TorBox seam (RD is the primary
       // candidate probe in resolveBacking). It is allowed to be called
@@ -1201,6 +1213,7 @@ test('A6 TV VFS healthy TorBox delivery → zero alternate-provider fallback wor
 test('A7 TV VFS 429/backoff alone → no protocol-invalid misinterpretation; existing 429 surface preserved', async (t) => {
   providerAccounting.reset();
   const { cache, handler, rdCallLog, getTorBoxDeliveryCalls } = buildFallbackHarness({
+    legacyEntry: true,
     rdOutcomes: [
       { status: 'failed', reason: 'sentinel-must-not-be-touched' },
     ],

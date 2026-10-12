@@ -4,6 +4,48 @@ Format per entry: date / phase-slice / status / observed changes /
 verification / production evidence / unproven / artifacts / next gate.
 No planned work as completed. No vague "healthy." No speculative causes.
 
+## 2026-10-12 — hybrid native/app Plex HTPC playback canary — LANDED
+
+- Changed: replaced the CDP-only playback control/observation path with a
+  hybrid. New `media-search/src/lib/plex-htpc/mpv-ipc.js` (libmpv native JSON
+  IPC client) and `.../plex-app.js` (minimal Plex application bridge); rewrote
+  `media-search/src/scripts/dev-canary.js` (`abaffbb`).
+- RE groundwork (Plex HTPC `1.71.1.346-f62ce923`, in-process libmpv 0.38.0):
+  the client reads `<PLEX_USERDATA_DIR>/mpv.conf`, so `input-ipc-server`
+  exposes libmpv JSON IPC with no binary patch, no injection, no CDP. The
+  app's real player contract is QtWebChannel `player.*`; the canary reaches it
+  through the client's JS DI container.
+- Verification: new focused suite `test/plex-htpc-canary-seam.test.js`
+  (10/10) covering seek-read evidence semantics, run isolation, token
+  redaction, failure classification and mpv.conf idempotence.
+- Production evidence: E01, E05, MobLand E02, MobLand E04 all PASS with
+  identity verification (ratingKey, Part, media path, client id), progression,
+  forward/backward/near-EOF seeks proven against player position, PMS
+  `viewOffset` and a fresh exact-TorrentFile byte read, and app-level stop
+  with confirmed PMS teardown. Control per fixture: 3 CDP evaluates, 9
+  data-plane polls, 1 mpv socket.
+- What the rewrite proved about the seams: mpv IPC alone is NOT sufficient —
+  `loadfile` decodes bytes with no PMS session, and mpv `stop` leaves the PMS
+  session alive with no application notification. Start and teardown must be
+  app-level; seek/observe is honestly native.
+- Unproven / still brittle:
+  - one intermittent `PMS_SESSION_NOT_CREATED` caused by the client's own 30 s
+    HTTP timeout against PMS metadata (surfaced with the client's error); not
+    reproduced since, retry succeeded. Needs a longer observation window to
+    decide whether it is a real PMS latency tail.
+  - near-EOF seek can auto-advance into the next episode; mitigated by
+    stopping every live controller, not just video.
+  - PMS timeline reporting is ~10 s periodic, so seek→PMS-confirmation costs
+    ~10.5 s per seek. Inherent to the client, not the canary.
+  - the remaining bridge couples to the client build via one webpack module id
+    (verified, with a precise failure if the build changes).
+- Repo note: this slice's stash test collided with concurrent commits in the
+  same working tree. Three conflicted files were restored to their committed
+  state; the stashed work is intact in `stash@{0}`. Nothing owned by this slice
+  was lost, and no concurrent work was overwritten.
+- Next gate: decide whether removing the final two app-level CDP evaluates is
+  worth an interposer, only if they still cost real reliability.
+
 ## 2026-09-26 — failover semantics + byte proof — LANDED
 
 - Changed: same-object route-recovery semantics, live same-TorrentFile

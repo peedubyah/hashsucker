@@ -116,7 +116,7 @@ function seedLegacyRow(cache, { season, episode, size }) {
   });
 }
 
-test('materializeVfsEntry supersedes a legacy TV row when authoritative publication arrives', (t) => {
+test('materializeVfsEntry supersedes a legacy TV row when authoritative publication arrives', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -128,7 +128,7 @@ test('materializeVfsEntry supersedes a legacy TV row when authoritative publicat
 
   const before = 1_788_270_500_000;
   const after = 1_788_270_500_500;
-  const entry = materializeVfsEntry(
+  const entry = await materializeVfsEntry(
     cache,
     authoritativeHandoff({
       season: 1,
@@ -171,14 +171,14 @@ test('materializeVfsEntry supersedes a legacy TV row when authoritative publicat
   assert.equal(all.length, 1, 'legacy row superseded in place — no duplicate');
 });
 
-test('materializeVfsEntry is idempotent when an identical authoritative publication is replayed', (t) => {
+test('materializeVfsEntry is idempotent when an identical authoritative publication is replayed', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
   const controlPlaneStore = createControlPlaneStoreMock([tedE2TorrentFile()]);
 
   // First publication supersedes the legacy row
-  const first = materializeVfsEntry(
+  const first = await materializeVfsEntry(
     cache,
     authoritativeHandoff({
       season: 1,
@@ -192,7 +192,7 @@ test('materializeVfsEntry is idempotent when an identical authoritative publicat
   );
 
   // Second identical publication (e.g. Seerr resend, retry, or duplicate request)
-  const second = materializeVfsEntry(
+  const second = await materializeVfsEntry(
     cache,
     authoritativeHandoff({
       season: 1,
@@ -217,7 +217,7 @@ test('materializeVfsEntry is idempotent when an identical authoritative publicat
   assert.equal(all.length, 1, 'replay does not create a second row');
 });
 
-test('materializeVfsEntry remains fail-closed when an existing authoritative row has a differing TorrentFile identity', (t) => {
+test('materializeVfsEntry remains fail-closed when an existing authoritative row has a differing TorrentFile identity', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -248,7 +248,7 @@ test('materializeVfsEntry remains fail-closed when an existing authoritative row
   };
   const controlPlaneStore = createControlPlaneStoreMock([firstTf, conflictingTf]);
 
-  assert.throws(
+  await assert.rejects(
     () => materializeVfsEntry(
       cache,
       authoritativeHandoff({
@@ -271,7 +271,7 @@ test('materializeVfsEntry remains fail-closed when an existing authoritative row
   assert.equal(persisted.updatedAt, original.updatedAt);
 });
 
-test('materializeVfsEntry inserts a new authoritative row for an episode that has no legacy state', (t) => {
+test('materializeVfsEntry inserts a new authoritative row for an episode that has no legacy state', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -280,7 +280,7 @@ test('materializeVfsEntry inserts a new authoritative row for an episode that ha
   // No legacy row for E07 (a previously-unpublished episode)
   assert.equal(cache.getVfsTvEntry('tt10986410', 1, 7), null);
 
-  const entry = materializeVfsEntry(
+  const entry = await materializeVfsEntry(
     cache,
     authoritativeHandoff({
       season: 1,

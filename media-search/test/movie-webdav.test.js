@@ -122,12 +122,12 @@ test('movie VFS materializes two durable handoffs without movie-specific branche
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   persistMovie(cache, {
-    mediaId: 'tt0000001',
+    mediaId: 'tt0000000',
     infoHash: HASH_A,
     filename: 'Oppenheimer.2023.2160p.mkv',
   });
   persistMovie(cache, {
-    mediaId: 'tt0000002',
+    mediaId: 'tt10000000',
     infoHash: HASH_B,
     filename: 'Companion.2025.2160p.mkv',
   });
@@ -164,7 +164,7 @@ test('movie VFS ignores malformed legacy handoffs instead of failing the catalog
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   persistMovie(cache, {
-    mediaId: 'tt0000001',
+    mediaId: 'tt0000000',
     infoHash: HASH_A,
     filename: 'Oppenheimer.2023.2160p.mkv',
   });
@@ -210,7 +210,7 @@ test('movie VFS persists exact provider range size and reuses it across handler 
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   persistMovie(cache, {
-    mediaId: 'tt0000001',
+    mediaId: 'tt0000000',
     infoHash: HASH_A,
     filename: 'Oppenheimer.2023.2160p.mkv',
   });
@@ -242,7 +242,7 @@ test('movie VFS persists exact provider range size and reuses it across handler 
   assert.equal(first.status, 200);
   assert.equal(first.headers['content-length'], '4099958870');
   assert.deepEqual(fetchRanges, ['bytes=0-0']);
-  assert.equal(cache.getVfsMovieEntry('tt0000001').size, 4099958870);
+  assert.equal(cache.getVfsMovieEntry('tt0000000').size, 4099958870);
 
   request = createRequest(createMovieWebDav(dependencies));
   const reopened = await request('/vfs/Movies/Oppenheimer%20(2023)/Oppenheimer%20(2023).mkv', {
@@ -257,12 +257,12 @@ test('movie VFS retries once after stale range metadata and returns fresh bytes'
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   persistMovie(cache, {
-    mediaId: 'tt0000001',
+    mediaId: 'tt0000000',
     infoHash: HASH_A,
     filename: 'Oppenheimer.2023.2160p.mkv',
   });
   cache.createVfsMovieEntry({
-    mediaId: 'tt0000001',
+    mediaId: 'tt0000000',
     releaseKey: `${HASH_A}:torrent`,
     infoHash: HASH_A,
     fileIndex: null,
@@ -314,7 +314,7 @@ test('movie VFS coalesces concurrent initial metadata probes per entry', async (
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   persistMovie(cache, {
-    mediaId: 'tt0000001',
+    mediaId: 'tt0000000',
     infoHash: HASH_A,
     filename: 'Oppenheimer.2023.2160p.mkv',
   });
@@ -349,4 +349,57 @@ test('movie VFS coalesces concurrent initial metadata probes per entry', async (
   const responses = await Promise.all([first, second]);
   assert.deepEqual(responses.map((response) => response.status), [200, 200]);
   assert.equal(probeCount, 1);
+});
+
+test('movie VFS byte integrity: beginning, distant seek, and near-EOF ranges hash-match provider bytes', async (t) => {
+  // Part 9: the bytes Plex receives must equal the provider bytes for the
+  // same ranges. The stub provider serves a deterministic pattern; the
+  // test recomputes the expected slices locally and compares hashes.
+  const crypto = await import('node:crypto');
+  const SIZE = 1_000_000;
+  const byteAt = (i) => i % 251;
+  const expectedSlice = (start, end) => {
+    const buf = Buffer.alloc(end - start + 1);
+    for (let i = start; i <= end; i++) buf[i - start] = byteAt(i);
+    return buf;
+  };
+  const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+
+  const cache = createDiscoveryCache();
+  t.after(() => cache.close());
+  persistMovie(cache, {
+    mediaId: 'tt0000000',
+    infoHash: HASH_A,
+    filename: 'Oppenheimer.2023.2160p.mkv',
+  });
+  const fetchFn = async (_url, options) => {
+    const m = String(options?.headers?.range || options?.headers?.Range || '').match(/bytes=(\d+)-(\d*)/);
+    const start = m ? parseInt(m[1], 10) : 0;
+    const end = m && m[2] !== '' ? parseInt(m[2], 10) : SIZE - 1;
+    const body = expectedSlice(start, Math.min(end, SIZE - 1));
+    return providerResponse(206, {
+      body,
+      contentRange: `bytes ${start}-${Math.min(end, SIZE - 1)}/${SIZE}`,
+    });
+  };
+  const dependencies = {
+    searchCache: cache,
+    controlPlaneStore: createControlPlane(null),
+    rdClient: null,
+    rdResolutionCache: createRdResolutionCache(),
+    resolveTorBoxDeliverySeam: async () => ({ url: 'https://provider.test/file', size: SIZE, recovered: false }),
+    torBoxDownloadUrlCache: { get() { return null; }, set() {}, delete() {}, async getOrInFlight() { throw new Error('unused'); } },
+    fetchFn,
+    torBoxRedirectOptions: { apiKey: 'test-token', apiBase: 'https://provider.test' },
+  };
+  const request = createRequest(createMovieWebDav(dependencies));
+  const url = '/vfs/Movies/Oppenheimer%20(2023)/Oppenheimer%20(2023).mkv';
+  for (const [start, end] of [[0, 999], [500000, 500999], [SIZE - 1000, SIZE - 1]]) {
+    const res = await request(url, { method: 'GET', headers: { range: `bytes=${start}-${end}` } });
+    assert.equal(res.status, 206, `range ${start}-${end} serves 206`);
+    assert.equal(res.headers['content-range'], `bytes ${start}-${end}/${SIZE}`);
+    const expected = expectedSlice(start, end);
+    assert.equal(sha(res.body), sha(expected), `range ${start}-${end} bytes hash-match provider bytes`);
+    assert.equal(res.body.length, expected.length, `range ${start}-${end} length exact`);
+  }
 });

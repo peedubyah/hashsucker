@@ -641,11 +641,14 @@ test('GET /media/lookup accepts "torrent" as fileIndex', async () => {
   store.close();
 });
 
-test('GET /media/lookup returns 502 when control plane store is not configured', async () => {
-  const handler = createRequestHandler({});
-  const request = createRequest(handler);
-  const response = await request(`/media/lookup/${HASH}/0`);
-  assert.equal(response.status, 502);
+test('handler construction without a control-plane store fails fast', async () => {
+  // Binding authority requires the store at construction, so a storeless
+  // handler cannot exist to return a route-level 502: the product contract
+  // is an explicit fail-fast error (same contract as server.test.js).
+  assert.throws(
+    () => createRequestHandler({}),
+    /controlPlaneStore is required/,
+  );
 });
 
 // ---------------------------------------------------------------------------

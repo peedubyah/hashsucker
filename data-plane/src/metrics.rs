@@ -189,6 +189,10 @@ pub struct Metrics {
     /// Bounded ring of completed per-request stage waterfalls. Bounded (not
     /// unbounded) because this is diagnostic telemetry on a long-lived server.
     pub stage_reports: Mutex<Vec<StageReport>>,
+    /// Bounded per-TorrentFile retention for production-canary correlation.
+    /// This prevents unrelated traffic from evicting the active fixture's
+    /// cache/provider evidence before the canary collects it.
+    pub stage_reports_by_tf: Mutex<HashMap<String, Vec<StageReport>>>,
     /// The most recently completed request's waterfall. This is what the
     /// benchmark reads for its permanent timing fields.
     pub stage_last: Mutex<Option<StageReport>>,
@@ -196,6 +200,7 @@ pub struct Metrics {
 
 /// Cap on retained per-request stage waterfalls.
 const STAGE_REPORT_CAP: usize = 64;
+const STAGE_REPORT_TF_CAP: usize = 256;
 
 impl Metrics {
     /// Publish a completed request's stage waterfall. Retains the last
@@ -203,10 +208,19 @@ impl Metrics {
     pub fn record_stage_report(&self, r: StageReport) {
         *self.stage_last.lock().unwrap() = Some(r.clone());
         let mut v = self.stage_reports.lock().unwrap();
-        v.push(r);
+        v.push(r.clone());
         if v.len() > STAGE_REPORT_CAP {
             let over = v.len() - STAGE_REPORT_CAP;
             v.drain(0..over);
+        }
+        if !r.tf_id.is_empty() {
+            let mut by_tf = self.stage_reports_by_tf.lock().unwrap();
+            let bucket = by_tf.entry(r.tf_id.clone()).or_default();
+            bucket.push(r);
+            if bucket.len() > STAGE_REPORT_TF_CAP {
+                let over = bucket.len() - STAGE_REPORT_TF_CAP;
+                bucket.drain(0..over);
+            }
         }
     }
 
@@ -216,6 +230,15 @@ impl Metrics {
             .unwrap()
             .iter()
             .map(|r| r.to_json())
+            .collect()
+    }
+
+    pub fn stage_reports_by_tf_json(&self) -> Vec<serde_json::Value> {
+        self.stage_reports_by_tf
+            .lock()
+            .unwrap()
+            .values()
+            .flat_map(|rows| rows.iter().map(|r| r.to_json()))
             .collect()
     }
 }

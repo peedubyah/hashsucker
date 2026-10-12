@@ -68,13 +68,13 @@ function authoritativeTorrentFile(overrides = {}) {
   };
 }
 
-test('materializeVfsEntry refuses to write when handoff has no torrentFileId (allowLegacy=false)', (t) => {
+test('materializeVfsEntry refuses to write when handoff has no torrentFileId (allowLegacy=false)', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   const controlPlane = controlPlaneWith([authoritativeTorrentFile()]);
 
   // handoff.torrentFileId missing -> fail closed
-  assert.throws(
+  await assert.rejects(
     () => materializeVfsEntry(
       cache,
       authoritativeHandoff({ torrentFileId: null }),
@@ -89,13 +89,13 @@ test('materializeVfsEntry refuses to write when handoff has no torrentFileId (al
   assert.equal(cache.getVfsTvEntry('tt10986410', 1, 2), null);
 });
 
-test('materializeVfsEntry refuses when the referenced TorrentFile does not exist', (t) => {
+test('materializeVfsEntry refuses when the referenced TorrentFile does not exist', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   // Empty control plane: no TorrentFile at all.
   const controlPlane = controlPlaneWith([]);
 
-  assert.throws(
+  await assert.rejects(
     () => materializeVfsEntry(
       cache,
       authoritativeHandoff(),
@@ -108,7 +108,7 @@ test('materializeVfsEntry refuses when the referenced TorrentFile does not exist
   assert.equal(cache.getVfsTvEntry('tt10986410', 1, 2), null);
 });
 
-test('materializeVfsEntry refuses when TorrentFile size is not a positive safe integer', (t) => {
+test('materializeVfsEntry refuses when TorrentFile size is not a positive safe integer', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -120,7 +120,7 @@ test('materializeVfsEntry refuses when TorrentFile size is not a positive safe i
   ];
   for (const { tf } of cases) {
     const controlPlane = controlPlaneWith([tf]);
-    assert.throws(
+    await assert.rejects(
       () => materializeVfsEntry(
         cache,
         authoritativeHandoff(),
@@ -135,13 +135,13 @@ test('materializeVfsEntry refuses when TorrentFile size is not a positive safe i
   assert.equal(cache.getVfsTvEntry('tt10986410', 1, 2), null);
 });
 
-test('materializeVfsEntry refuses when TorrentFile infoHash disagrees with the handoff', (t) => {
+test('materializeVfsEntry refuses when TorrentFile infoHash disagrees with the handoff', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   const tf = authoritativeTorrentFile({ infoHash: 'ffffffffffffffffffffffffffffffffffff' });
   const controlPlane = controlPlaneWith([tf]);
 
-  assert.throws(
+  await assert.rejects(
     () => materializeVfsEntry(
       cache,
       authoritativeHandoff(),
@@ -154,13 +154,13 @@ test('materializeVfsEntry refuses when TorrentFile infoHash disagrees with the h
   assert.equal(cache.getVfsTvEntry('tt10986410', 1, 2), null);
 });
 
-test('modern VFS write contract: torrent_file_id, infoHash, size, canonical_path come from TorrentFile', (t) => {
+test('modern VFS write contract: torrent_file_id, infoHash, size, canonical_path come from TorrentFile', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   const tf = authoritativeTorrentFile();
   const controlPlane = controlPlaneWith([tf]);
 
-  const entry = materializeVfsEntry(
+  const entry = await materializeVfsEntry(
     cache,
     authoritativeHandoff(),
     controlPlane,
@@ -194,11 +194,11 @@ test('modern VFS write contract: torrent_file_id, infoHash, size, canonical_path
   }
 });
 
-test('modern write path does not require a non-null controlPlaneStore only when allowLegacy=true', (t) => {
+test('modern write path does not require a non-null controlPlaneStore only when allowLegacy=true', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   // Without a control plane, allowLegacy=false must throw before any row is written.
-  assert.throws(
+  await assert.rejects(
     () => materializeVfsEntry(
       cache,
       authoritativeHandoff(),

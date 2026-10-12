@@ -28,6 +28,20 @@ import {
 } from '../src/lib/intents/providers/seerr.js';
 
 const TOKEN = 'test-seerr-token-deadbeef';
+
+// Hermetic ingress tests: Seerr itself is stubbed over localhost HTTP
+// (127.0.0.1 allowed), but live discovery, provider APIs, and metadata
+// must never leave the process — every other fetch fails fast so the
+// pipeline exercises its designed fail-safe behavior deterministically.
+// This file runs in its own process; the module-scope stub cannot leak.
+const _realFetch = globalThis.fetch;
+globalThis.fetch = async (url, init) => {
+  const href = String(url);
+  if (href.includes('127.0.0.1') || href.includes('localhost')) {
+    return _realFetch(url, init);
+  }
+  throw new Error(`no-network-fixture: ${href.slice(0, 120)}`);
+};
 const VALID_PAYLOAD = {
   notification_type: 'MEDIA_AUTO_APPROVED',
   subject: 'Alice requested Inception',
@@ -152,7 +166,11 @@ test('seerr ingress: correct token + valid movie → one durable intent', async 
     assert.equal(res.status, 202, res.text);
     const body = JSON.parse(res.text);
     assert.equal(body.status, 'deferred');
-    assert.equal(body.deferReason, 'candidate-not-fulfillable');
+    // Empty corpus + hermetic live discovery ⇒ zero candidates ⇒
+    // released-no-candidate (with live network this calibrated to
+    // candidate-not-fulfillable; the hermetic classification is the
+    // correct one for an empty result set).
+    assert.equal(body.deferReason, 'released-no-candidate');
     assert.ok(body.futureIntentId > 0, 'unbound candidates defer to durable intent');
     assert.equal(body.notificationType, 'MEDIA_AUTO_APPROVED');
     assert.equal(body.mediaId, 'tt1375666');
@@ -609,6 +627,18 @@ function seedCandidateForMedia(cache, mediaId, infoHash, fileIndex = 0) {
     INSERT INTO release_attributes (info_hash, file_index_key, source, filename, confidence, media_type, season, resolution, codec, audio, source_type, release_group, language, parsed_at)
     VALUES (@info_hash, @fi_key, 'test', 'Test.Movie.2024.1080p.mkv', 0.9, 'movie', NULL, '1080p', 'h264', 'aac', 'web', 'test-rg', 'en', @now)
   `).run({ info_hash: infoHash, fi_key: fiKey, now });
+
+  // Corpus membership: without the candidate→media association the
+  // request path cannot see this row (association is the retrieval key).
+  cache.associateMedia(infoHash, fileIndex, mediaId, {
+    source: 'test',
+    confidence: 0.9,
+    evidence: ['test-seed'],
+    resolverSource: 'test',
+    resolverVersion: '1.0',
+    matchMethod: 'test-seed',
+    resolutionState: 'probable',
+  });
 }
 
 test('seerr ingress: actionable webhook → one media_intents row AND one media_requests row', async () => {
@@ -1087,6 +1117,10 @@ test('seerr ingress: TMDB-only movie → canonical title threaded into searchByM
   try {
     const cache = buildCache();
     const handler = buildHandler(cache);
+    // Seed one corpus row so the request persists deterministically
+    // without live network (branch-1 live discovery is hermetically
+    // empty in this file).
+    seedCandidateForMedia(cache, 'tt0133093', 'abcd1234567890abcdef1234567890ab123457');
     // Wrap the cache so we can observe the searchByMedia call shape.
     // We do this through the public db.prepare surface by patching the
     // upsertMediaIntent call to also record what was passed to

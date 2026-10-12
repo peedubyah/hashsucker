@@ -73,15 +73,15 @@ function torrentFile({ id, infoHash = INFO_HASH_A, internalPath, size = 5_000_00
   };
 }
 
-test('same logical alias + same TorrentFile -> exactly one durable VFS row (idempotent)', (t) => {
+test('same logical alias + same TorrentFile -> exactly one durable VFS row (idempotent)', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   const tf = torrentFile({ id: 'tf_same' });
   const controlPlane = controlPlaneWith([tf]);
 
   const handoff = authoritativeHandoff({ torrentFileId: 'tf_same' });
-  const a = materializeVfsEntry(cache, handoff, controlPlane, () => 1_788_000_000_000, { allowLegacy: false });
-  const b = materializeVfsEntry(cache, handoff, controlPlane, () => 1_788_000_500_000, { allowLegacy: false });
+  const a = await materializeVfsEntry(cache, handoff, controlPlane, () => 1_788_000_000_000, { allowLegacy: false });
+  const b = await materializeVfsEntry(cache, handoff, controlPlane, () => 1_788_000_500_000, { allowLegacy: false });
 
   // Idempotency: identity preserved across replays.
   assert.equal(b.torrentFileId, a.torrentFileId);
@@ -108,7 +108,7 @@ test('same logical alias + same TorrentFile -> exactly one durable VFS row (idem
   );
 });
 
-test('same alias + different authoritative TorrentFile -> fail-closed (no silent overwrite)', (t) => {
+test('same alias + different authoritative TorrentFile -> fail-closed (no silent overwrite)', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -121,7 +121,7 @@ test('same alias + different authoritative TorrentFile -> fail-closed (no silent
   const controlPlane = controlPlaneWith([tfOriginal, tfReplacement]);
 
   // First publication: original TF.
-  const a = materializeVfsEntry(
+  const a = await materializeVfsEntry(
     cache,
     authoritativeHandoff({ torrentFileId: 'tf_original' }),
     controlPlane,
@@ -132,7 +132,7 @@ test('same alias + different authoritative TorrentFile -> fail-closed (no silent
   assert.equal(a.size, 5_000_000_000);
 
   // Second publication: a DIFFERENT TF for the same slot -> must fail closed.
-  assert.throws(
+  await assert.rejects(
     () => materializeVfsEntry(
       cache,
       authoritativeHandoff({ torrentFileId: 'tf_replacement' }),
@@ -154,7 +154,7 @@ test('same alias + different authoritative TorrentFile -> fail-closed (no silent
   assert.equal(all.length, 1);
 });
 
-test('concurrent identical first-publication race -> exactly one logical row (race recovery)', (t) => {
+test('concurrent identical first-publication race -> exactly one logical row (race recovery)', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   const tf = torrentFile({ id: 'tf_race' });
@@ -180,7 +180,7 @@ test('concurrent identical first-publication race -> exactly one logical row (ra
 
   // The new authoritative materialize must observe the existing identical
   // row and return it (idempotent) without throwing.
-  const entry = materializeVfsEntry(
+  const entry = await materializeVfsEntry(
     cache, handoff, controlPlane, () => 1_788_000_500_000, { allowLegacy: false },
   );
   assert.equal(entry.torrentFileId, 'tf_race');
@@ -192,7 +192,7 @@ test('concurrent identical first-publication race -> exactly one logical row (ra
   assert.equal(all.length, 1);
 });
 
-test('missing episode -> insert only, no supersede, no duplicate', (t) => {
+test('missing episode -> insert only, no supersede, no duplicate', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
   const tf = torrentFile({ id: 'tf_fresh' });
@@ -201,7 +201,7 @@ test('missing episode -> insert only, no supersede, no duplicate', (t) => {
   // Pre-condition: no VFS row for this slot.
   assert.equal(cache.getVfsTvEntry('tt0000099', 1, 7), null);
 
-  const entry = materializeVfsEntry(
+  const entry = await materializeVfsEntry(
     cache,
     authoritativeHandoff({ torrentFileId: 'tf_fresh', season: 1, episode: 7 }),
     controlPlane,

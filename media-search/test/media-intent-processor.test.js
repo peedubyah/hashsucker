@@ -11,6 +11,17 @@ import test from 'node:test';
 import { createDiscoveryCache } from '../src/lib/discovery/cache.js';
 import { MediaIntentProcessor, formatProcessingSummary } from '../src/lib/intents/index.js';
 
+// Hermetic worker tests: the processor is a background worker whose
+// production path performs live discovery, availability checks, and
+// metadata lookups. Unit tests must not depend on (or burn) provider
+// APIs and network metadata: every fetch outside the process fails fast,
+// and all pipeline stages degrade to their designed fail-safe behavior
+// (live → [], availability → unknown, metadata → null). This file runs in
+// its own process, so the module-scope stub cannot leak into other files.
+globalThis.fetch = async (url) => {
+  throw new Error(`no-network-fixture: ${String(url).slice(0, 120)}`);
+};
+
 // =============================================================================
 // Test: MediaIntentProcessor requires cache instance
 // =============================================================================

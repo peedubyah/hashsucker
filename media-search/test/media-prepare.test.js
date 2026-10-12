@@ -116,6 +116,8 @@ test('prepareOnly persists handoff without VFS, STRM, or publication', async (t)
       ...baseReq,
       mediaId: MOVIE_ID,
       mediaType: 'movie',
+      mediaTitle: 'Movie',
+      canonicalYear: 2020,
       prepareOnly: true,
       controlPlaneStore: stubStore(tf),
       ensureTorBoxFileIdentity: stubEnsure(tf, calls),
@@ -146,14 +148,14 @@ test('prepared request republishes with zero additional provider work', async (t
     const store = stubStore(tf);
     const ensure = stubEnsure(tf, calls);
     const prep = await searchByMedia(cache, {
-      ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie', prepareOnly: true,
+      ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie', mediaTitle: 'Movie', canonicalYear: 2020, prepareOnly: true,
       controlPlaneStore: store, ensureTorBoxFileIdentity: ensure,
     });
     assert.equal(prep.prepared, true);
     assert.equal(calls.count, 1);
 
     const req = await searchByMedia(cache, {
-      ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie',
+      ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie', mediaTitle: 'Movie', canonicalYear: 2020,
       controlPlaneStore: store, ensureTorBoxFileIdentity: ensure,
     });
     assert.equal(req.reuseMode, 'republish');
@@ -179,7 +181,7 @@ test('prepareOnly respects exact episode identity', async (t) => {
     const store = stubStore(tf);
     const ensure = stubEnsure(tf, calls);
     const prep = await searchByMedia(cache, {
-      ...baseReq, mediaId: SERIES_ID, mediaType: 'series', season: 1, episode: 1,
+      ...baseReq, mediaId: SERIES_ID, mediaType: 'series', season: 1, episode: 1, mediaTitle: 'Show',
       prepareOnly: true, controlPlaneStore: store, ensureTorBoxFileIdentity: ensure,
     });
     assert.equal(prep.prepared, true);
@@ -206,7 +208,7 @@ test('stale prepared state falls back safely into the normal path', async (t) =>
     const calls = { count: 0 };
     const store = stubStore(tf);
     const prep = await searchByMedia(cache, {
-      ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie', prepareOnly: true,
+      ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie', mediaTitle: 'Movie', canonicalYear: 2020, prepareOnly: true,
       controlPlaneStore: store, ensureTorBoxFileIdentity: stubEnsure(tf, calls),
     });
     assert.equal(prep.prepared, true);
@@ -219,7 +221,7 @@ test('stale prepared state falls back safely into the normal path', async (t) =>
       'predicate rejects stale truth',
     );
     const req = await searchByMedia(cache, {
-      ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie',
+      ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie', mediaTitle: 'Movie', canonicalYear: 2020,
       controlPlaneStore: staleStore, ensureTorBoxFileIdentity: stubEnsure(tf, calls),
     });
     assert.ok(!req.reuseMode, 'no reuse on stale truth — normal path taken');
@@ -238,11 +240,11 @@ test('repeated prepare is idempotent and never publishes', async (t) => {
     const store = stubStore(tf);
     const ensure = stubEnsure(tf, calls);
     const first = await searchByMedia(cache, {
-      ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie', prepareOnly: true,
+      ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie', mediaTitle: 'Movie', canonicalYear: 2020, prepareOnly: true,
       controlPlaneStore: store, ensureTorBoxFileIdentity: ensure,
     });
     const second = await searchByMedia(cache, {
-      ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie', prepareOnly: true,
+      ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie', mediaTitle: 'Movie', canonicalYear: 2020, prepareOnly: true,
       controlPlaneStore: store, ensureTorBoxFileIdentity: ensure,
     });
     assert.equal(first.prepared, true);

@@ -1117,6 +1117,9 @@ export async function searchTrace(cache, options = {}) {
 
     const allCandidates = [...canonicalLocal, ...canonicalLive];
     const discovered = allCandidates.length;
+    // Trace-local funnel object (combinedSearch keeps a richer one; the
+    // trace return carries its own pipeline summary below).
+    const pipelineDebug = {};
 
     // Dedup
     timing.start('candidate.dedup');

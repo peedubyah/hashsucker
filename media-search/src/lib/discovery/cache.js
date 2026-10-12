@@ -5936,10 +5936,14 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
         continue;
       }
 
-      // Insert into queue, preserving first_seen as created_at
+      // Insert into queue, preserving first_seen as created_at.
+      // priority defaults to 0 (same convention as the probe queue);
+      // the INSERT lists the NOT NULL column explicitly so it must be
+      // bound on every call.
       insertEnrichmentQueueStmt.run({
         info_hash: candidate.infoHash,
         file_index_key: fileIndexKey(candidate.fileIndex),
+        priority: 0,
         max_attempts: maxAttempts,
         resolver_source: null,
         now: candidate.firstSeen || now,

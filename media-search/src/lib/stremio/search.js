@@ -10,6 +10,12 @@ import { discoveryAccounting } from '../discovery/discovery-accounting.js';
 
 const DEFAULT_CONCURRENCY = 6;
 
+// Per-addon fetch bound (torznab parity): one hanging manifest must never
+// stall the whole pass. Generous vs observed latencies (tens–hundreds of
+// ms); a timeout is recorded per-source as a timeout disposition, and the
+// remaining sources merge normally.
+const ADDON_FETCH_TIMEOUT_MS = 5000;
+
 const TORRENTIO_BASE = 'https://torrentio.strem.fun';
 
 function buildTorrentioUrl(provider, apiKey) {
@@ -158,6 +164,11 @@ export async function searchStremio({
   mediaId,
   addons,
   concurrency = DEFAULT_CONCURRENCY,
+  // Optional per-source observer: called exactly once per addon with
+  // { addonId, addonName, provider, debridProvider, latencyMs, rawCount,
+  //   parsedCount, error }. Additive only — success/failure behavior is
+  // unchanged (failures still resolve to []).
+  onSourceResult = null,
 }) {
   if (!['movie', 'series'].includes(type)) {
     throw new Error(`Invalid Stremio type: ${type}`);
@@ -176,6 +187,22 @@ export async function searchStremio({
     );
 
   const tasks = enabledAddons.map((addon, index) => async () => {
+    const startedAt = Date.now();
+    const sourceMeta = {
+      addonId: addon.addon_id,
+      addonName: addon.name,
+      provider: addon.provider || addon.provider_name || addon.addon_id,
+      debridProvider: addon.debridProvider || null,
+    };
+    const report = (partial) => {
+      if (typeof onSourceResult === 'function') {
+        try {
+          onSourceResult({ ...sourceMeta, latencyMs: Date.now() - startedAt, ...partial });
+        } catch {
+          // Observer must never break discovery.
+        }
+      }
+    };
     const streamUrl = buildStreamUrl(
       addon.manifest_url,
       type,
@@ -194,56 +221,68 @@ export async function searchStremio({
           'user-agent': 'media-search/0.0.1',
           accept: 'application/json',
         },
+        signal: AbortSignal.timeout(ADDON_FETCH_TIMEOUT_MS),
       });
     } catch (err) {
       discoveryAccounting.recordError(addon.addon_id);
-      throw new Error(
-        `${addon.name}: network error: ${err?.message || 'unknown'}`
-      );
+      const message = `${addon.name}: network error: ${err?.message || 'unknown'}`;
+      console.error(message);
+      report({ rawCount: 0, parsedCount: 0, error: message });
+      return [];
     }
 
     if (!response.ok) {
       discoveryAccounting.recordError(addon.addon_id);
-      throw new Error(
-        `${addon.name}: HTTP ${response.status}`
-      );
+      const message = `${addon.name}: HTTP ${response.status}`;
+      console.error(message);
+      report({ rawCount: 0, parsedCount: 0, error: message });
+      return [];
     }
 
-    const data = await response.json();
+    let data;
+    try {
+      data = await response.json();
+    } catch (err) {
+      discoveryAccounting.recordError(addon.addon_id);
+      const message = `${addon.name}: invalid JSON: ${err?.message || 'unknown'}`;
+      console.error(message);
+      report({ rawCount: 0, parsedCount: 0, error: message });
+      return [];
+    }
     const streams = Array.isArray(data.streams)
       ? data.streams
       : [];
 
-    const normalized = streams
-      .map((raw) =>
-        normalizeStream(raw, {
-          addonId: addon.addon_id,
-          addonName: addon.name,
-          provider: addon.provider || addon.provider_name || addon.addon_id,
-          sourceClass: 'stremio',
-          sortOrder: addon.sort_order ?? index,
-          streamType: type,
-        })
-      )
-      .filter(Boolean);
+    let normalized;
+    try {
+      normalized = streams
+        .map((raw) =>
+          normalizeStream(raw, {
+            addonId: addon.addon_id,
+            addonName: addon.name,
+            provider: addon.provider || addon.provider_name || addon.addon_id,
+            sourceClass: 'stremio',
+            sortOrder: addon.sort_order ?? index,
+            streamType: type,
+          })
+        )
+        .filter(Boolean);
+    } catch (err) {
+      discoveryAccounting.recordError(addon.addon_id);
+      const message = `${addon.name}: normalize failed: ${err?.message || 'unknown'}`;
+      console.error(message);
+      report({ rawCount: streams.length, parsedCount: 0, error: message });
+      return [];
+    }
     // Account the per-source candidate count AFTER normalization
     // (so the count is the number of bindable candidates, not the
     // raw stream list size).
     discoveryAccounting.recordCandidates(addon.addon_id, normalized.length);
+    report({ rawCount: streams.length, parsedCount: normalized.length, error: null });
     return normalized;
   });
 
-  const batches = await runPool(
-    tasks.map((task) => async () => {
-      try {
-        return await task();
-      } catch (error) {
-        console.error(error.message);
-        return [];
-      }
-    }),
-    concurrency
-  );
+  const batches = await runPool(tasks, concurrency);
 
   let results = [];
 

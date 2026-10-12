@@ -230,7 +230,14 @@ test('scheduler: exhausted deferred row re-arms at low cadence, never dies', asy
   assert.ok(after.next_check_at > 1_000_000 + 6 * 86400 * 1000, 're-armed ~7d out, not hot-looped');
 });
 
-test('scheduler: exhausted non-deferred row still dies (no behavior change)', async () => {
+test('scheduler: exhausted non-deferred row parks its poll but stays dead', async () => {
+  // Liveness repair (proven live Sep 2026: two exhausted rows with a stale
+  // next_check_at head-of-line-blocked the due queue for 7 days, starving
+  // every released-unfulfilled row behind them — each tick silently no-ops
+  // on the same head row because due() orders by next_check_at and a tick
+  // processes one intent). The exhaustion semantics are unchanged (failed
+  // stays failed, never rearmed, history preserved); only the poll is
+  // parked 7d out so the queue advances past it.
   const { cache, store } = memStore();
   const { intent } = store.seed({ mediaType: 'movie', mediaId: 'ttD', source: 'operator' });
   store.transition(intent.id, 'failed', { last_error: 'prepare-http-400', next_check_at: 1 });
@@ -238,8 +245,12 @@ test('scheduler: exhausted non-deferred row still dies (no behavior change)', as
   const sched = memScheduler(store);
   const row = { ...store.findByIdentity({ mediaId: 'ttD' }) };
   const r = await sched.processIntent(row);
-  assert.equal(r.acted, false);
-  assert.equal(r.reason, 'attempts-exhausted');
+  assert.equal(r.acted, true);
+  assert.equal(r.parked, true);
+  const after = store.findByIdentity({ mediaId: 'ttD' });
+  assert.equal(after.state, 'failed', 'exhaustion state preserved (never rearmed)');
+  assert.equal(after.attempts, 6, 'history preserved');
+  assert.ok(after.next_check_at > 1_000_000 + 6 * 86400 * 1000, 'poll parked ~7d out, not hot-looped');
 });
 
 test('store: withdrawSeerrRequest hits parent+children, spares prepared and foreign rows', () => {

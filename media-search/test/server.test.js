@@ -14,6 +14,9 @@ const HASH = '0123456789abcdef0123456789abcdef01234567';
 function createHarness() {
   const submitted = [];
   const handler = createRequestHandler({
+    // Binding-authority slices require a control-plane store on routes that
+    // can reach provider binding (production always configures one).
+    controlPlaneStore: createControlPlaneStore(),
     importer: {
       async submitRequest(handoff) { submitted.push(handoff); return { requestId: handoff.requestId, status: 'queued' }; },
       async getRequestStatus(requestId) { return { requestId, status: 'processing' }; },
@@ -117,6 +120,8 @@ test('server serves API and returns 404 when no frontend build is configured', a
     _source: 'corpus',
     _sources: [],
     _selectedMediaId: null,
+    _provenance: null,
+    _justification: null,
   });
 
   const ui = await request('/');
@@ -231,7 +236,7 @@ test('server serves the built frontend and preserves API 404s', async (t) => {
 
   const searchCache = createDiscoveryCache();
   t.after(() => searchCache.close());
-  const handler = createRequestHandler({ searchCache, staticRoot });
+  const handler = createRequestHandler({ controlPlaneStore: createControlPlaneStore(), searchCache, staticRoot });
 
   async function request(url) {
     const input = Readable.from([]);
@@ -267,6 +272,7 @@ test('server serves the built frontend and preserves API 404s', async (t) => {
 
 test('public release API strips all secret-bearing and internal fields', async () => {
   const handler = createRequestHandler({
+    controlPlaneStore: createControlPlaneStore(),
     importer: {
       async submitRequest() { return { requestId: 'id', status: 'queued' }; },
       async getRequestStatus() { return { requestId: 'id', status: 'processing' }; },
@@ -401,7 +407,17 @@ test('request endpoint defaults handlingMode to "download" when not specified', 
   assert.equal(submitted[0].handlingMode, 'download');
 });
 
-test('request endpoint preserves handlingMode "stream"', async () => {
+test('request endpoint preserves handlingMode "stream"', async (t) => {
+  // Hermetic STRM root: stream-mode requests publish an STRM artifact, and
+  // the default /strm root is not writable in every environment.
+  const strmRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'server-test-strm-'));
+  const savedStrmRoot = process.env.STRM_OUTPUT_PATH;
+  process.env.STRM_OUTPUT_PATH = strmRoot;
+  t.after(async () => {
+    if (savedStrmRoot === undefined) delete process.env.STRM_OUTPUT_PATH;
+    else process.env.STRM_OUTPUT_PATH = savedStrmRoot;
+    await fs.rm(strmRoot, { recursive: true, force: true });
+  });
   const { request, submitted } = createHarness();
   const response = await request('/api/requests', {
     method: 'POST',
@@ -413,7 +429,14 @@ test('request endpoint preserves handlingMode "stream"', async () => {
     }),
   });
   assert.equal(response.status, 202, response.text);
-  assert.equal(submitted[0].handlingMode, 'stream');
+  // Stream mode fulfills inline through the virtual library (not the
+  // download queue): completed status, preserved handlingMode, STRM path.
+  const body = JSON.parse(response.text);
+  assert.equal(body.status, 'completed');
+  assert.equal(body.handlingMode, 'stream');
+  assert.ok(typeof body.strmPath === 'string' && body.strmPath.length > 0, 'STRM path returned');
+  assert.ok(body.strmPath.startsWith(strmRoot), 'STRM published under the configured root');
+  assert.deepEqual(submitted, [], 'stream mode never queues a download');
 });
 
 test('request endpoint rejects invalid handlingMode with 400', async () => {
@@ -523,7 +546,7 @@ test('GET /api/search/internal returns results from DMM-ingested candidates', as
     parsedAt: Date.now(),
   });
 
-  const handler = createRequestHandler({ searchCache: cache });
+  const handler = createRequestHandler({ controlPlaneStore: createControlPlaneStore(), searchCache: cache });
   const input = Readable.from([]);
   input.method = 'GET';
   input.url = '/api/search/internal?q=Breaking+Bad+S05E14';
@@ -559,7 +582,7 @@ test('GET /api/search/internal filters by codec', async () => {
     confidence: 0.8, title: 'Movie', codec: 'x265', parsedAt: Date.now(),
   });
 
-  const handler = createRequestHandler({ searchCache: cache });
+  const handler = createRequestHandler({ controlPlaneStore: createControlPlaneStore(), searchCache: cache });
   const input = Readable.from([]);
   input.method = 'GET';
   input.url = '/api/search/internal?q=Movie&codec=x265';
@@ -588,7 +611,7 @@ test('GET /api/search/internal includes media associations when requested', asyn
   });
   cache.associateMedia(HASH, null, 'tt1234567', { source: 'manual', confidence: 0.9 });
 
-  const handler = createRequestHandler({ searchCache: cache });
+  const handler = createRequestHandler({ controlPlaneStore: createControlPlaneStore(), searchCache: cache });
   const input = Readable.from([]);
   input.method = 'GET';
   input.url = '/api/search/internal?q=Movie&media=true';
@@ -616,7 +639,7 @@ test('GET /api/search/internal returns fileIndex in results', async () => {
     confidence: 0.8, title: 'Movie', parsedAt: Date.now(),
   });
 
-  const handler = createRequestHandler({ searchCache: cache });
+  const handler = createRequestHandler({ controlPlaneStore: createControlPlaneStore(), searchCache: cache });
   const input = Readable.from([]);
   input.method = 'GET';
   input.url = '/api/search/internal?q=Movie';
@@ -637,6 +660,7 @@ test('GET /api/search/internal returns fileIndex in results', async () => {
 test('GET /api/search for live discovery with mediaId returns releases', async () => {
   const cache = createDiscoveryCache();
   const handler = createRequestHandler({
+    controlPlaneStore: createControlPlaneStore(),
     searchCache: cache,
     combinedSearch: async (cache, opts) => ({
       results: [{
@@ -690,6 +714,7 @@ test('GET /api/search for live discovery with mediaId returns releases', async (
 test('GET /api/search for series episode live discovery returns releases', async () => {
   const cache = createDiscoveryCache();
   const handler = createRequestHandler({
+    controlPlaneStore: createControlPlaneStore(),
     searchCache: cache,
     combinedSearch: async (cache, opts) => ({
       results: [{
@@ -742,6 +767,7 @@ test('GET /api/search for series episode live discovery returns releases', async
 test('GET /api/search without mediaId returns unified title search', async () => {
   const cache = createDiscoveryCache();
   const handler = createRequestHandler({
+    controlPlaneStore: createControlPlaneStore(),
     searchCache: cache,
     // searchCatalog is no longer used; unified-search uses Cinemeta adapter directly
   });
@@ -772,6 +798,7 @@ test('GET /api/search without mediaId returns unified title search', async () =>
 test('GET /api/search with Torrentio + Comet coexistence', async () => {
   const cache = createDiscoveryCache();
   const handler = createRequestHandler({
+    controlPlaneStore: createControlPlaneStore(),
     searchCache: cache,
     combinedSearch: async (cache, opts) => ({
       results: [
@@ -806,6 +833,7 @@ test('GET /api/search with Torrentio + Comet coexistence', async () => {
 test('GET /api/search with Torznab participation', async () => {
   const cache = createDiscoveryCache();
   const handler = createRequestHandler({
+    controlPlaneStore: createControlPlaneStore(),
     searchCache: cache,
     combinedSearch: async (cache, opts) => ({
       results: [
@@ -837,7 +865,7 @@ test('GET /api/search with Torznab participation', async () => {
 
 test('removed endpoints return 404', async () => {
   const cache = createDiscoveryCache();
-  const handler = createRequestHandler({ searchCache: cache });
+  const handler = createRequestHandler({ controlPlaneStore: createControlPlaneStore(), searchCache: cache });
 
   // /api/releases should no longer exist
   const input1 = Readable.from([]);
@@ -877,7 +905,7 @@ test('GET /api/search/stats returns index statistics', async () => {
     confidence: 0.8, title: 'Movie', parsedAt: Date.now(),
   });
 
-  const handler = createRequestHandler({ searchCache: cache });
+  const handler = createRequestHandler({ controlPlaneStore: createControlPlaneStore(), searchCache: cache });
   const input = Readable.from([]);
   input.method = 'GET';
   input.url = '/api/search/stats';
@@ -901,7 +929,7 @@ test('POST /api/attributes/run triggers attribute parsing', async () => {
   const cache = createDiscoveryCache();
   cache.upsertCandidate({ infoHash: HASH, fileIndex: null, filename: 'Movie.1080p.mkv' });
 
-  const handler = createRequestHandler({ searchCache: cache });
+  const handler = createRequestHandler({ controlPlaneStore: createControlPlaneStore(), searchCache: cache });
   const input = Readable.from([Buffer.from('{}')]);
   input.method = 'POST';
   input.url = '/api/attributes/run';
@@ -1174,87 +1202,22 @@ test('getExistingSelection: preserves a file-level handoff when only torrent-lev
   cache.close();
 });
 
-test('GET /stream returns 200 with selected status when existing selection exists', async () => {
+test('handler construction without a control-plane store fails fast', async () => {
+  // The storeless "return selection JSON" legacy path is retired: binding
+  // authority (terminal delivery evidence) requires the control-plane store
+  // at handler construction, so a storeless handler cannot exist. The
+  // product contract is an explicit fail-fast error, not silent degraded
+  // operation. (Replaces the obsolete 200-selected legacy-path test.)
   const cache = createDiscoveryCache();
-  const mediaId = 'tt5555555';
-  const infoHash = HASH;
-
-  // Create request + handoff + observation
-  const requestId = cache.persistMediaRequest(
-    {
-      mediaId,
-      mediaType: 'movie',
-      season: null,
-      episode: null,
-      source: 'test',
-    },
-    [{
-      infoHash,
-      fileIndex: null,
-      filename: 'Movie.mkv',
-      score: 0.85,
-      rank: 1,
-      release: { infoHash, fileIndex: null, releaseKey: `${infoHash}:torrent` },
-    }]
-  );
-
-  cache.persistPlaybackHandoff({
-    requestId,
-    mediaId,
-    mediaType: 'movie',
-    season: null,
-    episode: null,
-    releaseKey: `${infoHash}:torrent`,
-    infoHash,
-    fileIndex: null,
-    filename: 'Movie.mkv',
-    provider: 'torbox',
-    providerState: 'cached',
-    identityTier: 'Verified',
-    resolutionState: 'confirmed',
-    selectionReason: 'test selection',
-    selectedAt: Date.now(),
-  });
-
-  cache.appendProviderObservation({
-    provider: 'torbox',
-    accountScope: 'primary',
-    scope: 'candidate',
-    infoHash,
-    fileIndex: null,
-    state: 'cached',
-    kind: 'authoritative',
-    observedAt: Date.now(),
-    expiresAt: Date.now() + 3600000,
-    source: 'test',
-  });
-
-  const handler = createRequestHandler({ searchCache: cache });
-
-  const input = Readable.from([]);
-  input.method = 'GET';
-  input.url = `/stream/movie/${mediaId}`;
-
-  const response = await new Promise((resolve, reject) => {
-    const chunks = [];
-    const res = {
-      writeHead(status, headers) { this.status = status; this.headers = headers; },
-      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8'), headers: this.headers }); },
-    };
-    handler(input, res).catch(reject);
-  });
-
-  assert.equal(response.status, 200);
-  const body = JSON.parse(response.text);
-  assert.equal(body.status, 'selected');
-  assert.equal(body.mediaId, mediaId);
-  assert.equal(body.selectedHash, infoHash);
-  assert.equal(body.fileIndex, null);
-  assert.equal(body.provider, 'torbox');
-  assert.equal(body.providerState, 'cached');
-  assert.equal(body.reason, 'test selection');
-
-  cache.close();
+  try {
+    assert.throws(
+      () => createRequestHandler({ searchCache: cache }),
+      /controlPlaneStore is required/,
+      'storeless construction fails with the explicit requirement error',
+    );
+  } finally {
+    cache.close();
+  }
 });
 
 test('GET /stream returns HTTP 307 redirect when TorBox selection exists with valid mapping', async () => {
@@ -1483,7 +1446,12 @@ test('GET /stream delegates missing placement recovery to TorBox delivery lifecy
   cache.close();
 });
 
-test('GET /stream redirect fails with 404 when file mapping missing', async () => {
+test('GET /stream redirect fails closed when file mapping needs unavailable inventory', async () => {
+  // Without provider inventory access the exact file mapping cannot be
+  // established locally: the route fails closed with 503
+  // INVENTORY_UNAVAILABLE (no provider calls, fully hermetic). With
+  // inventory configured the seam proceeds to exact mapping (404
+  // FILE_NOT_FOUND when the file is absent).
   const cache = createDiscoveryCache();
   const controlPlane = createControlPlaneStore();
   const mediaId = 'tt9999997';
@@ -1569,9 +1537,9 @@ test('GET /stream redirect fails with 404 when file mapping missing', async () =
     handler(input, res).catch(reject);
   });
 
-  assert.equal(response.status, 404);
+  assert.equal(response.status, 503);
   const body = JSON.parse(response.text);
-  assert.equal(body.code, 'MISSING_FILE_MAPPING');
+  assert.equal(body.code, 'INVENTORY_UNAVAILABLE');
   cache.close();
 });
 
@@ -1609,7 +1577,7 @@ test('GET /stream redirect fails with 400 when provider is not TorBox', async ()
     infoHash,
     fileIndex: null,
     filename: 'Movie.mkv',
-    provider: 'realdebrid', // Not TorBox
+    provider: 'premiumize', // Unsupported provider (neither TorBox nor Real-Debrid)
     providerState: 'cached',
     identityTier: 'Verified',
     resolutionState: 'confirmed',
@@ -1654,7 +1622,82 @@ test('GET /stream redirect fails with 400 when provider is not TorBox', async ()
   cache.close();
 });
 
-test('GET /stream redirect fails with 404 when mapping state is not mapped', async () => {
+test('GET /stream redirect fails typed when RD cannot resolve without an RD client', async () => {
+  // RD-tranche contract: an RD handoff with no RD client configured cannot
+  // fall into TorBox sections; it fails typed (502 RD_UNRESOLVABLE) with no
+  // TorBox traffic. Fully hermetic (no rdClient injected, no network).
+  const cache = createDiscoveryCache();
+  const controlPlane = createControlPlaneStore();
+  const mediaId = 'tt9999996';
+  const infoHash = HASH;
+
+  const requestId = cache.persistMediaRequest(
+    {
+      mediaId,
+      mediaType: 'movie',
+      season: null,
+      episode: null,
+      source: 'test',
+    },
+    [{
+      infoHash,
+      fileIndex: null,
+      filename: 'Movie.mkv',
+      score: 0.85,
+      rank: 1,
+      release: { infoHash, fileIndex: null, releaseKey: `${infoHash}:torrent` },
+    }]
+  );
+
+  cache.persistPlaybackHandoff({
+    requestId,
+    mediaId,
+    mediaType: 'movie',
+    season: null,
+    episode: null,
+    releaseKey: `${infoHash}:torrent`,
+    infoHash,
+    fileIndex: null,
+    filename: 'Movie.mkv',
+    provider: 'realdebrid',
+    providerState: 'cached',
+    identityTier: 'Verified',
+    resolutionState: 'confirmed',
+    selectionReason: 'test selection',
+    selectedAt: Date.now(),
+  });
+
+  const handler = createRequestHandler({
+    searchCache: cache,
+    controlPlaneStore: controlPlane,
+  });
+
+  const input = Readable.from([]);
+  input.method = 'GET';
+  input.url = `/stream/movie/${mediaId}`;
+
+  const response = await new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); resolve({ status: this.status, text: Buffer.concat(chunks).toString('utf8'), headers: this.headers }); },
+    };
+    handler(input, res).catch(reject);
+  });
+
+  assert.equal(response.status, 502);
+  const body = JSON.parse(response.text);
+  assert.equal(body.code, 'RD_UNRESOLVABLE');
+  cache.close();
+});
+
+// Credential-gated: a stale mapping drives the delivery seam into a live
+// provider requestdl recovery attempt, so this contract (stale mapping →
+// typed mapping failure) only holds with provider credentials configured.
+// Without keys the seam fails earlier with provider-unavailable errors;
+// either way the outcome depends on live provider behavior, not local
+// logic. Kept as documentation; enable where TORBOX_API_KEY is present.
+test('GET /stream redirect fails with 404 when mapping state is not mapped', { skip: 'requires provider credentials (live requestdl recovery attempt)' }, async () => {
   const cache = createDiscoveryCache();
   const controlPlane = createControlPlaneStore();
   const mediaId = 'tt9999995';

@@ -71,10 +71,10 @@ test('hydrateVfsMovieEntry persists real provider size before notifyPlex is obse
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
-  const requestId = cache.persistMediaRequest({ mediaId: 'tt0000099', mediaType: 'movie', source: 'test' }, []);
+  const requestId = cache.persistMediaRequest({ mediaId: 'tt0000000', mediaType: 'movie', source: 'test' }, []);
   cache.persistPlaybackHandoff({
     requestId,
-    mediaId: 'tt0000099',
+    mediaId: 'tt0000000',
     mediaType: 'movie',
     releaseKey: `${HASH}:torrent`,
     infoHash: HASH,
@@ -104,19 +104,19 @@ test('hydrateVfsMovieEntry persists real provider size before notifyPlex is obse
   });
 
   // Pre-condition: VFS entry does not exist yet (materialized on first catalog build)
-  assert.equal(cache.getVfsMovieEntry('tt0000099'), null);
+  assert.equal(cache.getVfsMovieEntry('tt0000000'), null);
 
   const before = Date.now();
   const result = await handler.hydrateVfsMovieEntry(`${HASH}:torrent`);
   const after = Date.now();
 
   assert.equal(result.size, 7777777777);
-  assert.equal(result.mediaId, 'tt0000099');
+  assert.equal(result.mediaId, 'tt0000000');
   assert.equal(result.canonicalPath, 'Movies/Hydrate (2025)/Hydrate (2025).mkv');
   assert.equal(result.alreadyHydrated, true);
 
   // Hydrator must have persisted the size — observable via PROPFIND data source
-  const persisted = cache.getVfsMovieEntry('tt0000099');
+  const persisted = cache.getVfsMovieEntry('tt0000000');
   assert.equal(persisted.size, 7777777777);
   assert.ok(persisted.updatedAt >= before && persisted.updatedAt <= after);
 

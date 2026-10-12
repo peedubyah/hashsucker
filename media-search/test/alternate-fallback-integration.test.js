@@ -150,6 +150,15 @@ test('integration: primary cached → no fallback (existing behavior)', async ()
     controlPlaneStore: controlPlane,
     eventStore,
     revalidator,
+    // Hermetic delivery: the requestdl step needs provider access, but
+    // these tests pin fallback *selection* (rank order, eligibility,
+    // telemetry, handoff immutability), not provider URL minting.
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://provider.test/file',
+      placementId: 'pl_test',
+      providerFileId: 'pf_test',
+      recovered: false,
+    }),
   });
 
   const response = await new Promise((resolve, reject) => {
@@ -214,6 +223,15 @@ test('integration: primary uncached → fallback to rank #2 cached', async () =>
     controlPlaneStore: controlPlane,
     eventStore,
     revalidator,
+    // Hermetic delivery: the requestdl step needs provider access, but
+    // these tests pin fallback *selection* (rank order, eligibility,
+    // telemetry, handoff immutability), not provider URL minting.
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://provider.test/file',
+      placementId: 'pl_test',
+      providerFileId: 'pf_test',
+      recovered: false,
+    }),
   });
 
   const response = await new Promise((resolve, reject) => {
@@ -284,6 +302,15 @@ test('integration: primary provider check fails → fallback to rank #2', async 
     controlPlaneStore: controlPlane,
     eventStore,
     revalidator,
+    // Hermetic delivery: the requestdl step needs provider access, but
+    // these tests pin fallback *selection* (rank order, eligibility,
+    // telemetry, handoff immutability), not provider URL minting.
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://provider.test/file',
+      placementId: 'pl_test',
+      providerFileId: 'pf_test',
+      recovered: false,
+    }),
   });
 
   const response = await new Promise((resolve, reject) => {
@@ -383,6 +410,15 @@ test('integration: rank #2 ineligible → skipped, rank #3 used', async () => {
     controlPlaneStore: controlPlane,
     eventStore,
     revalidator,
+    // Hermetic delivery: the requestdl step needs provider access, but
+    // these tests pin fallback *selection* (rank order, eligibility,
+    // telemetry, handoff immutability), not provider URL minting.
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://provider.test/file',
+      placementId: 'pl_test',
+      providerFileId: 'pf_test',
+      recovered: false,
+    }),
   });
 
   const response = await new Promise((resolve, reject) => {
@@ -433,6 +469,15 @@ test('integration: all alternates unavailable → typed failure', async () => {
     controlPlaneStore: controlPlane,
     eventStore,
     revalidator,
+    // Hermetic delivery: the requestdl step needs provider access, but
+    // these tests pin fallback *selection* (rank order, eligibility,
+    // telemetry, handoff immutability), not provider URL minting.
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://provider.test/file',
+      placementId: 'pl_test',
+      providerFileId: 'pf_test',
+      recovered: false,
+    }),
   });
 
   const response = await new Promise((resolve, reject) => {
@@ -497,6 +542,15 @@ test('integration: fallback does not mutate persisted handoff', async () => {
     controlPlaneStore: controlPlane,
     eventStore,
     revalidator,
+    // Hermetic delivery: the requestdl step needs provider access, but
+    // these tests pin fallback *selection* (rank order, eligibility,
+    // telemetry, handoff immutability), not provider URL minting.
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://provider.test/file',
+      placementId: 'pl_test',
+      providerFileId: 'pf_test',
+      recovered: false,
+    }),
   });
 
   const response = await new Promise((resolve, reject) => {
@@ -560,6 +614,15 @@ test('integration: fallback telemetry recorded with correct structure', async ()
     controlPlaneStore: controlPlane,
     eventStore,
     revalidator,
+    // Hermetic delivery: the requestdl step needs provider access, but
+    // these tests pin fallback *selection* (rank order, eligibility,
+    // telemetry, handoff immutability), not provider URL minting.
+    resolveTorBoxDeliverySeam: async () => ({
+      url: 'https://provider.test/file',
+      placementId: 'pl_test',
+      providerFileId: 'pf_test',
+      recovered: false,
+    }),
   });
 
   const response = await new Promise((resolve, reject) => {

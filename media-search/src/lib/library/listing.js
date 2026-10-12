@@ -114,7 +114,11 @@ export function listLibrary({ cache, controlPlaneStore, promotionStore = null, l
     const handoff = handoffFor(cache, item);
     const vfs = vfsRowFor(cache, item);
     const activeBinding = activeBindingFor(controlPlaneStore, item.id);
-    const tfId = activeBinding?.torrentFile?.id ?? null;
+    // TF resolution prefers the active binding, but an incomplete item
+    // (desired present, no VFS/binding yet) still names its last-selected
+    // TorrentFile on the handoff — surface provider truth (coordinates,
+    // size) for it instead of reporting nothing servable.
+    const tfId = activeBinding?.torrentFile?.id ?? handoff?.torrentFileId ?? null;
     const tf = activeBinding?.torrentFile ?? torrentFileFor(controlPlaneStore, tfId);
     const desiredAbsent = item.desiredState === 'absent';
     const storage = storageFor(promotionStore, item, episodeScoped);

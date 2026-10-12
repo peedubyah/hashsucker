@@ -236,8 +236,11 @@ test('provider resource replacement reconciles without changing canonical identi
 
   const bindings = h.store.listBindings(h.item.id);
   const active = bindings.find((binding) => binding.status === 'active');
-  assert.equal(bindings.length, 2);
-  assert.equal(active.version, initial.version + 1);
+  // Same-TorrentFile route repair updates coordinates in place (no new
+  // binding version): representation identity did not change, only the
+  // provider resource behind it.
+  assert.equal(bindings.length, 1);
+  assert.equal(active.version, initial.version);
   assert.equal(active.releaseKey, RELEASE.releaseKey);
   assert.equal(active.infoHash, RELEASE.infoHash);
   assert.equal(active.fileIndex, RELEASE.fileIndex);
