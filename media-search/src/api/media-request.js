@@ -697,23 +697,17 @@ async function tryReuseHealthyPublication({
         }
       }
       if (hydratedEntry) {
-        // The prepared replay contract must not race its own consumer
-        // notification. Await the targeted refresh dispatch so fulfillment
-        // confirmation observes the publication attempt before returning.
-        await notifyPlex({
-          mediaId: handoff.mediaId,
-          mediaType: handoff.mediaType,
-          canonicalPath: hydratedEntry.canonicalPath,
-        });
-        // Additive: when the Plex section is idle, also request + observe +
-        // verify the targeted ingest so the confirmation below sees it rather
-        // than racing it. Busy/timeout/unconfirmed all leave today's behaviour
-        // untouched. Episodes only: that is the geometry this seam proves.
+        // Additive: when the Plex section is idle, run the deterministic
+        // transaction FIRST — validate -> quiesce -> targeted refresh ->
+        // observe scan -> verify resulting item. Running it before notifyPlex
+        // matters: notifyPlex queues a refresh of its own, which makes the
+        // section busy, so a confirm placed after it would always refuse.
+        // Episodes only: that is the geometry this seam proves.
         if (isEpisode) {
           const expectedPartFile = sectionRootFor(handoff.mediaType) && hydratedEntry.canonicalPath
             ? `${sectionRootFor(handoff.mediaType)}/${hydratedEntry.canonicalPath.split('/').slice(1).join('/')}`
             : null;
-          await opportunisticPlexIngestConfirm({
+          const ingest = await opportunisticPlexIngestConfirm({
             mediaType: handoff.mediaType,
             canonicalPath: hydratedEntry.canonicalPath,
             mediaId: handoff.mediaId,
@@ -726,6 +720,27 @@ async function tryReuseHealthyPublication({
             // failures, so a tight bound costs nothing but latency.
             timeoutMs: 20_000,
             pollMs: 250,
+          });
+          if (ingest === INGEST_OUTCOMES.VERIFIED) {
+            // Positive confirmation is already established by the observed,
+            // verified transaction, so a second refresh of the same path would
+            // only add redundant scanner work. Skip it. (Anything other than
+            // verified falls through to today's behaviour below.)
+          } else {
+            // Busy / unconfirmed: exactly today's behaviour. The prepared
+            // replay contract must not race its own consumer notification, so
+            // still await the targeted refresh dispatch before confirming.
+            await notifyPlex({
+              mediaId: handoff.mediaId,
+              mediaType: handoff.mediaType,
+              canonicalPath: hydratedEntry.canonicalPath,
+            });
+          }
+        } else {
+          await notifyPlex({
+            mediaId: handoff.mediaId,
+            mediaType: handoff.mediaType,
+            canonicalPath: hydratedEntry.canonicalPath,
           });
         }
       }
