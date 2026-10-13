@@ -150,13 +150,15 @@ test('waitForScanQuiet reports a timeout instead of claiming quiet', async () =>
   assert.equal(await waitForScanQuiet({ plexUrl: PLEX_URL, plexToken: PLEX_TOKEN, pollMs: 1, timeoutMs: 20, fetchFn }), false);
 });
 
-test('sectionIdFor maps media types from the environment contract', () => {
+test('sectionIdFor maps only the real mediaType contract (movie | series)', () => {
   assert.equal(sectionIdFor('movie', { PLEX_MOVIES_SECTION_ID: '2', PLEX_TV_SECTION_ID: '3' }), '2');
   assert.equal(sectionIdFor('series', { PLEX_TV_SECTION_ID: '3' }), '3');
-  assert.equal(sectionIdFor('episode', { PLEX_TV_SECTION_ID: '3' }), '3');
-  assert.equal(sectionIdFor('tv', { PLEX_TV_SECTION_ID: '3' }), '3');
+  // 'episode' is a coordinate qualifier on a series, not a mediaType.
+  assert.equal(sectionIdFor('episode', { PLEX_TV_SECTION_ID: '3' }), null);
+  assert.equal(sectionIdFor('tv', { PLEX_TV_SECTION_ID: '3' }), null);
   assert.equal(sectionIdFor('unknown', { PLEX_TV_SECTION_ID: '3' }), null);
   assert.equal(sectionIdFor('movie', {}), null);
+  assert.equal(sectionIdFor('series', {}), null);
 });
 
 test('isPlexEnabled requires the existing URL/token pair', () => {

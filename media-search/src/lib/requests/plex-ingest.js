@@ -61,10 +61,17 @@ export function isPlexEnabled(env = process.env) {
   return Boolean(env.PLEX_URL && env.PLEX_TOKEN);
 }
 
-/** Section id for a media type, from the existing environment contract. */
+/**
+ * Section id for a media type.
+ *
+ * The accepted values are `'movie'` and `'series'` only — that is the contract
+ * enforced by `playback-handoff.js` and consumed by `plex-notifier.js`. `'episode'`
+ * is NOT a mediaType for this purpose: it is a coordinate qualifier
+ * (season+episode) on a series. Passing `'episode'` here yields null.
+ */
 export function sectionIdFor(mediaType, env = process.env) {
   if (mediaType === 'movie') return env.PLEX_MOVIES_SECTION_ID || null;
-  if (mediaType === 'series' || mediaType === 'tv' || mediaType === 'episode') return env.PLEX_TV_SECTION_ID || null;
+  if (mediaType === 'series') return env.PLEX_TV_SECTION_ID || null;
   return null;
 }
 
