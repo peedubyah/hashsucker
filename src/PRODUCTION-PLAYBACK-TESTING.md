@@ -648,4 +648,52 @@ or only by the analyzer could not be observed directly (no new publication could
 be created without product mutation, and the sanctioned republish returned
 `noop`), so the predicate conservatively requires `size`.
 
-**Not yet wired.** `notifyPlex()` remains fire-and-forget.
+### Opportunistic deterministic confirm (integrated 2026-10-13)
+
+The ingest seam is now integrated **additively** on the publication path.
+`notifyPlex()` is not replaced: refresh coalescing, the confirmation fallback,
+retry cadence and publication semantics are unchanged.
+
+Rule: when the relevant Plex section is idle, the deterministic transaction runs
+first (validate → VFS existence → quiescence → targeted refresh → observe scan
+→ verify resulting item). Anything else — busy, scan start/end timeout, item not
+visible, unreachable VFS — falls through to exactly today's behaviour with no
+failure, no retry and no added latency. `INGEST_SCAN_BUSY` is explicitly not an
+error. An invalid local path is a hard defect and is never sent to PMS.
+
+Ordering matters and was corrected by a production drive: the confirm must run
+BEFORE `notifyPlex()`, because that call queues its own refresh of the same
+path and would leave the section busy, so a confirm placed after it would always
+refuse and never verify. On `verified`, the second refresh is skipped as
+redundant scanner work.
+
+Episodes only — that is the geometry the seam proves. Per-section single-flight
+is shared process-wide, so concurrent publications in one section refuse rather
+than produce un-attributable observations. The awaited (request-path) call is
+bounded to 20 s; the fire-and-forget site to 60 s.
+
+Metrics: `plex_ingest_attempts/verified/busy/unconfirmed/invalid` counters plus
+a `plex_ingest` snapshot (section, season path, scan uuid, timings, resulting
+ratingKey/Part, `fileMatch`/`sizeMatch`).
+
+**Measured in production** (Path-B republication drives; the library was fully
+converged, so these were driven rather than naturally occurring):
+
+| Attempt | Outcome | Notes |
+|---|---|---|
+| single, idle section | verified | scanUUID 62b314db, scan 1624ms, scan→item 23ms, rk 531 / Part 1082, fileMatch+sizeMatch true |
+| single, section already scanning | busy | publication still fulfilled via the unchanged path |
+| 4 concurrent, one section | 2 verified + 2 busy | all 4 fulfilled, 7 s wall, no backlog |
+
+PMS-side cost across ~10 driven publications: 34 refreshes dispatched, **4
+distinct directories walked, 0 items added, 0 "media not available" events, 0 DB
+busy waits, 0 `/playQueues` 500s.** STRM projections went 145 → 150 (four
+intended-restored rows), which is the publication work itself, not churn.
+
+**Remaining blocker for full replacement** is unchanged and is path correlation:
+activity attribution stays inferential, so per-section single-flight is
+mandatory. Full wiring would trade an honest no-op for either a serialization
+cost or an ambiguous either-way decision.
+
+**Not yet wired.** `notifyPlex()` itself remains fire-and-forget for the case
+where the seam does not verify.
