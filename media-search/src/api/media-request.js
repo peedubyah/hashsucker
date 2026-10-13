@@ -721,6 +721,11 @@ async function tryReuseHealthyPublication({
             episode,
             expectedPartFile,
             expectedSize: hydratedEntry.size ?? null,
+            // This sits on the request path, so keep the worst-case block
+            // small and strictly bounded. Busy/inconclusive are skips, not
+            // failures, so a tight bound costs nothing but latency.
+            timeoutMs: 20_000,
+            pollMs: 250,
           });
         }
       }
@@ -1559,6 +1564,8 @@ export async function searchByMedia(cache, request) {
                     episode,
                     expectedPartFile: expectedPartFile2,
                     expectedSize: vfsEntry?.size ?? null,
+                    timeoutMs: 60_000,
+                    pollMs: 250,
                   });
                 }).catch(() => {
                   // Plex notification failure is non-fatal
