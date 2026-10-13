@@ -224,3 +224,34 @@ test('different sections are independent, so movies are not blocked by TV', asyn
   assert.equal(out.outcome, INGEST_OUTCOMES.VERIFIED);
   assert.equal(out.scanUuid, 'movie-scan');
 });
+
+test('opportunistic confirms share the process-wide per-section flight', async () => {
+  // Two concurrent confirms in the same section must not both observe a scan:
+  // path attribution is inferential, so the second must refuse.
+  let release;
+  const slow = () => new Promise((r) => { release = r; });
+  const common = {
+    mediaType: 'series', canonicalPath: CANON, mediaId: 'tt1234567', season: 1, episode: 1,
+    expectedPartFile: EXPECT_FILE, expectedSize: 1234, env: ENV,
+    vfsExistsFn: async () => true, quietFn: async () => true,
+    fetchFn: async (url, options = {}) => (options.method === 'PROPFIND' ? { status: 207 } : { MediaContainer: { Activity: [] } }),
+  };
+  const first = opportunisticIngestConfirm({
+    ...common,
+    observeFn: slow,
+    findResult: async () => ({ partId: '1', file: EXPECT_FILE, size: 1234, ratingKey: '2' }),
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  const second = await opportunisticIngestConfirm({
+    ...common,
+    observeFn: async () => ({ started: true, completed: true, uuid: 'other', elapsedMs: 1 }),
+    findResult: async () => ({ partId: '9', file: EXPECT_FILE, size: 1234, ratingKey: '9' }),
+  });
+  assert.equal(second.outcome, INGEST_OUTCOMES.UNCONFIRMED);
+  assert.equal(second.fallbackReason, 'section-scanning');
+  const scan = { started: true, completed: true, uuid: 'shared-1', elapsedMs: 10 };
+  release(scan);
+  const one = await first;
+  assert.equal(one.outcome, INGEST_OUTCOMES.VERIFIED);
+  assert.equal(one.partId, '1');
+});

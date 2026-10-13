@@ -530,7 +530,7 @@ export async function opportunisticIngestConfirm({
   plexUrl = null,
   plexToken = null,
   vfsBaseUrl = process.env.HASHSUCKER_BASE_URL || 'http://127.0.0.1:3000',
-  flight,
+  flight = sharedFlight,
   timeoutMs = 60_000,
   pollMs = 200,
   quietTimeoutMs = 5_000,
