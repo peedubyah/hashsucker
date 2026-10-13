@@ -15,6 +15,7 @@
  * withdrawal through the existing safe-unpublish path; history rows are
  * preserved and no provider GC runs.
  */
+import { describePrepareFailure } from '../requests/prepare-failure.js';
 import { INTENT_STATES, intentBackoffMs } from './future-intents.js';
 import { DEFER_REASONS } from '../defers/seerr-defer.js';
 import { judgeReleaseQuality, ANTICIPATION_QUALITY } from './quality-gate.js';
@@ -169,7 +170,10 @@ export function createAnticipationScheduler({
     if (intent.episode != null) body.episode = intent.episode;
     const r = await post('/api/media-prepare', body, PREPARE_TIMEOUT_MS);
     if (r.status !== 200 || r.json?.prepared !== true || !r.json?.handoff?.torrentFileId) {
-      return { ok: false, terminal: r.status === 400, error: r.json?.error || `prepare-http-${r.status}` };
+      // The endpoint answers 200 for market conditions too, so describe the
+      // body rather than emitting an opaque `prepare-http-200`.
+      const { error, reason } = describePrepareFailure(r);
+      return { ok: false, terminal: r.status === 400, error, reason };
     }
     return { ok: true, torrentFileId: r.json.handoff.torrentFileId, winner: pickPrepareWinner(r.json), fresh: r.json?.alreadyPrepared !== true };
   }

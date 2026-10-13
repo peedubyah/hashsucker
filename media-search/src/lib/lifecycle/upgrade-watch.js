@@ -15,6 +15,7 @@
  * upgrades are rare events; the loop must cost ~nothing when the
  * market has nothing better.
  */
+import { describePrepareFailure } from '../requests/prepare-failure.js';
 import { tierOf, isTerminalTier, compareUpgrade, durabilityOf, shouldVetoUpgrade, DURABILITY } from './upgrade-policy.js';
 import { profilePolicy } from './quality-profiles.js';
 import { intentBackoffMs } from '../anticipation/future-intents.js';
@@ -326,7 +327,8 @@ export function createUpgradeEvaluator({
     if (row.episode != null) body.episode = row.episode;
     const r = await post('/api/media-prepare', body, 5 * 60 * 1000);
     if (r.status !== 200 || r.json?.prepared !== true || !r.json?.handoff?.torrentFileId) {
-      return { ok: false, error: r.json?.error || `prepare-http-${r.status}` };
+      const { error, reason } = describePrepareFailure(r);
+      return { ok: false, error, reason };
     }
     return { ok: true, torrentFileId: r.json.handoff.torrentFileId };
   }
