@@ -604,3 +604,48 @@ mask a condition real users can also hit. The honest options are HashSucker-side
 fix or accept the mount's directory mtime behaviour, or reduce refresh
 frequency. The canary's only change is diagnostic: it now names the PMS
 rejection separately instead of collapsing it into a generic start failure.
+
+## Deterministic library ingest (2026-10-13)
+
+`media-search/src/lib/requests/plex-ingest.js` formalises the ingest seam so it
+can be used as a product primitive:
+
+```
+validateRefreshPath → vfsDirectoryExists → waitForScanQuiet
+  → requestSectionRefresh → observeScan (start+end) → waitForResultingItem
+```
+
+**Invalid-path protection (destructive mode closed).** PMS accepts *any* path
+with HTTP 200 — including one that does not exist — then logs `Failed to create
+parent iterator` and **`Marking media not available`**, silently taking real
+media out of service. `validateRefreshPath` therefore rejects locally: relative
+canonical path only, no traversal, inside the configured section root,
+`Season NN` target for series, and confirmed present through HashSucker's own
+VFS (`PROPFIND` 207). Proven live: a nonexistent path, a traversal attempt, an
+absolute path and a non-season directory were all blocked; PMS logged **zero**
+refresh requests and **zero** "not available" events.
+
+**Single-flight is per SECTION, not per path.** The activity object carries
+only `librarySectionID`, and the scan runs in-process (the only scanner child is
+the later `--analyze --item <ids>` process, which never receives a path). A
+second path's scan is therefore indistinguishable from ours, so the module
+refuses with `INGEST_SCAN_BUSY` rather than guessing. Measured: three concurrent
+ingests in one section → 1 succeeded, 2 correctly refused. Two sequential
+ingests in one section → ~3.9 s total (~1–2 s each).
+
+**Resulting-item readiness.** Measured ordering for a genuine new ingest: the
+scan phase creates the item and its Part (`file` populated), then a separate
+`--analyze` subprocess commits `size`/`duration`/streams/hash. The readiness
+predicate is therefore **ratingKey + Part id + exact `MediaPart.file` + exact
+`Part.size`** — machine-verifiable, and because `size` is committed by analysis
+it doubles as an analysis-completion floor. Duration is not required for direct
+play, where PMS resolves the source from the Part.
+
+**Remaining ambiguity (honest).** Path correlation is *inferential* — sound only
+while the quiescence + single-flight invariant holds, and unprovable from any
+API. Separately, whether `Part.size` is populated by the scan's filesystem stat
+or only by the analyzer could not be observed directly (no new publication could
+be created without product mutation, and the sanctioned republish returned
+`noop`), so the predicate conservatively requires `size`.
+
+**Not yet wired.** `notifyPlex()` remains fire-and-forget.
