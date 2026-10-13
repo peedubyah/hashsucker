@@ -1309,13 +1309,22 @@ export function createTvWebDav({
         response.end(JSON.stringify({ error: 'Not found', code: 'NOT_FOUND' }));
         return true;
       }
-      await sendDavXml(response, entries, (entry) => {
-        if (entry.type === 'collection') {
-          return { size: 0, modifiedAt: now(), etag: '"0"' };
-        }
-        // Durable metadata only — no provider resolution during Plex scans
-        return getDurableMetadata(entry.state);
-      });
+      // Collections advertise the newest durable `selectedAt` across the whole
+      // TV tree (0 when nothing is published), so a directory's mtime only
+      // moves when publication actually moves. Advertising `now()` made Plex
+      // see every directory as perpetually newer than its last refresh, which
+      // drove continuous scanner churn — that scanner is the SQLite lock
+      // holder behind the PMS `/playQueues` busy-database 500s. Mirrors
+      // movie-webdav, which already derives collection mtime from handoffs.
+      const collectionModifiedAt = Math.max(
+        0,
+        ...Array.from(tree.entries.values())
+          .filter((entry) => entry.type === 'file')
+          .map((entry) => entry.state.handoff.selectedAt),
+      );
+      await sendDavXml(response, entries, (entry) => (entry.type === 'collection'
+        ? { size: 0, modifiedAt: collectionModifiedAt, etag: '"collection"' }
+        : getDurableMetadata(entry.state)));
       return true;
     }
 
