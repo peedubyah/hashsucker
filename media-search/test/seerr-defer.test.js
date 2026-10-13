@@ -211,23 +211,34 @@ test('scheduler: released future row re-arms immediately at expected release', a
   assert.equal(store.findByIdentity({ mediaId: 'ttFuture', season: 1, episode: 8 }).next_check_at, 1_000_000);
 });
 
-test('scheduler: exhausted deferred row re-arms at low cadence, never dies', async () => {
+test('scheduler: exhausted deferred row re-arms to attempt once, then re-parks cold', async () => {
+  // Cold-retry semantics. The re-arm itself is NOT the 7-day wait: it is due
+  // immediately so the very next tick performs exactly ONE preparation attempt.
+  // The low cadence lives on the re-park, so a repeat market miss sleeps ~7d
+  // and a market that became satisfiable converges within one tick. Attempts
+  // are incremented, never reset, so a re-arm never restores a fresh hot
+  // budget. (Previously the re-arm parked 7d out AND was unreachable, because
+  // classifyIntentPriority filtered the row before processIntent ran.)
   const { cache, store } = memStore();
   const { intent } = store.seed({
     mediaType: 'movie', mediaId: 'ttZ', source: 'seerr:req-z',
     deferReason: 'released-no-candidate',
+    season_owners_note: null,
   });
-  store.transition(intent.id, 'failed', { last_error: 'prepare-http-200', next_check_at: 1 });
+  store.transition(intent.id, 'failed', { last_error: 'prepare:no-handoff:no-bindable-candidate', next_check_at: 1 });
   cache.db.prepare('UPDATE future_intents SET attempts = 6 WHERE id = ?').run(intent.id);
+  cache.db.prepare("UPDATE future_intents SET season_owners = 'season:ttZ:s01' WHERE id = ?").run(intent.id);
   const sched = memScheduler(store);
   const row = { ...store.findByIdentity({ mediaId: 'ttZ' }) };
   const r = await sched.processIntent(row);
   assert.equal(r.acted, true);
   assert.equal(r.to, 'anticipated');
   assert.equal(r.rearmed, true);
+  assert.equal(r.coldRetry, true);
   const after = store.findByIdentity({ mediaId: 'ttZ' });
   assert.equal(after.state, 'anticipated');
-  assert.ok(after.next_check_at > 1_000_000 + 6 * 86400 * 1000, 're-armed ~7d out, not hot-looped');
+  assert.equal(after.next_check_at, 1_000_000, 're-arm is due now: the next tick attempts once');
+  assert.equal(after.attempts, 7, 'attempts incremented, hot budget not restored');
 });
 
 test('scheduler: exhausted non-deferred row parks its poll but stays dead', async () => {

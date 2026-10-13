@@ -26,7 +26,7 @@ const PREPARE_TIMEOUT_MS = 5 * 60 * 1000;
 const PLEX_CONFIRM_ATTEMPTS = 6;
 const PLEX_CONFIRM_INTERVAL_MS = 500;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
-const MAX_ATTEMPTS = 6;
+export const MAX_ATTEMPTS = 6;
 const PARKED_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ACTIONS_PER_TICK = 8;
 const MAX_TICK_WORK_MS = 30_000;
@@ -36,9 +36,46 @@ const PUBLICATION_UNCONFIRMED = 'consumer-publication-unconfirmed';
 // prefix. The loop still performs at most one actionable intent per tick.
 const DUE_SCAN_LIMIT = 50;
 
+/** Defer reasons that describe a retryable market miss rather than a defect. */
+function isRetryableMarketDefer(reason) {
+  return reason === DEFER_REASONS.RELEASED_NO_CANDIDATE
+    || reason === DEFER_REASONS.CANDIDATE_NOT_FULFILLABLE;
+}
+
+/**
+ * Cold-retry eligibility for EXHAUSTED, AIRED, STILL-SEASON-OWNED obligations.
+ *
+ * Ordinary one-shot exhaustion keeps the old behaviour permanently: a row with
+ * no continuing season owner, or whose defer reason is not a retryable market
+ * miss, stays non-actionable forever.
+ *
+ * An active requested-season owner is a continuing durable obligation: the
+ * household asked for the season, not for one attempt. So when such a row runs
+ * out of hot attempts it keeps the obligation and is reconsidered only once the
+ * cold park (PARKED_MS) has elapsed — never hot. `attempts` is preserved, so a
+ * cold reconsideration permits exactly one further attempt and then re-parks;
+ * it never restores a fresh hot budget.
+ */
+export function isColdRetryEligible(intent, nowMs, maxAttempts = MAX_ATTEMPTS) {
+  if (!intent) return false;
+  if (intent.state !== INTENT_STATES.FAILED) return false;
+  if (intent.attempts < maxAttempts) return false;      // not exhausted: ordinary path owns it
+  if (!intent.season_owners) return false;             // one-shot: no continuing obligation
+  if (!isRetryableMarketDefer(intent.defer_reason)) return false;
+  if (intent.next_check_at == null || intent.next_check_at > nowMs) return false;  // cold park not elapsed
+  return true;
+}
+
 export function classifyIntentPriority(intent, nowMs, maxAttempts = MAX_ATTEMPTS) {
   if (!intent || intent.state === INTENT_STATES.WITHDRAWN || intent.state === INTENT_STATES.PLAYABLE) return { className: 'P5', rank: 5, actionable: false };
-  if (intent.state === INTENT_STATES.FAILED && intent.attempts >= maxAttempts) return { className: 'P5', rank: 5, actionable: false };
+  if (intent.state === INTENT_STATES.FAILED && intent.attempts >= maxAttempts) {
+    // Season-owned aired work stays obligated and becomes cold-actionable once
+    // its park elapses; everything else keeps the old permanent exhaustion.
+    if (isColdRetryEligible(intent, nowMs, maxAttempts)) {
+      return { className: 'P2', rank: 2, actionable: true, coldRetry: true };
+    }
+    return { className: 'P5', rank: 5, actionable: false };
+  }
   if (intent.defer_reason === DEFER_REASONS.FUTURE_NOT_RELEASED && intent.expected_at != null && intent.expected_at > nowMs) {
     return { className: 'P5', rank: 5, actionable: false };
   }
@@ -486,8 +523,13 @@ export function createAnticipationScheduler({
         const d = intent.defer_reason;
         if (d === DEFER_REASONS.RELEASED_NO_CANDIDATE
           || d === DEFER_REASONS.CANDIDATE_NOT_FULFILLABLE) {
-          store.retry(intent.id, now() + PARKED_MS);
-          return { acted: true, intentId: intent.id, from: 'failed', to: 'anticipated', ms: now() - t0, rearmed: true };
+          // Cold reconsideration: re-arm due now so the NEXT tick performs
+          // exactly one preparation attempt. `retry` increments attempts (never
+          // resets it), so a repeat market miss fails the exhaustion check
+          // again and parks for another full cold interval — one attempt per
+          // cold cycle, never a fresh hot budget.
+          store.retry(intent.id, now());
+          return { acted: true, intentId: intent.id, from: 'failed', to: 'anticipated', ms: now() - t0, rearmed: true, coldRetry: true };
         }
         if (d === DEFER_REASONS.FUTURE_NOT_RELEASED) {
           // Release wake is one-time. Clear the pre-release classification so
@@ -537,7 +579,7 @@ export function createAnticipationScheduler({
     const dueList = store.due({ limit: DUE_SCAN_LIMIT });
     const classified = dueList.map((row, index) => ({ row, index, priority: classifyIntentPriority(row, now()) }));
     log(`scheduler due-snapshot limit=${DUE_SCAN_LIMIT} count=${dueList.length} ids=${dueList.map((row) => row.id).join(',')}`);
-    classified.forEach(({ row, priority }) => log(`scheduler classify id=${row.id} state=${row.state} class=${priority.className} actionable=${priority.actionable}`));
+    classified.forEach(({ row, priority }) => log(`scheduler classify id=${row.id} state=${row.state} class=${priority.className} attempts=${row.attempts} actionable=${priority.actionable} cold=${priority.coldRetry === true}`));
     const orderedDue = classified
       .filter(({ priority }) => priority.actionable)
       .sort((a, b) => (a.priority.rank - b.priority.rank) || (a.index - b.index));
