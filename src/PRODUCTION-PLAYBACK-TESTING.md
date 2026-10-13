@@ -605,6 +605,75 @@ fix or accept the mount's directory mtime behaviour, or reduce refresh
 frequency. The canary's only change is diagnostic: it now names the PMS
 rejection separately instead of collapsing it into a generic start failure.
 
+## Cold retry for exhausted season-owned aired obligations (2026-10-13)
+
+### Old semantics
+
+`classifyIntentPriority` returned `actionable: false` for any row with
+`state === failed && attempts >= MAX_ATTEMPTS` — permanently. Combined with
+`due()` (which does not filter on attempts) the row stayed in the due list but
+was always filtered out of `orderedDue`, so it was never processed again. An
+attempts-exhausted re-arm path existed in `processIntent` but was **unreachable
+dead code**, reachable only by calling `processIntent` directly.
+
+Consequence: an aired requested-season obligation whose market became
+satisfiable later could only be revived by a brand-new Seerr request
+(`revive()` is called only from `deferSeerrRequest`). Slow Horses S06E04 was
+exactly this case.
+
+### New semantics
+
+`isColdRetryEligible(intent, nowMs)` — all four gates required:
+
+1. `state === failed` — only exhausted rows
+2. `attempts >= MAX_ATTEMPTS` — genuinely exhausted, not a hot row
+3. `season_owners` non-empty — a continuing requested-season obligation, not a
+   one-shot request
+4. retryable market defer reason (`released-no-candidate` or
+   `candidate-not-fulfillable`), and `next_check_at <= nowMs`
+
+Anything else keeps the old permanent-exhaustion semantics: a one-shot row with
+no season owner, or a `hard-failure`/`future-not-released`/null reason, never
+becomes cold-actionable.
+
+The exhausted re-arm now lands **due NOW** rather than `now() + PARKED_MS`. The
+re-arm is not the 7-day wait — the next tick performs exactly ONE preparation
+attempt, and a repeat market miss re-parks for the full cold interval. `retry()`
+increments `attempts`, so a cold cycle never restores a fresh hot budget.
+
+Cadence is the existing `PARKED_MS` (7 days). One interval only: both a market
+miss and a transient provider failure get the same conservative cadence, and
+there is no evidence to justify a second reason-specific interval.
+
+Cold state is fully durable (attempts / season_owners / next_check_at), so a
+media-search restart neither resets the cold timer nor hot-loops exhausted rows.
+
+### Production evidence (deployed, natural scheduler ticks only)
+
+Slow Horses S06E04 (positive target), no manual edits and no new Seerr request:
+
+```
+failed, attempts=6, parked 10-09
+  → classify: id=94 state=failed class=P2 attempts=6 actionable=true cold=true
+  → due-row:  from=failed to=anticipated rearmed=true coldRetry=true        (attempts 6→7)
+  → due-row:  from=anticipated to=prepared  ms=9306                         (attempts 7→8)
+  → due-row:  from=prepared to=playable ms=13362; prewarm warmed=17/17 bytes=142606336
+  → durable: handoff reason='tv-episode bound S6E4' provider=torbox/cached
+             TorrentFile tf_6445b01c, size 9474354491, bindings=1
+             vfs_tv_entry canonical_path=TV/tt5875444/Season 06/…; library_item desired=present
+```
+
+`tt0159187` (negative control): the rows that attempted re-parked at exactly
+168.0h (7 days) with the structured reason
+`prepare:no-handoff:no-bindable-candidate`, confirming the earlier label fix —
+the market still has only S01E01 cached for that show. No rapid Bloodhound or
+provider work; the cadence is one attempt per 7-day cycle.
+
+Scheduler cost: a 13-row cold cycle is 2 ticks of re-arms (8 + 5) at 16–27 ms
+each, then the preparation attempts (9–16 s each, provider-bound), bounded by
+`MAX_ACTIONS_PER_TICK = 8` and `MAX_TICK_WORK_MS = 30s`. P0/P1 work interleaves
+with cold P2 work in the same ticks — no starvation of ordinary drain.
+
 ## Requested-season preparation failures (2026-10-13)
 
 Two aired clusters were blocked. Both carried the same opaque label, but the

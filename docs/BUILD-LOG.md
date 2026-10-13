@@ -459,3 +459,29 @@ No planned work as completed. No vague "healthy." No speculative causes.
   S06E04 (no Binding/handoff/publication).
 - Verification: 7 new label tests; full suite 3197 pass / 12 fail — byte-identical
   failure set before and after, verified by diff.
+
+## 2026-10-13 — cold retry for exhausted season-owned aired obligations — LANDED
+
+- Changed: `isColdRetryEligible()` in `src/lib/anticipation/scheduler.js`
+  (`ecf7419`); exhausted re-arm now due immediately instead of parked out.
+- Old: `attempts >= MAX_ATTEMPTS` was permanently non-actionable, and the
+  existing re-arm path was unreachable dead code. Result: an aired requested-
+  season obligation whose market became satisfiable could only be revived by a
+  new Seerr request.
+- New: four gates (failed, exhausted, continuing season owner, retryable market
+  defer reason + cold park elapsed). One-shot rows and non-retryable reasons
+  keep the old permanent semantics.
+- Cadence: existing PARKED_MS (7 days), one interval only.
+- Production evidence: Slow Horses S06E04 went failed(attempts=6, parked) →
+  cold re-arm (attempts 6→7) → prepared (9.3s) → playable (13.4s), prewarm
+  17/17 ranges, handoff `tv-episode bound S6E4` provider torbox/cached,
+  TorrentFile tf_6445b01c + one Binding, VFS entry + library path active.
+  No manual attempts reset, no new Seerr request, no service restart.
+- Negative control: tt0159187 E05/E06/E07 re-parked at exactly 168.0h (7 days)
+  with `prepare:no-handoff:no-bindable-candidate`.
+- Scheduler cost: 13-row cold cycle = 2 re-arm ticks (16–27 ms) + bounded
+  attempts (9–16 s each); P0/P1 work interleaves, no starvation.
+- Verification: 12 new tests (test/cold-retry-season-owned.test.js) incl.
+  restart durability and future-obligation non-interference; updated one
+  existing test that had pinned the old unreachable semantics. Full suite
+  3211 pass / 10 fail — identical pre-existing set.
