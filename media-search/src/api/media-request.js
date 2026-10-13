@@ -28,9 +28,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { notifyJellyfin } from '../lib/requests/jellyfin-notifier.js';
 import { notifyPlex } from '../lib/requests/plex-notifier.js';
+import { INGEST_OUTCOMES, opportunisticIngestConfirm } from '../lib/requests/plex-ingest.js';
 import { confirmPlexEpisode } from '../lib/consumers/plex.js';
 import { materializeVfsEntry } from '../lib/vfs/materialize.js';
 import { DEMAND_PRIORITY } from '../lib/discovery/cache.js';
+import { inc, setPlexIngestObservation } from '../lib/metrics.js';
 
 /**
  * Minimum eligible corpus candidates before live discovery is triggered.
@@ -703,6 +705,24 @@ async function tryReuseHealthyPublication({
           mediaType: handoff.mediaType,
           canonicalPath: hydratedEntry.canonicalPath,
         });
+        // Additive: when the Plex section is idle, also request + observe +
+        // verify the targeted ingest so the confirmation below sees it rather
+        // than racing it. Busy/timeout/unconfirmed all leave today's behaviour
+        // untouched. Episodes only: that is the geometry this seam proves.
+        if (isEpisode) {
+          const expectedPartFile = sectionRootFor(handoff.mediaType) && hydratedEntry.canonicalPath
+            ? `${sectionRootFor(handoff.mediaType)}/${hydratedEntry.canonicalPath.split('/').slice(1).join('/')}`
+            : null;
+          await opportunisticPlexIngestConfirm({
+            mediaType: handoff.mediaType,
+            canonicalPath: hydratedEntry.canonicalPath,
+            mediaId: handoff.mediaId,
+            season,
+            episode,
+            expectedPartFile,
+            expectedSize: hydratedEntry.size ?? null,
+          });
+        }
       }
     } catch (error) {
       console.error(`Reuse republication failed, falling back to discovery: ${error.message}`);
@@ -841,6 +861,81 @@ async function attemptTorBoxFileBinding({ ensureTorBoxFileIdentityFn, selected, 
  *   `({ infoHash, selectedFileSize, releaseKey }) => Promise<{ placementId, providerFileId, torrentFileId, size }>`.
  * @returns {Promise<Object>} Ranked results with identity state and score breakdown
  */
+
+/** Section root for a mediaType, mirroring plex-notifier's configFor. */
+function sectionRootFor(mediaType, env = process.env) {
+  if (mediaType === 'movie') return env.PLEX_MOVIES_ROOT || null;
+  if (mediaType === 'series' || mediaType === 'tv') return env.PLEX_TV_ROOT || null;
+  return null;
+}
+
+/**
+ * Additive, opportunistic deterministic Plex ingest confirmation.
+ *
+ * Runs ONLY when the relevant Plex section is idle, and never changes what a
+ * caller must do when it is not:
+ *   - busy section        -> returns 'busy'; today's behaviour continues
+ *                           unchanged, no failure, no retry, no block
+ *   - scan start/end      -> 'unconfirmed'; still normal unconfirmed publication
+ *   - item not visible    -> 'unconfirmed'
+ *   - invalid local path  -> 'invalid' (hard defect, never sent to PMS)
+ *   - verified item       -> 'verified' (ratingKey + Part id + exact file + size)
+ *
+ * The value is convergence: when idle, the targeted refresh is requested AND
+ * observed AND its resulting item verified, so the caller's normal Plex
+ * visibility confirmation (which runs anyway, unchanged) sees the item instead
+ * of racing it. Nothing here replaces that confirmation.
+ */
+async function opportunisticPlexIngestConfirm({ mediaType, canonicalPath, mediaId, season = null, episode = null, expectedPartFile = null, expectedSize = null }) {
+  if (!canonicalPath) return null;
+  inc('plex_ingest_attempts_total');
+  let result;
+  try {
+    result = await opportunisticIngestConfirm({
+      mediaType,
+      canonicalPath,
+      mediaId,
+      season,
+      episode,
+      expectedPartFile,
+      expectedSize,
+      findResult: async () => {
+        const plex = await confirmPlexEpisode({
+          mediaId, season, episode,
+          ...(expectedPartFile ? { expectedPartFile } : {}),
+        });
+        if (!plex?.visible || !plex.mediaPart?.file) return null;
+        return {
+          partId: String(plex.mediaPart.id),
+          file: plex.mediaPart.file,
+          size: plex.mediaPart.size,
+          ratingKey: plex.ratingKey,
+        };
+      },
+    });
+  } catch (err) {
+    // Defensive: the helper is built not to throw, but publication must never
+    // break because an opportunistic confirm did.
+    console.error(`[Plex] opportunistic ingest confirm skipped for ${mediaId}: ${err?.message || err}`);
+    return null;
+  }
+  const metric = result?.metric || result;
+  if (metric) setPlexIngestObservation(metric);
+  const outcome = result?.outcome;
+  if (outcome === INGEST_OUTCOMES.VERIFIED) {
+    inc('plex_ingest_verified_total');
+    console.log(`[Plex] ingest verified media=${mediaId} part=${result.partId} file=${result.fileMatch ? 'exact' : 'MISMATCH'} size=${result.sizeMatch === null ? 'n/a' : (result.sizeMatch ? 'exact' : 'MISMATCH')} scanMs=${result.scanMs}`);
+  } else if (outcome === INGEST_OUTCOMES.BUSY) {
+    inc('plex_ingest_busy_total');
+  } else if (outcome === INGEST_OUTCOMES.INVALID) {
+    inc('plex_ingest_invalid_total');
+    console.error(`[Plex] ingest path rejected locally for ${mediaId}: ${result.fallbackReason} (not sent to Plex)`);
+  } else {
+    inc('plex_ingest_unconfirmed_total');
+  }
+  return outcome;
+}
+
 export async function searchByMedia(cache, request) {
   const requestStartedAt = Date.now();
   const mediaId = String(request.mediaId || '').trim();
@@ -1442,12 +1537,29 @@ export async function searchByMedia(cache, request) {
                   mediaId: handoff.mediaId,
                   mediaType: handoff.mediaType,
                   canonicalPath: vfsEntry.canonicalPath,
-                }).then((plResult) => {
+                }).then(async (plResult) => {
                   if (plResult.notified) {
                     console.log(`[Plex] Notified via ${plResult.method}: ${handoff.mediaId}`);
                   } else if (plResult.error) {
                     console.error(`[Plex] Will be discovered on next scan: ${plResult.error}`);
                   }
+                }).then(async () => {
+                  // Additive and non-blocking: deterministic confirm when the
+                  // section is idle. Never throws, never changes publication
+                  // outcome on busy/timeout/unconfirmed.
+                  if (!isEpisode) return;
+                  const expectedPartFile2 = sectionRootFor(handoff.mediaType) && vfsEntry?.canonicalPath
+                    ? `${sectionRootFor(handoff.mediaType)}/${vfsEntry.canonicalPath.split('/').slice(1).join('/')}`
+                    : null;
+                  await opportunisticPlexIngestConfirm({
+                    mediaType: handoff.mediaType,
+                    canonicalPath: vfsEntry.canonicalPath,
+                    mediaId: handoff.mediaId,
+                    season,
+                    episode,
+                    expectedPartFile: expectedPartFile2,
+                    expectedSize: vfsEntry?.size ?? null,
+                  });
                 }).catch(() => {
                   // Plex notification failure is non-fatal
                 });

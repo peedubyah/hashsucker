@@ -33,6 +33,13 @@ const counters = {
   uncached_candidates: 0,
   unknown_cache_state: 0,
 
+  // Plex deterministic ingest (opportunistic, additive to the refresh path)
+  plex_ingest_attempts_total: 0,
+  plex_ingest_verified_total: 0,
+  plex_ingest_busy_total: 0,
+  plex_ingest_unconfirmed_total: 0,
+  plex_ingest_invalid_total: 0,
+
   // Ranking
   winner_source_corpus: 0,
   winner_source_live: 0,
@@ -45,6 +52,39 @@ const counters = {
 // Plex refresh coalescer snapshot. Mirrored from
 // createRefreshCoalescer via bindPlexMetricsSink(). Snapshot, not
 // monotonic counters — the coalescer owns the source of truth.
+// Last opportunistic Plex deterministic-ingest observation. Snapshot, not
+// monotonic; the counters above carry the totals. Records the outcome class so
+// a busy section is visible as a skip, never as a failure.
+let plexIngestLast = {
+  outcome: null, fallbackReason: null, sectionId: null, seasonPath: null,
+  scanUuid: null, scanMs: null, scanToItemMs: null,
+  ratingKey: null, partId: null, size: null, fileMatch: null, sizeMatch: null,
+  mediaId: null, season: null, episode: null, at: null,
+};
+
+export function setPlexIngestObservation(observation) {
+  if (!observation || typeof observation !== 'object') return;
+  plexIngestLast = {
+    outcome: observation.outcome ?? null,
+    fallbackReason: observation.fallbackReason ?? null,
+    sectionId: observation.sectionId ?? null,
+    seasonPath: observation.seasonPath ?? null,
+    scanUuid: observation.scanUuid ?? null,
+    scanMs: observation.scanMs ?? null,
+    scanToItemMs: observation.scanToItemMs ?? null,
+    ratingKey: observation.ratingKey ?? null,
+    partId: observation.partId ?? null,
+    size: observation.size ?? null,
+    fileMatch: observation.fileMatch ?? null,
+    sizeMatch: observation.sizeMatch ?? null,
+    mediaId: observation.mediaId ?? null,
+    season: observation.season ?? null,
+    episode: observation.episode ?? null,
+    at: Date.now(),
+  };
+  emitter.emit('change', 'plex_ingest', plexIngestLast);
+}
+
 let plexRefreshAccount = {
   refresh_requested: 0,
   refresh_coalesced: 0,
@@ -124,6 +164,7 @@ export function getMetrics() {
     timestamp: new Date().toISOString(),
     counters: { ...counters },
     plex_refresh: { ...plexRefreshAccount },
+    plex_ingest: { ...plexIngestLast },
     ranking: {
       score_distribution: {
         buckets: scoreBuckets,

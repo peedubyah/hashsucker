@@ -36,6 +36,33 @@
  * Therefore this module proves only: a section scan was started and the scan
  * PHASE completed. Result correlation (ratingKey / Part / exact file) stays with
  * the caller, e.g. `confirmPlexEpisode`, which queries PMS metadata directly.
+ *
+ * PATH CORRELATION — measured conclusion (PMS 1.43.3): there is none.
+ *   - `/activities` carries only `librarySectionID`.
+ *   - The scan runs in-process; no scanner child exists for it. (Separately,
+ *     `Plex Media Scanner --analyze --no-thumbs --item <ids>` is spawned for the
+ *     analysis phase, and receives `--item <ids>` — never `--directory`.)
+ *   - The refresh request log carries the path and a `#reqid`, but that lives in
+ *     PMS's own log and is not correlated to the activity uuid.
+ *   The only sound substitute is the invariant enforced by `createIngestFlight`:
+ *   PMS is quiescent beforehand and at most one ingest is outstanding per
+ *   section, so an observed activity is attributable. That is strong inference,
+ *   not proof — and `requestLibraryIngest` refuses rather than guesses when the
+ *   invariant cannot be held.
+ *
+ * RESULTING-ITEM READINESS — measured ordering for a genuine new ingest:
+ *   1. scan phase creates the metadata item AND its Part (Part id is allocated
+ *      and its `file` is populated before any analysis runs);
+ *   2. a separate `--analyze` subprocess opens the file with FFMPEG;
+ *   3. only during analysis are `size`, `duration`, streams and the technical
+ *      hash committed (`Updating media item <id>, size=…`).
+ *   So `Part.file` appears at scan end, while `size`/`duration` are analysis
+ *   products. The readiness predicate therefore requires ratingKey + Part id +
+ *   exact `file` + exact `size`: it is machine-verifiable and, because size is
+ *   committed by analysis, it doubles as an analysis-completion floor.
+ *   Duration is deliberately not required — for direct play PMS resolves the
+ *   source and creates a session from the Part, and HashSucker already holds
+ *   the authoritative TorrentFile size.
  */
 import pathPosix from 'node:path';
 
@@ -386,7 +413,11 @@ export async function requestLibraryIngest({
       const found = await findResult();
       if (found && found.partId && found.file) {
         const kind = classifyResultingItem(found, verify);
-        if (kind) throw ingestError(kind.code, kind.message);
+        if (kind) {
+          const err = ingestError(kind.code, kind.message);
+          err.item = found; // so the caller can report the exact mismatch
+          throw err;
+        }
         item = { ...found, verifiedAt: Date.now() };
         break;
       }
@@ -428,4 +459,221 @@ export function classifyResultingItem(found, verify) {
     return { code: INGEST_ERRORS.NOT_PLAYBACK_READY, message: 'Plex item has no Part id (not playback-ready)' };
   }
   return null;
+}
+
+/* ── Opportunistic deterministic confirmation ───────────────────────────────── */
+
+const OUTCOMES = Object.freeze({
+  /** Deterministic verification succeeded; publication may promote immediately. */
+  VERIFIED: 'verified',
+  /** The Plex section is scanning; caller must fall back to today's behaviour. */
+  BUSY: 'busy',
+  /** Section was idle but the transaction did not verify; normal unconfirmed state. */
+  UNCONFIRMED: 'unconfirmed',
+  /** Local path validation failed; hard error, must be surfaced. */
+  INVALID: 'invalid',
+});
+
+export { OUTCOMES as INGEST_OUTCOMES };
+
+/**
+ * Process-wide single-flight guard, shared by every opportunistic confirm so
+ * that concurrent publications in the same Plex section refuse rather than
+ * produce un-attributable scan observations. Different sections stay
+ * independent and concurrent.
+ */
+const sharedFlight = createIngestFlight();
+
+export function sharedIngestFlight() { return sharedFlight; }
+
+/**
+ * Section roots and collection segment for a mediaType, mirroring
+ * `plex-notifier.js`'s configFor so both agree on geometry.
+ */
+function ingestConfigFor(mediaType, env = process.env) {
+  if (mediaType === 'movie') {
+    return { sectionId: env.PLEX_MOVIES_SECTION_ID || null, root: env.PLEX_MOVIES_ROOT || null, collection: 'Movies' };
+  }
+  if (mediaType === 'series') {
+    return { sectionId: env.PLEX_TV_SECTION_ID || null, root: env.PLEX_TV_ROOT || null, collection: 'TV' };
+  }
+  return { sectionId: null, root: null, collection: null };
+}
+
+/**
+ * Opportunistically confirm a publication with the deterministic ingest
+ * transaction, when — and only when — it is safe to do so.
+ *
+ * Contract, deliberately additive:
+ *   - If the Plex section is busy, this returns `busy` and does nothing else.
+ *     That is NOT a publication failure: no failure is raised, no retry is
+ *     triggered, and the normal confirmation path runs instead.
+ *   - If the section is idle it runs the bounded transaction. Scan start /
+ *     completion timeouts and an item that never appears are `unconfirmed`,
+ *     never a publication failure.
+ *   - Only a locally-invalid path is surfaced as `invalid`, because that is a
+ *     hard defect and must never be sent to PMS.
+ *   - A verified item (ratingKey + Part id + exact file + exact size) is
+ *     `verified` and the caller may promote the publication immediately.
+ *
+ * Never throws for publication purposes. Metrics are recorded per attempt.
+ */
+export async function opportunisticIngestConfirm({
+  mediaType,
+  canonicalPath,
+  mediaId,
+  season = null,
+  episode = null,
+  expectedPartFile = null,
+  expectedSize = null,
+  findResult,
+  plexUrl = null,
+  plexToken = null,
+  vfsBaseUrl = process.env.HASHSUCKER_BASE_URL || 'http://127.0.0.1:3000',
+  flight,
+  timeoutMs = 60_000,
+  pollMs = 200,
+  quietTimeoutMs = 5_000,
+  env = process.env,
+  fetchFn,
+  onMetric = null,
+  // seams, forwarded verbatim so tests and diagnostics can replace any stage
+  vfsExistsFn = vfsDirectoryExists,
+  quietFn = waitForScanQuiet,
+  observeFn = observeScan,
+} = {}) {
+  const t0 = Date.now();
+  const cfg = ingestConfigFor(mediaType, env);
+  const url = plexUrl || env.PLEX_URL || null;
+  const token = plexToken || env.PLEX_TOKEN || null;
+  const metric = {
+    mediaId: mediaId ?? null, season, episode,
+    sectionId: cfg.sectionId, seasonPath: null,
+    outcome: OUTCOMES.UNCONFIRMED, fallbackReason: null,
+    scanUuid: null, scanMs: null, scanToItemMs: null,
+    ratingKey: null, partId: null, file: null, size: null,
+    fileMatch: null, sizeMatch: null,
+    elapsedMs: null,
+  };
+
+  // Uniform shape: these fields are always present (null when unknown) so a
+  // caller never has to distinguish "absent" from "not yet filled in".
+  const finish = (outcome, fallbackReason, extra = {}) => {
+    metric.outcome = outcome;
+    metric.fallbackReason = fallbackReason;
+    metric.elapsedMs = Date.now() - t0;
+    Object.assign(metric, extra);
+    if (onMetric) {
+      try { onMetric({ ...metric }); } catch { /* instrumentation must never break publication */ }
+    }
+    return {
+      outcome,
+      fallbackReason,
+      sectionId: metric.sectionId,
+      seasonPath: metric.seasonPath,
+      scanUuid: metric.scanUuid,
+      scanMs: metric.scanMs,
+      scanToItemMs: metric.scanToItemMs,
+      ratingKey: metric.ratingKey,
+      partId: metric.partId,
+      file: metric.file,
+      size: metric.size,
+      fileMatch: metric.fileMatch,
+      sizeMatch: metric.sizeMatch,
+      code: extra.code ?? null,
+      item: extra.item ?? null,
+      metric,
+    };
+  };
+
+  // Hard requirement: without Plex and a VFS to verify against, do nothing.
+  if (!url || !token) return finish(OUTCOMES.UNCONFIRMED, 'plex-unavailable');
+  if (!cfg.sectionId || !cfg.root) return finish(OUTCOMES.UNCONFIRMED, 'no-section-geometry');
+
+  // 1. Local validation. A bad path is a hard defect, not a skip.
+  let plan;
+  try {
+    plan = validateRefreshPath({ mediaType, canonicalPath, sectionRoot: cfg.root, vfsBaseUrl, collection: cfg.collection });
+    metric.seasonPath = plan.scanPath;
+  } catch (err) {
+    return finish(OUTCOMES.INVALID, err.message, { code: err.code });
+  }
+
+  // 2. VFS existence. A missing directory is likewise a hard defect.
+  try {
+    const exists = await vfsDirectoryExists(plan.vfsUrl, { fetchFn });
+    if (!exists) return finish(OUTCOMES.INVALID, `vfs-directory-absent: ${plan.vfsUrl}`, { code: INGEST_ERRORS.PATH_NOT_FOUND });
+  } catch (err) {
+    // An unreachable VFS is ambiguous, not a defect in the path.
+    return finish(OUTCOMES.UNCONFIRMED, `vfs-check-unavailable: ${err.message}`);
+  }
+
+  // 3. Idle gate. One cheap call; a busy section skips without side effects.
+  let busy = false;
+  try {
+    busy = !(await isScanQuiet({ plexUrl: url, plexToken: token, fetchFn }));
+  } catch (err) {
+    return finish(OUTCOMES.UNCONFIRMED, `idle-check-failed: ${err.message}`);
+  }
+  if (busy) return finish(OUTCOMES.BUSY, 'section-scanning');
+
+  // 4. Bounded deterministic transaction.
+  try {
+    const out = await requestLibraryIngest({
+      mediaType, canonicalPath,
+      sectionRoot: cfg.root, vfsBaseUrl, collection: cfg.collection,
+      sectionIdOverride: cfg.sectionId,
+      plexUrl: url, plexToken: token,
+      verify: { mediaId, expectedPartFile, expectedSize },
+      findResult,
+      flight, pollMs, timeoutMs,
+      fetchFn,
+      vfsExistsFn,
+      quietFn,
+      observeFn,
+    });
+    return finish(OUTCOMES.VERIFIED, null, {
+      scanUuid: out.scan?.uuid ?? null,
+      scanMs: out.scan?.elapsedMs ?? null,
+      scanToItemMs: out.scanToItemMs ?? null,
+      ratingKey: out.item?.ratingKey ?? null,
+      partId: out.item?.partId ?? null,
+      file: out.item?.file ?? null,
+      size: out.item?.size ?? null,
+      fileMatch: expectedPartFile ? out.item?.file === expectedPartFile : null,
+      sizeMatch: expectedSize != null && out.item?.size != null ? Number(out.item.size) === Number(expectedSize) : null,
+      item: out.item,
+    });
+  } catch (err) {
+    // Every failure here is an inconclusive confirm, never a publication error.
+    const code = err?.code || 'unknown';
+    const reason = {
+      [INGEST_ERRORS.SCAN_BUSY]: 'section-scanning',
+      [INGEST_ERRORS.SCAN_NOT_STARTED]: 'scan-not-started',
+      [INGEST_ERRORS.SCAN_NOT_COMPLETED]: 'scan-not-completed',
+      [INGEST_ERRORS.ITEM_NOT_FOUND]: 'item-not-visible',
+      [INGEST_ERRORS.REFRESH_REJECTED]: 'refresh-rejected',
+      [INGEST_ERRORS.WRONG_PART_PATH]: 'wrong-part-path',
+      [INGEST_ERRORS.WRONG_PART_SIZE]: 'wrong-part-size',
+      [INGEST_ERRORS.NOT_PLAYBACK_READY]: 'not-playback-ready',
+      [INGEST_ERRORS.INVALID_PATH]: 'invalid-path',
+      [INGEST_ERRORS.PATH_NOT_FOUND]: 'path-not-found',
+    }[code] || `ingest-${code}`;
+    // Expose the verification identity even when the item was rejected, so a
+    // caller can see WHICH mismatch occurred, not just that it did.
+    const detail = err && typeof err === 'object' && err.item ? err.item : {};
+    return finish(
+      code === INGEST_ERRORS.INVALID_PATH || code === INGEST_ERRORS.PATH_NOT_FOUND ? OUTCOMES.INVALID : OUTCOMES.UNCONFIRMED,
+      reason,
+      {
+        code,
+        ratingKey: detail.ratingKey ?? null,
+        partId: detail.partId != null ? String(detail.partId) : null,
+        file: detail.file ?? null,
+        size: detail.size ?? null,
+        fileMatch: expectedPartFile && detail.file != null ? detail.file === expectedPartFile : null,
+        sizeMatch: expectedSize != null && detail.size != null ? Number(detail.size) === Number(expectedSize) : null,
+      },
+    );
+  }
 }
