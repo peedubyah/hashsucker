@@ -4,6 +4,47 @@ Format per entry: date / phase-slice / status / observed changes /
 verification / production evidence / unproven / artifacts / next gate.
 No planned work as completed. No vague "healthy." No speculative causes.
 
+## 2026-10-12 — VFS collection mtime scanned PMS continuously — FIXED + DEPLOYED
+
+- Changed: `media-search/src/lib/vfs/tv-webdav.js` now derives TV collection
+  mtime from the newest durable handoff `selectedAt` across the TV tree instead
+  of `Date.now()`. Deployed as `3466af5` (media-search rebuilt + recreated).
+- Root cause (mechanism, not correlation): the TV PROPFIND handler returned
+  `modifiedAt: now()` for every `entry.type === 'collection'` while returning
+  durable `state.handoff.selectedAt` for files. rclone faithfully mirrored that
+  synthesized time over WebDAV, so `/mnt/hashsucker-vfs/TV/.../Season NN/` showed
+  a mtime equal to the current second. PMS observed this directly:
+  `WARN Directory change time at "<path>" is in the future: <now>` and
+  `Last refresh (T) is older than directory change time (<now>)`, so its freshness
+  check could never pass. movie-webdav already did this correctly; TV was the
+  outlier. Confirmed at the source by PROPFIND: collection `getlastmodified`
+  advanced 23:31:21 → 23:31:31 while files kept real times.
+- Before/after (identical forced traffic: 40 WebDAV PROPFINDs + 24 PMS metadata
+  lookups on a stable, unchanged directory, 5–6 min windows):
+  before  2× "in the future", 4× "need to refresh", 8× "Updating Metadata";
+  after   0 / 0 / 0. A further unforced 8-minute window also measured 0 across
+  everything, with 0 busy-database waits and 0 `/playQueues` 500s.
+- Explicit-refresh breakdown (corrected to Request lines only, so the earlier
+  Request/Completed double-count is removed): the historically observed
+  14-in-2-minutes was 7 real dispatches over 17 s across 2 paths
+  (4× tt7137906/Season 01, 3× tt7366338/Season 01, inter-arrival 0.8–7.9 s).
+  Today the whole log holds 2 dispatches for 1 path. Coalescing exists and is
+  wired (`openSeasonFanOutScope` for the Seerr path, keyed debounce in
+  `refresh-coalescer.js`, live `plex_refresh` metrics); the 7-call burst is
+  consistent with the debounce semantics rather than a defect, so no change was
+  made there.
+- Dominant cause: **filesystem metadata instability**, not explicit refresh.
+  Zero targeted refreshes were issued during the baseline window, yet 4
+  autonomous "need to refresh" events and 8 scanner activities still occurred.
+  Explicit refreshes compound it but are an order of magnitude less frequent.
+- Not changed: rclone mount flags (`--dir-cache-time 60s --attr-timeout 60s`),
+  because the instability was synthesized by HashSucker's WebDAV layer, not by
+  rclone. Remounting would have risked active playback for no benefit.
+- Verification: full VFS/WebDAV/refresh suite 81/81 pass. Post-fix production
+  playback canary (E04) PASS with clean teardown, 0 leaked sessions. VFS listing
+  and PMS convergence intact (both episodes listed, Media id 1085 present,
+  section 3 size 17).
+
 ## 2026-10-12 — PMS session-creation failures diagnosed — LANDED
 
 - Changed: the canary now classifies a PMS-side session-creation rejection
