@@ -425,3 +425,37 @@ No planned work as completed. No vague "healthy." No speculative causes.
   read-only `/status/sessions` seam, runs only when published active bindings
   exist, and requires positive progress plus exact publication/Binding/TorrentFile
   correlation. It adds no webhook or event subsystem and no 1-second loop.
+
+## 2026-10-13 — requested-season preparation failures diagnosed — LANDED
+
+- Changed: `prepare-http-200` no longer hides application-level failures.
+  `src/lib/requests/prepare-failure.js` (`describePrepareFailure`) reports the
+  body's own reason; applied to the anticipation scheduler and upgrade-watch,
+  which had duplicated logic. Commit `f32e3a6`.
+- Root cause of the OPAQUITY (shared by both clusters, 13 rows): the scheduler's
+  error branch treated three distinct conditions as one — no handoff
+  (`selection.selected == null`), handoff without `torrentFileId`, and non-200
+  transport. HTTP 200 is returned for the first two, which are market outcomes.
+- Root cause of the FAILURES differs per cluster:
+  - `tt0159187` S1E2–S1E13 (12 rows): `no-bindable-candidate`. The provider has
+    exactly one cached release for this show — S01E01 (hence E1 is playable).
+    Measured: E2 has 9 candidates (2 cached, both S01E01); E5/E13 have 50
+    candidates (2 cached, both S01E01, zero matching their episode). Bloodhound
+    ran for E5/E13 (53 candidates) and could not make it bindable. Provider
+    boundary, not a HashSucker defect.
+  - `tt5875444` S06E04 (1 row): `candidate-not-fulfillable`, `attempts = 6 =
+    MAX_ATTEMPTS` → not actionable, never retried. A current prepare finds 48/50
+    candidates cached and binds successfully, so this is blocked by the attempts
+    park, not the market.
+- Neither converges unattended because `attempts` is not reset by season
+    reconciliation; `revive()` (attempts=0) is only reached from a new Seerr
+    request for the same item.
+- Bloodhound: remains PARTIAL. Observed it runs and supplies candidates; not
+  observed the full persisted-insufficient → authoritative-representation →
+  Binding/VFS/publication chain.
+- No rows repaired, no DB edits, no provider failover, no service restarts.
+  Disclosed side effect: a `persist:false` diagnostic still runs the TorBox
+  binding seam and created durable TorrentFile `tf_6445b01c` for Slow Horses
+  S06E04 (no Binding/handoff/publication).
+- Verification: 7 new label tests; full suite 3197 pass / 12 fail — byte-identical
+  failure set before and after, verified by diff.

@@ -605,6 +605,85 @@ fix or accept the mount's directory mtime behaviour, or reduce refresh
 frequency. The canary's only change is diagnostic: it now names the PMS
 rejection separately instead of collapsing it into a generic start failure.
 
+## Requested-season preparation failures (2026-10-13)
+
+Two aired clusters were blocked. Both carried the same opaque label, but the
+mechanisms are **different**.
+
+### What `prepare-http-200` actually meant
+
+`/api/media-prepare` answers **HTTP 200 for application-level outcomes**. The
+scheduler's error branch was:
+
+```js
+if (r.status !== 200 || r.json?.prepared !== true || !r.json?.handoff?.torrentFileId) {
+  return { ok: false, terminal: r.status === 400, error: r.json?.error || `prepare-http-${r.status}` };
+}
+```
+
+So `prepare-http-200` covered **three different conditions**, all indistinguishable in `last_error`:
+
+| Condition | Real meaning |
+|---|---|
+| no handoff built | `selection.selected` was null → `selection.reason` (e.g. `no-bindable-candidate`) |
+| handoff without `torrentFileId` | prepared, but no authoritative TorrentFile bound |
+| non-200 | genuine transport failure |
+
+Fixed in `f32e3a6` (`src/lib/requests/prepare-failure.js`): the body's own reason
+is now reported (`prepare:no-handoff:<selection.reason>` /
+`prepare:no-torrentfile:<selection.reason>`), an explicit server error is
+verbatim, and an unrecognised shape still degrades to `prepare-http-200` so a
+future body change cannot look like success. Applied to both the anticipation
+scheduler and upgrade-watch, which had the same duplicated logic. Terminality is
+unchanged (200 retryable, 400 terminal).
+
+### Breakdown by row
+
+**`tt0159187` (John DeLorean) S1E2–S1E13 — provider-blocked. 12 rows.**
+Every one reports `selection.reason = no-bindable-candidate`. The market has
+exactly **one cached release for this show: S01E01** — which is why E1 is
+`playable` and E2–E13 are not. Measured per episode: E2 has 9 candidates (2
+cached, both S01E01; both E02 releases uncached); E5 and E13 have 50
+candidates (2 cached, both S01E01; zero matching their episode). Bloodhound was
+invoked for E5/E13 and returned 53 candidates each — no bindable representation,
+because the provider has nothing cached for those episodes. The 7-day attempts
+park is the correct response to a repeated market miss.
+
+**`tt5875444` (Slow Horses) S06E04 — park-blocked, not market-blocked. 1 row.**
+A current prepare run finds **48 of 50 candidates cached** and binds
+(`tv-episode bound S6E4`, valid `torrentFileId`). So the representation is
+obtainable today. The row cannot retry because `attempts = 6 = MAX_ATTEMPTS`,
+so `classifyIntentPriority` marks it `actionable: false` and it is filtered out
+of every tick. `revive()` (which resets `attempts = 0`) is only reached from a
+new Seerr request for the same item, and none has arrived since the file was
+cached. It will converge on the next such request.
+
+### Why neither cluster converges unattended
+
+`attempts` is never reset by season reconciliation (`ensureSeasonEpisode` updates
+owners/expected/next_check but not attempts), so a parked row stays parked until
+an external `revive`. That is the boundary, and it is a policy boundary rather
+than a defect: for a genuinely uncached item, retrying is exactly what burns the
+budget. It does mean an aired obligation that becomes satisfiable while parked
+waits for a new request.
+
+### Diagnostic side effect (disclosed)
+
+A read-only probe (`persist: false`) skips the request row and the handoff, but
+**not** the TorBox binding seam, so a diagnostic run created the durable
+TorrentFile `tf_6445b01c-…` for Slow Horses S06E04. No Binding, handoff, or
+publication was created, and no intent row was touched. Anyone repeating this
+diagnosis should expect the same side effect.
+
+### Bloodhound status: still PARTIAL
+
+Observed: Bloodhound is invoked and supplies candidates (`live-results count=53`
+for tt0159187 E5/E13). Not observed: persisted path insufficient → Bloodhound
+supplies the exact authoritative representation → Binding/VFS/publication. For
+tt0159187 it supplied candidates but nothing bindable resulted; for Slow Horses
+S06E04 it was not invoked at all — the binding came through the normal pipeline.
+Status is not upgraded.
+
 ## Deterministic library ingest (2026-10-13)
 
 `media-search/src/lib/requests/plex-ingest.js` formalises the ingest seam so it
