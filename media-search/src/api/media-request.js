@@ -9,19 +9,13 @@
  * (Torrentio/Comet). Live results pass through the same identity eligibility gate.
  *
  * Contract: media ID -> ranked release candidates -> explainable JSON response.
+ *
+ * This module owns the entry points (searchByMedia) and the reuse fast path;
+ * the stage sequence itself lives in ./media-request-stages.js and the
+ * presentation tail in ../lib/requests/publication.js.
  */
 
-import { createRequestIntent } from '../lib/requests/intent.js';
-import { rankHitsTiered, classifyIdentityTier, evaluateIdentityEligibility } from '../lib/discovery/ranking.js';
-import { getStrongestReleaseAttributes } from '../lib/discovery/release-attributes.js';
-import { evaluateObservationFreshness } from '../lib/providers/observations.js';
-import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
-import { createAvailabilityChecker } from '../lib/intents/availability.js';
-import { selectBestCandidate, selectBindableCandidate } from '../lib/discovery/selection.js';
-import { lookupCorpusByTitle, resolveWantedIdentity, IDENTITY_TIERS } from '../lib/discovery/corpus-identity.js';
-import { computeHistoricalAvailabilityPrior } from '../lib/discovery/confidence-projection.js';
-import { resolveTvTorrentFile, isPlayableVideoTorrentFile } from '../lib/resolver/tv-episode-resolver.js';
-import { buildPlaybackHandoff } from '../lib/discovery/playback-handoff.js';
+import { isPlayableVideoTorrentFile } from '../lib/resolver/tv-episode-resolver.js';
 import { publishStrm } from '../lib/requests/strm-publisher.js';
 import { createLibraryIdentityKey } from '../lib/control-plane/canonical-path.js';
 import { notifyJellyfin } from '../lib/requests/jellyfin-notifier.js';
@@ -31,31 +25,31 @@ import {
   verifyPublishedStrm,
   publishSelectedHandoff,
   republishHealthyHandoff,
+  materializeHandoff,
 } from '../lib/requests/publication.js';
-import { DEMAND_PRIORITY } from '../lib/discovery/cache.js';
+import {
+  buildRequestContext,
+  collectTitleIndexInputs,
+  runLiveDiscoveryStage,
+  mergeTitleInputsIntoLive,
+  buildCorpusRankingInput,
+  shapeRankedResults,
+  applyTorboxAvailability,
+  selectCandidateForRequest,
+  persistRequestAndBackfill,
+  buildHandoffForSelection,
+  promoteDemandForRequest,
+  requestResponseBase,
+  unfulfilledResponse,
+  skippedCandidatesOf,
+} from './media-request-stages.js';
+import { rankHitsTiered } from '../lib/discovery/ranking.js';
+import { backfillRequestMediaAssociations } from './media-request-stages.js';
 
-/**
- * Minimum eligible corpus candidates before live discovery is triggered.
- * Configurable via request.liveDiscoveryThreshold.
- */
-const DEFAULT_LIVE_DISCOVERY_THRESHOLD = 1;
+// Backfill moved into the stages module (it is a pipeline stage); re-exported
+// here because existing callers and tests import it from this module.
+export { backfillRequestMediaAssociations };
 
-/**
- * Prepared durable truth (preparation tranche).
- *
- * Returns the durable fulfillment identity for a media item WITHOUT
- * touching presentation: stored playback handoff (full shape with
- * torrentFileId) + matching TorrentFile row (positive size) + at least
- * one data-plane coordinate (present, mapped provider file on a
- * non-removed placement).
- *
- * This is the shared predicate behind both the reuse fast path (which
- * proceeds to republish presentation) and preparation (which stops
- * here). Identity rows are immutable; placement liveness is re-proven
- * at serve time, so no TTL is applied here.
- *
- * @returns {{ handoff, torrentFileId, torrentFile } | null}
- */
 export function getPreparedDurableState({
   cache,
   controlPlaneStore,
@@ -147,105 +141,6 @@ export function getPreparedDurableState({
   return { handoff, torrentFileId, torrentFile };
 }
 
-/**
- * Corpus backfill (corpus productization tranche): record observed
- * request outcomes as candidate→media associations so the corpus can
- * serve future discovery for previously-requested media without any
- * external matching. Only eligible ranked results are recorded, with
- * their identity confidence; ranking rules are untouched. Best-effort:
- * never fails the request. Runs after persistMediaRequest commits.
- */
-export function backfillRequestMediaAssociations(cache, intent, explainable, requestId) {
-  if (typeof cache.upsertMediaAssociation !== 'function') return 0;
-  if (!intent?.mediaId || !Array.isArray(explainable) || explainable.length === 0) return 0;
-  let associated = 0;
-  for (const r of explainable) {
-    try {
-      if (!r || !r.infoHash) continue;
-      if (r.identity?.eligible === false) continue;
-      cache.upsertMediaAssociation(r.infoHash, r.fileIndex ?? null, intent.mediaId, {
-        source: 'request-outcome',
-        confidence: typeof r.identity?.confidence === 'number' ? r.identity.confidence : 0.5,
-        evidence: [`request:${requestId}`, `rank:${r.rank ?? '?'}`],
-        resolutionState: r.identity?.state || 'unresolved',
-        matchMethod: 'request-ranked',
-      });
-      associated++;
-    } catch {
-      // One bad row must not poison the rest.
-    }
-  }
-  return associated;
-}
-
-/**
- * Corpus title-index collection (corpus intelligence tranche): resolve the
- * wanted identity once per request and return STRUCTURED-tier ranking
- * inputs plus their eligibility map. Same ranker, same weights, same
- * eligibility gate as every other source — the title index is a new
- * input, not a new rule. Never throws (empty on any failure).
- */
-async function collectTitleIndexCandidates({
-  cache, mediaId, mediaType, season, episode, mediaTitle, canonicalYear,
-}) {
-  const inputs = [];
-  const eligibilityByHash = new Map();
-  let wanted = { title: null, year: null, source: 'none' };
-  try {
-    wanted = await resolveWantedIdentity({ mediaId, mediaType, mediaTitle, canonicalYear });
-    if (!wanted.title) return { inputs, eligibilityByHash };
-    const rows = lookupCorpusByTitle(cache, {
-      title: wanted.title, year: wanted.year, season, episode, mediaType,
-    });
-    for (const row of rows) {
-      const key = `${row.infoHash}:${row.fileIndex ?? 'torrent'}`;
-      const releaseAttrs = {
-        title: row.title,
-        year: row.year ?? undefined,
-        season: row.season ?? undefined,
-        episode: row.episode ?? undefined,
-        episodeRange: undefined,
-        seasonOnly: false,
-        mediaType,
-        resolution: row.resolution ?? undefined,
-        source: row.sourceType ?? undefined,
-        // Canonical scoring key (ranker V2 fix 1): qualityScore reads
-        // sourceType; mirror it like the other ranking-input builders.
-        sourceType: row.sourceType ?? undefined,
-        codec: row.codec ?? undefined,
-        hdr: row.hdr ?? undefined,
-        audio: row.audio ?? undefined,
-      };
-      const eligibility = evaluateIdentityEligibility(
-        { releaseAttributes: releaseAttrs, sources: [{ origin: 'corpus-title-index' }] },
-        { season, episode, mediaType, mediaTitle: wanted.title, year: wanted.year ?? canonicalYear },
-      );
-      eligibilityByHash.set(key, eligibility);
-      inputs.push({
-        hash: row.infoHash,
-        fileIndex: row.fileIndex,
-        releaseKey: key,
-        filename: row.filename,
-        relevance: 0.75,
-        releaseAttributes: releaseAttrs,
-        parserConfidence: 0.75,
-        mediaAssociations: [],
-        providerObservations: [],
-        providerEvidence: [],
-        sources: [{ origin: 'corpus-title-index', evidence: ['exact-normalized-title-match', `tier:${IDENTITY_TIERS.STRUCTURED}`], confidence: 0.75 }],
-        selectedMediaId: mediaId,
-        hasLiveDiscovery: false,
-        hasTitleIndex: true,
-        exactFileSize: row.size,
-        selectedFileSize: row.size,
-        historicalPrior: 0,
-      });
-    }
-  } catch {
-    // Title lookup is best-effort enrichment, never fatal.
-  }
-  return { inputs, eligibilityByHash, wanted };
-}
 
 /**
  * Ensure the canonical STRM is materialized for an existing durable handoff.
@@ -570,151 +465,50 @@ async function tryReuseHealthyPublication({
 }
 
 /**
- * Get availability info for a candidate from stored observations.
- * @param {Object} hit - Ranked candidate
- * @returns {Object}
+ * Search for release candidates by media identity.
+ *
+ * Product stage sequence:
+ *   1. fast paths (already-prepared, healthy-publication reuse)
+ *   2. candidate collection (corpus and/or live discovery)
+ *   3. ranking → explainable rows
+ *   4. provider availability
+ *   5. binding selection
+ *   6. request persistence
+ *   7. durable handoff
+ *   8. publication (request path) / materialization (corpus path)
+ *   9. demand promotion + response
+ *
+ * Two candidate pipelines share those stages:
+ *   - live pipeline: used when the corpus has no candidates for this item
+ *     (or an explicit live-only retry). Publishes fully.
+ *   - corpus pipeline: normal corpus-serving path. Materializes the
+ *     authoritative VFS row and fails closed on presentation gaps.
+ *
+ * @param {Object} cache - Discovery cache instance
+ * @param {Object} request - Media request (see media-request-stages.buildRequestContext)
+ * @returns {Promise<Object>} Ranked results with identity state and score breakdown
  */
-function _getAvailabilityForCandidate(hit) {
-  const observations = hit.providerObservations || [];
-  const availability = {};
-
-  for (const obs of observations) {
-    if (obs.provider && obs.state) {
-      const freshness = evaluateObservationFreshness(obs, { now: Date.now() });
-      availability[obs.provider] = {
-        state: obs.state,
-        checkedAt: obs.observedAt,
-        ageMs: freshness.ageMs,
-        fileMetadata: obs.evidence?.fileMetadata || null,
-      };
-    }
-  }
-
-  return availability;
-}
-
 export async function searchByMedia(cache, request) {
-  const requestStartedAt = Date.now();
-  const mediaId = String(request.mediaId || '').trim();
-  const mediaType = request.mediaType || 'movie';
-  const limit = Math.min(parseInt(request.limit, 10) || 50, 100);
-  const offset = parseInt(request.offset, 10) || 0;
-  const persist = request.persist !== false;
-  const liveDiscoveryThreshold = request.liveDiscoveryThreshold != null
-    ? parseInt(request.liveDiscoveryThreshold, 10)
-    : DEFAULT_LIVE_DISCOVERY_THRESHOLD;
-  const skipLiveDiscovery = request.skipLiveDiscovery === true;
-  const bloodhound = request.bloodhound === true;
-  const skipAvailability = request.skipAvailability === true;
-  // Preparation tranche: run discovery/ranking/selection/binding and persist
-  // reusable durable truth WITHOUT presentation (no VFS, no STRM, no
-  // consumer notification, no library desired-state change). A later normal
-  // request recognizes the prepared state via getPreparedDurableState and
-  // proceeds directly to publication with zero provider work.
-  const prepareOnly = request.prepareOnly === true;
-  // Slice 1.75: optional identity-binding seam. When provided by the caller,
-  // the selected candidate's exact per-file size is matched against the
-  // current TorBox inventory BEFORE a playback handoff is persisted, and
-  // the resulting torrentFileId is carried into the handoff. Failures are
-  // logged and degrade to a NULL torrentFileId on the handoff.
-  const ensureTorBoxFileIdentityFn = typeof request.ensureTorBoxFileIdentity === 'function'
-    ? request.ensureTorBoxFileIdentity
-    : null;
-  // RD-only tranche: Real-Debrid binding seam, threaded to selection
-  // exactly like the TorBox seam. Absent by default (TorBox-only behavior
-  // bit-for-bit); present when the operator configured RD.
-  const ensureRealDebridFileIdentityFn = typeof request.ensureRealDebridFileIdentity === 'function'
-    ? request.ensureRealDebridFileIdentity
-    : null;
-  // Optional hydrators: when provided, must be { hydrateMovie, hydrateTv }.
-  // They are called between publishStrm and notifyPlex so that PROPFIND
-  // advertises the real file size before the Plex partial refresh fires.
-  // Hydration failure must NOT destroy the durable handoff or VFS entry;
-  // the caller decides whether to skip the Plex notification.
-  const hydrateVfs = request.hydrateVfs && typeof request.hydrateVfs === 'object'
-    ? request.hydrateVfs
-    : null;
+  const ctx = buildRequestContext(cache, request);
 
-  // Intent source metadata (optional)
-  const source = request.source || null;
-  const sourceType = request.sourceType || null;
-  const sourceId = request.sourceId || null;
-  const sourceLabel = request.sourceLabel || null;
-  const requestedBy = request.requestedBy || null;
-  const priority = request.priority ?? null;
-  const requestIntent = request.intent || 'library';
-  const qualityProfile = request.qualityProfile || 'balanced';
-  const posterUrl = request.posterUrl || null;
-  const mediaYear = request.canonicalYear ?? request.year ?? null;
-  const mediaTitle = request.mediaTitle || null; // Optional: human-readable media name for identity verification
-  const intentId = request.intentId != null ? request.intentId : null; // Optional: pre-existing media_intents.id (skips implicit upsert)
-  // Canonical presentation title/year for the VFS path. Surfaces the
-  // Seerr detail body's `originalTitle` / `releaseDate` so the Plex-facing
-  // directory uses a clean identity (e.g. "Dune Part Two (2024)") instead
-  // of the noisy provider release name. Falls back to the candidate
-  // filename when absent.
-  const canonicalTitle = typeof request.canonicalTitle === 'string' && request.canonicalTitle.trim()
-    ? request.canonicalTitle.trim()
-    : null;
-  const canonicalYear = Number.isSafeInteger(request.canonicalYear) && request.canonicalYear >= 0
-    ? request.canonicalYear
-    : null;
-
-  if (!mediaId) {
-    throw new Error('mediaId is required');
-  }
-
-  const intent = createRequestIntent({ type: mediaType, mediaId });
-
-  // Resolve season/episode: intent encodes them from mediaId (Seerr fan-out children
-  // encode S:E in the mediaId, e.g. 'tt10986410:1:2') or from explicit request params.
-  // Prefer explicit params; fall back to intent for Seerr-style S:E mediaId.
-  const season = request.season != null ? parseInt(request.season, 10)
-    : (intent.season != null ? intent.season : null);
-  const episode = request.episode != null ? parseInt(request.episode, 10)
-    : (intent.episodes?.length > 0 ? intent.episodes[0] : null);
-
-  // Episode geometry, shared by publication dispatch and consumer
-  // confirmation: a series episode request always carries explicit
-  // coordinates; a movie request never does.
-  const hasEpisodeCoords = Number.isSafeInteger(season) && season >= 1
-    && Number.isSafeInteger(episode) && episode >= 1;
-  const isEpisode = mediaType === 'episode' || hasEpisodeCoords;
-
-  // Fast path: reuse a healthy durable publication.
-  //
-  // When current durable truth already proves this exact media item has a
-  // reusable publication (selected handoff → identical TorrentFile identity
-  // → at least one mapped present provider coordinate, i.e. exactly what
-  // the S-1 projection would serve), skip discovery/ranking/availability
-  // and re-run only the idempotent publication steps. Anything insufficient
-  // or unhealthy falls through to the full path below. Never substitutes a
-  // different Release: identity comes from the stored handoff itself, and
-  // provider liveness is not stricter than S-1 serving semantics.
-  // Preparation mode never publishes: when durable truth already proves
-  // this item prepared, return it with zero provider work and zero
-  // presentation. Otherwise fall through to the full pipeline, which
-  // persists preparation but stops before VFS/STRM/notification.
-  // Upgrade sensing opts OUT explicitly (forceDiscovery): re-probing an
-  // already-prepared title must run fresh discovery/ranking, otherwise
-  // the loop could never see a better release for exactly the titles
-  // it watches. Default path unchanged.
-  if (prepareOnly && !request.forceDiscovery && !request.liveOnly) {
+  // Stage 1a: preparation mode never publishes and never discovers when
+  // durable truth already proves the item prepared.
+  if (ctx.prepareOnly && !request.forceDiscovery && !ctx.liveOnly) {
     const already = getPreparedDurableState({
       cache,
-      controlPlaneStore: request.controlPlaneStore ?? null,
-      mediaId,
-      mediaType,
-      season,
-      episode,
+      controlPlaneStore: ctx.controlPlaneStore,
+      mediaId: ctx.mediaId,
+      mediaType: ctx.mediaType,
+      season: ctx.season,
+      episode: ctx.episode,
     });
     if (already) {
       return {
         requestId: already.handoff.requestId ?? null,
-        intent,
+        intent: ctx.intent,
         results: [],
         total: 0,
-        query: { mediaId, mediaType, season, episode },
+        query: { mediaId: ctx.mediaId, mediaType: ctx.mediaType, season: ctx.season, episode: ctx.episode },
         selection: { selected: null, reason: 'already-prepared', alternates: [] },
         handoff: already.handoff,
         prepared: true,
@@ -722,533 +516,51 @@ export async function searchByMedia(cache, request) {
         published: false,
       };
     }
-  } else if (!request.liveOnly) {
+  } else if (!ctx.liveOnly) {
+    // Stage 1b: reuse a healthy durable publication (no discovery, no
+    // provider work) — see tryReuseHealthyPublication.
     const reuseResult = await tryReuseHealthyPublication({
       cache,
-      controlPlaneStore: request.controlPlaneStore ?? null,
-      hydrateVfs,
-      mediaId,
-      mediaType,
-      season,
-      episode,
-      canonicalTitle,
-      canonicalYear,
-      ensureTorBoxFileIdentityFn,
-      source,
+      controlPlaneStore: ctx.controlPlaneStore,
+      hydrateVfs: ctx.hydrateVfs,
+      mediaId: ctx.mediaId,
+      mediaType: ctx.mediaType,
+      season: ctx.season,
+      episode: ctx.episode,
+      canonicalTitle: ctx.canonicalTitle,
+      canonicalYear: ctx.canonicalYear,
+      ensureTorBoxFileIdentityFn: ctx.ensureTorBoxFileIdentityFn,
+      source: ctx.source,
+      requestStartedAt: ctx.startedAt,
     });
     if (reuseResult) {
       return reuseResult;
     }
   }
 
-  // Corpus title-index inputs, collected once per request and merged
-  // into whichever ranking path runs (live, corpus, or title-only).
-  // One FTS query plus at most one cached metadata lookup. The resolved
-  // wanted identity is reused for Prowlarr live search below.
-  const { inputs: collectedTitleInputs, eligibilityByHash: titleEligibilityByHash, wanted: wantedIdentity } =
-    await collectTitleIndexCandidates({
-      cache, mediaId, mediaType, season, episode, mediaTitle, canonicalYear,
-    });
-  const titleInputs = request.liveOnly ? [] : collectedTitleInputs;
+  // Stage 2: candidate collection. Corpus rows suppress live discovery; a
+  // live-only retry is used only after persisted candidates fail exact
+  // durable binding — it keeps the same ranking/identity/binding pipeline
+  // while preventing corpus rows from suppressing the live fallback.
+  const titleIndex = await collectTitleIndexInputs(ctx);
+  const titleInputs = ctx.liveOnly ? [] : titleIndex.inputs;
+  const candidates = ctx.liveOnly ? [] : cache.queryCandidatesByMedia(ctx.mediaId);
 
-  // Stage 1: Retrieve candidates by media association. A live-only retry is
-  // used only after persisted candidates fail exact durable binding; it keeps
-  // the same ranking/identity/binding pipeline while preventing corpus rows
-  // from suppressing the required live fallback.
-  const candidates = request.liveOnly ? [] : cache.queryCandidatesByMedia(mediaId);
-
-  if ((candidates.length === 0 || request.liveOnly) && !skipLiveDiscovery) {
-    // No corpus candidates, or an explicit fulfillment fallback — try live discovery
-    let liveCandidates = [];
-    let liveEligibleCount = 0;
-    const liveMetadataByHash = new Map();
-    const liveEligibilityByHash = new Map();
-    // Audit: ranking-determinism — live-vs-live dedup.
-    // runLiveDiscovery aggregates Stremio + Torznab; both may return the
-    // same (infoHash, fileIndex). Without this Set, identical releaseKeys
-    // would be pushed into rankingInputs, the comparator returns 0
-    // (tied at all 5 tie-breakers), and JS stable sort preserves
-    // input-arrival order — defeating the deterministic ordering
-    // invariant. The Set is keyed on releaseKey, the canonical
-    // identity produced by createReleaseIdentity.
-    const seenLiveKeys = new Set();
-    let liveDiscoveryTriggered = true;
-    let requestId = null;
-
-    try {
-      const liveResults = await runLiveDiscovery(mediaId, {
-        season,
-        episode,
-        title: wantedIdentity?.title ?? mediaTitle ?? null,
-        year: wantedIdentity?.year ?? canonicalYear ?? null,
-        wantedImdbId: mediaId,
-      });
-      for (const live of liveResults) {
-        const key = live.releaseKey;
-        if (!key || !live.infoHash) continue;
-        // Skip duplicate live entries (same infoHash+fileIndex from
-        // multiple live providers or repeated within one provider).
-        if (seenLiveKeys.has(key)) continue;
-        seenLiveKeys.add(key);
-
-        const releaseAttrs = {
-          title: live.title || live.filename,
-          year: live.year,
-          season: live.season,
-          episode: live.episode,
-          episodeRange: live.episodeRange,
-          seasonOnly: live.seasonOnly,
-          mediaType: live.mediaType,
-          resolution: live.resolution,
-          source: live.source,
-          // Canonical scoring key (ranker V2 fix 1): qualityScore reads
-          // sourceType. Mirror the live class so source contribution is
-          // not silently zeroed.
-          sourceType: live.source,
-          codec: live.codec,
-          hdr: live.hdr,
-          audio: live.audio,
-          releaseGroup: live.releaseGroup,
-        };
-
-        const eligibility = evaluateIdentityEligibility(
-          { releaseAttributes: releaseAttrs, sources: live.sources ?? null },
-          { season, episode, mediaType, mediaTitle, year: wantedIdentity?.year ?? canonicalYear }
-        );
-        liveEligibilityByHash.set(key, eligibility);
-        if (eligibility.eligible) liveEligibleCount++;
-
-        liveMetadataByHash.set(key, {
-          filename: live.filename,
-          releaseAttributes: releaseAttrs,
-          providers: live.providers,
-        });
-
-        liveCandidates.push({
-          hash: live.infoHash,
-          fileIndex: live.fileIndex,
-          releaseKey: key,
-          filename: live.filename || live.title,
-          // Preserve per-source relevance/provenance when the discovery
-          // source supplies them (Prowlarr rows carry relevance 0.7 and
-          // origin 'prowlarr'); legacy rows fall back to live defaults.
-          relevance: live.relevance ?? 0.8,
-          releaseAttributes: releaseAttrs,
-          parserConfidence: live.parserConfidence ?? live.confidence ?? 0.5,
-          mediaAssociations: [],
-          providerObservations: [],
-          providerEvidence: [],
-          sources: live.sources ?? [{ origin: 'live', evidence: [], confidence: live.confidence ?? 0.5 }],
-          selectedMediaId: mediaId,
-          hasLiveDiscovery: true,
-          // Slice 1.75: propagate the RAW byte size from behaviorHints.videoSize
-          // through live discovery so the pre-publication TorBox identity
-          // helper can match by exact size. Corpus rows remain null.
-          selectedFileSize: live.selectedFileSize ?? null,
-        });
-      }
-    } catch (error) {
-      console.error(`Live discovery failed for ${mediaId}: ${error.message}`);
-    }
-
-    if (liveCandidates.length === 0) {
-      // No candidates from corpus or live discovery — but an existing durable
-      // handoff may still need its STRM materialized (idempotence invariant).
-      const { strmPath } = await ensureStrmForExistingHandoff(cache, mediaId, mediaType, season, episode);
-      return {
-        requestId,
-        intent,
-        results: [],
-        total: 0,
-        query: { mediaId, mediaType, season, episode },
-        identitySummary: { tier: 'none', confidence: 0, evidence: [] },
-        ranking: { TieredRankingApplied: false, TierCounts: {} },
-        discovery: { liveDiscoveryTriggered, liveCandidates: 0, liveEligible: 0 },
-        availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
-        selection: { selected: null, reason: 'no candidates', alternates: [] },
-        strmPath,
-      };
-    }
-
-    // Corpus title-index merge: STRUCTURED-tier candidates join ranking
-    // under normal rules (deduped, eligibility-gated). Runs before the
-    // empty check so title-index hits alone can carry a request with
-    // zero live results.
-    for (const t of titleInputs) {
-      if (seenLiveKeys.has(t.releaseKey)) continue;
-      seenLiveKeys.add(t.releaseKey);
-      liveCandidates.push(t);
-      if (!liveEligibilityByHash.has(t.releaseKey)) {
-        liveEligibilityByHash.set(t.releaseKey, titleEligibilityByHash.get(t.releaseKey));
-      }
-    }
-
-    // Rank live candidates
-    const { ranked, tierMeta } = rankHitsTiered(liveCandidates, { season, episode, mediaTitle }, mediaId, liveEligibilityByHash);
-    const total = ranked.length;
-    const results = ranked.slice(offset, offset + limit);
-
-    const explainable = results.map((hit, index) => {
-      const key = `${hit.hash}:${hit.fileIndex ?? 'torrent'}`;
-      const meta = liveMetadataByHash.get(key) || {};
-      const eligibility = hit.eligibility || liveEligibilityByHash.get(key);
-
-      const tier = classifyIdentityTier(
-        { releaseAttributes: hit.releaseAttributes, mediaAssociations: hit.mediaAssociations, sources: hit.sources, relevance: hit.components?.relevance || 0, selectedMediaId: hit.selectedMediaId },
-        { season, episode, mediaTitle }, mediaId
-      );
-
-      const identityTier = (eligibility && !eligibility.eligible) ? 'Ineligible' : tier.IdentityTier;
-      const identityConfidence = (eligibility && !eligibility.eligible) ? 0 : tier.IdentityConfidence;
-      const identityEvidence = (eligibility && !eligibility.eligible) ? (tier.IdentityEvidence || []).concat([eligibility.code]) : (tier.IdentityEvidence || []);
-      const expectedMediaScope = `${mediaType}${season != null ? `:S${String(season).padStart(2, '0')}` : ''}${episode != null ? `:E${String(episode).padStart(2, '0')}` : ''}`;
-      const parsedCandidateScope = hit.releaseAttributes?.season != null || hit.releaseAttributes?.episode != null
-        ? `${hit.releaseAttributes?.mediaType || 'unknown'}:S${String(hit.releaseAttributes?.season || 0).padStart(2, '0')}:E${String(hit.releaseAttributes?.episode || 0).padStart(2, '0')}`
-        : null;
-
-      return {
-        rank: offset + index + 1,
-        infoHash: hit.hash,
-        fileIndex: hit.fileIndex,
-        filename: hit.filename,
-        score: hit.score,
-        scoreBreakdown: hit.justification?.scoreBreakdown || {},
-        identity: { tier: identityTier, confidence: identityConfidence, evidence: identityEvidence, state: meta.resolutionState || 'unresolved', matchMethod: meta.matchMethod, eligible: eligibility ? eligibility.eligible : true, ineligibleReason: eligibility && !eligibility.eligible ? eligibility.reason : null, ineligibleCode: eligibility && !eligibility.eligible ? eligibility.code : null, expectedMediaScope, parsedCandidateScope },
-        release: hit.releaseAttributes,
-        sources: hit.sources || [],
-        observations: [],
-        availability: {},
-        // Slice 1.75: surface the per-file byte size carried by live
-        // discovery. Null when the source stream had no numeric videoSize.
-        selectedFileSize: hit.selectedFileSize ?? null,
-        // Slice 4: pass through the ranked-specific evidence fields so
-        // the persistence layer can build a frozen snapshot of what
-        // the scorer actually saw. Without these, the snapshot would
-        // be all-zeros and useless for post-restart explanation.
-        justification: hit.justification,
-        components: hit.components,
-        contributions: hit.contributions,
-        providerObservations: hit.providerObservations || [],
-        hasLiveDiscovery: hit.hasLiveDiscovery === true,
-      };
-    });
-
-    // TorBox availability check
-    let availabilityStats = { checked: 0, cached: 0, uncached: 0, unknown: 0 };
-    if (!skipAvailability) {
-      const eligibleHashes = explainable.filter(r => r.identity?.eligible !== false && r.infoHash).map(r => r.infoHash);
-      if (eligibleHashes.length > 0) {
-        try {
-          const checker = createAvailabilityChecker(cache);
-          const batchResult = await checker.checkAvailability(eligibleHashes);
-          availabilityStats.checked = eligibleHashes.length;
-          availabilityStats.cached = batchResult.results.filter(r => r.state === 'cached').length;
-          availabilityStats.uncached = batchResult.results.filter(r => r.state === 'uncached').length;
-          availabilityStats.unknown = batchResult.results.filter(r => r.state === 'unknown').length;
-          const availabilityByHash = new Map(batchResult.results.map(r => [r.infoHash, r]));
-          for (const result of explainable) {
-            const avail = availabilityByHash.get(result.infoHash);
-            if (avail) {
-              result.availability.torbox = { state: avail.state, checkedAt: avail.checkedAt, latencyMs: avail.latencyMs };
-            }
-          }
-        } catch (error) {
-          console.error(`Availability check failed: ${error.message}`);
-        }
-      }
-    }
-
-    // Stage 7: Select bindable candidate
-    // Slice 2.1: iterate ranked candidates in existing order until one becomes
-    // bindable (exact-size fast path, or TV episode resolution for cached TorBox).
-    // Side effects (handoff persist, VFS publication, STRM, notifications) are
-    // deferred until a genuine TorrentFile binding is proven.
-    // TV episode scope: activate PATH B TV resolution when we have explicit episode
-    // context, regardless of intent scope:
-    // - S:E in mediaId → intent.scope='episode' (direct episode request)
-    // - request.season/episode params → Seerr fan-out children (scope='series')
-    // - mediaType='episode' → legacy direct episode request
-    const hasExplicitEpisode = request.season != null || request.episode != null;
-    const tvCoordinates = (intent.scope === 'episode' || mediaType === 'episode' || hasExplicitEpisode)
-      ? { season, episode }
-      : null;
-    let selection = await selectBindableCandidate(explainable, {
-      ensureTorBoxFileIdentityFn,
-      ensureRealDebridFileIdentityFn,
-      resolveTvTorrentFileFn: resolveTvTorrentFile,
-      tvCoordinates,
-      controlPlaneStore: request.controlPlaneStore ?? null,
-      maxTier: request.maxTier ?? null,
-    });
-
-    // Corpus rows can be identity-valid yet impossible to bind. For released
-    // requests, retry the same request through live discovery exactly once
-    // before returning an unfulfilled result. This preserves Binding authority
-    // and keeps same-X recovery inside the existing selection helpers.
-    if (!selection.selected && !skipLiveDiscovery && !request.liveOnly) {
-      console.log(`media-search: bloodhound trigger media=${mediaId} season=${season ?? ''} episode=${episode ?? ''} candidates=${explainable.length} reason=${selection.reason}`);
-      // Bloodhound fallback: only after the normal ranked candidate set has
-      // failed exact binding. It re-enters this same search/rank/select/
-      // fulfillment pipeline with corpus candidates suppressed; it does not
-      // create a second ranking or publication path.
-      const liveRetry = await searchByMedia(cache, {
-        ...request,
-        liveOnly: true,
-        forceDiscovery: true,
-        skipLiveDiscovery: false,
-        persist: true,
-        bloodhound: true,
-      });
-      if (liveRetry?.selection?.selected) {
-        return liveRetry;
-      }
-    }
-
-    // Stage 8: Persist media request to obtain requestId
-    if (persist) {
-      requestId = cache.persistMediaRequest(
-        {
-          mediaId: intent.mediaId,
-          mediaType: intent.mediaType,
-          season,
-          episode,
-          source,
-          sourceType,
-          sourceId,
-          sourceLabel,
-          requestedBy,
-          priority,
-          requestIntent,
-          status: selection.selected ? 'completed' : 'pending',
-          qualityProfile,
-          mediaTitle,
-          mediaYear,
-          posterUrl,
-          intentId,
-        },
-        explainable
-      );
-      // Corpus backfill: record eligible ranked outcomes as durable
-      // candidate→media associations (best-effort, post-commit).
-      try {
-        backfillRequestMediaAssociations(cache, intent, explainable, requestId);
-      } catch {
-        // Association bookkeeping must never fail fulfillment.
-      }
-    }
-
-    // Stage 9: Build playback handoff if bindable selection succeeded and request was persisted
-    let handoff = null;
-    if (selection.selected && requestId) {
-      // Bindable selection already resolved the TorrentFile; pull from the
-      // private _binding marker set inside selectBindableCandidate.
-      const binding = selection.selected._binding ?? null;
-      const handoffRequest = {
-        requestId,
-        mediaId,
-        mediaType,
-        season,
-        episode,
-        // Canonical presentation identity (e.g. Seerr `originalTitle` /
-        // `releaseDate`). Threaded into the handoff so the VFS
-        // materializer can build a clean Plex-facing path
-        // (Movies/<Title> (<Year>)/...) without parsing it out of the
-        // provider release filename. Only used for presentation; the
-        // handoff's `filename` / `infoHash` continue to identify the
-        // provider-backed file.
-        ...(canonicalTitle ? { canonicalTitle } : {}),
-        ...(canonicalYear != null ? { canonicalYear } : {}),
-        // Slice 2.1: durable TorrentFile id from bindable selection.
-        // NULL when no bindable candidate exists (all candidates unbindable).
-        ...(selection.selected._torrentFileId ? { torrentFileId: selection.selected._torrentFileId } : {}),
-      };
-      handoff = buildPlaybackHandoff(selection, handoffRequest);
-      if (selection.selected && cache.appendEvidenceObservation) {
-        cache.appendEvidenceObservation({
-          subjectKind: 'selection',
-          infoHash: selection.selected.infoHash,
-          fileIndex: selection.selected.fileIndex,
-          mediaId,
-          observer: 'hashsucker',
-          sourceClass: source || 'request',
-          state: requestIntent || 'library',
-          correlationId: requestId == null ? null : String(requestId),
-          payload: {
-            qualityProfile,
-            reason: selection.reason,
-            candidateCount: explainable.length,
-            alternativeCount: selection.alternates?.length ?? 0,
-            identityTier: selection.selected.identity?.tier ?? null,
-          },
-        });
-      }
-      if (handoff && binding) {
-        handoff.torrentFileIdentity = {
-          status: binding.status,
-          torrentFileId: binding.torrentFileId,
-          placementId: binding.placementId ?? null,
-          providerFileId: binding.providerFileId ?? null,
-          size: binding.size ?? null,
-          season: binding.season ?? null,
-          episode: binding.episode ?? null,
-        };
-      }
-
-      // Persist handoff
-      if (handoff) {
-        try {
-          cache.persistPlaybackHandoff(handoff);
-          if (!prepareOnly) {
-          // Presentation is one owned stage sequence (lib/requests/publication):
-          // authoritative VFS materialization → converged .strm → Jellyfin →
-          // VFS hydration → non-blocking Plex dispatch. Stage failures are
-          // typed so the caller keeps its exact reason codes.
-          try {
-            await publishSelectedHandoff({
-              cache,
-              controlPlaneStore: request.controlPlaneStore ?? null,
-              handoff,
-              selection,
-              mediaId,
-              mediaType,
-              season,
-              episode,
-              isEpisode,
-              hydrateVfs,
-            });
-          } catch (publicationError) {
-            const stage = publicationError instanceof PublicationError ? publicationError.stage : null;
-            const reason = stage === 'strm-publication'
-              ? 'adapter-publication-failed'
-              : 'durable-publication-failed';
-            console.error(`Publication failed for ${mediaId} stage=${stage}: ${publicationError.message}`);
-            return {
-              requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
-              identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
-              discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
-              availability: availabilityStats, selection, handoff,
-              unfulfilled: true, retryOwned: true, published: false,
-              reason, error: publicationError.message,
-            };
-          }
-          } // end presentation gate (prepareOnly stops after handoff persist)
-        } catch (error) {
-          return {
-            requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
-            identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
-            discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
-            availability: availabilityStats, selection, handoff,
-            unfulfilled: true, retryOwned: true, published: false,
-            reason: 'handoff-persistence-failed', error: error.message,
-          };
-        }
-      }
-    }
-
-    if (handoff && !prepareOnly) {
-      const itemKey = createLibraryIdentityKey({
-        mediaType: mediaType === 'movie' ? 'movie' : 'episode',
-        mediaId, season: mediaType === 'movie' ? null : season, episode: mediaType === 'movie' ? null : episode,
-      });
-      const item = request.controlPlaneStore?.getLibraryItemByIdentityKey?.(itemKey);
-      const binding = item ? request.controlPlaneStore?.getActiveBindingForLibraryItem?.(item.id) : null;
-      const libraryPath = item ? request.controlPlaneStore?.getActiveCanonicalPath?.(item.id) : null;
-      if (!binding || !libraryPath || binding.torrentFile.id !== handoff.torrentFileId) {
-        return {
-          requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
-          identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
-          discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
-          availability: availabilityStats, selection, handoff,
-          unfulfilled: true, retryOwned: true, fulfilled: false, published: false,
-          reason: 'authoritative-publication-incomplete',
-        };
-      }
-      let plex = null;
-      if ((mediaType === 'series' || mediaType === 'tv' || mediaType === 'episode') && season != null && episode != null) {
-        try { plex = await confirmPlexEpisode({ mediaId, season, episode }); } catch { plex = null; }
-      }
-      if (plex?.visible && plex.mediaPart?.file) {
-        return {
-          requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
-          identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
-          discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
-          availability: availabilityStats, selection, handoff,
-          published: true, vfsPublished: true, fulfilled: true, unfulfilled: false, retryOwned: false,
-          plex,
-        };
-      }
-    }
-
-    // Stage 10: Demand-driven queue promotion
-    // Promote enrichment and probe work for requested candidates
-    // Selected release gets highest priority, others get explicit-request priority
-    const demandCandidates = explainable
-      .filter(r => r.identity?.eligible !== false && r.infoHash)
-      .map(r => ({ infoHash: r.infoHash, fileIndex: r.fileIndex }));
-
-    // Promote all candidates to explicit-request priority
-    const promotion = cache.promoteDemand(
-      demandCandidates,
-      DEMAND_PRIORITY.EXPLICIT_REQUEST,
-      { reason: `media-request:${mediaId}` }
-    );
-
-    // If there's a selected release, promote it further to selected-release priority
-    if (selection.selected && selection.selected.infoHash) {
-      cache.promoteDemand(
-        [{ infoHash: selection.selected.infoHash, fileIndex: selection.selected.fileIndex }],
-        DEMAND_PRIORITY.SELECTED_RELEASE,
-        { reason: `selected-release:${mediaId}` }
-      );
-    }
-
-    return {
-      requestId,
-      intent,
-      results: explainable,
-      total,
-      query: { mediaId, mediaType, season, episode },
-      identitySummary: summarizeIdentity(explainable),
-      ranking: tierMeta,
-      discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
-      availability: availabilityStats,
-      selection,
-      handoff,
-      demandPromotion: {
-        enrichmentPromoted: promotion.enrichmentPromoted,
-        probePromoted: promotion.probePromoted,
-      },
-      // Preparation tranche: preparation persists reusable durable truth
-      // (handoff + TorrentFile + coordinates) without presentation.
-      prepared: prepareOnly && handoff != null,
-      published: !prepareOnly && handoff != null,
-      vfsPublished: !prepareOnly && handoff != null,
-      fulfilled: false,
-      unfulfilled: !prepareOnly,
-      retryOwned: !prepareOnly,
-      reason: !prepareOnly ? 'plex-confirmation-pending' : undefined,
-      ...(Array.isArray(selection.skipped) && selection.skipped.length > 0
-        ? { skippedCandidates: selection.skipped.slice(0, 25).map((s) => ({
-          infoHash: s.infoHash ?? null,
-          rank: s.rank ?? null,
-          torboxState: s.torboxState ?? null,
-          reason: s.reason ?? null,
-        })) }
-        : {}),
-    };
+  if ((candidates.length === 0 || ctx.liveOnly) && !ctx.skipLiveDiscovery) {
+    return runLivePipeline(ctx, { titleIndex, titleInputs, candidates });
   }
 
   if (candidates.length === 0 && titleInputs.length === 0) {
     // No corpus candidates and no title-index hits — but an existing
     // durable handoff may still need its STRM materialized (idempotence
     // invariant).
-    const { strmPath } = await ensureStrmForExistingHandoff(cache, mediaId, mediaType, season, episode);
+    const { strmPath } = await ensureStrmForExistingHandoff(cache, ctx.mediaId, ctx.mediaType, ctx.season, ctx.episode);
     return {
       requestId: null,
-      intent,
+      intent: ctx.intent,
       results: [],
       total: 0,
-      query: { mediaId, mediaType, season, episode },
+      query: { mediaId: ctx.mediaId, mediaType: ctx.mediaType, season: ctx.season, episode: ctx.episode },
       identitySummary: { tier: 'none', confidence: 0, evidence: [] },
       ranking: { TieredRankingApplied: false, TierCounts: {} },
       discovery: { liveDiscoveryTriggered: false, liveCandidates: 0, liveEligible: 0 },
@@ -1258,223 +570,222 @@ export async function searchByMedia(cache, request) {
     };
   }
 
-  // Stage 2: Build ranking inputs with identity associations
-  // Preserve metadata separately — rankHit() returns a new object that doesn't include custom fields
-  const metadataByHash = new Map();
-  const eligibilityByHash = new Map();
+  return runCorpusPipeline(ctx, { titleIndex, titleInputs, candidates });
+}
 
-  const rankingInputs = candidates.map(candidate => {
-    const attrs = getStrongestReleaseAttributes(cache, candidate.infoHash, candidate.fileIndex);
-    const associations = cache.getMediaAssociations(candidate.infoHash, candidate.fileIndex);
-    const observations = cache.getProviderObservations(candidate.infoHash, candidate.fileIndex, { includeStale: true });
+/* ------------------------------------------------------------------ *
+ * Live pipeline — no corpus candidates (or explicit live-only retry).
+ * ------------------------------------------------------------------ */
 
-    // Find association matching requested media
-    const matchingAssoc = associations.find(a => a.mediaId === mediaId);
-    const resolutionState = matchingAssoc?.resolutionState || 'unresolved';
-    const evidence = matchingAssoc?.evidence || [];
+async function runLivePipeline(ctx, { titleIndex, titleInputs }) {
+  const discovery = await runLiveDiscoveryStage(ctx, { wantedIdentity: titleIndex.wanted });
+  const { liveCandidates, liveEligibilityByHash, liveMetadataByHash, liveEligibleCount } = discovery;
 
-    // Store metadata for post-ranking merge
-    const key = `${candidate.infoHash}:${candidate.fileIndex ?? 'torrent'}`;
-    metadataByHash.set(key, {
-      resolutionState,
-      evidence,
-      matchMethod: matchingAssoc?.matchMethod,
-      filename: candidate.filename,
-    });
-
-    // Build release attributes for eligibility evaluation
-    const releaseAttrs = attrs ? {
-      title: attrs.title,
-      year: attrs.year,
-      season: attrs.season,
-      episode: attrs.episode,
-      episodeRange: attrs.episodeRange,
-      seasonOnly: attrs.seasonOnly,
-      mediaType: attrs.mediaType,
-      resolution: attrs.resolution,
-      source: attrs.sourceType,
-      // Canonical scoring key (ranker V2 fix 1): qualityScore reads
-      // sourceType; mirror the corpus class for the same reason.
-      sourceType: attrs.sourceType,
-      codec: attrs.codec,
-      hdr: attrs.hdr,
-      audio: attrs.audio,
-      releaseGroup: attrs.releaseGroup,
-    } : {};
-
-    // Evaluate identity eligibility for this candidate
-    const eligibility = evaluateIdentityEligibility(
-      { releaseAttributes: releaseAttrs, sources: candidate.sources ?? null },
-      { season, episode, mediaType, year: wantedIdentity?.year ?? canonicalYear }
-    );
-    eligibilityByHash.set(key, eligibility);
-
-    // Historical evidence prior: bounded contribution folded into
-    // providerAvailability by rankHit(). Fresh authoritative evidence
-    // always outranks this; it only modestly influences close candidates.
-    const historicalPrior = computeHistoricalAvailabilityPrior(
-      cache,
-      candidate.infoHash,
-      candidate.fileIndex,
-    );
-
+  if (liveCandidates.length === 0) {
+    // No candidates from corpus or live discovery — but an existing durable
+    // handoff may still need its STRM materialized (idempotence invariant).
+    const { strmPath } = await ensureStrmForExistingHandoff(ctx.cache, ctx.mediaId, ctx.mediaType, ctx.season, ctx.episode);
     return {
-      hash: candidate.infoHash,
-      fileIndex: candidate.fileIndex,
-      releaseKey: key,
-      filename: candidate.filename,
-      relevance: 1.0, // Direct media match = max relevance
-      releaseAttributes: releaseAttrs,
-      parserConfidence: attrs?.confidence ?? 0,
-      mediaAssociations: associations.map(a => ({
-        mediaId: a.mediaId,
-        confidence: a.confidence,
-        evidence: a.evidence || [],
-        resolutionState: a.resolutionState || 'unresolved',
-      })),
-      providerObservations: observations,
-      providerEvidence: observations,
-      sources: candidate.sources || [{ origin: 'corpus', evidence: [], confidence: 0.5 }],
-      selectedMediaId: mediaId,
-      hasLiveDiscovery: false,
-      historicalPrior,
+      requestId: null,
+      intent: ctx.intent,
+      results: [],
+      total: 0,
+      query: { mediaId: ctx.mediaId, mediaType: ctx.mediaType, season: ctx.season, episode: ctx.episode },
+      identitySummary: { tier: 'none', confidence: 0, evidence: [] },
+      ranking: { TieredRankingApplied: false, TierCounts: {} },
+      discovery: { liveDiscoveryTriggered: true, liveCandidates: 0, liveEligible: 0 },
+      availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
+      selection: { selected: null, reason: 'no candidates', alternates: [] },
+      strmPath,
     };
+  }
+
+  mergeTitleInputsIntoLive({
+    titleInputs,
+    titleEligibilityByHash: titleIndex.eligibilityByHash,
+    liveCandidates,
+    liveEligibilityByHash,
+    seenLiveKeys: discovery.seenLiveKeys,
   });
 
-  // Stage 2b: Determine corpus eligible count. For an exact TV request,
-  // generic season-pack rows do not prove that the requested episode can be
-  // fulfilled; let the existing bindable selection attempt them, but do not
-  // let them suppress the bounded live fallback.
-  const corpusEligibleCount = rankingInputs.filter(input => {
+  // Ranking → explainable rows.
+  const { ranked, tierMeta } = rankHitsTiered(
+    liveCandidates,
+    { season: ctx.season, episode: ctx.episode, mediaTitle: ctx.mediaTitle },
+    ctx.mediaId,
+    liveEligibilityByHash,
+  );
+  const total = ranked.length;
+  const explainable = shapeRankedResults({
+    ranked, ctx, metadataByHash: new Map(), eligibilityByHash: liveEligibilityByHash,
+  });
+
+  // Provider availability for eligible candidates.
+  const availabilityStats = ctx.skipAvailability
+    ? { checked: 0, cached: 0, uncached: 0, unknown: 0 }
+    : await applyTorboxAvailability({ explainable, cache: ctx.cache });
+
+  // Binding selection.
+  const selection = await selectCandidateForRequest({ explainable, ctx });
+
+  // Bloodhound fallback: only after the normal ranked candidate set has
+  // failed exact binding. It re-enters this same search/rank/select/
+  // fulfillment pipeline with corpus candidates suppressed; it does not
+  // create a second ranking or publication path.
+  if (!selection.selected && !ctx.skipLiveDiscovery && !ctx.liveOnly) {
+    console.log(`media-search: bloodhound trigger media=${ctx.mediaId} season=${ctx.season ?? ''} episode=${ctx.episode ?? ''} candidates=${explainable.length} reason=${selection.reason}`);
+    const liveRetry = await searchByMedia(ctx.cache, {
+      ...ctx.request,
+      liveOnly: true,
+      forceDiscovery: true,
+      skipLiveDiscovery: false,
+      persist: true,
+      bloodhound: true,
+    });
+    if (liveRetry?.selection?.selected) {
+      return liveRetry;
+    }
+  }
+
+  // Request persistence (selection decides completed vs pending).
+  const requestId = persistRequestAndBackfill({
+    cache: ctx.cache, ctx, explainable, selection,
+    status: selection.selected ? 'completed' : 'pending',
+  });
+
+  const base = requestResponseBase({
+    ctx, requestId, total, tierMeta,
+    liveDiscoveryTriggered: true, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount,
+    availabilityStats, selection, explainable,
+  });
+
+  // Durable handoff + publication.
+  let handoff = null;
+  if (selection.selected && requestId) {
+    handoff = buildHandoffForSelection({ cache: ctx.cache, ctx, requestId, selection, explainable });
+    try {
+      ctx.cache.persistPlaybackHandoff(handoff);
+      if (!ctx.prepareOnly) {
+        // Presentation: authoritative VFS → converged .strm → consumers.
+        try {
+          await publishSelectedHandoff({
+            cache: ctx.cache,
+            controlPlaneStore: ctx.controlPlaneStore,
+            handoff,
+            selection,
+            mediaId: ctx.mediaId,
+            mediaType: ctx.mediaType,
+            season: ctx.season,
+            episode: ctx.episode,
+            isEpisode: ctx.isEpisode,
+            hydrateVfs: ctx.hydrateVfs,
+          });
+        } catch (publicationError) {
+          const stage = publicationError instanceof PublicationError ? publicationError.stage : null;
+          const reason = stage === 'strm-publication'
+            ? 'adapter-publication-failed'
+            : 'durable-publication-failed';
+          console.error(`Publication failed for ${ctx.mediaId} stage=${stage}: ${publicationError.message}`);
+          return unfulfilledResponse({ base, reason, error: publicationError, extra: { handoff } });
+        }
+      }
+    } catch (error) {
+      return unfulfilledResponse({ base, reason: 'handoff-persistence-failed', error });
+    }
+
+    // Consumer confirmation: the authoritative Binding + Plex visibility
+    // decide whether this request is fulfilled right now. An unconfirmed
+    // publication falls through to the pending response below (demand
+    // promotion still runs) — exactly as before.
+    if (!ctx.prepareOnly) {
+      const confirmed = await confirmAuthoritativePublication({ ctx, base, handoff });
+      if (confirmed) return confirmed;
+    }
+  }
+
+  return publishedOrPendingResponse({ ctx, base, handoff, selection, explainable });
+}
+
+/* ------------------------------------------------------------------ *
+ * Corpus pipeline — the normal corpus-serving path.
+ * ------------------------------------------------------------------ */
+
+async function runCorpusPipeline(ctx, { titleIndex, titleInputs, candidates }) {
+  // Build ranking inputs with identity associations. Metadata is kept
+  // separately because rankHit() returns a new object.
+  const metadataByHash = new Map();
+  const eligibilityByHash = new Map();
+  const rankingInputs = candidates.map((candidate) => buildCorpusRankingInput({
+    cache: ctx.cache, candidate, ctx, eligibilityByHash, metadataByHash,
+  }));
+
+  // Stage 2b: corpus eligible count. For an exact TV request, generic
+  // season-pack rows do not prove that the requested episode can be
+  // fulfilled; let the existing bindable selection attempt them, but do
+  // not let them suppress the bounded live fallback.
+  const corpusEligibleCount = rankingInputs.filter((input) => {
     const eligibility = eligibilityByHash.get(input.releaseKey);
     return eligibility ? eligibility.eligible : true;
   }).length;
-  const exactEpisodeCorpusCount = (season != null && episode != null)
+  const exactEpisodeCorpusCount = (ctx.season != null && ctx.episode != null)
     ? rankingInputs.filter((input) => {
       const eligibility = eligibilityByHash.get(input.releaseKey);
       if (eligibility && !eligibility.eligible) return false;
       const release = input.releaseAttributes || {};
-      return release.season === season && release.episode === episode;
+      return release.season === ctx.season && release.episode === ctx.episode;
     }).length
     : corpusEligibleCount;
 
-  // Stage 2c: Live discovery fallback
+  // Stage 2c: live discovery fallback.
   let liveDiscoveryTriggered = false;
   let liveCandidates = [];
   let liveEligibleCount = 0;
   const liveMetadataByHash = new Map();
   const liveEligibilityByHash = new Map();
-  // Audit: ranking-determinism — live-vs-live dedup AND corpus-vs-live dedup.
-  // seenLiveKeys extends the corpus-via-eligibilityByHash check: a release
-  // already known to corpus is skipped (corpus wins — it has authoritative
-  // mediaAssociations and providerObservations), AND any duplicate
-  // releaseKey appearing twice in the live stream is skipped so the
-  // ranking set never contains two equal (hash, fileIndex) pairs.
+  // Audit: ranking-determinism — live-vs-live dedup AND corpus-vs-live
+  // dedup. A release already known to corpus is skipped (corpus wins — it
+  // has authoritative mediaAssociations and providerObservations), and any
+  // duplicate releaseKey appearing twice in the live stream is skipped so
+  // the ranking set never contains two equal (hash, fileIndex) pairs.
   const seenLiveKeys = new Set();
 
-  if (!skipLiveDiscovery && exactEpisodeCorpusCount < liveDiscoveryThreshold) {
+  if (!ctx.skipLiveDiscovery && exactEpisodeCorpusCount < ctx.liveDiscoveryThreshold) {
     liveDiscoveryTriggered = true;
-    console.log(`media-search: bloodhound live-start media=${mediaId} season=${season ?? ''} episode=${episode ?? ''} corpus=${exactEpisodeCorpusCount}`);
-    try {
-      const liveResults = await runLiveDiscovery(mediaId, {
-        season,
-        episode,
-        title: wantedIdentity?.title ?? mediaTitle ?? null,
-        year: wantedIdentity?.year ?? canonicalYear ?? null,
-        wantedImdbId: mediaId,
-      });
+    console.log(`media-search: bloodhound live-start media=${ctx.mediaId} season=${ctx.season ?? ''} episode=${ctx.episode ?? ''} corpus=${exactEpisodeCorpusCount}`);
+    const discovery = await runLiveDiscoveryStage(ctx, { wantedIdentity: titleIndex.wanted, withHistoricalPrior: true });
+    liveCandidates = discovery.liveCandidates;
+    liveEligibleCount = discovery.liveEligibleCount;
+    console.log(`media-search: bloodhound live-results media=${ctx.mediaId} count=${discovery.rawCount}`);
 
-      console.log(`media-search: bloodhound live-results media=${mediaId} count=${liveResults.length}`);
-      for (const live of liveResults) {
-        const key = live.releaseKey;
-        if (!key || !live.infoHash) continue;
-
-        // Skip if already present in corpus (will be deduped later)
-        if (eligibilityByHash.has(key)) {
-          liveMetadataByHash.set(key, { ...liveMetadataByHash.get(key), live: true });
-          continue;
-        }
-        // Skip duplicate live entries (same infoHash+fileIndex from
-        // multiple live providers or repeated within one provider).
-        // Marking the key seen after the corpus-check ensures a later
-        // corpus row never overwrites a kept live entry either, but
-        // corpus is populated before this loop runs so the inner
-        // check above already handles the corpus side.
-        if (seenLiveKeys.has(key)) continue;
-        seenLiveKeys.add(key);
-
-        const releaseAttrs = {
-          title: live.title || live.filename,
-          year: live.year,
-          season: live.season,
-          episode: live.episode,
-          episodeRange: live.episodeRange,
-          seasonOnly: live.seasonOnly,
-          mediaType: live.mediaType,
-          resolution: live.resolution,
-          source: live.source,
-          // Canonical scoring key (ranker V2 fix 1): see live-map above.
-          sourceType: live.source,
-          codec: live.codec,
-          hdr: live.hdr,
-          audio: live.audio,
-          releaseGroup: live.releaseGroup,
-        };
-
-        // Same identity eligibility gate as corpus
-        const eligibility = evaluateIdentityEligibility(
-          { releaseAttributes: releaseAttrs, sources: live.sources ?? null },
-          { season, episode, mediaType, mediaTitle, year: wantedIdentity?.year ?? canonicalYear }
-        );
-        liveEligibilityByHash.set(key, eligibility);
-
-        if (eligibility.eligible) {
-          liveEligibleCount++;
-        }
-
-        liveMetadataByHash.set(key, {
-          filename: live.filename,
-          releaseAttributes: releaseAttrs,
-          providers: live.providers,
-        });
-
-        // Build ranking input for live candidate
-        const rankingInput = {
-          hash: live.infoHash,
-          fileIndex: live.fileIndex,
-          releaseKey: key,
-          filename: live.filename || live.title,
-          relevance: live.relevance ?? 0.8, // Live discovery slightly lower relevance than direct corpus match
-          releaseAttributes: releaseAttrs,
-          parserConfidence: live.parserConfidence ?? live.confidence ?? 0.5,
-          mediaAssociations: [], // Live has no persisted media associations
-          providerObservations: [], // Will be populated by availability check
-          providerEvidence: [],
-          sources: live.sources ?? [{ origin: 'live', evidence: [], confidence: live.confidence ?? 0.5 }],
-          selectedMediaId: mediaId,
-          hasLiveDiscovery: true,
-          historicalPrior: computeHistoricalAvailabilityPrior(
-            cache,
-            live.infoHash,
-            live.fileIndex,
-          ),
-        };
-
-        rankingInputs.push(rankingInput);
-        liveCandidates.push(rankingInput);
+    for (const live of discovery.liveCandidates) {
+      const key = live.releaseKey;
+      // Skip if already present in corpus (will be deduped later)
+      if (eligibilityByHash.has(key)) {
+        liveMetadataByHash.set(key, { ...discovery.liveMetadataByHash.get(key), live: true });
+        continue;
       }
-    } catch (error) {
-      // Live discovery failure must not break corpus results
-      console.error(`Live discovery failed for ${mediaId}: ${error.message}`);
+      // Skip duplicate live entries (same infoHash+fileIndex from multiple
+      // live providers or repeated within one provider). Marking the key
+      // seen after the corpus-check ensures a later corpus row never
+      // overwrites a kept live entry either, but corpus is populated
+      // before this loop runs so the inner check above already handles the
+      // corpus side.
+      if (seenLiveKeys.has(key)) continue;
+      seenLiveKeys.add(key);
+
+      liveEligibilityByHash.set(key, discovery.liveEligibilityByHash.get(key));
+      liveMetadataByHash.set(key, discovery.liveMetadataByHash.get(key));
+      // Build ranking input for live candidate
+      rankingInputs.push(live);
     }
   }
 
-  // Stage 3: Rank within tier (with eligibility overrides)
-  // Merge eligibility maps for ranking
+  // Stage 3: Rank within tier (with eligibility overrides). Merge
+  // eligibility maps for ranking.
   const rankingStartedAt = Date.now();
-  const allEligibilityByHash = new Map([...eligibilityByHash, ...liveEligibilityByHash, ...titleEligibilityByHash]);
-  // Corpus title-index merge (same mechanism as the live path).
+  const allEligibilityByHash = new Map([...eligibilityByHash, ...liveEligibilityByHash, ...titleIndex.eligibilityByHash]);
   {
+    // Corpus title-index merge (same mechanism as the live path).
     const haveKeys = new Set(rankingInputs.map((i) => i?.releaseKey).filter(Boolean));
     for (const t of titleInputs) {
       if (haveKeys.has(t.releaseKey)) continue;
@@ -1482,390 +793,161 @@ export async function searchByMedia(cache, request) {
       rankingInputs.push(t);
     }
   }
-  const { ranked, tierMeta } = rankHitsTiered(rankingInputs, { season, episode, mediaTitle }, mediaId, allEligibilityByHash);
+  const { ranked, tierMeta } = rankHitsTiered(rankingInputs, { season: ctx.season, episode: ctx.episode, mediaTitle: ctx.mediaTitle }, ctx.mediaId, allEligibilityByHash);
   const rankingLatencyMs = Date.now() - rankingStartedAt;
 
-  // Stage 4: Paginate
+  // Stage 4/5: Paginate + explainable response rows.
   const total = ranked.length;
-  const results = ranked.slice(offset, offset + limit);
-
-  // Stage 5: Build explainable response
-  const explainable = results.map((hit, index) => {
-    // Restore metadata from pre-ranking store
-    const key = `${hit.hash}:${hit.fileIndex ?? 'torrent'}`;
-    const meta = metadataByHash.get(key) || liveMetadataByHash.get(key) || {};
-    const eligibility = hit.eligibility || allEligibilityByHash.get(key);
-
-    const tier = classifyIdentityTier(
-      {
-        releaseAttributes: hit.releaseAttributes,
-        mediaAssociations: hit.mediaAssociations,
-        sources: hit.sources,
-        relevance: hit.components?.relevance || 0,
-        selectedMediaId: hit.selectedMediaId,
-      },
-      { season, episode, mediaTitle },
-      mediaId
-    );
-
-    // Use eligibility-based tier if available (Ineligible overrides classifyIdentityTier)
-    const identityTier = (eligibility && !eligibility.eligible) ? 'Ineligible' : tier.IdentityTier;
-    const identityConfidence = (eligibility && !eligibility.eligible) ? 0 : tier.IdentityConfidence;
-    const identityEvidence = (eligibility && !eligibility.eligible)
-      ? (tier.IdentityEvidence || []).concat([eligibility.code])
-      : (tier.IdentityEvidence || []);
-    // Build scope information for diagnostics
-    const expectedMediaScope = `${mediaType}${season != null ? `:S${String(season).padStart(2, '0')}` : ''}${episode != null ? `:E${String(episode).padStart(2, '0')}` : ''}`;
-    const parsedCandidateScope = hit.releaseAttributes?.season != null || hit.releaseAttributes?.episode != null
-      ? `${hit.releaseAttributes?.mediaType || 'unknown'}:S${String(hit.releaseAttributes?.season || 0).padStart(2, '0')}:E${String(hit.releaseAttributes?.episode || 0).padStart(2, '0')}`
-      : null;
-    return {
-      rank: offset + index + 1,
-      infoHash: hit.hash,
-      fileIndex: hit.fileIndex,
-      filename: hit.filename,
-      score: hit.score,
-      scoreBreakdown: hit.justification?.scoreBreakdown || {},
-      identity: {
-        tier: identityTier,
-        confidence: identityConfidence,
-        evidence: identityEvidence,
-        state: meta.resolutionState || 'unresolved',
-        matchMethod: meta.matchMethod,
-        eligible: eligibility ? eligibility.eligible : true,
-        ineligibleReason: eligibility && !eligibility.eligible ? eligibility.reason : null,
-        ineligibleCode: eligibility && !eligibility.eligible ? eligibility.code : null,
-        expectedMediaScope,
-        parsedCandidateScope,
-      },
-      release: hit.releaseAttributes,
-      sources: hit.sources || [],
-      observations: (hit.providerObservations || []).map(o => ({
-        provider: o.provider,
-        state: o.state,
-        cached: o.state === 'cached',
-        observedAt: o.observedAt,
-      })),
-      availability: _getAvailabilityForCandidate(hit),
-      // Slice 1.75: corpus rows do NOT have a per-file exact size (the
-      // candidates table only stores the whole-torrent size which is not
-      // a usable identity). Live-discovery rows carry the raw videoSize
-      // from behaviorHints. The pre-publication identity helper is a
-      // no-op when this is null.
-      selectedFileSize: hit.selectedFileSize ?? null,
-      // Slice 4: pass through the ranked-specific evidence fields so
-      // the persistence layer can build a frozen snapshot of what
-      // the scorer actually saw. Without these, the snapshot would
-      // be all-zeros and useless for post-restart explanation.
-      justification: hit.justification,
-      components: hit.components,
-      contributions: hit.contributions,
-      providerObservations: hit.providerObservations || [],
-      hasLiveDiscovery: hit.hasLiveDiscovery === true,
-    };
+  const explainable = shapeRankedResults({
+    ranked, ctx, metadataByHash, eligibilityByHash: allEligibilityByHash, liveMetadataByHash,
   });
 
-  // Stage 5b: TorBox availability check for eligible candidates
-  let availabilityStats = { checked: 0, cached: 0, uncached: 0, unknown: 0 };
-  if (!skipAvailability) {
-    const eligibleHashes = explainable
-      .filter(r => r.identity?.eligible !== false && r.infoHash)
-      .map(r => r.infoHash);
+  const availabilityStats = ctx.skipAvailability
+    ? { checked: 0, cached: 0, uncached: 0, unknown: 0 }
+    : await applyTorboxAvailability({ explainable, cache: ctx.cache });
 
-    if (eligibleHashes.length > 0) {
-      try {
-        const checker = createAvailabilityChecker(cache);
-        const batchResult = await checker.checkAvailability(eligibleHashes);
-        availabilityStats.checked = eligibleHashes.length;
-        availabilityStats.cached = batchResult.results.filter(r => r.state === 'cached').length;
-        availabilityStats.uncached = batchResult.results.filter(r => r.state === 'uncached').length;
-        availabilityStats.unknown = batchResult.results.filter(r => r.state === 'unknown').length;
+  // Stage 6: Persist results (this path always persists the pending
+  // request; selection runs afterwards and reports fulfillment separately).
+  const requestId = persistRequestAndBackfill({ cache: ctx.cache, ctx, explainable, selection: { selected: null } });
 
-        // Merge availability into results
-        const availabilityByHash = new Map(batchResult.results.map(r => [r.infoHash, r]));
-        for (const result of explainable) {
-          const avail = availabilityByHash.get(result.infoHash);
-          if (avail) {
-            result.availability = result.availability || {};
-            result.availability.torbox = {
-              state: avail.state,
-              checkedAt: avail.checkedAt,
-              latencyMs: avail.latencyMs,
-            };
-          }
-        }
-      } catch (error) {
-        // Availability check failure must not break results
-        console.error(`Availability check failed: ${error.message}`);
-      }
-    }
-  }
+  // Stage 7: Binding selection.
+  const selection = await selectCandidateForRequest({ explainable, ctx });
 
-  // Stage 6: Persist results
-  let requestId = null;
-  if (persist) {
-    requestId = cache.persistMediaRequest(
-      {
-        mediaId: intent.mediaId,
-        mediaType: intent.mediaType,
-        season,
-        episode,
-        source,
-        sourceType,
-        sourceId,
-        sourceLabel,
-        requestedBy,
-        priority,
-        requestIntent,
-        qualityProfile,
-        mediaTitle,
-        mediaYear,
-        posterUrl,
-        intentId,
-      },
-      explainable
-    );
-    // Corpus backfill (same as Stage 8 path): record eligible ranked
-    // outcomes as durable candidate→media associations.
-    try {
-      backfillRequestMediaAssociations(cache, intent, explainable, requestId);
-    } catch {
-      // Association bookkeeping must never fail fulfillment.
-    }
-  }
-
-  // Stage 7: Select bindable candidate
-  // Slice 2.1: iterate ranked candidates in existing order until one becomes
-  // bindable (exact-size fast path, or TV episode resolution for cached TorBox).
-  // TV episode scope: activate PATH B TV resolution when we have explicit episode
-  // context, regardless of intent scope:
-  // - S:E in mediaId → intent.scope='episode' (direct episode request)
-  // - request.season/episode params → Seerr fan-out children (scope='series')
-  // - mediaType='episode' → legacy direct episode request
-  const hasExplicitEpisode = request.season != null || request.episode != null;
-  const tvCoordinates = (intent.scope === 'episode' || mediaType === 'episode' || hasExplicitEpisode)
-    ? { season, episode }
-    : null;
-  const selection = await selectBindableCandidate(explainable, {
-    ensureTorBoxFileIdentityFn,
-    ensureRealDebridFileIdentityFn,
-    resolveTvTorrentFileFn: resolveTvTorrentFile,
-    tvCoordinates,
-    controlPlaneStore: request.controlPlaneStore ?? null,
-    maxTier: request.maxTier ?? null,
+  const base = requestResponseBase({
+    ctx, requestId, total, tierMeta,
+    liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount,
+    availabilityStats, selection, explainable,
   });
 
-  // Stage 8: Build playback handoff if bindable selection succeeded and request was persisted
+  // Stage 8: Durable handoff + authoritative materialization.
   let handoff = null;
   if (selection.selected && requestId) {
-    const binding = selection.selected._binding ?? null;
-    const handoffRequest = {
-      requestId,
-      mediaId,
-      mediaType,
-      season,
-      episode,
-      // See the live-discovery handoffRequest above. For movies the
-      // canonical title/year are wired all the way to the VFS
-      // presentation path; for series/TV they are stored on the handoff
-      // for downstream telemetry but the VFS TV materializer currently
-      // uses its existing filename-derived identity (unchanged in this
-      // slice).
-      ...(canonicalTitle ? { canonicalTitle } : {}),
-      ...(canonicalYear != null ? { canonicalYear } : {}),
-      // Slice 2.1: durable TorrentFile id from bindable selection.
-      // NULL when no bindable candidate exists (all candidates unbindable).
-      ...(selection.selected._torrentFileId ? { torrentFileId: selection.selected._torrentFileId } : {}),
-    };
-    handoff = buildPlaybackHandoff(selection, handoffRequest);
-    if (selection.selected && cache.appendEvidenceObservation) {
-      cache.appendEvidenceObservation({
-        subjectKind: 'selection',
-        infoHash: selection.selected.infoHash,
-        fileIndex: selection.selected.fileIndex,
-        mediaId,
-        observer: 'hashsucker',
-        sourceClass: source || 'request',
-        state: requestIntent || 'library',
-        correlationId: requestId == null ? null : String(requestId),
-        payload: {
-          qualityProfile,
-          reason: selection.reason,
-          candidateCount: explainable.length,
-          alternativeCount: selection.alternates?.length ?? 0,
-          identityTier: selection.selected.identity?.tier ?? null,
-        },
-      });
+    handoff = buildHandoffForSelection({ cache: ctx.cache, ctx, requestId, selection, explainable });
+    try {
+      ctx.cache.persistPlaybackHandoff(handoff);
+    } catch (error) {
+      console.error(`Handoff persistence failed: ${error.message}`);
     }
-    if (handoff && binding) {
-      handoff.torrentFileIdentity = {
-        status: binding.status,
-        torrentFileId: binding.torrentFileId,
-        placementId: binding.placementId ?? null,
-        providerFileId: binding.providerFileId ?? null,
-        size: binding.size ?? null,
-        season: binding.season ?? null,
-        episode: binding.episode ?? null,
-      };
-    }
-
-    // Persist handoff
-    if (handoff) {
+    // This corpus/live branch previously stopped after handoff persistence.
+    // That made activateBinding() unreachable: no VFS materialization meant
+    // no LibraryItem/Binding could be created. Enter the same authoritative
+    // materialization boundary used by the full publication path.
+    if (!ctx.prepareOnly) {
       try {
-        cache.persistPlaybackHandoff(handoff);
-      } catch (error) {
-        console.error(`Handoff persistence failed: ${error.message}`);
-      }
-
-      // This corpus/live branch previously stopped after handoff persistence.
-      // That made activateBinding() unreachable: no VFS materialization meant
-      // no LibraryItem/Binding could be created. Enter the same authoritative
-      // materialization boundary used by the full publication path.
-      if (!prepareOnly) {
-        try {
-          const vfsEntry = await materializeVfsEntry(
-            cache,
-            handoff,
-            request.controlPlaneStore ?? null,
-            undefined,
-            { allowLegacy: false },
-          );
-          if (!vfsEntry) {
-            throw new Error(`VFS materialization returned no entry for ${handoff.mediaId}`);
-          }
-        } catch (error) {
-          console.error(`VFS materialization failed: ${error.message}`);
-          return {
-            requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
-            identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
-            discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
-            availability: availabilityStats, selection, handoff,
-            unfulfilled: true, retryOwned: true, published: false,
-            fulfilled: false, reason: 'durable-publication-failed', error: error.message,
-          };
+        const vfsEntry = await materializeHandoff({
+          cache: ctx.cache, controlPlaneStore: ctx.controlPlaneStore, handoff,
+        });
+        if (!vfsEntry) {
+          throw new PublicationError('vfs-materialization', new Error(`VFS materialization returned no entry for ${handoff.mediaId}`));
         }
+      } catch (error) {
+        console.error(`VFS materialization failed: ${error.message}`);
+        return unfulfilledResponse({ base, reason: 'durable-publication-failed', error, extra: { handoff } });
       }
     }
   }
 
-  // Stage 9: Demand-driven queue promotion
-  // Promote enrichment and probe work for requested candidates
-  const demandCandidates = explainable
-    .filter(r => r.identity?.eligible !== false && r.infoHash)
-    .map(r => ({ infoHash: r.infoHash, fileIndex: r.fileIndex }));
+  // Stage 9: Demand-driven queue promotion.
+  const promotion = promoteDemandForRequest({ cache: ctx.cache, ctx, explainable, selection });
 
-  // Promote all candidates to explicit-request priority
-  const promotion = cache.promoteDemand(
-    demandCandidates,
-    DEMAND_PRIORITY.EXPLICIT_REQUEST,
-    { reason: `media-request:${mediaId}` }
-  );
-
-  cache.recordEvidenceQuery?.({
-    queryKey: `media:${mediaId}:${season ?? ''}:${episode ?? ''}`, observer: 'hashsucker', sourceClass: source || 'request', disposition: 'ranked_request', observedAt: Date.now(), latencyMs: Date.now() - requestStartedAt, candidateCount: rankingInputs.length, selectedCount: selection.selected ? 1 : 0,
+  ctx.cache.recordEvidenceQuery?.({
+    queryKey: `media:${ctx.mediaId}:${ctx.season ?? ''}:${ctx.episode ?? ''}`, observer: 'hashsucker', sourceClass: ctx.source || 'request', disposition: 'ranked_request', observedAt: Date.now(), latencyMs: Date.now() - ctx.startedAt, candidateCount: rankingInputs.length, selectedCount: selection.selected ? 1 : 0,
   });
 
-  // If there's a selected release, promote it further to selected-release priority
-  if (selection.selected && selection.selected.infoHash) {
-    cache.promoteDemand(
-      [{ infoHash: selection.selected.infoHash, fileIndex: selection.selected.fileIndex }],
-      DEMAND_PRIORITY.SELECTED_RELEASE,
-      { reason: `selected-release:${mediaId}` }
-    );
-  }
-
   return {
-    requestId,
-    intent,
-    results: explainable,
-    total,
-    query: { mediaId, mediaType, season, episode },
-    identitySummary: summarizeIdentity(explainable),
-    ranking: tierMeta,
-    requestWork: { reuse: false, discovery: liveDiscoveryTriggered, ranking: true, candidateCount: rankingInputs.length, rankedCount: ranked.length, rankingLatencyMs, latencyMs: Date.now() - requestStartedAt, source: source || 'request', selectedInfoHash: selection.selected?.infoHash ?? null, selectedTorrentFileId: selection.selected?._torrentFileId ?? handoff?.torrentFileId ?? null },
-    discovery: {
-      liveDiscoveryTriggered,
-      liveCandidates: liveCandidates.length,
-      liveEligible: liveEligibleCount,
-    },
-    availability: availabilityStats,
-    selection,
+    ...base,
     handoff,
     demandPromotion: {
       enrichmentPromoted: promotion.enrichmentPromoted,
       probePromoted: promotion.probePromoted,
     },
+    requestWork: {
+      reuse: false, discovery: liveDiscoveryTriggered, ranking: true,
+      candidateCount: rankingInputs.length, rankedCount: ranked.length,
+      rankingLatencyMs, latencyMs: Date.now() - ctx.startedAt,
+      source: ctx.source || 'request',
+      selectedInfoHash: selection.selected?.infoHash ?? null,
+      selectedTorrentFileId: selection.selected?._torrentFileId ?? handoff?.torrentFileId ?? null,
+    },
     // This corpus/live fallback path persists the exact handoff but does not
     // execute the durable publication sequence above. A handoff is not a
-    // publication, so released requests must fail closed here rather than
-    // reporting `published: true`.
-    prepared: prepareOnly && handoff != null,
+    // publication, so released requests fail closed rather than report
+    // `published: true`.
+    prepared: ctx.prepareOnly && handoff != null,
     published: false,
     fulfilled: false,
-    unfulfilled: !prepareOnly,
-    retryOwned: !prepareOnly,
-    reason: !prepareOnly ? 'durable-publication-incomplete' : undefined,
-    ...(Array.isArray(selection.skipped) && selection.skipped.length > 0
-      ? { skippedCandidates: selection.skipped.slice(0, 25).map((s) => ({
-        infoHash: s.infoHash ?? null,
-        rank: s.rank ?? null,
-        torboxState: s.torboxState ?? null,
-        reason: s.reason ?? null,
-      })) }
-      : {}),
+    unfulfilled: !ctx.prepareOnly,
+    retryOwned: !ctx.prepareOnly,
+    reason: !ctx.prepareOnly ? 'durable-publication-incomplete' : undefined,
+    ...skippedCandidatesOf(selection),
   };
 }
 
-function summarizeIdentity(results) {
-  if (results.length === 0) {
-    return { tier: 'none', confidence: 0, evidence: [] };
+/* ------------------------------------------------------------------ *
+ * Shared end-of-pipeline stages
+ * ------------------------------------------------------------------ */
+
+/**
+ * Authoritative publication confirmation for a freshly published item.
+ * Returns the fulfilled response when the Binding and Plex both confirm,
+ * otherwise null so the caller falls through to the pending response.
+ */
+async function confirmAuthoritativePublication({ ctx, base, handoff }) {
+  const itemKey = createLibraryIdentityKey({
+    mediaType: ctx.mediaType === 'movie' ? 'movie' : 'episode',
+    mediaId: ctx.mediaId,
+    season: ctx.mediaType === 'movie' ? null : ctx.season,
+    episode: ctx.mediaType === 'movie' ? null : ctx.episode,
+  });
+  const item = ctx.controlPlaneStore?.getLibraryItemByIdentityKey?.(itemKey);
+  const binding = item ? ctx.controlPlaneStore?.getActiveBindingForLibraryItem?.(item.id) : null;
+  const libraryPath = item ? ctx.controlPlaneStore?.getActiveCanonicalPath?.(item.id) : null;
+  if (!binding || !libraryPath || binding.torrentFile.id !== handoff.torrentFileId) {
+    return unfulfilledResponse({
+      base, reason: 'authoritative-publication-incomplete',
+      extra: { fulfilled: false, published: false, handoff },
+    });
   }
+  let plex = null;
+  if ((ctx.mediaType === 'series' || ctx.mediaType === 'tv' || ctx.mediaType === 'episode')
+    && ctx.season != null && ctx.episode != null) {
+    try { plex = await confirmPlexEpisode({ mediaId: ctx.mediaId, season: ctx.season, episode: ctx.episode }); } catch { plex = null; }
+  }
+  if (plex?.visible && plex.mediaPart?.file) {
+    return {
+      ...base,
+      handoff,
+      published: true,
+      vfsPublished: true,
+      fulfilled: true,
+      unfulfilled: false,
+      retryOwned: false,
+      plex,
+    };
+  }
+  // Not visible (or a movie): fall through to the pending response.
+  return null;
+}
 
-  const top = results[0];
-  const ineligibleCount = results.filter(r => r.identity?.eligible === false).length;
-  const eligibleCount = results.length - ineligibleCount;
-
-  // Count by eligibility code
-  const ineligibleByCode = results.reduce((acc, r) => {
-    if (r.identity?.eligible === false && r.identity?.ineligibleCode) {
-      acc[r.identity.ineligibleCode] = (acc[r.identity.ineligibleCode] || 0) + 1;
-    }
-    return acc;
-  }, {});
-
-  // Count by tier
-  const tierCounts = results.reduce((acc, r) => {
-    const tier = r.identity?.tier || 'unknown';
-    acc[tier] = (acc[tier] || 0) + 1;
-    return acc;
-  }, {});
-
-  // Count exact episode matches and season packs
-  const exactEpisodeMatches = results.filter(r =>
-    r.identity?.eligible !== false &&
-    r.release?.season != null &&
-    r.release?.episode != null
-  ).length;
-  const seasonPackMatches = results.filter(r =>
-    r.identity?.eligible !== false &&
-    r.release?.seasonOnly === true || r.release?.mediaType === 'season'
-  ).length;
-
+/** Demand promotion + final response for a published-or-pending live request. */
+function publishedOrPendingResponse({ ctx, base, handoff, selection, explainable }) {
+  const promotion = promoteDemandForRequest({ cache: ctx.cache, ctx, explainable, selection: selection ?? { selected: null } });
   return {
-    tier: top.identity?.tier || 'unknown',
-    confidence: top.identity?.confidence || 0,
-    evidence: top.identity?.evidence || [],
-    totalCandidates: results.length,
-    eligibleCount,
-    ineligibleCount,
-    ineligibleByCode,
-    tierCounts,
-    exactEpisodeMatches,
-    seasonPackMatches,
-    resolutionStates: results.reduce((acc, r) => {
-      const state = r.identity?.state || 'unresolved';
-      acc[state] = (acc[state] || 0) + 1;
-      return acc;
-    }, {}),
+    ...base,
+    handoff: handoff ?? null,
+    demandPromotion: {
+      enrichmentPromoted: promotion.enrichmentPromoted,
+      probePromoted: promotion.probePromoted,
+    },
+    // Preparation tranche: preparation persists reusable durable truth
+    // (handoff + TorrentFile + coordinates) without presentation.
+    prepared: ctx.prepareOnly && handoff != null,
+    published: !ctx.prepareOnly && handoff != null,
+    vfsPublished: !ctx.prepareOnly && handoff != null,
+    fulfilled: false,
+    unfulfilled: !ctx.prepareOnly,
+    retryOwned: !ctx.prepareOnly,
+    reason: !ctx.prepareOnly ? 'plex-confirmation-pending' : undefined,
+    ...skippedCandidatesOf(selection ?? { selected: null }),
   };
 }
