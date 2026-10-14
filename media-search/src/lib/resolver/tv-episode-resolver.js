@@ -82,6 +82,13 @@ export function resolveTvTorrentFile({ torrentFiles, season, episode }) {
   if (!Array.isArray(torrentFiles)) {
     throw { code: 'INVALID_COORDINATES', message: 'torrentFiles must be an array' };
   }
+  // An empty list is a market fact (nothing cached for this release), not a
+  // caller mistake. The provider placement already failed upstream; reporting
+  // it as INVALID_COORDINATES made "not cached yet" look like bad input and
+  // hid the real reason in the per-candidate skip list.
+  if (torrentFiles.length === 0) {
+    throw { code: 'EPISODE_NOT_FOUND', message: 'No TorrentFiles for this release (nothing cached)' };
+  }
   if (!Number.isSafeInteger(season) || season < 1) {
     throw { code: 'INVALID_COORDINATES', message: `Invalid season: ${season}` };
   }

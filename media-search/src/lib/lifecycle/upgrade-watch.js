@@ -15,7 +15,7 @@
  * upgrades are rare events; the loop must cost ~nothing when the
  * market has nothing better.
  */
-import { describePrepareFailure } from '../requests/prepare-failure.js';
+import { isPrepared, isPublished, prepareFailure, probeFailure } from '../requests/prepare-outcome.js';
 import { tierOf, isTerminalTier, compareUpgrade, durabilityOf, shouldVetoUpgrade, DURABILITY } from './upgrade-policy.js';
 import { profilePolicy } from './quality-profiles.js';
 import { intentBackoffMs } from '../anticipation/future-intents.js';
@@ -302,7 +302,7 @@ export function createUpgradeEvaluator({
     if (row.season != null) body.season = row.season;
     if (row.episode != null) body.episode = row.episode;
     const r = await post('/api/media-prepare', body, 5 * 60 * 1000);
-    if (r.status !== 200) return { ok: false, error: r.json?.error || `probe-http-${r.status}` };
+    if (r.status !== 200) { const f = probeFailure(r); return { ok: false, ...f }; }
     const results = Array.isArray(r.json?.results) ? r.json.results : [];
     let sel = r.json?.selection?.selected || results[0] || null;
     if (sel) {
@@ -326,10 +326,7 @@ export function createUpgradeEvaluator({
     if (row.season != null) body.season = row.season;
     if (row.episode != null) body.episode = row.episode;
     const r = await post('/api/media-prepare', body, 5 * 60 * 1000);
-    if (r.status !== 200 || r.json?.prepared !== true || !r.json?.handoff?.torrentFileId) {
-      const { error, reason } = describePrepareFailure(r);
-      return { ok: false, error, reason };
-    }
+    if (!isPrepared(r)) { const f = prepareFailure(r); return { ok: false, ...f }; }
     return { ok: true, torrentFileId: r.json.handoff.torrentFileId };
   }
 
@@ -341,9 +338,7 @@ export function createUpgradeEvaluator({
     if (row.season != null) body.season = row.season;
     if (row.episode != null) body.episode = row.episode;
     const r = await post('/api/media-request', body, 5 * 60 * 1000);
-    if (r.status !== 200 || !r.json?.handoff?.torrentFileId) {
-      return { ok: false, error: r.json?.error || `publish-http-${r.status}` };
-    }
+    if (!isPublished(r)) { const f = publishFailure(r); return { ok: false, ...f }; }
     return { ok: true, torrentFileId: r.json.handoff.torrentFileId, reuseMode: r.json.reuseMode ?? null };
   }
 

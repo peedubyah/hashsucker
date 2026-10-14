@@ -14,6 +14,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { isAuthoritativePartFile, vfsPartFile } from '../src/lib/plex/vfs-path.js';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -212,7 +213,7 @@ function prepareResponse({ winner = null, alreadyPrepared = false, tf = 'tf_w1' 
   };
 }
 
-function policyScheduler(store, { prepareWinner = null, probeWinner = null, publishTf = 'tf_w1', publicationConfirmed = true, confirmation = null } = {}) {
+function policyScheduler(store, { prepareWinner = null, probeWinner = null, publishTf = 'tf_w1', publicationConfirmed = true, confirmation = null, vfsEntry = null } = {}) {
   const calls = [];
   let confirmationCalls = 0;
   const fetchFn = async (url, opts = {}) => {
@@ -250,8 +251,11 @@ function policyScheduler(store, { prepareWinner = null, probeWinner = null, publ
     }
     throw new Error('unexpected ' + url);
   };
+  const cache = vfsEntry
+    ? { getVfsTvEntry: () => vfsEntry }
+    : {};
   const sched = createAnticipationScheduler({
-    store, baseUrl: 'http://t', dataPlaneBaseUrl: 'http://d',
+    store, cache, baseUrl: 'http://t', dataPlaneBaseUrl: 'http://d',
     fetchFn, clock: () => NOW, log: () => {},
     confirmConsumerPublicationFn: async () => {
       confirmationCalls += 1;
@@ -328,14 +332,18 @@ test('scheduler: handoff and byte probe without consumer publication stays retry
 test('scheduler: bounded Plex confirmation accepts exact Part after refresh lag', async () => {
   const store = memStore();
   store.seed({ mediaType: 'series', mediaId: 'ttExact', season: 1, episode: 8, expectedAt: NOW + 3 * 60 * 60 * 1000 });
+  // Publish first so an authoritative VFS canonical path exists (production
+  // always has one by this state); the hook publishes the exact path below.
+  const CANON = 'TV/ttExact/Season 01/ttExact - S01E08.mkv';
   const confirmation = (attempt) => attempt < 3
     ? { visible: false, mediaPart: null }
-    : { visible: true, mediaPart: { file: '/mnt/hashsucker-vfs/TV/ttExact/Season 01/ttExact - S01E08.mp4' } };
+    : { visible: true, mediaPart: { file: '/mnt/hashsucker-vfs/' + CANON } };
   const { sched, getConfirmationCalls } = policyScheduler(store, {
     prepareWinner: { filename: 'Exact.2026.1080p.WEB-DL-GROUP', source: 'WEB-DL' },
     probeWinner: { filename: 'Exact.2026.1080p.WEB-DL-GROUP', source: 'WEB-DL' },
     publicationConfirmed: false,
     confirmation,
+    vfsEntry: { canonicalPath: CANON },
   });
   const row = store.findByIdentity({ mediaId: 'ttExact', season: 1, episode: 8 });
   await sched.tickOnce();
@@ -343,6 +351,17 @@ test('scheduler: bounded Plex confirmation accepts exact Part after refresh lag'
   const result = await sched.tickOnce();
   assert.equal(result.to, 'playable');
   assert.equal(getConfirmationCalls(), 3);
+});
+
+test('scheduler: Plex confirmation rejects a guessed path that no VFS publication backs', () => {
+  // The removed .mp4 fallback could never have matched a real MediaPart. With
+  // no authoritative canonical path there is nothing to accept, so a row
+  // without VFS truth must not be promoted from a matching-looking guess.
+  const ineligible = isAuthoritativePartFile('/mnt/hashsucker-vfs/TV/ttX/Season 01/ttX - S01E01.mp4',
+    'TV/ttX/Season 01/ttX - S01E01.mkv');
+  assert.equal(ineligible, false);
+  // and vfsPartFile refuses to invent one
+  assert.equal(vfsPartFile(null), null);
 });
 
 test('intent due repair requeues legacy playable future classification', async () => {

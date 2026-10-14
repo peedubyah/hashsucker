@@ -431,6 +431,7 @@ export async function selectBindableCandidate(results, options = {}) {
         }
         let placementTorrentFiles;
         let placementId = null;
+        let placementFailed = false;
         try {
           const result = await ensureTorBoxFileIdentityFn({
             infoHash: candidate.infoHash,
@@ -447,11 +448,15 @@ export async function selectBindableCandidate(results, options = {}) {
             torboxState: candidate.availability?.torbox?.state || 'unknown',
             reason: 'TorBox placement failed',
           });
-          if (!hasRdSeam) continue;
+          placementFailed = true;
         }
 
         // STEP 2: Resolve requested S/E from the now-persisted TorrentFiles.
-        try {
+        // When the placement ensure already failed there is nothing to resolve:
+        // falling through would hand `undefined` to the resolver and report
+        // INVALID_COORDINATES, which reads like bad input rather than "not
+        // cached yet".
+        if (!placementFailed) try {
           const { torrentFile } = resolveTvTorrentFileFn({ torrentFiles: placementTorrentFiles, season, episode });
           if (!isPlayableVideoTorrentFile(torrentFile)) {
             throw { code: 'EPISODE_NOT_PLAYABLE', message: 'Selected TorrentFile is not a playable media payload' };

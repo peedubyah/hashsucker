@@ -15,7 +15,8 @@
  * withdrawal through the existing safe-unpublish path; history rows are
  * preserved and no provider GC runs.
  */
-import { describePrepareFailure } from '../requests/prepare-failure.js';
+import { isPrepared, isPublished, prepareFailure, probeFailure } from '../requests/prepare-outcome.js';
+import { isAuthoritativePartFile, vfsPartFile } from '../plex/vfs-path.js';
 import { INTENT_STATES, intentBackoffMs } from './future-intents.js';
 import { DEFER_REASONS } from '../defers/seerr-defer.js';
 import { judgeReleaseQuality, ANTICIPATION_QUALITY } from './quality-gate.js';
@@ -29,6 +30,10 @@ const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 export const MAX_ATTEMPTS = 6;
 const PARKED_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ACTIONS_PER_TICK = 8;
+// Nominal per-tick work budget, checked BETWEEN actions. A single action is
+// never interrupted mid-flight: one provider prepare can legitimately run
+// ~17s (observed), so a tick may exceed this nominal bound. The cap bounds how
+// many actions are STARTED, not an absolute deadline.
 const MAX_TICK_WORK_MS = 30_000;
 const PUBLISHED_CONFIRMATION_RETRY_MS = 60 * 60 * 1000;
 const PUBLICATION_UNCONFIRMED = 'consumer-publication-unconfirmed';
@@ -206,10 +211,10 @@ export function createAnticipationScheduler({
     if (intent.season != null) body.season = intent.season;
     if (intent.episode != null) body.episode = intent.episode;
     const r = await post('/api/media-prepare', body, PREPARE_TIMEOUT_MS);
-    if (r.status !== 200 || r.json?.prepared !== true || !r.json?.handoff?.torrentFileId) {
+    if (!isPrepared(r)) {
       // The endpoint answers 200 for market conditions too, so describe the
       // body rather than emitting an opaque `prepare-http-200`.
-      const { error, reason } = describePrepareFailure(r);
+      const { error, reason } = prepareFailure(r);
       return { ok: false, terminal: r.status === 400, error, reason };
     }
     return { ok: true, torrentFileId: r.json.handoff.torrentFileId, winner: pickPrepareWinner(r.json), fresh: r.json?.alreadyPrepared !== true };
@@ -235,9 +240,7 @@ export function createAnticipationScheduler({
     if (intent.season != null) body.season = intent.season;
     if (intent.episode != null) body.episode = intent.episode;
     const r = await post('/api/media-prepare', body, PREPARE_TIMEOUT_MS);
-    if (r.status !== 200) {
-      return { ok: false, error: r.json?.error || `probe-http-${r.status}` };
-    }
+    if (r.status !== 200) { const f = probeFailure(r); return { ok: false, ...f }; }
     return { ok: true, winner: pickPrepareWinner(r.json) };
   }
 
@@ -254,9 +257,7 @@ export function createAnticipationScheduler({
     if (intent.season != null) body.season = intent.season;
     if (intent.episode != null) body.episode = intent.episode;
     const r = await post('/api/media-request', body, REQUEST_TIMEOUT_MS);
-    if (r.status !== 200 || !r.json?.handoff?.torrentFileId) {
-      return { ok: false, error: r.json?.error || `publish-http-${r.status}` };
-    }
+    if (!isPublished(r)) { const f = publishFailure(r); return { ok: false, ...f }; }
     // `fulfilled` is the normal media-request contract for consumer
     // publication: it is returned only after the configured consumer can
     // see the item. `published`/`vfsPublished` describe internal progress
@@ -283,12 +284,16 @@ export function createAnticipationScheduler({
     const vfsEntry = intent.media_type === 'series' && intent.season != null && intent.episode != null
       ? cache?.getVfsTvEntry?.(intent.media_id, intent.season, intent.episode)
       : null;
-    const expectedPartFile = vfsEntry?.canonicalPath
-      ? `/mnt/hashsucker-vfs/${String(vfsEntry.canonicalPath).replace(/^\/+/, '')}`
-      : intent.media_type === 'series' && intent.season != null && intent.episode != null
-        ? `/mnt/hashsucker-vfs/TV/${intent.media_id}/Season ${String(intent.season).padStart(2, '0')}/${intent.media_id} - S${String(intent.season).padStart(2, '0')}E${String(intent.episode).padStart(2, '0')}.mp4`
-        : null;
+    // Only the authoritative VFS publication is acceptable. There is no
+    // synthesised fallback: every series row that reaches confirmation carries
+    // a canonical path, and a guessed path could never match the real
+    // MediaPart, so a fallback would silently fail a converged publication.
+    const expectedPartFile = vfsPartFile(vfsEntry?.canonicalPath ?? null);
     const attempts = initial ? PLEX_CONFIRM_ATTEMPTS : 1;
+    // Hoisted out of the retry loop: the authoritative publication cannot
+    // change between attempts within one call, so re-reading it per attempt is
+    // a repeated identical DB lookup.
+    const canonicalPath = vfsEntry?.canonicalPath ?? null;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
         const result = await confirmConsumerPublicationFn({
@@ -297,7 +302,8 @@ export function createAnticipationScheduler({
           episode: intent.episode,
           expectedPartFile,
         });
-        if (result?.visible === true && result.mediaPart?.file === expectedPartFile) return true;
+        if (expectedPartFile && result?.visible === true
+            && isAuthoritativePartFile(result.mediaPart?.file, canonicalPath)) return true;
       } catch {}
       if (initial && attempt + 1 < attempts) await sleepFn(PLEX_CONFIRM_INTERVAL_MS);
     }
@@ -588,7 +594,9 @@ export function createAnticipationScheduler({
     let stopReason = 'snapshot-exhausted';
     for (const { row: original, priority } of orderedDue) {
       if (actions >= MAX_ACTIONS_PER_TICK) { stopReason = 'action-cap'; break; }
-      if (now() - ordinaryTickStartedAt >= MAX_TICK_WORK_MS) { stopReason = 'wall-clock-cap'; break; }
+      // Nominal budget: do not START another action once it is spent. The
+      // action already in flight is allowed to finish.
+      if (actions > 0 && now() - ordinaryTickStartedAt >= MAX_TICK_WORK_MS) { stopReason = 'wall-clock-cap'; break; }
       let intent = original;
       // A released future-not-released row may have exhausted its pre-release
       // retry budget. Re-arm it and continue through the normal claim in this
@@ -634,7 +642,7 @@ export function createAnticipationScheduler({
         return { acted: true, intentId: intent.id, from: intent.state, to: 'anticipated', ms: 0, error: true };
       }
     }
-    log(`scheduler drain actions=${actions} stopReason=${stopReason} durationMs=${now() - ordinaryTickStartedAt}`);
+    log(`scheduler drain actions=${actions} stopReason=${stopReason} durationMs=${now() - ordinaryTickStartedAt} nominalCapMs=${MAX_TICK_WORK_MS}`);
     return lastResult ?? { acted: actions > 0, actions, stopReason, durationMs: now() - ordinaryTickStartedAt };
   }
 

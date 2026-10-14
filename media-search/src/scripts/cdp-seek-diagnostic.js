@@ -1,0 +1,19 @@
+#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+const repo = '/home/patrick/src/hashsucker';
+const key = process.env.SEEK_FIXTURE || 'e01';
+const meta = { e01: { ratingKey:'497', tf:'tf_426aa723-3dfc-427a-8cc2-3871f231ff6c', grandparent:'495', parent:'496' }, e05: { ratingKey:'514', tf:'tf_1355e37f-143d-4703-8a53-23827089afbe', grandparent:'495', parent:'496' }, mobland: { ratingKey:'512', tf:'tf_8d9d4437-03e9-440b-8b80-db36f9dd22af', grandparent:'510', parent:'511' } }[key];
+const run = (c,a,o={}) => spawnSync(c,a,{cwd:repo,encoding:'utf8',timeout:o.timeout||30000,...o});
+const jlast = (s,d=null) => { try{return JSON.parse(s.split('\n').filter(Boolean).at(-1)||'')}catch{return d} };
+const cdp = (expression) => { const py=`import json,sys,requests,websocket\nj=requests.get('http://127.0.0.1:9222/json/list').json()[0]\nw=websocket.create_connection(j['webSocketDebuggerUrl'],timeout=10)\nw.send(json.dumps({'id':1,'method':'Runtime.evaluate','params':{'expression':sys.argv[1],'awaitPromise':True,'returnByValue':True}}))\nwhile True:\n x=json.loads(w.recv())\n if x.get('id')==1: print(json.dumps(x.get('result',{}).get('result',{}).get('value')));break`; return jlast(run('python3',['-c',py,expression]).stdout); };
+const plex = (source) => jlast(run('docker',['compose','exec','-T','media-search','node','--input-type=module'],{input:source}).stdout,{});
+const sessions = () => plex(`const j=await (await fetch(process.env.PLEX_URL+'/status/sessions',{headers:{'X-Plex-Token':process.env.PLEX_TOKEN,Accept:'application/json'}})).json();const x=(j.MediaContainer?.Metadata||[]).find(x=>String(x.ratingKey)==='${meta.ratingKey}');console.log(JSON.stringify(x?{offset:x.viewOffset||0,state:x.Player?.state||null}:null));`);
+const reads = () => {const r=run('docker',['exec','hashsucker-data-plane-1','sh','-lc','wget -qO- http://127.0.0.1:3001/metrics']);const j=jlast(r.stdout,{});return (j.stages_recent||[]).filter(x=>x.tf_id==='${meta.tf}').map(x=>x.request).filter(Boolean);};
+const sleep = ms=>new Promise(r=>setTimeout(r,ms));
+const uri=`server://1c622b259a95aebb46228e9661409b7656539c53/com.plexapp.plugins.library/library/metadata/${meta.ratingKey}`;
+const p=JSON.stringify({metadataSourceUri:uri,itemKey:`/library/metadata/${meta.ratingKey}`,type:'episode',subtype:'episode',grandparentKey:`/library/metadata/${meta.grandparent}`,parentKey:`/library/metadata/${meta.parent}`,fromPlayButton:true,startPaused:false});
+console.log('NAV',cdp(`window.__hsr(72861).Z.resolve("navigation").navigate("VisualMediaPlaybackScreen",${p}).then(()=>true)`));
+for(let i=0;i<60;i++){const s=cdp('(()=>{let c=window.__hsr(72861).Z.resolve("navigation").current?._playbackController;return {state:c?.state,loaded:c?.hasPlayerLoaded,pos:c?.position,duration:c?.duration}})()');if(s?.loaded&&s.state==='playing')break;await sleep(1000)}
+console.log('READY',cdp('(()=>{let c=window.__hsr(72861).Z.resolve("navigation").current._playbackController;return {state:c.state,pos:c.position,duration:c.duration}})()'),sessions());
+for(const target of [600000,120000,900000,300000]){const before=reads();const t=Date.now();const result=cdp(`(()=>{let c=window.__hsr(72861).Z.resolve("navigation").current._playbackController;let before={state:c.state,pos:c.position,loaded:c.hasPlayerLoaded};return Promise.resolve(c.seek(${target})).then(()=>({before,after:{state:c.state,pos:c.position,loaded:c.hasPlayerLoaded}}))})()`);await sleep(8000);const after=cdp('(()=>{let c=window.__hsr(72861).Z.resolve("navigation").current._playbackController;return {state:c.state,pos:c.position,loaded:c.hasPlayerLoaded}})()');const ps=sessions();const rr=reads();console.log(JSON.stringify({target,call:result,elapsed:Date.now()-t,controllerAfter:after,pms:ps,newReads:rr.filter(x=>!before.some(y=>y.start===x.start&&y.end===x.end)).slice(-8)}));}
+console.log('STOP',cdp('window.__hsr(72861).Z.resolve("navigation").current._playbackController.stop()'));

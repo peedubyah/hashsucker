@@ -120,12 +120,9 @@ export function bindPlexMetricsSink(fn) {
   return () => { if (metricsSink === fn) metricsSink = null; };
 }
 
+/** Read-only accounting snapshot for diagnostics (tests, operator metrics). */
 export function getPlexRefreshAccount() {
   return getCoalescer().getAccount();
-}
-
-export function resetPlexRefreshAccount() {
-  getCoalescer().resetAccount();
 }
 
 // ── Dispatcher ──────────────────────────────────────────────────────────────
