@@ -88,6 +88,7 @@ function isRealControlPlaneStore(store) {
  * side-effect-free outside the observe / execute durability modes.
  */
 function tryActivateAuthoritativeBinding({
+  searchCache,
   controlPlaneStore,
   handoff,
   torrentFile,
@@ -192,7 +193,8 @@ function tryActivateAuthoritativeBinding({
       reason,
     });
     bindingActivationRetryAt.delete(activationKey);
-  } catch (error) {    // A modern authoritative VFS entry cannot remain consumer-visible without
+  } catch (error) {
+    // A modern authoritative VFS entry cannot remain consumer-visible without
     // its exact active Binding. Remove only this exact orphaned TV projection;
     // durable TorrentFile/provider truth and the LibraryItem/path history stay.
     try {
@@ -202,7 +204,8 @@ function tryActivateAuthoritativeBinding({
       }
     } catch (cleanupError) {
       console.warn(`[vfs] orphan VFS cleanup failed: ${cleanupError.message}`);
-    }    const message = String(error?.message ?? error);
+    }
+    const message = String(error?.message ?? error);
     if (/stale or unbounded provider inventory observation/i.test(message)) {
       bindingActivationRetryAt.set(activationKey, observedAt + BINDING_ACTIVATION_RETRY_MS);
       if (bindingActivationRetryAt.size > 2048) {
@@ -596,6 +599,7 @@ export async function materializeVfsEntry(
     // immediately stale exposure and prevent Binding activation.
     const observedAt = now();
     tryActivateAuthoritativeBinding({
+      searchCache,
       controlPlaneStore,
       handoff,
       torrentFile,
