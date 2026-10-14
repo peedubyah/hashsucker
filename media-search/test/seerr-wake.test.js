@@ -31,9 +31,9 @@ const TOKEN = 'test-seerr-wake-token';
 const NOW = 1_800_000_000_000;
 const FUTURE = NOW + 30 * 86400 * 1000;
 
-function memStore() {
+function memStore(clock = () => NOW) {
   const cache = createDiscoveryCache({ dbPath: ':memory:' });
-  return { cache, store: createFutureIntentStore({ db: cache.db }) };
+  return { cache, store: createFutureIntentStore({ db: cache.db, clock }) };
 }
 
 function availablePayload(requestId, media = { media_type: 'movie', imdbId: 'tt0133093', tmdbId: '603', tvdbId: null }) {
@@ -145,11 +145,13 @@ test('scheduler: duplicate wakes converge on one claim', async () => {
     clock: () => NOW,
     log: () => {},
   });
-  const row = { ...store.findByIdentity({ mediaId: 'ttW' }) };
-  // FAILED with attempts < max re-arms via normal retry; claim path for
-  // anticipated rows is exercised by the duplicate-seed test below.
-  const r = await sched.processIntent(row);
-  assert.equal(r.acted, true);
+  // Driven through the real tick: the wake must move the poll, and the
+  // classifier/due selector must then actually claim the row (a direct
+  // processIntent call would prove nothing about reachability).
+  const r = await sched.tickOnce();
+  const after = store.findByIdentity({ mediaId: 'ttW' });
+  assert.equal(r.intentId, intent.id, 'the woken row was selected by the real gate');
+  assert.equal(after.state, 'anticipated', 're-armed through the tick');
   assert.equal(r.to, 'anticipated');
 });
 

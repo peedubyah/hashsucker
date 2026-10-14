@@ -636,29 +636,10 @@ async function runLivePipeline(ctx, { titleIndex, titleInputs }) {
   // Binding selection.
   const selection = await selectCandidateForRequest({ explainable, ctx });
 
-  // Bloodhound fallback: only after the normal ranked candidate set has
-  // failed exact binding. It re-enters this same search/rank/select/
-  // fulfillment pipeline with corpus candidates suppressed; it does not
-  // create a second ranking or publication path.
-  // `!liveDiscoveryTriggered` keeps the fanout bounded at one per request
-  // attempt: when this pipeline already consulted the live market (threshold
-  // fallback) and came back empty, re-entering would ask the same market the
-  // same question twice.
-  if (!selection.selected && !ctx.skipLiveDiscovery && !ctx.liveOnly && !ctx.unreleased
-    && !liveDiscoveryTriggered) {
-    console.log(`media-search: bloodhound trigger media=${ctx.mediaId} season=${ctx.season ?? ''} episode=${ctx.episode ?? ''} candidates=${explainable.length} reason=${selection.reason}`);
-    const liveRetry = await searchByMedia(ctx.cache, {
-      ...ctx.request,
-      liveOnly: true,
-      forceDiscovery: true,
-      skipLiveDiscovery: false,
-      persist: true,
-      bloodhound: true,
-    });
-    if (liveRetry?.selection?.selected) {
-      return liveRetry;
-    }
-  }
+  // No bloodhound re-entry here: this pipeline just consulted the live
+  // market itself, so re-entering liveOnly would ask the same market the
+  // same question. The corpus-pipeline trigger below is the meaningful one
+  // (persisted rows insufficient → ask the market).
 
   // Request persistence (selection decides completed vs pending).
   const requestId = persistRequestAndBackfill({

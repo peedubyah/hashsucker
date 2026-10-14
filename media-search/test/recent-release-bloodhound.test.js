@@ -916,3 +916,52 @@ test('slow source hang does not stall the fast layer', async (t) => {
   assert.equal(seenUrls.filter((u) => u.includes('comet-torbox')).length, 1,
     'hung source attempted exactly once');
 });
+
+// ---------------------------------------------------------------------------
+// Persisted-insufficiency trigger: the corpus carries an ELIGIBLE exact
+// episode row, so the live threshold fallback is suppressed — and that row
+// still cannot bind. The request must then re-enter live discovery exactly
+// once (the Bloodhound causal completion for corpus-sourced requests).
+// ---------------------------------------------------------------------------
+
+test('bloodhound completes a corpus-sourced request when the exact row cannot bind', async (t) => {
+  withTmpStrm(t);
+  const cache = createDiscoveryCache();
+  try {
+    seedCorpus(cache); // eligible exact S1E7 rows exist
+    let liveInvocations = 0;
+    // Only the live-supplied release is bindable; every corpus row is refused
+    // by the provider (eligible but not cached).
+    const store = stubStoreWithBindings();
+    const ensureCalls = [];
+    const result = await searchByMedia(cache, baseRequest({
+      controlPlaneStore: store,
+      ensureTorBoxFileIdentity: stubEnsure(ensureCalls, store),
+      confirmPlexFn: async () => ({ visible: true, mediaPart: { file: 'x' } }),
+      liveDiscoveryFn: async () => {
+        liveInvocations += 1;
+        return {
+          releases: [{
+            infoHash: LIVE_L1, fileIndex: null, releaseKey: `${LIVE_L1}:torrent`,
+            filename: E07_FILENAMES[LIVE_L1], title: 'Lanterns',
+            releaseAttributes: { season: 1, episode: 7, mediaType: 'series', resolution: '1080p', source: 'WEB-DL', sourceType: 'WEB-DL' },
+            selectedFileSize: E07_SIZES[LIVE_L1],
+            relevance: 0.8, parserConfidence: 0.9,
+            sources: [{ origin: 'live', evidence: [], confidence: 0.8 }],
+          }],
+          sources: [{ id: 'stremio', sourceClass: 'stremio', disposition: 'queried_ok', rawCount: 1, parsedCount: 1 }],
+        };
+      },
+    }));
+
+    assert.equal(liveInvocations, 1,
+      'the live re-entry runs exactly once for a corpus-sourced request whose exact row cannot bind');
+    assert.ok(result.selection.selected, 'the live-supplied release binds');
+    assert.equal(result.selection.selected.infoHash, LIVE_L1);
+    assert.ok(result.handoff?.torrentFileId, 'authoritative TorrentFile threaded');
+    assert.ok(cache.getVfsTvEntry(MEDIA_ID, 1, 7), 'authoritative VFS row materialized');
+    assert.equal(result.fulfilled, true, 'publication completes from the live winner');
+  } finally {
+    cache.close();
+  }
+});

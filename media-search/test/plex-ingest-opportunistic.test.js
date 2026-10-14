@@ -60,6 +60,13 @@ const base = (extra = {}) => opportunisticIngestConfirm({
   expectedSize: 1234,
   ...seams(),
   env: ENV,
+  // Every seam above is stubbed, so the only real wait is the bounded poll
+  // loop. Keep it short and deterministic instead of inheriting the 60 s
+  // production bound: a suite-wide minute-long test is a flakiness hazard and
+  // proves nothing extra.
+  timeoutMs: 50,
+  pollMs: 1,
+  quietTimeoutMs: 5,
   ...extra,
 });
 

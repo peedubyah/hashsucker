@@ -273,3 +273,45 @@ test('P4 — a failed binding activation is reported by the authoritative check,
   assert.equal(store.db.prepare('SELECT COUNT(*) AS c FROM bindings').get().c, 0,
     'the stale inventory must not have produced a binding');
 });
+
+test('P5 — prepared replay confirms the ingest BEFORE notifying (never races its own refresh)', async (t) => {
+  const plex = await startPlexStub(t);
+  withPublicationEnv(t, { PLEX_URL: plex.baseUrl, HASHSUCKER_BASE_URL: plex.baseUrl });
+  const { cache, store } = buildStores(t);
+  const { placementId } = seedEpisode(store);
+  const handoff = episodeHandoff(placementId);
+
+  // The deterministic ingest must be attempted on the republish path (it is
+  // the prepared-replay contract) and the targeted refresh dispatched only
+  // when it did not verify.
+  const result = await republishHealthyHandoff({
+    cache, controlPlaneStore: store, handoff,
+    mediaId: EPISODE_MEDIA_ID, mediaType: 'series', season: 1, episode: 1, isEpisode: true,
+  });
+  assert.ok(result.vfsEntry, 'authoritative VFS row re-proven on replay');
+
+  // Reaching the ingest transaction at all is the regression: an out-of-scope
+  // variable once made this branch throw inside a swallowed .catch(), so the
+  // confirm silently never ran on the fresh-publication path, and a missing
+  // branch would silently skip it here.
+  assert.ok(plex.requests.some((u) => u?.includes('/library/sections/2/refresh')),
+    'the targeted TV refresh must be dispatched on replay when ingest did not verify');
+});
+
+test('P6 — a movie replay notifies but never enters the episode ingest transaction', async (t) => {
+  const plex = await startPlexStub(t);
+  withPublicationEnv(t, { PLEX_URL: plex.baseUrl, HASHSUCKER_BASE_URL: plex.baseUrl });
+  const { cache, store } = buildStores(t);
+  const { placementId } = seedMovie(store);
+  const handoff = movieHandoff(placementId);
+
+  const before = getMetrics().counters.plex_ingest_attempts_total;
+  await republishHealthyHandoff({
+    cache, controlPlaneStore: store, handoff,
+    mediaId: MOVIE_MEDIA_ID, mediaType: 'movie', isEpisode: false,
+  });
+  assert.equal(getMetrics().counters.plex_ingest_attempts_total, before,
+    'movies never enter the episode ingest transaction');
+  assert.ok(plex.requests.some((u) => u?.includes('/library/sections/1/refresh')),
+    'the targeted Movies refresh is dispatched on replay');
+});
