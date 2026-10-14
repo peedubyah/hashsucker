@@ -316,6 +316,17 @@ notification, awaited). Stage failures are typed `PublicationError`s carrying
 their stage, so callers keep their exact reason codes
 (`durable-publication-failed`, `adapter-publication-failed`).
 
+**Scheduler wake semantics** (why a row acts when it acts):
+
+| Row | When it is actionable |
+|---|---|
+| Future, before its prepare window | Not actionable; its poll is parked at `expected_at - prepareDays` (cheap waiting, no per-interval re-classification) |
+| Future, inside its prepare window | Actionable, ranked with released work of the same class (this is what makes prepare-ahead possible) |
+| Failed future row whose air date passed | Actionable once (`releasedWake`): the pre-release classification is cleared and exactly one further attempt is granted |
+| Failed, aired, still season-owned, park elapsed | Cold-actionable (P2): one further attempt per 7-day cold cycle; attempts are preserved so no fresh hot budget returns |
+| Failed, aired, no season owner / non-retryable reason | Never actionable again; skipped inside the bounded snapshot so it cannot head-of-line block the queue |
+| `published_preparing` | P0: bounded, idempotent confirmation/probe retry |
+
 **Prepare / fulfill result semantics.** Precisely four outcomes exist and are
 the only shape consumers should read: `prepared` (durable truth, no
 presentation), `published` (authoritative Binding + VFS row + STRM),
