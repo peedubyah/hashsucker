@@ -55,11 +55,32 @@ test('a one-shot exhausted row with no season owner keeps the old semantics', ()
 });
 
 test('a non-retryable defer reason keeps the old semantics', () => {
-  for (const reason of ['hard-failure', 'future-not-released', null]) {
+  for (const reason of ['hard-failure', null]) {
     const row = exhausted({ defer_reason: reason, next_check_at: NOW - DAY });
     assert.equal(isColdRetryEligible(row, NOW), false, `reason=${reason}`);
     assert.equal(classifyIntentPriority(row, NOW).actionable, false, `reason=${reason}`);
   }
+});
+
+test('future-not-released is non-actionable only while still unreleased', () => {
+  // Still unreleased: not actionable, and its poll waits for the window.
+  const waiting = exhausted({
+    defer_reason: 'future-not-released',
+    expected_at: NOW + 10 * DAY,
+    next_check_at: NOW - DAY,
+  });
+  assert.equal(classifyIntentPriority(waiting, NOW).actionable, false, 'still unreleased');
+  assert.equal(isColdRetryEligible(waiting, NOW), false, 'no cold retry while unreleased');
+
+  // Air date passed while the row sat failed: the one-time release wake
+  // makes it actionable regardless of the exhausted attempt budget.
+  const aired = exhausted({
+    defer_reason: 'future-not-released',
+    expected_at: NOW - 1,
+    next_check_at: NOW - DAY,
+  });
+  assert.equal(classifyIntentPriority(aired, NOW).actionable, true, 'release wake is actionable');
+  assert.equal(classifyIntentPriority(aired, NOW).releasedWake, true);
 });
 
 test('a non-exhausted row is never cold-actionable (ordinary hot path owns it)', () => {

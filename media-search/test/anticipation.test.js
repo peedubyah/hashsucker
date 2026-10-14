@@ -260,7 +260,11 @@ test('priority classifier uses durable intent state and ownership fields', () =>
   assert.equal(classifyIntentPriority({ state: 'anticipated', expected_at: nowMs }, nowMs).className, 'P4');
   assert.equal(classifyIntentPriority({ state: 'failed', attempts: 1 }, nowMs).className, 'P5');
   assert.equal(classifyIntentPriority({ state: 'failed', attempts: 6 }, nowMs).actionable, false);
-  assert.equal(classifyIntentPriority({ state: 'anticipated', expected_at: nowMs + 1, defer_reason: 'future-not-released' }, nowMs).actionable, false);
+  // Unreleased outside the prepare window waits; inside it, anticipation
+  // work is due (that is what the prepare window is for).
+  const DAY = 86_400_000;
+  assert.equal(classifyIntentPriority({ state: 'anticipated', expected_at: nowMs + 30 * DAY, defer_reason: 'future-not-released' }, nowMs).actionable, false);
+  assert.equal(classifyIntentPriority({ state: 'anticipated', expected_at: nowMs + DAY, defer_reason: 'future-not-released' }, nowMs).actionable, true);
 });
 
 test('P0 drains before P1 and exhausted rows consume no action slots', async () => {

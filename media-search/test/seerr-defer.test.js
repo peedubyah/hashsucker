@@ -188,11 +188,14 @@ test('store: hasPendingForMedia distinguishes waiting from done', () => {
 // Scheduler exhaustion: deferred rows park, others die
 // ---------------------------------------------------------------------------
 
-function memScheduler(store) {
+function memScheduler(store, httpCalls = []) {
   return createAnticipationScheduler({
     store,
     baseUrl: 'http://test:3000',
-    fetchFn: async () => { throw new Error('must-not-call-network'); },
+    fetchFn: async (url) => {
+      httpCalls.push(url);
+      throw new Error('must-not-call-network');
+    },
     clock: () => 1_000_000,
     log: () => {},
   });
@@ -241,27 +244,39 @@ test('scheduler: exhausted deferred row re-arms to attempt once, then re-parks c
   assert.equal(after.attempts, 7, 'attempts incremented, hot budget not restored');
 });
 
-test('scheduler: exhausted non-deferred row parks its poll but stays dead', async () => {
+test('scheduler: exhausted non-deferred row never blocks the queue and never re-attempts', async () => {
   // Liveness repair (proven live Sep 2026: two exhausted rows with a stale
   // next_check_at head-of-line-blocked the due queue for 7 days, starving
-  // every released-unfulfilled row behind them — each tick silently no-ops
-  // on the same head row because due() orders by next_check_at and a tick
-  // processes one intent). The exhaustion semantics are unchanged (failed
-  // stays failed, never rearmed, history preserved); only the poll is
-  // parked 7d out so the queue advances past it.
+  // every released-unfulfilled row behind them). Exhaustion semantics are
+  // unchanged: an ordinary exhausted row (no continuing season owner) stays
+  // failed forever and is never re-attempted. What changed is that it no
+  // longer needs a dedicated parking action — the tick skips it inside the
+  // same bounded snapshot, so work behind it advances immediately.
   const { cache, store } = memStore();
   const { intent } = store.seed({ mediaType: 'movie', mediaId: 'ttD', source: 'operator' });
   store.transition(intent.id, 'failed', { last_error: 'prepare-http-400', next_check_at: 1 });
   cache.db.prepare('UPDATE future_intents SET attempts = 6 WHERE id = ?').run(intent.id);
-  const sched = memScheduler(store);
-  const row = { ...store.findByIdentity({ mediaId: 'ttD' }) };
-  const r = await sched.processIntent(row);
-  assert.equal(r.acted, true);
-  assert.equal(r.parked, true);
+  // Real released-unfulfilled work waiting behind the exhausted row.
+  const behind = store.seed({ mediaType: 'movie', mediaId: 'ttBehind', source: 'seerr:x' }).intent;
+  store.transition(behind.id, 'anticipated', { defer_reason: 'released-no-candidate', next_check_at: 1 });
+
+  const httpCalls = [];
+  const sched = memScheduler(store, httpCalls);
+
+  const r = await sched.tickOnce();
   const after = store.findByIdentity({ mediaId: 'ttD' });
   assert.equal(after.state, 'failed', 'exhaustion state preserved (never rearmed)');
   assert.equal(after.attempts, 6, 'history preserved');
-  assert.ok(after.next_check_at > 1_000_000 + 6 * 86400 * 1000, 'poll parked ~7d out, not hot-looped');
+  assert.equal(r.intentId, behind.id, 'the queue advanced past the exhausted row');
+  assert.ok(httpCalls.length >= 1, 'the row behind the exhausted one was actually attempted');
+
+  // A later tick still never re-attempts the exhausted row.
+  const before = httpCalls.length;
+  await sched.tickOnce();
+  const stillFailed = store.findByIdentity({ mediaId: 'ttD' });
+  assert.equal(stillFailed.state, 'failed', 'exhausted row stays terminal');
+  assert.equal(stillFailed.attempts, 6, 'attempts unchanged (no hot or cold re-attempt)');
+  assert.ok(httpCalls.length >= before, 'scheduler keeps working');
 });
 
 test('store: withdrawSeerrRequest hits parent+children, spares prepared and foreign rows', () => {

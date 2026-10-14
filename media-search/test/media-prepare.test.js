@@ -45,10 +45,21 @@ function stubStore(torrentFile) {
   };
 }
 
+// Two provider interactions exist in this pipeline and the stub records
+// which one ran:
+//   selection/binding work — ensure({ infoHash, controlPlaneStore, ... }):
+//     creates the cached-only placement and reads the inventory that the
+//     cardinality/exact-size binding decision consumes;
+//   bounded route refresh — ensure({ infoHash, skipSizeMatch: true }) with no
+//     store: re-proves route freshness for the authoritative Binding guard.
+// The reuse path is only allowed to do the second.
 function stubEnsure(torrentFile, calls) {
-  return async ({ skipSizeMatch } = {}) => {
+  return async (params = {}) => {
     calls.count++;
-    if (skipSizeMatch) {
+    const isSelectionWork = params.controlPlaneStore != null;
+    calls[isSelectionWork ? 'bindingWork' : 'routeRefresh'] =
+      (calls[isSelectionWork ? 'bindingWork' : 'routeRefresh'] ?? 0) + 1;
+    if (params.skipSizeMatch) {
       return { placementId: 'pl1', torrentFiles: [{ ...torrentFile }] };
     }
     return { placementId: 'pl1', providerFileId: 'f1', torrentFileId: torrentFile.id, size: torrentFile.size };
@@ -138,7 +149,7 @@ test('prepareOnly persists handoff without VFS, STRM, or publication', async (t)
   }
 });
 
-test('prepared request republishes with zero additional provider work', async (t) => {
+test('prepared request republishes with no additional binding work (one bounded route refresh)', async (t) => {
   const dir = withTmpStrm(t);
   const cache = createDiscoveryCache();
   try {
@@ -154,12 +165,20 @@ test('prepared request republishes with zero additional provider work', async (t
     assert.equal(prep.prepared, true);
     assert.equal(calls.count, 1);
 
+    // The reuse path performs exactly one bounded provider interaction: the
+    // route-inventory refresh that re-proves freshness for the authoritative
+    // Binding guard (inventory/readiness/exposure observations carry a TTL, so
+    // a republish hours later cannot activate without it). It performs NO
+    // binding work: no exact-size identity match, no placement creation, no
+    // candidate re-selection.
     const req = await searchByMedia(cache, {
       ...baseReq, mediaId: MOVIE_ID, mediaType: 'movie', mediaTitle: 'Movie', canonicalYear: 2020,
       controlPlaneStore: store, ensureTorBoxFileIdentity: ensure,
     });
     assert.equal(req.reuseMode, 'republish');
-    assert.equal(calls.count, 1, 'no additional provider binding work');
+    assert.equal(calls.count, 2, 'exactly one additional provider interaction');
+    assert.equal(calls.routeRefresh, 1, 'that interaction is the bounded route refresh');
+    assert.equal(calls.bindingWork, 1, 'no new selection/binding work (the prepare pass created the placement)');
     assert.equal(req.availability.checked, 0, 'no availability re-check');
     assert.equal(req.handoff.torrentFileId, 'tf_mov1', 'same TorrentFile published');
     const vfs = cache.getVfsMovieEntry(MOVIE_ID);

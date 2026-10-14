@@ -103,6 +103,11 @@ export function buildRequestContext(cache, request) {
       : null,
     controlPlaneStore: request.controlPlaneStore ?? null,
     maxTier: request.maxTier ?? null,
+    // Test seams, explicit and defaulted to the real implementation. Both
+    // replace network-boundary behavior (live discovery aggregation, Plex
+    // presence probing) and never change production behavior when absent.
+    liveDiscoveryFn: typeof request.liveDiscoveryFn === 'function' ? request.liveDiscoveryFn : null,
+    confirmPlexFn: typeof request.confirmPlexFn === 'function' ? request.confirmPlexFn : null,
     source: request.source || null,
     sourceType: request.sourceType || null,
     sourceId: request.sourceId || null,
@@ -121,7 +126,21 @@ export function buildRequestContext(cache, request) {
     canonicalYear: Number.isSafeInteger(request.canonicalYear) && request.canonicalYear >= 0
       ? request.canonicalYear
       : null,
+    // Release gate. A request may carry the authoritative release/air date
+    // (Seerr detail body for episodes, or a caller-supplied airDate).
+    // Unreleased media must never burn live discovery or trigger the
+    // bloodhound fallback: the market question is meaningless before the
+    // release exists, and the anticipation scheduler owns waiting for it.
+    unreleased: isUnreleased(request.releaseDate ?? request.airDate ?? null),
   };
+}
+
+/** True when the given release/air date is a known future date. */
+function isUnreleased(dateRaw) {
+  if (dateRaw == null) return false;
+  const parsed = Date.parse(String(dateRaw));
+  if (!Number.isFinite(parsed)) return false;
+  return parsed > Date.now();
 }
 
 /* ------------------------------------------------------------------ *
@@ -220,15 +239,25 @@ export async function runLiveDiscoveryStage(ctx, { wantedIdentity, withHistorica
   let liveEligibleCount = 0;
   let error = null;
   let rawCount = 0;
+  const discoverLive = ctx.liveDiscoveryFn ?? runLiveDiscovery;
 
+  // Live discovery returns a flat release array; the bloodhound runner
+  // returns { releases, sources } where `sources` carries per-route
+  // dispositions (queried_empty / skipped_fast_sufficient / upstream_error
+  // / not_configured). Normalize both so a miss reads the same either way.
+  let sourceReports = [];
   try {
-    const liveResults = await runLiveDiscovery(mediaId, {
+    const liveResult = await discoverLive(mediaId, {
       season,
       episode,
       title: wantedIdentity?.title ?? mediaTitle ?? null,
       year: wantedIdentity?.year ?? canonicalYear ?? null,
       wantedImdbId: mediaId,
     });
+    const liveResults = Array.isArray(liveResult)
+      ? liveResult
+      : (Array.isArray(liveResult?.releases) ? liveResult.releases : []);
+    sourceReports = Array.isArray(liveResult?.sources) ? liveResult.sources : [];
     rawCount = liveResults.length;
     for (const live of liveResults) {
       const key = live.releaseKey;
@@ -308,6 +337,17 @@ export async function runLiveDiscoveryStage(ctx, { wantedIdentity, withHistorica
   return {
     liveCandidates, liveEligibilityByHash, liveMetadataByHash,
     liveEligibleCount, rawCount, seenLiveKeys, error,
+    // Per-route outcomes, bounded: what was asked and what each route
+    // answered. This is what separates "market asked and is empty" from
+    // "route was never asked / failed upstream".
+    sources: sourceReports.slice(0, 32).map((s) => ({
+      id: s.id ?? null,
+      sourceClass: s.sourceClass ?? null,
+      disposition: s.disposition ?? null,
+      rawCount: s.rawCount ?? null,
+      parsedCount: s.parsedCount ?? null,
+      error: s.error ?? null,
+    })),
   };
 }
 
@@ -838,7 +878,7 @@ export function skippedCandidatesOf(selection) {
 /** Fields every pipeline response carries. */
 export function requestResponseBase({
   ctx, requestId, total, tierMeta,
-  liveDiscoveryTriggered = false, liveCandidates = 0, liveEligible = 0,
+  liveDiscoveryTriggered = false, liveCandidates = 0, liveEligible = 0, liveSources = [],
   availabilityStats, selection, explainable,
 }) {
   return {
@@ -849,7 +889,10 @@ export function requestResponseBase({
     query: { mediaId: ctx.mediaId, mediaType: ctx.mediaType, season: ctx.season, episode: ctx.episode },
     identitySummary: summarizeIdentity(explainable),
     ranking: tierMeta,
-    discovery: { liveDiscoveryTriggered, liveCandidates, liveEligible },
+    // liveSources records what each live route was asked and answered, so a
+    // miss is auditable as "market asked and empty" rather than "we never
+    // looked". Empty unless live discovery actually ran.
+    discovery: { liveDiscoveryTriggered, liveCandidates, liveEligible, liveSources },
     availability: availabilityStats,
     selection,
   };

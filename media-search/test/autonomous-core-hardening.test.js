@@ -283,6 +283,19 @@ test('part8: future intent lifecycle completes on the clock with no second reque
     source: 'seerr:test', expectedAt, deferReason: 'future-not-released',
   }).intent;
 
+  // Durable publication the scheduler confirms against: a discovery cache
+  // carrying the authoritative VFS TV row. Without it the scheduler must
+  // (and does) refuse to confirm a publication — a guessed path can never
+  // match the real MediaPart.
+  const vfsCache = createDiscoveryCache();
+  const CANONICAL_PATH = `TV/${SERIES_ID}/Season 01/${SERIES_ID} - S01E07.mkv`;
+  const seedVfsRow = () => vfsCache.createVfsTvEntry?.({
+    mediaId: SERIES_ID, season: 1, episode: 7, releaseKey: 'f'.repeat(40),
+    infoHash: 'f'.repeat(40), fileIndex: null, canonicalPath: CANONICAL_PATH,
+    torrentFileId: 'tf_future_1', size: 100,
+    createdAt: nowMs, updatedAt: nowMs,
+  });
+
   const httpCalls = [];
   let prepareBehavior = 'fail';
   const fetchFn = async (url, opts = {}) => {
@@ -322,15 +335,25 @@ test('part8: future intent lifecycle completes on the clock with no second reque
     store, baseUrl: 'http://t', dataPlaneBaseUrl: 'http://dp',
     fetchFn, clock: () => nowMs, log: () => {},
     tvPrepareDays: 3, tvPublishDays: 1,
+    // Consumer-confirmation seam: production injects the Plex probe; the
+    // fixture reports the authoritative MediaPart for the published row.
+    confirmConsumerPublicationFn: async () => ({
+      visible: true,
+      mediaPart: { id: '1', file: `/mnt/hashsucker-vfs/${CANONICAL_PATH}`, size: 100 },
+    }),
+    cache: vfsCache,
   });
   const row = () => store.list({}).find((r) => r.id === seeded.id);
 
-  // 1. Future: waits cheaply (TV prepare window opens 3d before air).
+  // 1. Future: a row that has not entered its prepare window is not
+  // actionable — the scheduler must not spend a tick (or any provider call)
+  // on unreleased media, and it parks the poll at the window open so the row
+  // stops being re-classified every interval.
   let r = await sched.tickOnce();
-  assert.equal(r.acted, true);
   assert.equal(httpCalls.length, 0, 'no provider calls while outside the window');
   assert.equal(row().state, 'anticipated');
   assert.equal(row().next_check_at, expectedAt - 3 * DAY, 'sleep until prepare window');
+  assert.ok(r.acted === false || r.actions === 0, 'unreleased work is not actionable');
 
   // 2. Due: first attempt fails → owned failure with backoff (not terminal).
   nowMs = expectedAt - 3 * DAY + 1;
@@ -351,19 +374,40 @@ test('part8: future intent lifecycle completes on the clock with no second reque
   assert.ok(httpCalls.length > callsAfterFail, 'retry re-attempted preparation');
 
   // 4. Publish waits for the publish window (1d before air), then publishes.
+  // Publication lands in published_preparing: the item is published but the
+  // cheap confirmation/probe retry has not converged yet.
   const pubRow = row();
   assert.ok(pubRow.next_check_at <= nowMs || pubRow.state === 'prepared', 'prepared state reached');
   nowMs = expectedAt - 1 * DAY + 1;
   r = await sched.tickOnce();
-  assert.equal(r.to, 'playable', 'fulfillment completes inside the publish window');
-  assert.equal(row().state, 'playable');
+  assert.equal(r.to, 'published_preparing', 'publication inside the publish window');
+  assert.equal(row().state, 'published_preparing');
+  const publishCallsAfterPublish = httpCalls.filter((u) => u.includes('/api/media-')).length;
+  // The P0 retry re-probes quality and republishes through the reuse path:
+  // bounded, idempotent work — not a fresh discovery/prepare cycle.
+  const PUBLISH_PATH_CALL_BUDGET = 2;
 
-  // 5. Terminal: further ticks do nothing (no second user request, no churn).
+  // 5. P0 convergence: the cheap confirmation/probe retry completes the
+  // lifecycle with no further provider work. The first attempt is deferred by
+  // the confirmation-retry backoff; later ticks are near-free.
+  seedVfsRow();
+  nowMs = row().next_check_at + 1;
+  r = await sched.tickOnce();
+  assert.equal(r.to, 'playable', 'convergence completes inside the publish window');
+  assert.equal(row().state, 'playable');
+  // The convergence retry is bounded: one quality probe plus one idempotent
+  // republish, then the lifecycle completes.
+  const publishCallsAfterConverge = httpCalls.filter((u) => u.includes('/api/media-')).length;
+  assert.ok(publishCallsAfterConverge - publishCallsAfterPublish <= PUBLISH_PATH_CALL_BUDGET,
+    `convergence stays bounded (${publishCallsAfterConverge - publishCallsAfterPublish} publish-path calls)`);
+
+  // 6. Terminal: further ticks do nothing (no second user request, no churn).
   const callsBefore = httpCalls.length;
   nowMs += DAY;
   r = await sched.tickOnce();
   assert.equal(r.acted, false, 'terminal intent takes no further action');
   assert.equal(httpCalls.length, callsBefore, 'no further I/O after terminal');
+  vfsCache.close();
 });
 
 // ---------------------------------------------------------------------------
@@ -394,16 +438,19 @@ test('part5: exhausted non-retryable row parks instead of starving the queue', a
     clock: () => nowMs, log: () => {},
   });
 
-  // Tick 1 parks the blocker (state/history preserved, poll moved out).
+  // The exhausted blocker is not actionable (no continuing season owner, so
+  // no cold-retry obligation): the scheduler skips it inside the same bounded
+  // snapshot instead of spending a dedicated action parking it.
   let r = await sched.tickOnce();
-  assert.equal(r.acted, true, 'blocker tick acts');
   const parked = store.list({}).find((x) => x.media_id === 'ttBlocker');
   assert.equal(parked.state, 'failed', 'blocker state preserved');
   assert.equal(parked.attempts, 6, 'blocker history preserved');
-  assert.ok(parked.next_check_at > nowMs, 'blocker poll parked in the future');
+  assert.equal(r.intentId, queued.id, 'queue advanced past the exhausted blocker in the same tick');
 
-  // Tick 2 reaches the queued work (previously starved forever).
+  // No cold retry without an active season owner, and no hot re-attempt: the
+  // row stays terminal forever.
   r = await sched.tickOnce();
-  assert.equal(r.acted, true, 'queued work acted upon');
-  assert.equal(r.intentId, queued.id, 'queue advanced past the parked blocker');
+  const still = store.list({}).find((x) => x.media_id === 'ttBlocker');
+  assert.equal(still.state, 'failed', 'blocker remains terminal');
+  assert.equal(still.attempts, 6, 'blocker attempts unchanged');
 });

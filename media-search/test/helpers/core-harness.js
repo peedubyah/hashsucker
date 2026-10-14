@@ -97,8 +97,8 @@ export function stubFetch(t, streamsByAddon, seen) {
 // resolution / single-file cardinality can bind. Everything else fails
 // NO_PLACEMENT. Bound TorrentFiles mirror into the backing store.
 export function stubEnsure(calls, { bindable = new Set(), backingStore = null } = {}) {
-  return async ({ infoHash, selectedFileSize, skipSizeMatch } = {}) => {
-    calls.push({ infoHash, selectedFileSize: selectedFileSize ?? null, skipSizeMatch: !!skipSizeMatch });
+  return async ({ infoHash, selectedFileSize, skipSizeMatch, controlPlaneStore } = {}) => {
+    calls.push({ infoHash, selectedFileSize: selectedFileSize ?? null, skipSizeMatch: !!skipSizeMatch, controlPlaneStore: controlPlaneStore ?? null });
     const hash = String(infoHash || '').toLowerCase();
     if (!bindable.has(hash)) {
       const err = new Error(`No cached placement for ${hash}`);

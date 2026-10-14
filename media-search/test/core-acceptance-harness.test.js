@@ -70,8 +70,10 @@ test('S1: corpus-direct binds, stages, then reuses to fulfilled with zero live I
     seedCorpusRow(cache, { infoHash: CORPUS_H1 });
     const store = stubStoreWithCoords();
     const ensureCalls = [];
-    const ensure = async ({ infoHash, selectedFileSize, skipSizeMatch } = {}) => {
-      ensureCalls.push(String(infoHash));
+    const ensure = async ({ infoHash, selectedFileSize, skipSizeMatch, controlPlaneStore } = {}) => {
+      // Record the interaction shape: selection/binding work carries the
+      // control-plane store; the reuse path's bounded route refresh does not.
+      ensureCalls.push({ infoHash: String(infoHash), controlPlaneStore: controlPlaneStore ?? null });
       const hash = String(infoHash || '').toLowerCase();
       if (hash === CORPUS_H1.toLowerCase() && skipSizeMatch) {
         const tf = { id: 'tf_corpus_1', infoHash: hash, size: 555555555, internalPath: 'Harness/Season 01/Harness - S01E07.mkv' };
@@ -100,7 +102,9 @@ test('S1: corpus-direct binds, stages, then reuses to fulfilled with zero live I
     assert.ok(cache.getVfsTvEntry(MEDIA_ID, 1, 7), 'VFS materialized on pass 1');
     assert.equal(first.retryOwned, true, 'staged success stays retry-owned until convergence');
     const ensureAfterPass1 = ensureCalls.length;
+    const s1BindingWorkAfterPass1 = ensureCalls.filter((c) => c.controlPlaneStore != null).length;
     assert.ok(ensureAfterPass1 > 0, 'pass 1 attempted provider binding');
+    assert.ok(s1BindingWorkAfterPass1 > 0, 'pass 1 performed selection/binding work');
 
     // Pass 2 (duplicate request, no changes): reuse converges — zero
     // provider work, zero live I/O, same representation, STRM published.
@@ -113,7 +117,12 @@ test('S1: corpus-direct binds, stages, then reuses to fulfilled with zero live I
     }));
     assert.ok(second.reuseMode, 'pass 2 reuses healthy state');
     assert.equal(liveCounter.count, 0, 'S1: still 0 live discovery calls');
-    assert.equal(ensureCalls.length, ensureAfterPass1, 'S1: 0 additional provider binding calls');
+    // The reuse path performs exactly one bounded route refresh (ensure with
+    // no controlPlaneStore) to re-prove freshness for the authoritative
+    // Binding guard; it performs no selection/binding work at all.
+    const s1BindingWork = ensureCalls.filter((c) => c.controlPlaneStore != null).length;
+    assert.equal(s1BindingWork, s1BindingWorkAfterPass1,
+      'S1: 0 additional provider binding/selection calls on reuse');
     assert.equal(second.handoff.torrentFileId, first.handoff.torrentFileId, 'S1: no representation change');
     assert.equal(second.fulfilled, true, 'S1: fulfilled after convergence');
     assert.equal(second.retryOwned, false, 'S1: success does not remain retryOwned');
@@ -293,6 +302,7 @@ test('S12: restart during retry ownership preserves state; later market change f
     // convergence completes on the following pass via reuse — no live, no
     // provider work, same representation.
     const ensureAfterRetry = ensureCalls.length;
+    const s12BindingWorkAfterRetry = ensureCalls.filter((c) => c.controlPlaneStore != null).length;
     const liveAfterRetry = liveCounter.count;
     const third = await searchByMedia(cache, baseRequest({
       controlPlaneStore: store,
@@ -306,7 +316,11 @@ test('S12: restart during retry ownership preserves state; later market change f
     assert.equal(third.fulfilled, true, 'S12: fulfilled');
     assert.equal(third.retryOwned, false, 'S12: success clears retry ownership');
     assert.equal(liveCounter.count, liveAfterRetry, 'S12: convergence performs no live fanout');
-    assert.equal(ensureCalls.length, ensureAfterRetry, 'S12: convergence performs no provider work');
+    // Convergence may run the bounded route refresh (freshness guard), never
+    // selection/binding work.
+    const s12BindingWork = ensureCalls.filter((c) => c.controlPlaneStore != null).length;
+    assert.equal(s12BindingWork, s12BindingWorkAfterRetry,
+      'S12: convergence performs no provider binding work');
     assert.equal(third.handoff.torrentFileId, retry.handoff.torrentFileId, 'S12: same representation');
   } finally {
     cache.close();

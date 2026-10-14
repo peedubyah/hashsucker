@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { searchByMedia, isReleasedRequest, normalizeLiveDiscoveryResult } from '../src/api/media-request.js';
+import { searchByMedia } from '../src/api/media-request.js';
 import { runBloodhoundDiscovery, mergeBloodhoundRows, classifyBloodhoundEpisode } from '../src/lib/discovery/live-bridge.js';
 import { createDiscoveryCache } from '../src/lib/discovery/cache.js';
 import { storeReleaseAttributes } from '../src/lib/discovery/release-attributes.js';
@@ -278,29 +278,35 @@ function baseRequest(extra = {}) {
 // Released-request predicate
 // ---------------------------------------------------------------------------
 
-test('isReleasedRequest: defaults to released, opts out only on future evidence', () => {
-  assert.equal(isReleasedRequest({}), true, 'no metadata → released');
-  assert.equal(isReleasedRequest({ mediaId: MEDIA_ID }), true);
-  assert.equal(isReleasedRequest({ airDate: '2020-01-01' }), true, 'past air date → released');
-  assert.equal(
-    isReleasedRequest({ airDate: new Date(Date.now() + 86400000).toISOString() }),
-    false,
-    'future air date → unreleased (no bloodhound)',
-  );
-  assert.equal(isReleasedRequest({ unreleased: true }), false);
-  assert.equal(
-    isReleasedRequest({ releaseDate: new Date(Date.now() + 86400000).toISOString().slice(0, 10) }),
-    false,
-  );
-});
-
-test('normalizeLiveDiscoveryResult: accepts legacy arrays and bloodhound shape', () => {
-  assert.deepEqual(normalizeLiveDiscoveryResult([{ infoHash: 'x' }]), {
-    rows: [{ infoHash: 'x' }], sources: [],
+test('live discovery stage accepts both the legacy array shape and the bloodhound shape', async (t) => {
+  const base = () => {
+    const cache = createDiscoveryCache();
+    t.after(() => cache.close());
+    return cache;
+  };
+  const request = (liveDiscoveryFn) => ({
+    mediaId: MEDIA_ID, mediaType: 'series', season: 1, episode: 7,
+    mediaTitle: 'Harness', skipAvailability: true, persist: false,
+    liveOnly: true,
+    controlPlaneStore: null, liveDiscoveryFn,
   });
-  const shaped = { releases: [{ infoHash: 'y' }], sources: [{ id: 's' }] };
-  assert.deepEqual(normalizeLiveDiscoveryResult(shaped), { rows: [{ infoHash: 'y' }], sources: [{ id: 's' }] });
-  assert.deepEqual(normalizeLiveDiscoveryResult(null), { rows: [], sources: [] });
+
+  // Legacy flat array: rows only, no source reports.
+  const legacy = await searchByMedia(base(), request(async () => []));
+  assert.deepEqual(legacy.discovery.liveSources, [], 'no source reports for the legacy shape');
+
+  // Bloodhound shape: rows plus per-route dispositions, surfaced on the
+  // response so a miss is auditable as "market asked and empty".
+  const shaped = await searchByMedia(base(), request(async () => ({
+    releases: [],
+    sources: [
+      { id: 'stremio', sourceClass: 'stremio', disposition: 'queried_empty', rawCount: 0, parsedCount: 0 },
+      { id: 'prowlarr', sourceClass: 'prowlarr', disposition: 'skipped_fast_sufficient', rawCount: 3, parsedCount: 3 },
+    ],
+  })));
+  assert.equal(shaped.discovery.liveSources.length, 2, 'per-route outcomes are surfaced');
+  assert.equal(shaped.discovery.liveSources[0].disposition, 'queried_empty');
+  assert.equal(shaped.discovery.liveSources[1].disposition, 'skipped_fast_sufficient');
 });
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,11 @@ const PUBLICATION_UNCONFIRMED = 'consumer-publication-unconfirmed';
 // prefix. The loop still performs at most one actionable intent per tick.
 const DUE_SCAN_LIMIT = 50;
 
+// Fallback prepare window used by priority classification when the scheduler
+// did not supply its configured windows (direct callers/tests). The scheduler
+// always passes windowsFor(intent).
+const DEFAULT_PREPARE_DAYS = 3;
+
 /** Defer reasons that describe a retryable market miss rather than a defect. */
 function isRetryableMarketDefer(reason) {
   return reason === DEFER_REASONS.RELEASED_NO_CANDIDATE
@@ -71,8 +76,18 @@ export function isColdRetryEligible(intent, nowMs, maxAttempts = MAX_ATTEMPTS) {
   return true;
 }
 
-export function classifyIntentPriority(intent, nowMs, maxAttempts = MAX_ATTEMPTS) {
+export function classifyIntentPriority(intent, nowMs, maxAttempts = MAX_ATTEMPTS, windows = null) {
   if (!intent || intent.state === INTENT_STATES.WITHDRAWN || intent.state === INTENT_STATES.PLAYABLE) return { className: 'P5', rank: 5, actionable: false };
+  // Release wake: a row classified future-not-released whose expected_at has
+  // passed needs its one-time rearm (pre-release classification cleared, one
+  // further attempt) before ordinary exhaustion semantics apply. Without
+  // this the store surfaces the row as due but the classifier parks it, so
+  // the wake never runs and the row can never fulfill.
+  if (intent.state === INTENT_STATES.FAILED
+    && intent.defer_reason === DEFER_REASONS.FUTURE_NOT_RELEASED
+    && intent.expected_at != null && intent.expected_at <= nowMs) {
+    return { className: 'P2', rank: 2, actionable: true, releasedWake: true };
+  }
   if (intent.state === INTENT_STATES.FAILED && intent.attempts >= maxAttempts) {
     // Season-owned aired work stays obligated and becomes cold-actionable once
     // its park elapses; everything else keeps the old permanent exhaustion.
@@ -82,7 +97,15 @@ export function classifyIntentPriority(intent, nowMs, maxAttempts = MAX_ATTEMPTS
     return { className: 'P5', rank: 5, actionable: false };
   }
   if (intent.defer_reason === DEFER_REASONS.FUTURE_NOT_RELEASED && intent.expected_at != null && intent.expected_at > nowMs) {
-    return { className: 'P5', rank: 5, actionable: false };
+    // Unreleased, but the prepare window exists precisely so bytes are ready
+    // before air. Before the window opens the row waits (its poll is parked
+    // at the window start); once inside, anticipation work is due and ranked
+    // with released work of the same class.
+    const prepareDays = windows?.prepareDays ?? DEFAULT_PREPARE_DAYS;
+    const windowStart = intent.expected_at - prepareDays * 86400 * 1000;
+    if (windowStart > nowMs) {
+      return { className: 'P5', rank: 5, actionable: false, awaitingPrepareWindow: true };
+    }
   }
   if (intent.state === INTENT_STATES.PUBLISHED_PREPARING) return { className: 'P0', rank: 0, actionable: true };
   const airedRequested = intent.season_owners && intent.expected_at != null && intent.expected_at <= nowMs;
@@ -145,6 +168,10 @@ export function createAnticipationScheduler({
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  function priorityIsActionable(row) {
+    return classifyIntentPriority(row, now(), MAX_ATTEMPTS, windowsFor(row)).actionable;
   }
 
   function windowsFor(intent) {
@@ -583,12 +610,41 @@ export function createAnticipationScheduler({
     // terminal/parked backlog rows be skipped without allowing them to pin
     // later retryable publication work indefinitely.
     const dueList = store.due({ limit: DUE_SCAN_LIMIT });
-    const classified = dueList.map((row, index) => ({ row, index, priority: classifyIntentPriority(row, now()) }));
+    const classified = dueList.map((row, index) => ({
+      row, index, priority: classifyIntentPriority(row, now(), MAX_ATTEMPTS, windowsFor(row)),
+    }));
     log(`scheduler due-snapshot limit=${DUE_SCAN_LIMIT} count=${dueList.length} ids=${dueList.map((row) => row.id).join(',')}`);
     classified.forEach(({ row, priority }) => log(`scheduler classify id=${row.id} state=${row.state} class=${priority.className} attempts=${row.attempts} actionable=${priority.actionable} cold=${priority.coldRetry === true}`));
     const orderedDue = classified
       .filter(({ priority }) => priority.actionable)
       .sort((a, b) => (a.priority.rank - b.priority.rank) || (a.index - b.index));
+
+    // Cheap waiting for unreleased rows. A future-not-released row whose
+    // prepare window has not opened is not actionable, but without this its
+    // poll stays at seed time, so every interval re-classifies it (and every
+    // future episode inflates the due snapshot). Park the poll at the window
+    // open — idempotent, and the row becomes due exactly when it can act.
+    let parkedFuture = 0;
+    for (const { row } of classified) {
+      if (priorityIsActionable(row)) continue;
+      if (row.state !== INTENT_STATES.ANTICIPATED) continue;
+      if (row.defer_reason !== DEFER_REASONS.FUTURE_NOT_RELEASED) continue;
+      if (row.expected_at == null || row.expected_at <= now()) continue;
+      const windowStart = row.expected_at - windowsFor(row).prepareDays * 86400 * 1000;
+      if (windowStart <= now() || row.next_check_at >= windowStart) continue;
+      try {
+        store.transition(row.id, INTENT_STATES.ANTICIPATED, {
+          last_error: 'outside-prepare-window',
+          next_check_at: windowStart,
+        });
+        parkedFuture += 1;
+      } catch {
+        // Parking is an optimization; a failed write leaves the previous
+        // (more frequent) poll, never less work done.
+      }
+    }
+    if (parkedFuture > 0) log(`scheduler parked-future count=${parkedFuture}`);
+
     let actions = 0;
     let lastResult = null;
     let stopReason = 'snapshot-exhausted';

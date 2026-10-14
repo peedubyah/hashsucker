@@ -262,7 +262,11 @@ async function tryReuseHealthyPublication({
   ensureTorBoxFileIdentityFn = null,
   source = 'request',
   requestStartedAt = Date.now(),
+  confirmPlexFn = null,
 }) {
+  // Plex presence seam: real confirmPlexEpisode in production, injected
+  // probe in tests. Absent by default.
+  const confirmPlex = typeof confirmPlexFn === 'function' ? confirmPlexFn : confirmPlexEpisode;
   try {
     // Prepared durable truth (shared with preparation): stored handoff +
     // matching TorrentFile + serving coordinates. Anything insufficient
@@ -303,7 +307,7 @@ async function tryReuseHealthyPublication({
     const confirmReuseFulfillment = async () => {
       if (!isEpisode || !controlPlaneStore) return { fulfilled: false, retryOwned: true, unfulfilled: true, published: true, vfsPublished: true, plex: null };
       try {
-        const plex = await confirmPlexEpisode({ mediaId, season, episode });
+        const plex = await confirmPlex({ mediaId, season, episode });
         const fulfilled = plex?.visible === true && plex?.mediaPart?.file;
         return {
           fulfilled: !!fulfilled,
@@ -532,6 +536,7 @@ export async function searchByMedia(cache, request) {
       ensureTorBoxFileIdentityFn: ctx.ensureTorBoxFileIdentityFn,
       source: ctx.source,
       requestStartedAt: ctx.startedAt,
+      confirmPlexFn: ctx.confirmPlexFn,
     });
     if (reuseResult) {
       return reuseResult;
@@ -546,7 +551,10 @@ export async function searchByMedia(cache, request) {
   const titleInputs = ctx.liveOnly ? [] : titleIndex.inputs;
   const candidates = ctx.liveOnly ? [] : cache.queryCandidatesByMedia(ctx.mediaId);
 
-  if ((candidates.length === 0 || ctx.liveOnly) && !ctx.skipLiveDiscovery) {
+  // Unreleased media never enters live discovery implicitly; an explicit
+  // liveOnly request is an operator/manual override and still honors it.
+  if ((candidates.length === 0 || ctx.liveOnly) && !ctx.skipLiveDiscovery
+    && (!ctx.unreleased || ctx.liveOnly)) {
     return runLivePipeline(ctx, { titleIndex, titleInputs, candidates });
   }
 
@@ -593,7 +601,7 @@ async function runLivePipeline(ctx, { titleIndex, titleInputs }) {
       query: { mediaId: ctx.mediaId, mediaType: ctx.mediaType, season: ctx.season, episode: ctx.episode },
       identitySummary: { tier: 'none', confidence: 0, evidence: [] },
       ranking: { TieredRankingApplied: false, TierCounts: {} },
-      discovery: { liveDiscoveryTriggered: true, liveCandidates: 0, liveEligible: 0 },
+      discovery: { liveDiscoveryTriggered: true, liveCandidates: 0, liveEligible: 0, liveSources: discovery.sources },
       availability: { checked: 0, cached: 0, uncached: 0, unknown: 0 },
       selection: { selected: null, reason: 'no candidates', alternates: [] },
       strmPath,
@@ -632,7 +640,12 @@ async function runLivePipeline(ctx, { titleIndex, titleInputs }) {
   // failed exact binding. It re-enters this same search/rank/select/
   // fulfillment pipeline with corpus candidates suppressed; it does not
   // create a second ranking or publication path.
-  if (!selection.selected && !ctx.skipLiveDiscovery && !ctx.liveOnly) {
+  // `!liveDiscoveryTriggered` keeps the fanout bounded at one per request
+  // attempt: when this pipeline already consulted the live market (threshold
+  // fallback) and came back empty, re-entering would ask the same market the
+  // same question twice.
+  if (!selection.selected && !ctx.skipLiveDiscovery && !ctx.liveOnly && !ctx.unreleased
+    && !liveDiscoveryTriggered) {
     console.log(`media-search: bloodhound trigger media=${ctx.mediaId} season=${ctx.season ?? ''} episode=${ctx.episode ?? ''} candidates=${explainable.length} reason=${selection.reason}`);
     const liveRetry = await searchByMedia(ctx.cache, {
       ...ctx.request,
@@ -656,6 +669,7 @@ async function runLivePipeline(ctx, { titleIndex, titleInputs }) {
   const base = requestResponseBase({
     ctx, requestId, total, tierMeta,
     liveDiscoveryTriggered: true, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount,
+    liveSources: discovery.sources,
     availabilityStats, selection, explainable,
   });
 
@@ -749,7 +763,7 @@ async function runCorpusPipeline(ctx, { titleIndex, titleInputs, candidates }) {
   // the ranking set never contains two equal (hash, fileIndex) pairs.
   const seenLiveKeys = new Set();
 
-  if (!ctx.skipLiveDiscovery && exactEpisodeCorpusCount < ctx.liveDiscoveryThreshold) {
+  if (!ctx.skipLiveDiscovery && !ctx.unreleased && exactEpisodeCorpusCount < ctx.liveDiscoveryThreshold) {
     liveDiscoveryTriggered = true;
     console.log(`media-search: bloodhound live-start media=${ctx.mediaId} season=${ctx.season ?? ''} episode=${ctx.episode ?? ''} corpus=${exactEpisodeCorpusCount}`);
     const discovery = await runLiveDiscoveryStage(ctx, { wantedIdentity: titleIndex.wanted, withHistoricalPrior: true });
@@ -813,9 +827,45 @@ async function runCorpusPipeline(ctx, { titleIndex, titleInputs, candidates }) {
   // Stage 7: Binding selection.
   const selection = await selectCandidateForRequest({ explainable, ctx });
 
+  // Bloodhound fallback, identical to the live pipeline's: persisted rows can
+  // be identity-valid yet impossible to bind, and a released request gets
+  // exactly one live re-entry before it is reported unfulfilled. Re-entering
+  // with liveOnly keeps the same ranking/identity/binding pipeline while
+  // preventing the corpus rows from suppressing the live market; it does not
+  // create a second ranking or publication path.
+  // A miss from the live re-entry is reported on THIS response: the caller
+  // must be able to see that the market was asked (and what each route
+  // answered) rather than inferring "never looked".
+  let bloodhoundTriggered = false;
+  let bloodhoundSources = [];
+  // `!liveDiscoveryTriggered` keeps the fanout bounded at one per request
+  // attempt: when this pipeline already consulted the live market (threshold
+  // fallback) and came back empty, re-entering would ask the same market the
+  // same question twice.
+  if (!selection.selected && !ctx.skipLiveDiscovery && !ctx.liveOnly && !ctx.unreleased
+    && !liveDiscoveryTriggered) {
+    console.log(`media-search: bloodhound trigger media=${ctx.mediaId} season=${ctx.season ?? ''} episode=${ctx.episode ?? ''} candidates=${explainable.length} reason=${selection.reason}`);
+    const liveRetry = await searchByMedia(ctx.cache, {
+      ...ctx.request,
+      liveOnly: true,
+      forceDiscovery: true,
+      skipLiveDiscovery: false,
+      persist: true,
+      bloodhound: true,
+    });
+    if (liveRetry?.selection?.selected) {
+      return liveRetry;
+    }
+    bloodhoundTriggered = liveRetry?.discovery?.liveDiscoveryTriggered === true;
+    bloodhoundSources = liveRetry?.discovery?.liveSources ?? [];
+  }
+
   const base = requestResponseBase({
     ctx, requestId, total, tierMeta,
-    liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount,
+    liveDiscoveryTriggered: liveDiscoveryTriggered || bloodhoundTriggered,
+    liveCandidates: liveCandidates.length,
+    liveEligible: liveEligibleCount,
+    liveSources: [...(liveDiscoveryTriggered ? [] : []), ...bloodhoundSources],
     availabilityStats, selection, explainable,
   });
 
@@ -911,7 +961,8 @@ async function confirmAuthoritativePublication({ ctx, base, handoff }) {
   let plex = null;
   if ((ctx.mediaType === 'series' || ctx.mediaType === 'tv' || ctx.mediaType === 'episode')
     && ctx.season != null && ctx.episode != null) {
-    try { plex = await confirmPlexEpisode({ mediaId: ctx.mediaId, season: ctx.season, episode: ctx.episode }); } catch { plex = null; }
+    const confirmPlex = ctx.confirmPlexFn ?? confirmPlexEpisode;
+    try { plex = await confirmPlex({ mediaId: ctx.mediaId, season: ctx.season, episode: ctx.episode }); } catch { plex = null; }
   }
   if (plex?.visible && plex.mediaPart?.file) {
     return {
