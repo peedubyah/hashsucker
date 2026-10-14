@@ -605,6 +605,79 @@ fix or accept the mount's directory mtime behaviour, or reduce refresh
 frequency. The canary's only change is diagnostic: it now names the PMS
 rejection separately instead of collapsing it into a generic start failure.
 
+## Refactor pass: consolidated contracts and truthful failure reasons (2026-10-13)
+
+Four changes, all reducing divergence risk between components that implement
+the same contract separately. No policy changes.
+
+### 1. One authoritative VFS path helper
+
+`src/lib/plex/vfs-path.js` now owns `<mount root>/<canonicalPath>` construction
+and the identity comparison. Two callers previously did it inline:
+
+- `anticipation/scheduler.js` `confirmConsumerPublication` built the path
+  inline **with a synthesised `.mp4` fallback** for rows lacking a VFS entry.
+  Measured over the production corpus: 0 of 6 authoritative `vfs_tv_entries`
+  paths end in `.mp4` at the guessed location, and every series row in
+  `prepared`, `published_preparing` or `playable` state carries an authoritative
+  canonical path (the single `published_preparing` row without one is a movie
+  with no season/episode, so it never reached the series branch). The fallback
+  was unreachable and could only ever fail a converged publication.
+- `consumers/accepted-playback.js` compared against the same constructed path.
+
+Both now share `vfsPartFile` / `isAuthoritativePartFile`.
+
+### 2. One prepare-outcome contract
+
+`src/lib/requests/prepare-outcome.js` owns the `isPrepared` / `isPublished`
+predicates and the failure labels. The anticipation scheduler and upgrade-watch
+each carried an identical three-check predicate with their own error string;
+both now delegate. HTTP 200 remains a transport fact, not a preparation fact.
+
+### 3. "Not cached yet" no longer reported as `INVALID_COORDINATES`
+
+In `discovery/selection.js` PATH B, when the TorBox placement ensure threw,
+`placementTorrentFiles` stayed `undefined` and the resolver's type check
+reported a caller mistake. The placement failure is now the terminal reason for
+that candidate, matching the resolver's own `EPISODE_NOT_FOUND` for an empty but
+valid list. Before/after for `tt0159187` E02 (live, deployed):
+
+```
+before: TorBox placement failed / INVALID_COORDINATES /
+        rd-not-cached:rd-not-downloaded:queued / no-bindable-path
+after:  TorBox placement failed /
+        rd-not-cached:rd-not-downloaded:queued / no-bindable-path
+```
+
+The `queued` observation from the earlier slice is now undistorted by a
+spurious input-validation error.
+
+### 4. Deliberately not changed
+
+- Cold-retry cadence (7 days, one interval).
+- Cache-only fulfillment boundary.
+- Scheduler priority semantics and cold-retry gating.
+- Opportunistic deterministic ingest semantics.
+- The nominal 30 s per-tick work cap: it is checked between actions, so one
+  ~17 s provider prepare can exceed it. Documented explicitly on the constant and
+  in the drain log rather than introducing cancellation.
+
+### Also removed
+
+- `resetPlexRefreshAccount` — zero callers repo-wide (grep-proven, including
+  tests and scripts).
+- A repeated identical `vfs_tv_entries` read inside the Plex confirmation retry
+  loop, hoisted out of the loop.
+
+### Measurements
+
+| Path | Before | After |
+|---|---|---|
+| Tier-A idempotent request (warm) | 27.0 ms | 25.4–27.5 ms (unchanged) |
+| `future_intents.due()` query | 0.04 ms | unchanged (no index/projection justified) |
+| `skippedCandidates` reason quality | 4 entries, 1 spurious | 3 entries, all true |
+| Full suite | 3211 pass / 10 fail | 3219 pass / 10 fail (identical pre-existing set) |
+
 ## Cached-only fulfillment boundary, and why `no-bindable-candidate` is not a market miss (2026-10-13)
 
 ### The question

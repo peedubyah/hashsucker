@@ -513,3 +513,32 @@ No planned work as completed. No vague "healthy." No speculative causes.
   E05/E13) but no authoritative representation; the blocker is the cached-only
   boundary, not Bloodhound candidate supply.
 - Verification: full suite 3211 pass / 10 fail — identical pre-existing set.
+
+## 2026-10-13 — refactor: consolidated contracts, truthful failure reasons — LANDED
+
+- Commit `b0f771f`. Four changes, no policy change:
+  - `src/lib/plex/vfs-path.js` is now the single authority for the
+    VFS->Plex mount path and the authoritative-part comparison. The
+    anticipation scheduler's synthesised `.mp4` fallback was removed: 0/6
+    authoritative paths end in .mp4 at the guessed location, and the branch
+    was unreachable (every prepared/publicated_preparing/playable series row
+    carries a canonical path; the one exception is a movie with no S/E).
+  - `src/lib/requests/prepare-outcome.js` owns one prepare/publish result
+    contract shared by the anticipation scheduler and upgrade-watch, which each
+    had their own copy.
+  - selection.js PATH B no longer reports `INVALID_COORDINATES` when the TorBox
+    placement ensure fails (the resolver was being handed `undefined`); the
+    placement failure is now the terminal candidate reason. Live before/after
+    for tt0159187 E02 confirms one spurious reason removed.
+  - `resolveTvTorrentFile` classifies an empty list as EPISODE_NOT_FOUND, not an
+    input error.
+- Also removed: `resetPlexRefreshAccount` (zero callers, grep-proven); a
+  repeated identical vfs_tv_entries read inside the Plex confirmation retry
+  loop.
+- The nominal 30 s per-tick work cap is documented as between-actions rather
+  than an absolute deadline (one ~17 s provider prepare can exceed it).
+- Measurements: Tier-A idempotent request 27.0 ms before, 25.4-27.5 ms after
+  (unchanged); future_intents.due() 0.04 ms (no index/projection work
+  justified). Full suite 3219 pass / 10 fail, identical pre-existing set.
+- Production validation: scheduler cold-retry, priority classes, and P0
+  confirmation all behaving as before; placeholder.
