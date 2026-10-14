@@ -542,3 +542,36 @@ No planned work as completed. No vague "healthy." No speculative causes.
   justified). Full suite 3219 pass / 10 fail, identical pre-existing set.
 - Production validation: scheduler cold-retry, priority classes, and P0
   confirmation all behaving as before; scheduler drain, cold-retry classification (cold=true), and 23 ms P0 retries all observed unchanged.
+
+## 2026-10-14 — architecture cleanup: decomposed the request pipeline — LANDED
+
+- Commits `00e2821`, `4a5c0e0`, `b05642b`, `afbd6ea`, `cf385de`, `4df9c1b`.
+- `src/lib/requests/publication.js` is the single owner of the handoff →
+  published-item tail (VFS materialization → converged .strm → Jellyfin →
+  hydration → Plex dispatch). Both call sites (request path, prepared replay)
+  share it; only consumer dispatch differs, and only deliberately.
+- `src/api/media-request-stages.js` owns every pipeline stage plus the response
+  shapes; `searchByMedia()` reads as the nine-stage product sequence over the
+  live/corpus pipelines. media-request.js: 2337 → 951 lines.
+- Seerr ingress (`src/api/seerr-ingress.js`), transport primitives
+  (`src/server/http.js`), media byte delivery (`src/server/media-delivery.js`),
+  route helpers (`src/server/route-helpers.js`), request-scoped provider seams
+  (`src/lib/requests/provider-ensure.js`), and Plex section geometry
+  (`src/lib/plex/section-config.js`) each moved to their owner. app.js:
+  4682 → 3375 lines.
+- `src/server/index.js` is now the composition root (107 lines);
+  `src/server/workers.js` owns every background ticker.
+- Regressions found and fixed during runtime validation:
+  - the fresh-publication episode ingest confirm referenced an out-of-scope
+    `isEpisode` inside a fire-and-forget chain, so it never ran (swallowed by
+    its own .catch()). Episode geometry is now computed once and passed
+    explicitly.
+  - the orphaned-VFS cleanup after a failed binding activation referenced a
+    `searchCache` parameter it never received — every invocation threw a
+    swallowed ReferenceError, leaving unbound episode rows consumer-visible.
+    Both have regression tests.
+- Quieted a per-function `activateBinding attempt` log line (~154/6 min in
+  production); failure diagnostics unchanged.
+- Measurements: Tier-A idempotent episode request 27.0 ms before, 26.3–31.5 ms
+  after (reuse=noop, fulfilled=True, Plex-confirmed); Tier-A movie noop 5–6 ms.
+  Full suite 3241 tests / 3226 pass / 10 fail — identical pre-existing set.

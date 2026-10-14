@@ -277,6 +277,63 @@ regardless of TorBox vs Real-Debrid execution
 | `POST /api/future-intents` | Seed durable future intent (no presentation); scheduler prepares/publishes ahead of demand |
 | `GET /api/future-intents` | List intents, counts, next check |
 
+### Request pipeline module map
+
+The request path is a stage sequence, not one module. Each stage has one owner,
+narrow inputs/outputs, and no hidden global policy:
+
+| Stage | Owner | Contract |
+|---|---|---|
+| Request parsing | `media-search/src/api/media-request-stages.js` (`buildRequestContext`) | one parsed context per request; every flag and seam resolved here, once |
+| Title index | same (`collectTitleIndexInputs`) | corpus title-index candidates + resolved wanted identity; best-effort |
+| Live discovery | same (`runLiveDiscoveryStage`) | deduped live candidates + eligibility + metadata maps |
+| Corpus ranking input | same (`buildCorpusRankingInput`) | identity associations, observations, eligibility, historical prior |
+| Ranking → response rows | same (`shapeRankedResults`) | ranked hits → explainable rows (both pipelines share this projection) |
+| Availability | same (`applyTorboxAvailability`) | provider cache state per eligible candidate; never breaks results |
+| Binding selection | same (`selectCandidateForRequest`) | iterates ranked candidates until a TorrentFile binds |
+| Persistence | same (`persistRequestAndBackfill`, `buildHandoffForSelection`) | request row + associations + durable playback handoff |
+| Publication | `media-search/src/lib/requests/publication.js` | handoff → published item (see below) |
+| Demand promotion | same (`promoteDemandForRequest`) | queue priority for requested candidates |
+| Response shaping | same (`requestResponseBase`, `unfulfilledResponse`, `skippedCandidatesOf`) | success / prepared / failure shapes cannot drift |
+
+`searchByMedia()` (`src/api/media-request.js`) composes those stages over two
+candidate pipelines: the **live pipeline** (no corpus candidates, or an explicit
+live-only retry — publishes and confirms consumers) and the **corpus pipeline**
+(the normal corpus-serving path — materializes the authoritative VFS row and
+fails closed on presentation gaps). Everything else (the
+already-prepared short-circuit and the healthy-publication reuse fast path)
+also lives there; neither does discovery or provider work.
+
+**Publication** (`src/lib/requests/publication.js`) owns one stage sequence:
+authoritative VFS materialization (Binding activation) → converged `.strm`
+(verify-adopt-repair; `publishStrm` trusts path existence, not content) →
+Jellyfin notification → authoritative VFS metadata hydration → Plex dispatch
+(targeted refresh + opportunistic deterministic ingest confirm). Two documented
+compositions differ only in consumer dispatch: `publishSelectedHandoff` (request
+path, never blocks on scanner work) and `republishHealthyHandoff` (prepared
+replay: deterministic confirm first so the replay never races its own
+notification, awaited). Stage failures are typed `PublicationError`s carrying
+their stage, so callers keep their exact reason codes
+(`durable-publication-failed`, `adapter-publication-failed`).
+
+**Prepare / fulfill result semantics.** Precisely four outcomes exist and are
+the only shape consumers should read: `prepared` (durable truth, no
+presentation), `published` (authoritative Binding + VFS row + STRM),
+`fulfilled` (published *and* the consumer confirms visibility), and
+`unfulfilled` with a `reason` + `retryOwned` (nobody may assume a retry the
+owner did not schedule). Per-candidate bindability failures ride on
+`skippedCandidates`, which is part of the response contract rather than
+debug-only output. `getPreparedDurableState` is the single predicate behind
+both the reuse fast path and preparation.
+
+**Process composition.** `src/server/index.js` is the composition root (env →
+stores → workers → server → shutdown; no DI framework, plain explicit
+construction). `src/server/workers.js` owns every background ticker with its
+enable flag. `src/server/app.js` owns dependency injection into the request
+handler and route registration. `src/api/seerr-ingress.js` owns the Seerr
+webhook boundary (auth, TMDB→IMDb translation, TV fan-out) and delegates all
+fulfillment to `searchByMedia`.
+
 **Prepared vs published.** A *prepared* item has durable fulfillment truth —
 playback handoff (exact Release + TorrentFile) + positive-size TorrentFile row
 + at least one present mapped provider coordinate — but no VFS row, no STRM,
