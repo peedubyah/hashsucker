@@ -66,6 +66,8 @@
  */
 import pathPosix from 'node:path';
 
+import { sectionConfigFor } from '../plex/section-config.js';
+
 const PLEX_TIMEOUT_MS = 10_000;
 const DEFAULT_POLL_MS = 150;
 const DEFAULT_DRAIN_MS = 5_000;
@@ -487,18 +489,10 @@ const sharedFlight = createIngestFlight();
 export function sharedIngestFlight() { return sharedFlight; }
 
 /**
- * Section roots and collection segment for a mediaType, mirroring
- * `plex-notifier.js`'s configFor so both agree on geometry.
+ * Section geometry comes from the shared Plex owner so the notifier, the
+ * deterministic ingest transaction, and the request-path confirmation can
+ * never disagree about which section/root a canonical path belongs to.
  */
-function ingestConfigFor(mediaType, env = process.env) {
-  if (mediaType === 'movie') {
-    return { sectionId: env.PLEX_MOVIES_SECTION_ID || null, root: env.PLEX_MOVIES_ROOT || null, collection: 'Movies' };
-  }
-  if (mediaType === 'series') {
-    return { sectionId: env.PLEX_TV_SECTION_ID || null, root: env.PLEX_TV_ROOT || null, collection: 'TV' };
-  }
-  return { sectionId: null, root: null, collection: null };
-}
 
 /**
  * Opportunistically confirm a publication with the deterministic ingest
@@ -543,7 +537,7 @@ export async function opportunisticIngestConfirm({
   observeFn = observeScan,
 } = {}) {
   const t0 = Date.now();
-  const cfg = ingestConfigFor(mediaType, env);
+  const cfg = sectionConfigFor(mediaType, env);
   const url = plexUrl || env.PLEX_URL || null;
   const token = plexToken || env.PLEX_TOKEN || null;
   const metric = {

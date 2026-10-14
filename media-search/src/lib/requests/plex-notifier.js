@@ -26,26 +26,9 @@
 import path from 'node:path';
 
 import { createRefreshCoalescer, REFRESH_DEFAULTS } from '../plex/refresh-coalescer.js';
+import { sectionConfigFor } from '../plex/section-config.js';
 
 const PLEX_TIMEOUT_MS = 5_000;
-
-function configFor(mediaType) {
-  if (mediaType === 'movie') {
-    return {
-      sectionId: process.env.PLEX_MOVIES_SECTION_ID,
-      root: process.env.PLEX_MOVIES_ROOT,
-      collection: 'Movies',
-    };
-  }
-  if (mediaType === 'series' || mediaType === 'tv') {
-    return {
-      sectionId: process.env.PLEX_TV_SECTION_ID,
-      root: process.env.PLEX_TV_ROOT,
-      collection: 'TV',
-    };
-  }
-  return { sectionId: null, root: null, collection: null };
-}
 
 export function isPlexEnabled() {
   return Boolean(process.env.PLEX_URL && process.env.PLEX_TOKEN);
@@ -64,7 +47,7 @@ export function planPlexRefresh({ mediaType, canonicalPath }) {
   if (!isPlexEnabled()) {
     return { ok: false, error: 'plex-disabled' };
   }
-  const { sectionId, root, collection } = configFor(mediaType);
+  const { sectionId, root, collection } = sectionConfigFor(mediaType);
   if (!sectionId || !root || !canonicalPath) {
     return { ok: false, error: 'missing-section-root-or-path' };
   }

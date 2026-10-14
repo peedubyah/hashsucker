@@ -22,17 +22,17 @@ import { lookupCorpusByTitle, resolveWantedIdentity, IDENTITY_TIERS } from '../l
 import { computeHistoricalAvailabilityPrior } from '../lib/discovery/confidence-projection.js';
 import { resolveTvTorrentFile, isPlayableVideoTorrentFile } from '../lib/resolver/tv-episode-resolver.js';
 import { buildPlaybackHandoff } from '../lib/discovery/playback-handoff.js';
-import { publishStrm, expectedStrmPath } from '../lib/requests/strm-publisher.js';
+import { publishStrm } from '../lib/requests/strm-publisher.js';
 import { createLibraryIdentityKey } from '../lib/control-plane/canonical-path.js';
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import { notifyJellyfin } from '../lib/requests/jellyfin-notifier.js';
-import { notifyPlex } from '../lib/requests/plex-notifier.js';
-import { INGEST_OUTCOMES, opportunisticIngestConfirm } from '../lib/requests/plex-ingest.js';
 import { confirmPlexEpisode } from '../lib/consumers/plex.js';
-import { materializeVfsEntry } from '../lib/vfs/materialize.js';
+import {
+  PublicationError,
+  verifyPublishedStrm,
+  publishSelectedHandoff,
+  republishHealthyHandoff,
+} from '../lib/requests/publication.js';
 import { DEMAND_PRIORITY } from '../lib/discovery/cache.js';
-import { inc, setPlexIngestObservation } from '../lib/metrics.js';
 
 /**
  * Minimum eligible corpus candidates before live discovery is triggered.
@@ -336,98 +336,6 @@ async function ensureStrmForExistingHandoff(cache, mediaId, mediaType, season = 
 }
 
 /**
- * Verify an existing .strm file for an already-published item without any
- * network calls. Tries the derived canonical path first (VFS presentation
- * identity → shared sanitizer rule), then falls back to a bounded
- * content sweep: the .strm filename always ends with ` - SNNENN.strm`
- * (episodes) and content always carries the resolver URL, so title
- * divergence between VFS and STRM resolution can never cause a false
- * miss. Returns the verified path, or null when missing/mismatched
- * (caller republishes instead of reporting false success).
- */
-async function verifyPublishedStrm({ vfsCanonicalPath, mediaType, mediaId, season, episode }) {
-  const isMovie = mediaType === 'movie';
-  const candidates = [];
-  const dirBase = path.posix.basename(path.posix.dirname(String(vfsCanonicalPath || '')));
-  if (dirBase) {
-    const m = dirBase.match(/^(.*) \((\d{4})\)$/);
-    candidates.push(expectedStrmPath({
-      title: m ? m[1] : dirBase,
-      year: m ? Number(m[2]) : null,
-      mediaType: isMovie ? 'movie' : 'series',
-      season,
-      episode,
-    }));
-  }
-  const root = process.env.STRM_OUTPUT_PATH || '/strm';
-  if (!isMovie && season != null && episode != null) {
-    // TV filenames are consumer-structural (`TV Shows/... - SNNENN.strm`)
-    // while VFS TV rows may carry mediaId-based names: sweep boundedly.
-    const code = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
-    const showsRoot = path.join(root, 'TV Shows');
-    try {
-      const shows = await fs.readdir(showsRoot, { withFileTypes: true });
-      for (const show of shows) {
-        if (!show.isDirectory()) continue;
-        const seasonDir = path.join(showsRoot, show.name,
-          `Season ${String(season).padStart(2, '0')}`);
-        let files;
-        try {
-          files = await fs.readdir(seasonDir);
-        } catch {
-          continue;
-        }
-        for (const f of files) {
-          if (f.endsWith(` - ${code}.strm`)) candidates.push(path.join(seasonDir, f));
-        }
-      }
-    } catch {
-      // No TV Shows tree — derived path (if any) already covers it.
-    }
-  }
-  if (isMovie) {
-    // Presentation titles can diverge between VFS and STRM resolution
-    // (request canonicals vs Cinemeta vs filename); content is the arbiter.
-    const moviesRoot = path.join(root, 'Movies');
-    try {
-      const dirs = await fs.readdir(moviesRoot, { withFileTypes: true });
-      for (const d of dirs) {
-        if (!d.isDirectory()) continue;
-        let files;
-        try {
-          files = await fs.readdir(path.join(moviesRoot, d.name));
-        } catch {
-          continue;
-        }
-        for (const f of files) {
-          if (f.endsWith('.strm')) candidates.push(path.join(moviesRoot, d.name, f));
-        }
-      }
-    } catch {
-      // No Movies tree — derived path (if any) already covers it.
-    }
-  }
-  for (const candidate of candidates) {
-    let content;
-    try {
-      content = await fs.readFile(candidate, 'utf8');
-    } catch {
-      continue;
-    }
-    const firstLine = content.split('\n')[0].trim();
-    if (isMovie) {
-      if (firstLine.includes(`/stream/movie/${mediaId}`)) return candidate;
-      continue;
-    }
-    if (!firstLine.includes(`/stream/series/${mediaId}`)) continue;
-    if (season != null && !firstLine.includes(`season=${season}`)) continue;
-    if (episode != null && !firstLine.includes(`episode=${episode}`)) continue;
-    return candidate;
-  }
-  return null;
-}
-
-/**
  * Fast-path reuse predicate + idempotent republication for already-healthy
  * published media.
  *
@@ -617,133 +525,21 @@ async function tryReuseHealthyPublication({
       }
     }
     // materializeVfsEntry re-asserts the stored identity against the existing
-    // row (throws on divergence → fall through to full discovery). publishStrm is idempotent.
-    let vfsEntry = null;
+    // row (throws on divergence → fall through to full discovery). The
+    // publication module owns the rest: converged .strm, Jellyfin, VFS
+    // hydration, and the confirm-then-notify Plex dispatch.
     try {
-      vfsEntry = await materializeVfsEntry(
+      await republishHealthyHandoff({
         cache,
-        handoff,
         controlPlaneStore,
-        undefined,
-        { allowLegacy: false },
-      );
-    } catch (error) {
-      console.error(`Reuse fast path found divergent publication, falling back to discovery: ${error.message}`);
-      return null;
-    }
-    try {
-      // Adopt an already-correct .strm when verification finds one: this
-      // skips the network title resolution inside publishStrm. Publish
-      // (create/migrate) only when nothing verified.
-      const adopted = await verifyPublishedStrm({
-        vfsCanonicalPath: vfsEntry?.canonicalPath,
+        handoff,
+        mediaId: handoff.mediaId,
         mediaType: handoff.mediaType,
-        mediaId,
-        season: handoff.season,
-        episode: handoff.episode,
-      }).catch(() => null);
-      let finalStrm = adopted
-        ? { published: true, path: adopted }
-        : await publishStrm({ handoff });
-      if (!adopted && finalStrm.path) {
-        // publishStrm trusts path existence, not content: a stale file at
-        // the expected path (wrong media identity) would be a false
-        // success. Verify once; on mismatch remove and republish exactly
-        // once so repair converges instead of compounding.
-        const verified = await verifyPublishedStrm({
-          vfsCanonicalPath: vfsEntry?.canonicalPath,
-          mediaType: handoff.mediaType,
-          mediaId,
-          season: handoff.season,
-          episode: handoff.episode,
-        }).catch(() => null);
-        if (verified !== finalStrm.path) {
-          try {
-            await fs.unlink(finalStrm.path);
-          } catch {
-            // Already gone; republish below recreates it.
-          }
-          finalStrm = await publishStrm({ handoff });
-        }
-      }
-      if (finalStrm.published && finalStrm.path) {
-        handoff.strmPath = finalStrm.path;
-      }
-      if (finalStrm.path) {
-        notifyJellyfin({
-          strmPath: finalStrm.path,
-          mediaId: handoff.mediaId,
-          mediaType: handoff.mediaType,
-        }).catch(() => {});
-      }
-      // Same hydration rule as the full path: hydrate authoritative VFS
-      // metadata so Plex never scans a size-NULL entry; skip the Plex
-      // notification when hydration fails.
-      let hydratedEntry = vfsEntry;
-      if (hydratedEntry && hydrateVfs) {
-        try {
-          if (handoff.mediaType === 'movie') {
-            await hydrateVfs.hydrateMovie(handoff.releaseKey);
-          } else if (typeof hydrateVfs.hydrateTv === 'function') {
-            await hydrateVfs.hydrateTv({
-              mediaId: handoff.mediaId,
-              season: handoff.season,
-              episode: handoff.episode,
-            });
-          }
-        } catch (hydrateError) {
-          console.error(`[Plex] Will be discovered on next scan: VFS metadata hydration failed for ${handoff.mediaId}: ${hydrateError.message}`);
-          hydratedEntry = null;
-        }
-      }
-      if (hydratedEntry) {
-        // Additive: when the Plex section is idle, run the deterministic
-        // transaction FIRST — validate -> quiesce -> targeted refresh ->
-        // observe scan -> verify resulting item. Running it before notifyPlex
-        // matters: notifyPlex queues a refresh of its own, which makes the
-        // section busy, so a confirm placed after it would always refuse.
-        // Episodes only: that is the geometry this seam proves.
-        if (isEpisode) {
-          const expectedPartFile = sectionRootFor(handoff.mediaType) && hydratedEntry.canonicalPath
-            ? `${sectionRootFor(handoff.mediaType)}/${hydratedEntry.canonicalPath.split('/').slice(1).join('/')}`
-            : null;
-          const ingest = await opportunisticPlexIngestConfirm({
-            mediaType: handoff.mediaType,
-            canonicalPath: hydratedEntry.canonicalPath,
-            mediaId: handoff.mediaId,
-            season,
-            episode,
-            expectedPartFile,
-            expectedSize: hydratedEntry.size ?? null,
-            // This sits on the request path, so keep the worst-case block
-            // small and strictly bounded. Busy/inconclusive are skips, not
-            // failures, so a tight bound costs nothing but latency.
-            timeoutMs: 20_000,
-            pollMs: 250,
-          });
-          if (ingest === INGEST_OUTCOMES.VERIFIED) {
-            // Positive confirmation is already established by the observed,
-            // verified transaction, so a second refresh of the same path would
-            // only add redundant scanner work. Skip it. (Anything other than
-            // verified falls through to today's behaviour below.)
-          } else {
-            // Busy / unconfirmed: exactly today's behaviour. The prepared
-            // replay contract must not race its own consumer notification, so
-            // still await the targeted refresh dispatch before confirming.
-            await notifyPlex({
-              mediaId: handoff.mediaId,
-              mediaType: handoff.mediaType,
-              canonicalPath: hydratedEntry.canonicalPath,
-            });
-          }
-        } else {
-          await notifyPlex({
-            mediaId: handoff.mediaId,
-            mediaType: handoff.mediaType,
-            canonicalPath: hydratedEntry.canonicalPath,
-          });
-        }
-      }
+        season,
+        episode,
+        isEpisode,
+        hydrateVfs,
+      });
     } catch (error) {
       console.error(`Reuse republication failed, falling back to discovery: ${error.message}`);
       return null;
@@ -795,165 +591,6 @@ function _getAvailabilityForCandidate(hit) {
   }
 
   return availability;
-}
-
-/**
- * Slice 1.75: pre-publication TorBox file identity binding seam.
- *
- * Calls the injected `ensureTorBoxFileIdentity` helper when a candidate has
- * an exact per-file size (selectedFileSize). Failures are logged and the
- * handoff is persisted with torrentFileId=null (legacy behavior). Success
- * returns the torrentFileId to thread into the handoff.
- *
- * @param {Object} params
- * @param {Function|null} params.ensureTorBoxFileIdentityFn
- * @param {Object|null} params.selected - the selected candidate (selection.selected)
- * @param {Object|null} params.reason - debug reason when binding is skipped
- * @returns {Promise<{ torrentFileId: string|null, identity: Object|null }>}
- */
-async function attemptTorBoxFileBinding({ ensureTorBoxFileIdentityFn, selected, reason }) {
-  if (typeof ensureTorBoxFileIdentityFn !== 'function') {
-    return { torrentFileId: null, identity: null };
-  }
-  if (!selected || !selected.infoHash) {
-    return { torrentFileId: null, identity: null };
-  }
-  const selectedFileSize =
-    Number.isSafeInteger(selected.selectedFileSize) && selected.selectedFileSize > 0
-      ? selected.selectedFileSize
-      : null;
-  if (selectedFileSize == null) {
-    return {
-      torrentFileId: null,
-      identity: { status: 'skipped', reason: reason || 'no-exact-selected-file-size' },
-    };
-  }
-  try {
-    const result = await ensureTorBoxFileIdentityFn({
-      infoHash: selected.infoHash,
-      selectedFileSize,
-      releaseKey: selected.releaseKey || null,
-    });
-    return {
-      torrentFileId: result?.torrentFileId ?? null,
-      identity: {
-        status: 'bound',
-        placementId: result?.placementId ?? null,
-        providerFileId: result?.providerFileId ?? null,
-        size: result?.size ?? null,
-        selectedFileSize,
-      },
-    };
-  } catch (error) {
-    const code = error?.code || 'BINDING_ERROR';
-    return {
-      torrentFileId: null,
-      identity: {
-        status: 'unbound',
-        code,
-        reason: error?.message || String(error),
-        selectedFileSize,
-      },
-    };
-  }
-}
-
-/**
- * Search for release candidates by media identity.
- *
- * @param {Object} cache - Discovery cache instance
- * @param {Object} request - Media request
- * @param {string} request.mediaId - Media ID (IMDB, TMDB, etc.)
- * @param {string} request.mediaType - 'movie' or 'series'
- * @param {number} [request.season] - Season number (series only)
- * @param {number} [request.episode] - Episode number (series only)
- * @param {number} [request.limit=50] - Max results
- * @param {number} [request.offset=0] - Pagination offset
- * @param {boolean} [request.persist=true] - Persist results to database
- * @param {number} [request.liveDiscoveryThreshold] - Min eligible corpus before live discovery
- * @param {boolean} [request.skipLiveDiscovery] - Skip live discovery fallback
- * @param {boolean} [request.skipAvailability] - Skip TorBox availability check
- * @param {Function} [request.ensureTorBoxFileIdentity] - Slice 1.75 helper
- *   injection. When present, searchByMedia calls it before persisting a
- *   durable playback handoff and threads the resulting torrentFileId into
- *   the handoff. When the helper is absent, handoffs are persisted with
- *   torrentFileId=null (legacy behavior). The function signature is
- *   `({ infoHash, selectedFileSize, releaseKey }) => Promise<{ placementId, providerFileId, torrentFileId, size }>`.
- * @returns {Promise<Object>} Ranked results with identity state and score breakdown
- */
-
-/** Section root for a mediaType, mirroring plex-notifier's configFor. */
-function sectionRootFor(mediaType, env = process.env) {
-  if (mediaType === 'movie') return env.PLEX_MOVIES_ROOT || null;
-  if (mediaType === 'series' || mediaType === 'tv') return env.PLEX_TV_ROOT || null;
-  return null;
-}
-
-/**
- * Additive, opportunistic deterministic Plex ingest confirmation.
- *
- * Runs ONLY when the relevant Plex section is idle, and never changes what a
- * caller must do when it is not:
- *   - busy section        -> returns 'busy'; today's behaviour continues
- *                           unchanged, no failure, no retry, no block
- *   - scan start/end      -> 'unconfirmed'; still normal unconfirmed publication
- *   - item not visible    -> 'unconfirmed'
- *   - invalid local path  -> 'invalid' (hard defect, never sent to PMS)
- *   - verified item       -> 'verified' (ratingKey + Part id + exact file + size)
- *
- * The value is convergence: when idle, the targeted refresh is requested AND
- * observed AND its resulting item verified, so the caller's normal Plex
- * visibility confirmation (which runs anyway, unchanged) sees the item instead
- * of racing it. Nothing here replaces that confirmation.
- */
-async function opportunisticPlexIngestConfirm({ mediaType, canonicalPath, mediaId, season = null, episode = null, expectedPartFile = null, expectedSize = null }) {
-  if (!canonicalPath) return null;
-  inc('plex_ingest_attempts_total');
-  let result;
-  try {
-    result = await opportunisticIngestConfirm({
-      mediaType,
-      canonicalPath,
-      mediaId,
-      season,
-      episode,
-      expectedPartFile,
-      expectedSize,
-      findResult: async () => {
-        const plex = await confirmPlexEpisode({
-          mediaId, season, episode,
-          ...(expectedPartFile ? { expectedPartFile } : {}),
-        });
-        if (!plex?.visible || !plex.mediaPart?.file) return null;
-        return {
-          partId: String(plex.mediaPart.id),
-          file: plex.mediaPart.file,
-          size: plex.mediaPart.size,
-          ratingKey: plex.ratingKey,
-        };
-      },
-    });
-  } catch (err) {
-    // Defensive: the helper is built not to throw, but publication must never
-    // break because an opportunistic confirm did.
-    console.error(`[Plex] opportunistic ingest confirm skipped for ${mediaId}: ${err?.message || err}`);
-    return null;
-  }
-  const metric = result?.metric || result;
-  if (metric) setPlexIngestObservation(metric);
-  const outcome = result?.outcome;
-  if (outcome === INGEST_OUTCOMES.VERIFIED) {
-    inc('plex_ingest_verified_total');
-    console.log(`[Plex] ingest verified media=${mediaId} part=${result.partId} file=${result.fileMatch ? 'exact' : 'MISMATCH'} size=${result.sizeMatch === null ? 'n/a' : (result.sizeMatch ? 'exact' : 'MISMATCH')} scanMs=${result.scanMs}`);
-  } else if (outcome === INGEST_OUTCOMES.BUSY) {
-    inc('plex_ingest_busy_total');
-  } else if (outcome === INGEST_OUTCOMES.INVALID) {
-    inc('plex_ingest_invalid_total');
-    console.error(`[Plex] ingest path rejected locally for ${mediaId}: ${result.fallbackReason} (not sent to Plex)`);
-  } else {
-    inc('plex_ingest_unconfirmed_total');
-  }
-  return outcome;
 }
 
 export async function searchByMedia(cache, request) {
@@ -1036,6 +673,13 @@ export async function searchByMedia(cache, request) {
     : (intent.season != null ? intent.season : null);
   const episode = request.episode != null ? parseInt(request.episode, 10)
     : (intent.episodes?.length > 0 ? intent.episodes[0] : null);
+
+  // Episode geometry, shared by publication dispatch and consumer
+  // confirmation: a series episode request always carries explicit
+  // coordinates; a movie request never does.
+  const hasEpisodeCoords = Number.isSafeInteger(season) && season >= 1
+    && Number.isSafeInteger(episode) && episode >= 1;
+  const isEpisode = mediaType === 'episode' || hasEpisodeCoords;
 
   // Fast path: reuse a healthy durable publication.
   //
@@ -1455,146 +1099,36 @@ export async function searchByMedia(cache, request) {
         try {
           cache.persistPlaybackHandoff(handoff);
           if (!prepareOnly) {
-          let vfsEntry = null;
-          let durablePublicationError = null;
+          // Presentation is one owned stage sequence (lib/requests/publication):
+          // authoritative VFS materialization → converged .strm → Jellyfin →
+          // VFS hydration → non-blocking Plex dispatch. Stage failures are
+          // typed so the caller keeps its exact reason codes.
           try {
-            vfsEntry = await materializeVfsEntry(
+            await publishSelectedHandoff({
               cache,
-              handoff,
-              request.controlPlaneStore ?? null,
-              undefined,
-              { allowLegacy: false },
-            );
-          } catch (error) {
-            durablePublicationError = error;
-            console.error(`VFS materialization failed: ${error.message}`);
-          }
-          if (handoff.torrentFileId && !vfsEntry && !durablePublicationError) {
-            durablePublicationError = new Error(`VFS publication blocked: TorrentFile validation failed for ${handoff.mediaId}`);
-          }
-          if (durablePublicationError) {
-            return {
-              requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
-              identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
-              discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
-              availability: availabilityStats, selection, handoff,
-              unfulfilled: true, retryOwned: true, published: false,
-              reason: 'durable-publication-failed', error: durablePublicationError.message,
-            };
-          }
-
-          // After durable handoff, immediately publish .strm
-          // Idempotent: safe to call for repeated requests
-          try {
-            const strmResult = await publishStrm({
+              controlPlaneStore: request.controlPlaneStore ?? null,
               handoff,
               selection,
+              mediaId,
+              mediaType,
+              season,
+              episode,
+              isEpisode,
+              hydrateVfs,
             });
-            if (strmResult.published) {
-              // Attach STRM path to handoff for downstream telemetry
-              handoff.strmPath = strmResult.path;
-            }
-
-            // Notify Jellyfin of the new media (non-blocking)
-            // Failure does NOT roll back the request/handoff/STRM
-            if (strmResult.path) {
-              notifyJellyfin({
-                strmPath: strmResult.path,
-                mediaId: handoff.mediaId,
-                mediaType: handoff.mediaType,
-              }).then((jfResult) => {
-                if (jfResult.notified) {
-                  console.log(`[Jellyfin] Notified via ${jfResult.method}: ${handoff.mediaId}`);
-                } else if (jfResult.error) {
-                  console.error(`[Jellyfin] Will be discovered on next scan: ${jfResult.error}`);
-                }
-              }).catch(() => {
-                // Jellyfin notification failure is non-fatal
-              });
-
-              // Hydrate authoritative VFS metadata (real provider size) before
-              // asking Plex to scan the directory. The PROPFIND listing only
-              // surfaces the durable vfs_*_entries row, so without this step
-              // Plex sees a 0-byte file and refuses to add the item.
-              if (vfsEntry && hydrateVfs) {
-                try {
-                  if (mediaType === 'movie') {
-                    if (typeof hydrateVfs.hydrateMovie !== 'function') {
-                      throw new Error('hydrateMovie not provided to searchByMedia');
-                    }
-                    const hydrated = await hydrateVfs.hydrateMovie(vfsEntry.releaseKey);
-                    if (hydrated?.size == null) {
-                      throw new Error('hydrateMovie returned no size');
-                    }
-                    console.log(`[vfs-hydrate] media=${handoff.mediaId} release=${hydrated.releaseKey} size=${hydrated.size} alreadyHydrated=${hydrated.alreadyHydrated === true}`);
-                  } else if (mediaType === 'series' || mediaType === 'tv') {
-                    if (typeof hydrateVfs.hydrateTv !== 'function') {
-                      throw new Error('hydrateTv not provided to searchByMedia');
-                    }
-                    const hydrated = await hydrateVfs.hydrateTv({
-                      mediaId: handoff.mediaId,
-                      season: handoff.season,
-                      episode: handoff.episode,
-                    });
-                    if (hydrated?.size == null) {
-                      throw new Error('hydrateTv returned no size');
-                    }
-                    console.log(`[vfs-hydrate] media=${handoff.mediaId} S${hydrated.season}E${hydrated.episode} size=${hydrated.size} alreadyHydrated=${hydrated.alreadyHydrated === true}`);
-                  }
-                } catch (hydrateError) {
-                  // Do not destroy the durable handoff/VFS entry on hydration
-                  // failure. Skip the Plex notification so we do not ask Plex
-                  // to scan a 0-byte/size-NULL directory.
-                  console.error(`[Plex] Will be discovered on next scan: VFS metadata hydration failed for ${handoff.mediaId}: ${hydrateError.message}`);
-                  if (vfsEntry) vfsEntry = null;
-                }
-              }
-
-              // Request Plex partial scan of the VFS directory that contains
-              // the new file. Failure does not invalidate the fulfillment.
-              if (vfsEntry) {
-                notifyPlex({
-                  mediaId: handoff.mediaId,
-                  mediaType: handoff.mediaType,
-                  canonicalPath: vfsEntry.canonicalPath,
-                }).then(async (plResult) => {
-                  if (plResult.notified) {
-                    console.log(`[Plex] Notified via ${plResult.method}: ${handoff.mediaId}`);
-                  } else if (plResult.error) {
-                    console.error(`[Plex] Will be discovered on next scan: ${plResult.error}`);
-                  }
-                }).then(async () => {
-                  // Additive and non-blocking: deterministic confirm when the
-                  // section is idle. Never throws, never changes publication
-                  // outcome on busy/timeout/unconfirmed.
-                  if (!isEpisode) return;
-                  const expectedPartFile2 = sectionRootFor(handoff.mediaType) && vfsEntry?.canonicalPath
-                    ? `${sectionRootFor(handoff.mediaType)}/${vfsEntry.canonicalPath.split('/').slice(1).join('/')}`
-                    : null;
-                  await opportunisticPlexIngestConfirm({
-                    mediaType: handoff.mediaType,
-                    canonicalPath: vfsEntry.canonicalPath,
-                    mediaId: handoff.mediaId,
-                    season,
-                    episode,
-                    expectedPartFile: expectedPartFile2,
-                    expectedSize: vfsEntry?.size ?? null,
-                    timeoutMs: 60_000,
-                    pollMs: 250,
-                  });
-                }).catch(() => {
-                  // Plex notification failure is non-fatal
-                });
-              }
-            }
-          } catch (strmError) {
+          } catch (publicationError) {
+            const stage = publicationError instanceof PublicationError ? publicationError.stage : null;
+            const reason = stage === 'strm-publication'
+              ? 'adapter-publication-failed'
+              : 'durable-publication-failed';
+            console.error(`Publication failed for ${mediaId} stage=${stage}: ${publicationError.message}`);
             return {
               requestId, intent, results: explainable, total, query: { mediaId, mediaType, season, episode },
               identitySummary: summarizeIdentity(explainable), ranking: tierMeta,
               discovery: { liveDiscoveryTriggered, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount },
               availability: availabilityStats, selection, handoff,
               unfulfilled: true, retryOwned: true, published: false,
-              reason: 'adapter-publication-failed', error: strmError.message,
+              reason, error: publicationError.message,
             };
           }
           } // end presentation gate (prepareOnly stops after handoff persist)
