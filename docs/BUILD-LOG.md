@@ -541,4 +541,4 @@ No planned work as completed. No vague "healthy." No speculative causes.
   (unchanged); future_intents.due() 0.04 ms (no index/projection work
   justified). Full suite 3219 pass / 10 fail, identical pre-existing set.
 - Production validation: scheduler cold-retry, priority classes, and P0
-  confirmation all behaving as before; placeholder.
+  confirmation all behaving as before; scheduler drain, cold-retry classification (cold=true), and 23 ms P0 retries all observed unchanged.
