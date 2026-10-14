@@ -675,6 +675,74 @@ no selection change), so every ranked candidate's reject reason is visible
 instead of being synthesized into one opaque `selection.reason`. This is what
 made the `queued` observation possible at all.
 
+## Cached-only fulfillment boundary, and why `no-bindable-candidate` is not a market miss (2026-10-13)
+
+### The question
+
+Does `prepare:no-handoff:no-bindable-candidate` mean "the market has nothing", or
+"the provider has nothing cached yet"? For `tt0159187` E02-E13 the answer is now
+measured, and the two are not the same thing.
+
+### What the provider layer actually does
+
+Pre-readiness probing is **cached-only by explicit design**, stated three times in
+three independent modules:
+
+- `resolver/torbox-file-identity.js` B.2 — "The addOnlyIfCached flag ensures we
+  NEVER initiate an uncached download." All four `createPlacement` call sites pass
+  `addOnlyIfCached: true`. The TorBox API accepts `addOnlyIfCached=false`; nothing
+  calls it that way.
+- `providers/realdebrid/ensure.js` header — "EVERY probe resource this ensure
+  creates that does not prove immediately-usable cached state is deleted in a
+  finally-grade path."
+- `control-plane/second-placement.js` — "discover-only: TorBox cached-gate, RD
+  account discovery, never an uncached addMagnet."
+
+Observed live for `tt0159187` E02 via the new `skippedCandidates` field:
+
+```
+rank=1 tb=uncached reason=TorBox placement failed
+rank=1 tb=uncached reason=INVALID_COORDINATES
+rank=1 tb=uncached reason=rd-not-cached:rd-not-downloaded:queued
+rank=1 tb=uncached reason=no-bindable-path
+```
+
+The third line is the important one: **Real-Debrid accepted the magnet and
+reported `queued`.** Acquisition is not impossible - it happened. The ensure then
+reached `if (status !== 'downloaded') { cleanupQuietly(rdId) }` and deleted the
+resource, because "not yet downloaded" is treated identically to "not cached".
+
+For E05/E13 the ranked candidates are season packs, and RD refuses them outright
+(`rd-add-failed:hard`). So that cluster is a genuine market miss for a different
+reason: no episode-specific release is cached anywhere, and the packs are refused.
+
+### The state-machine gap
+
+`provider_placements.state` in production holds only `ready` (286) and `removed`
+(1). There is no `queued` or `downloading`. `download_requests`
+(requested / resolving / materializing / staged) models *byte staging from an
+already-resolved TorrentFile*, not provider acquisition. The state HashSucker
+would need - "obligation waiting on provider-preparing" - does not exist.
+
+### Conclusion: proven product boundary, not a defect
+
+Every request-time ensure path is read-only with respect to durable acquisition:
+it may add a probing resource and must delete it unless the bytes are already
+cached. Building an acquisition state machine would be a new fulfillment stage
+(obligation -> waiting/provider-preparing -> poll inventory -> bind), and neither
+the provider capabilities nor the current architecture support it: there is no
+placement state for it, no obligation state for it, and no polling consumer.
+
+**Therefore `no-bindable-candidate` conflates two states** - "market miss" and
+"not cached yet" - and the honest fix is to make that visible rather than to start
+acquiring uncached releases.
+
+### What changed
+
+`skippedCandidates` is now surfaced on the prepare response (additive, read-only,
+no selection change), so every ranked candidate's reject reason is visible
+instead of being synthesised into one opaque `selection.reason`.
+
 ## Cold retry for exhausted season-owned aired obligations (2026-10-13)
 
 ### Old semantics
