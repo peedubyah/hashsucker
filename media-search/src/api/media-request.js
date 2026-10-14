@@ -1693,6 +1693,14 @@ export async function searchByMedia(cache, request) {
       unfulfilled: !prepareOnly,
       retryOwned: !prepareOnly,
       reason: !prepareOnly ? 'plex-confirmation-pending' : undefined,
+      ...(Array.isArray(selection.skipped) && selection.skipped.length > 0
+        ? { skippedCandidates: selection.skipped.slice(0, 25).map((s) => ({
+          infoHash: s.infoHash ?? null,
+          rank: s.rank ?? null,
+          torboxState: s.torboxState ?? null,
+          reason: s.reason ?? null,
+        })) }
+        : {}),
     };
   }
 
@@ -2263,6 +2271,14 @@ export async function searchByMedia(cache, request) {
     unfulfilled: !prepareOnly,
     retryOwned: !prepareOnly,
     reason: !prepareOnly ? 'durable-publication-incomplete' : undefined,
+    ...(Array.isArray(selection.skipped) && selection.skipped.length > 0
+      ? { skippedCandidates: selection.skipped.slice(0, 25).map((s) => ({
+        infoHash: s.infoHash ?? null,
+        rank: s.rank ?? null,
+        torboxState: s.torboxState ?? null,
+        reason: s.reason ?? null,
+      })) }
+      : {}),
   };
 }
 

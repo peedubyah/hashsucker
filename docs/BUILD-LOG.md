@@ -485,3 +485,31 @@ No planned work as completed. No vague "healthy." No speculative causes.
   restart durability and future-obligation non-interference; updated one
   existing test that had pinned the old unreachable semantics. Full suite
   3211 pass / 10 fail — identical pre-existing set.
+
+## 2026-10-13 — cached-only fulfillment boundary proven; no-bindable reason surfaced — LANDED
+
+- Changed: `/api/media-prepare` now returns `skippedCandidates` (rank, infoHash,
+  torboxState, per-candidate reject reason) on the two no-handoff return sites.
+  Additive and read-only; no selection or binding change.
+- Root finding: `no-bindable-candidate` is NOT purely a market miss. For
+  tt0159187 E02, Real-Debrid accepted the magnet and reported `queued`
+  (`rd-not-dached:rd-not-downloaded:queued`), and the ensure then DELETED the
+  resource because "not yet downloaded" is treated as "not cached".
+- Design boundary proven, three independent modules:
+  - torbox-file-identity.js B.2 "addOnlyIfCached ... we NEVER initiate an
+    uncached download" (all 4 call sites pass true)
+  - realdebrid/ensure.js "EVERY probe resource ... that does not prove
+    immediately-usable cached state is deleted"
+  - second-placement.js "never an uncached addMagnet"
+- State-machine gap: provider_placements.state vocabulary is only ready/removed
+  (286/1 live); no queued/downloading. download_requests models byte staging from
+  an already-resolved TorrentFile, not provider acquisition.
+- tt0159187 E05/E13 differ: ranked candidates are season packs, RD refuses them
+  (`rd-add-failed:hard`) — those are genuine market misses.
+- Deliberately NOT implemented: an acquisition state machine. It would be a new
+  fulfillment stage with no placement/obligation state and no polling consumer to
+  support it.
+- Bloodhound status: unchanged, still PARTIAL. It supplies candidates (53 for
+  E05/E13) but no authoritative representation; the blocker is the cached-only
+  boundary, not Bloodhound candidate supply.
+- Verification: full suite 3211 pass / 10 fail — identical pre-existing set.
