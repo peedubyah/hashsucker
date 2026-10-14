@@ -39,7 +39,7 @@ import { DEMAND_PRIORITY } from '../lib/discovery/cache.js';
 export const DEFAULT_LIVE_DISCOVERY_THRESHOLD = 1;
 
 /** Episode geometry: explicit season+episode coordinates (or legacy type). */
-export function episodeGeometry(mediaType, season, episode) {
+function episodeGeometry(mediaType, season, episode) {
   const hasEpisodeCoords = Number.isSafeInteger(season) && season >= 1
     && Number.isSafeInteger(episode) && episode >= 1;
   return mediaType === 'episode' || hasEpisodeCoords;
@@ -122,11 +122,6 @@ export function buildRequestContext(cache, request) {
       ? request.canonicalYear
       : null,
   };
-}
-
-/** Media-scale label used in discovery telemetry lines. */
-export function mediaScale(ctx) {
-  return `${ctx.mediaId} season=${ctx.season ?? ''} episode=${ctx.episode ?? ''}`;
 }
 
 /* ------------------------------------------------------------------ *
@@ -425,7 +420,7 @@ export function buildCorpusRankingInput({ cache, candidate, ctx, eligibilityByHa
 }
 
 /** Availability from stored provider observations for one ranked hit. */
-export function availabilityForCandidate(hit) {
+function availabilityForCandidate(hit) {
   const observations = hit.providerObservations || [];
   const availability = {};
 

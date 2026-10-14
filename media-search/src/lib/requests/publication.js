@@ -67,7 +67,7 @@ export async function materializeHandoff({ cache, controlPlaneStore, handoff }) 
  * Guard: a TorrentFile-bound handoff without a VFS entry is not published.
  * Shared so both callers fail with the same reason.
  */
-export function assertVfsEntry({ handoff, vfsEntry }) {
+function assertVfsEntry({ handoff, vfsEntry }) {
   if (handoff.torrentFileId && !vfsEntry) {
     throw new PublicationError('vfs-materialization',
       new Error(`VFS publication blocked: TorrentFile validation failed for ${handoff.mediaId}`));
@@ -83,7 +83,7 @@ export function assertVfsEntry({ handoff, vfsEntry }) {
  * remove and republish exactly once so repair converges instead of
  * compounding. Without a VFS row, publish directly.
  */
-export async function publishStrmConverged({ handoff, selection, vfsEntry }) {
+async function publishStrmConverged({ handoff, selection, vfsEntry }) {
   const verify = () => verifyPublishedStrm({
     vfsCanonicalPath: vfsEntry?.canonicalPath,
     mediaType: handoff.mediaType,
@@ -216,7 +216,7 @@ export async function verifyPublishedStrm({ vfsCanonicalPath, mediaType, mediaId
  * Stage 3: Jellyfin notification. Non-blocking and diagnostic-only: a
  * failure never destroys the durable handoff, VFS entry, or .strm.
  */
-export function notifyJellyfinBestEffort({ strmPath, handoff }) {
+function notifyJellyfinBestEffort({ strmPath, handoff }) {
   if (!strmPath) return;
   notifyJellyfin({
     strmPath,
@@ -239,7 +239,7 @@ export function notifyJellyfinBestEffort({ strmPath, handoff }) {
  * returned; any failure returns null so the caller skips the Plex
  * notification instead of asking Plex to scan a 0-byte/size-NULL entry.
  */
-export async function hydrateVfsMetadata({ vfsEntry, mediaType, mediaId, season = null, episode = null, hydrateVfs }) {
+async function hydrateVfsMetadata({ vfsEntry, mediaType, mediaId, season = null, episode = null, hydrateVfs }) {
   if (!vfsEntry || !hydrateVfs) return vfsEntry;
   try {
     if (mediaType === 'movie') {
@@ -268,7 +268,7 @@ export async function hydrateVfsMetadata({ vfsEntry, mediaType, mediaId, season 
  * Stage 5a: deterministic ingest confirmation, additive and bounded.
  * Returns the ingest outcome (or null when not applicable).
  */
-export async function confirmIngestForPublication({ vfsEntry, mediaType, mediaId, season = null, episode = null, timeoutMs = 20_000, pollMs = 250 }) {
+async function confirmIngestForPublication({ vfsEntry, mediaType, mediaId, season = null, episode = null, timeoutMs = 20_000, pollMs = 250 }) {
   if (!vfsEntry?.canonicalPath) return null;
   const expectedPartFile = sectionPartFileFor(mediaType, vfsEntry.canonicalPath);
   inc('plex_ingest_attempts_total');
@@ -334,7 +334,7 @@ export async function confirmIngestForPublication({ vfsEntry, mediaType, mediaId
  *    confirm is chained afterwards. The caller continues without blocking
  *    on scanner work; publication outcome is unchanged either way.
  */
-export async function notifyPlexForPublication({ vfsEntry, mediaType, mediaId, season = null, episode = null, isEpisode, mode }) {
+async function notifyPlexForPublication({ vfsEntry, mediaType, mediaId, season = null, episode = null, isEpisode, mode }) {
   if (!vfsEntry?.canonicalPath) return;
   const notify = () => notifyPlex({
     mediaId,

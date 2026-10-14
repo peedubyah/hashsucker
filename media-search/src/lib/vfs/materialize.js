@@ -173,13 +173,10 @@ function tryActivateAuthoritativeBinding({
 
   let binding;
   try {
-    console.warn('[vfs] activateBinding attempt', JSON.stringify({
-      libraryItemId: item.id, libraryPathId: libraryPath.id, torrentFileId: torrentFile.id,
-      infoHash: handoff.infoHash, fileIndex: handoff.fileIndex ?? null,
-      placementId, providerFileId, exposureId: exposure.id,
-      providerFilePresent: controlPlaneStore.getProviderFile?.(placementId, providerFileId)?.present ?? null,
-      providerFileMappingState: controlPlaneStore.getProviderFile?.(placementId, providerFileId)?.mappingState ?? null,
-    }));
+    // Diagnostic detail for a failed activation lives on the failure line
+    // below (bounded by the retry map), not on an attempt line: retries
+    // here are routine on the cache-only boundary and an attempt line per
+    // call buried the failures in noise.
     binding = controlPlaneStore.activateBinding({
       libraryItemId: item.id,
       libraryPathId: libraryPath.id,
@@ -197,8 +194,14 @@ function tryActivateAuthoritativeBinding({
     // A modern authoritative VFS entry cannot remain consumer-visible without
     // its exact active Binding. Remove only this exact orphaned TV projection;
     // durable TorrentFile/provider truth and the LibraryItem/path history stay.
+    // Episode-shaped handoffs arrive as 'series' (pipeline), 'tv' (operator
+    // fan-out rows), or 'episode' (legacy direct requests); the row itself is
+    // keyed by coordinates, so gate on those, not on one label.
     try {
-      if (handoff.mediaType === 'series' && typeof controlPlaneStore.getActiveBindingForLibraryItem === 'function'
+      const isEpisodeShaped = handoff.mediaType === 'series' || handoff.mediaType === 'tv'
+        || handoff.mediaType === 'episode';
+      if (isEpisodeShaped && handoff.season != null && handoff.episode != null
+        && typeof controlPlaneStore.getActiveBindingForLibraryItem === 'function'
         && !controlPlaneStore.getActiveBindingForLibraryItem(item.id)) {
         searchCache.deleteVfsTvEntry?.(handoff.mediaId, handoff.season, handoff.episode);
       }
