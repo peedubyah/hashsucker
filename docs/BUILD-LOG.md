@@ -575,3 +575,51 @@ No planned work as completed. No vague "healthy." No speculative causes.
 - Measurements: Tier-A idempotent episode request 27.0 ms before, 26.3–31.5 ms
   after (reuse=noop, fulfilled=True, Plex-confirmed); Tier-A movie noop 5–6 ms.
   Full suite 3241 tests / 3226 pass / 10 fail — identical pre-existing set.
+
+## 2026-10-14 — product-gap closure: scheduler wake semantics and Bloodhound completion — LANDED
+
+- Commits `e4a5b0e`. Resolves the entire known-failing test set (was 10
+  failures) and closes four real product gaps the failing tests exposed:
+  1. **Future intents wait cheaply.** An anticipated `future-not-released`
+     row outside its prepare window now has its poll parked at the window
+     open instead of being re-classified and re-listed in the due snapshot
+     on every interval until it can act.
+  2. **The prepare window is reachable.** Priority classification treated any
+     `future-not-released` row as non-actionable until its air date, so
+     `prepareDays` could never start preparation early. Inside the window the
+     row ranks with released work of the same class.
+  3. **Release wake is reachable.** A failed `future-not-released` row whose
+     `expected_at` has passed is actionable (P2, `releasedWake`), so the
+     scheduler clears the pre-release classification and grants exactly one
+     further attempt. The store already surfaced such rows as due; the
+     classifier parked them, so the wake logic was dead code.
+  4. **Bloodhound completes for corpus-sourced requests.** The corpus
+     pipeline had no live re-entry after exact binding failed, so a request
+     whose persisted rows were identity-valid but unbindable never consulted
+     the live market. It now performs the same bounded, one-fanout re-entry
+     as the live pipeline (gated on unreleased media and on not having
+     already consulted live in this attempt) and reports what each route
+     answered. Production evidence: `tt0159187` S1E2 now logs
+     `bloodhound trigger ... reason=no-bindable-candidate` and answers with
+     the typed provider reasons `TorBox placement failed`,
+     `rd-not-cached:rd-not-downloaded:queued`, `no-bindable-path` — a
+     provider-pending miss is now visually distinct from a market miss.
+- searchByMedia honors the release gate: requests carrying an authoritative
+  release/air date never run live discovery or Bloodhound while unreleased;
+  an explicit `liveOnly` request is an operator override and still works.
+- Two test seams are now real (and were silently ignored before, so the
+  acceptance and Bloodhound suites proved nothing): `request.liveDiscoveryFn`
+  and `request.confirmPlexFn`. Both default to the production implementation.
+- Stale tests rewritten around the current contract and driven through the
+  real entry path (tickOnce / the request API), including the prepared
+  republish contract: reuse performs no binding work; the bounded route
+  refresh that re-proves freshness for the authoritative Binding guard is
+  counted separately.
+- New coverage: `test/plex-scanner-pressure.test.js` (collection mtime is
+  durable and stable across repeated PROPFINDs — the scanner-churn root
+  cause), `test/cache-only-boundary.test.js` (uncached creates no acquisition
+  state; provider-pending vs market-miss reasons; RD queued not bindable).
+- Final counts: **3257 tests / 3252 pass / 0 fail / 5 skipped / 0 todo.**
+  The five skips are explicit and reasoned (external fixtures unavailable,
+  two documented "unbuilt" behaviors, one live-credential test, one opt-in
+  benchmark) — no hidden known-failing baseline remains.
