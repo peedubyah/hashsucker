@@ -77,12 +77,20 @@ never the canary's outcome.
 
 Skipped tests must carry an explicit reason in the `skip:` field. Current skips:
 
+Exactly **5** skipped tests, each with a reason. Reconcile this table against
+the runner's `skipped` count whenever it changes:
+
 | Skip | Reason | Revisit when |
 |---|---|---|
-| `stage3-fixture-harness` (2) | External fixture artifact not available | the artifact is published |
-| `worker-a-torbox-promotion` A10/A11 | Documented unimplemented behavior (`unbuilt:`) | those features are built — then implement or delete the tests |
+| `worker-a-torbox-promotion` A10 | Documented unimplemented behavior (`unbuilt:` Retry-After TTL) | built — then implement or delete the test |
+| `worker-a-torbox-promotion` A11 | Documented unimplemented behavior (`unbuilt:` endpoint-scoped backoff) | built — then implement or delete the test |
+| `stage3-fixture-harness` ranking fixture | External Stage 3 artifact; gated by `STAGE3_RANKING_FIXTURE=1` | the artifact is published |
 | `server.test.js` stream-404 | Requires live provider credentials | not planned |
-| `rd-acquisition` benchmark | Opt-in (`RD_BENCH=1`) | performance work |
+| `rd-acquisition` 1M benchmark | Opt-in (`RD_BENCH=1`) | performance work |
+
+(`stage3-fixture-harness` also contains a conditional `t.skip` for the
+functional fixture that only fires when that artifact is absent; it does not
+contribute to the count while the fixture is present.)
 
 No test may be left failing "because it is familiar": a failing test is either
 fixed, rewritten around the real contract, or deleted with its reason recorded.
