@@ -33,6 +33,14 @@ const counters = {
   uncached_candidates: 0,
   unknown_cache_state: 0,
 
+  // Byte route actually used by /stream consumers (Jellyfin, external).
+  // data_plane = authoritative cached path (the goal);
+  // provider_direct = the pre-change redirect, kept only when no Binding exists.
+  byte_route_data_plane_total: 0,
+  byte_route_provider_direct_total: 0,
+  byte_route_policy_cached_total: 0,
+  byte_route_policy_provider_total: 0,
+
   // Plex deterministic ingest (opportunistic, additive to the refresh path)
   plex_ingest_attempts_total: 0,
   plex_ingest_verified_total: 0,

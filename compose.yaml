@@ -17,6 +17,12 @@ services:
         VERSION: ${HASHSUCKER_VERSION:-latest}
     restart: unless-stopped
     environment:
+      # Byte route for /stream consumers: 'cached' routes Binding-backed
+      # playback through the Rust data-plane cache/coalescer (one shared
+      # provider transfer per TorrentFile); 'provider' (default) keeps the
+      # historical direct CDN redirect. Enable 'cached' once durable
+      # ProviderPlacements are healthy for the library.
+      STREAM_BYTE_ROUTE: ${STREAM_BYTE_ROUTE:-provider}
       PORT: "3000"
       HOST: "0.0.0.0"
       REQUESTS_ROOT: /requests

@@ -18,6 +18,12 @@ import {
 import { sendJson, readBody, sendStatic } from './http.js';
 import { rdEnsureForRequest } from '../lib/requests/provider-ensure.js';
 import { handleMediaDelivery } from './media-delivery.js';
+import { createLibraryIdentityKey } from '../lib/control-plane/canonical-path.js';
+import {
+  serveAuthoritativeBytes,
+  resolveAuthoritativeByteRoute,
+  ByteRouteError,
+} from './bytes-route.js';
 import { getControlPlaneHealth } from '../lib/control-plane/health.js';
 import { planReconciliation } from '../lib/control-plane/reconciler.js';
 import {
@@ -53,7 +59,7 @@ import { listLibrary } from '../lib/library/listing.js';
 import { buildDiagnostics } from '../lib/diagnostics/readiness.js';
 import { runReconcile } from '../lib/consumers/reconcile.js';
 import { evaluateRetirement, readRetirementPolicy } from '../lib/consumers/eligibility.js';
-import { setPlexRefreshAccount } from '../lib/metrics.js';
+import { setPlexRefreshAccount, inc } from '../lib/metrics.js';
 import {
   buildSeerrIntent,
   checkSeerrAuth,
@@ -514,6 +520,8 @@ export function createRequestHandler(dependencies = {}) {
   const combinedSearchFn = dependencies.combinedSearch || combinedSearch;
   const virtualFulfillment = dependencies.fulfillVirtualSelection || fulfillVirtualSelection;
   const searchByMediaFn = dependencies.searchByMedia || searchByMedia;
+  // Injectable fetch for the Rust data-plane byte proxy (tests inject a fake).
+  const fetchFn = dependencies.fetchFn || fetch;
   // Internal search uses a persistent discovery cache.
   // dbPath can be injected via dependencies or DISCOVERY_DB env var.
   // Defaults to in-memory for testing (when no dbPath provided).
@@ -1170,7 +1178,75 @@ export function createRequestHandler(dependencies = {}) {
           // Accept both 'selected' and 'debug' status — 'debug' means the handoff exists
           // but provider state is not usable, which triggers revalidation and potential fallback
           if (existingSelection && (existingSelection.status === 'selected' || existingSelection.status === 'debug')) {
-            // 1a. Selected candidate must be resolvable for redirect.
+            // 1a. AUTHORITATIVE CACHED BYTE ROUTE (Binding authority).
+            //
+            // When an active Binding exists for this exact media coordinate,
+            // the client is redirected to HashSucker's own cached byte
+            // endpoint (`/bytes/:tfId`) served by the Rust data plane. Rust
+            // owns bytes, so the fixed-grid cache, per-chunk single-flight
+            // coalescing, and same-TorrentFile provider recovery apply for
+            // both provider routes: two concurrent sessions on one
+            // TorrentFile share one provider transfer instead of each
+            // pulling the full file.
+            //
+            // This runs BEFORE the provider ladders deliberately: for
+            // already-durable bytes the provider API must not be touched at
+            // all (no unrestrict, no requestdl, no liveness probe). Rust
+            // performs its own acquisition through the S-1 control contract
+            // if and when it actually needs a fresh capability.
+            //
+            // No Binding (or an unreadable control plane) keeps the existing
+            // provider ladders below unchanged, and that case is loudly
+            // instrumented at the redirect via `x-hashsucker-byte-route`.
+            // Byte-route policy. `cached` is the target end state: Binding
+            // authority → Rust cached bytes, so concurrent sessions share
+            // provider work and the provider API is untouched at resolve
+            // time. It is gated because the data plane can only serve
+            // TorrentFiles whose durable ProviderPlacement is still healthy,
+            // and on this deployment 119 of 122 active-bound TorrentFiles
+            // are TorBox-only with a stale placement (the same rot that
+            // already breaks Plex's VFS path for them). `provider` keeps the
+            // historical redirect. The chosen route is always instrumented
+            // via `x-hashsucker-byte-route` and the counters below.
+            const byteRoutePolicy = (env.STREAM_BYTE_ROUTE ?? 'provider').trim().toLowerCase() === 'cached'
+              ? 'cached'
+              : 'provider';
+            if (byteRoutePolicy === 'cached') inc('byte_route_policy_cached_total');
+            else inc('byte_route_policy_provider_total');
+            const byteRoute = byteRoutePolicy === 'cached'
+              ? await resolveAuthoritativeByteRoute({
+                controlPlaneStore,
+                mediaType,
+                mediaId: rawId,
+                season: identity.season,
+                episode: identity.episode,
+              })
+              : null;
+            if (byteRoute?.torrentFileId) {
+              inc('byte_route_data_plane_total');
+              recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
+                infoHash: existingSelection.selectedHash,
+                releaseKey: existingSelection.releaseKey,
+                provider: existingSelection.provider,
+                availabilitySource: 'authoritative-binding',
+                providerCheckOccurred: false,
+              });
+              profiler.mark('byte-route-redirect');
+              profiler.mark('307-returned');
+              response.writeHead(307, {
+                location: byteRoute.url,
+                'cache-control': 'no-store',
+                'x-hashsucker-byte-route': 'data-plane',
+                'x-torrent-id': byteRoute.torrentFileId,
+                'x-availability-source': 'authoritative-binding',
+                'x-provider-check-occurred': 'false',
+                'x-resolver-profile': JSON.stringify(profiler.summary()),
+              });
+              response.end();
+              return;
+            }
+
+            // 1b. Selected candidate must be resolvable for redirect.
             // TorBox handoffs go through the TorBox sections below; RD
             // handoffs resolve via the RD block above (preferred delivery)
             // and must never enter TorBox revalidation/delivery. Anything
@@ -1365,11 +1441,31 @@ export function createRequestHandler(dependencies = {}) {
             }
 
             // 1d. Resolve TorBox delivery through the authoritative seam when
-            // the control plane is available. The seam owns the placement
-            // lifecycle, the requestdl step, the short-lived CDN URL cache,
-            // and the bounded stale-placement repair for a requestdl failure
-            // that can represent a missing upstream resource.
-            if (controlPlaneStore) {
+            // the control plane is available. No Binding exists at this point,
+            // so this remains the historical provider redirect.
+            // The seam owns the placement lifecycle, the requestdl step,
+            // the short-lived CDN URL cache, and the bounded stale-placement
+            // repair for a requestdl failure that can represent a missing
+            // upstream resource.
+            if (byteRoutePolicy === 'cached') {
+              // The operator asked for the cached path but no authoritative
+              // Binding exists. Fail loudly rather than silently degrading to
+              // a provider redirect that would recreate the amplification
+              // this route exists to remove.
+              recordTelemetry(RESOLVER_OUTCOME.FAILED, 'NO_AUTHORITATIVE_BINDING', null, {
+                infoHash: existingSelection.selectedHash,
+                releaseKey: existingSelection.releaseKey,
+                provider: existingSelection.provider,
+              });
+              return sendJson(response, 409, {
+                error: 'Cached byte route requested but no authoritative Binding exists for this media',
+                code: 'NO_AUTHORITATIVE_BINDING',
+                mediaId: rawId,
+                mediaType,
+              });
+            }
+
+            if (controlPlaneStore && typeof resolveTorBoxDeliverySeam === 'function') {
               try {
                 const delivery = await resolveTorBoxDeliverySeam({
                   infoHash: existingSelection.selectedHash,
@@ -1380,6 +1476,7 @@ export function createRequestHandler(dependencies = {}) {
                 profiler.mark('torbox-delivery-resolved');
                 if (delivery.recovered) profiler.mark('torbox-delivery-recovered');
 
+                inc('byte_route_provider_direct_total');
                 recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
                   infoHash: existingSelection.selectedHash,
                   releaseKey: existingSelection.releaseKey,
@@ -1391,6 +1488,7 @@ export function createRequestHandler(dependencies = {}) {
                 response.writeHead(307, {
                   location: delivery.url,
                   'cache-control': 'no-store',
+                  'x-hashsucker-byte-route': 'provider-direct',
                   'x-torrent-id': delivery.placementId,
                   'x-file-id': delivery.providerFileId,
                   'x-availability-source': revalidation.availabilitySource,
@@ -2595,6 +2693,31 @@ export function createRequestHandler(dependencies = {}) {
           request, response, controlPlaneStore, env,
         });
         if (handled) return;
+      }
+      // Authoritative cached bytes for external consumers (Jellyfin's STRM
+      // URL lands here after /stream resolves the Binding). Node owns the
+      // identity already resolved by the caller; Rust owns the bytes.
+      const bytesMatch = request.method === 'GET'
+        && url.pathname.match(/^\/bytes\/([^/]+)$/);
+      if (bytesMatch) {
+        try {
+          await serveAuthoritativeBytes({
+            request,
+            response,
+            tfId: bytesMatch[1],
+            dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://data-plane:3001',
+            fetchFn,
+          });
+          return;
+        } catch (error) {
+          if (error instanceof ByteRouteError) {
+            return sendJson(response, error.status, {
+              error: error.message,
+              code: error.code,
+            });
+          }
+          throw error;
+        }
       }
       if (request.method === 'GET' && staticRoot && !url.pathname.startsWith('/api/')) {
         const served = await sendStatic(response, url.pathname, staticRoot);

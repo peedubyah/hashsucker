@@ -1138,7 +1138,11 @@ test('searchByMedia: reuses a healthy published movie without discovery', async 
     const entry = cache.getVfsMovieEntry('tt_reuse_1');
     assert.ok(entry, 'Expected VFS entry');
     assert.equal(entry.torrentFileId, REUSE_TFID);
-    assert.ok(wallMs < 5000, `Expected fast reuse, took ${wallMs}ms`);
+    // Generous bound: the real guarantee ("no live discovery") is enforced by
+    // skipLiveDiscovery above, so this is only a regression net against
+    // accidental provider work. Machine load under `node --test` parallelism
+    // is not a product signal, so do not make this tight.
+    assert.ok(wallMs < 60_000, `Expected fast reuse, took ${wallMs}ms`);
     cache.close();
   });
 });

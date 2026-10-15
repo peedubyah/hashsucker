@@ -1096,3 +1096,77 @@ Implication for future work: routing Jellyfin through the VFS/data-plane
 path (or a cache-fronted stream path) is the only way Jellyfin concurrency
 stops multiplying provider work. That is a product routing decision, not a
 coalescing defect.
+
+## Cached byte route for /stream consumers (2026-10-15)
+
+### Before / after route diagram
+
+```
+BEFORE
+Jellyfin STRM → /stream/movie/<id>
+  → media-search resolves identity (handoff → RD ladder / TorBox seam)
+  → 307 to provider CDN
+  → every client session pulls its own bytes (no cache, no coalescing)
+
+AFTER (STREAM_BYTE_ROUTE=cached)
+Jellyfin STRM → /stream/movie/<id>
+  → media-search resolves the SAME identity (handoff; no re-selection)
+  → resolveAuthoritativeByteRoute(): the ACTIVE Binding for the exact
+    library identity names the authoritative TorrentFile
+  → 307 to /bytes/<tfId>
+  → media-search proxies the Rust data plane /files/<tfId>
+  → Rust serves bytes: fixed-grid cache + per-chunk single-flight
+    coalescing + same-TorrentFile provider recovery
+```
+
+Published STRMs keep their `/stream/...` URL; only the backing changed.
+
+### Code
+- `src/server/bytes-route.js`: `resolveAuthoritativeByteRoute` (Binding
+  authority → byte route) and `serveAuthoritativeBytes` (proxy the data
+  plane verbatim: Range forwarded, 206/416/Content-Range/Accept-Ranges and
+  Retry-After preserved, client abort tears down the upstream).
+- `src/server/app.js`: `/bytes/:tfId` route; the `/stream` ladder gained a
+  Binding-first byte-route step ahead of both provider ladders.
+- `src/lib/metrics.js`: `byte_route_policy_{cached,provider}_total`,
+  `byte_route_data_plane_total`, `byte_route_provider_direct_total`, and
+  the `x-hashsucker-byte-route` response header.
+
+### Measured effect (production, Black Panther `tf_5de34a78…`, healthy route)
+| Metric | Before (provider redirect) | After (cached byte route) |
+|---|---|---|
+| Provider-control calls per /stream resolution | 1+ (RD unrestrict, liveness, or requestdl) | **0** (5 resolutions → zero counter delta) |
+| Two concurrent same-file sessions | 2 × 4,324,743,102 B (**~8.6 GB**) | 1 shared fill; repeat reads 0 extra origin bytes |
+| Cold concurrent pair, same chunk | 2 full pulls | **1 fill** (fetched_upstream +8,388,608, joins +1) |
+| Warm repeat reads (3 clients) | 3 full pulls | 0 extra origin bytes, TTFB 4–9 ms |
+| Origin request count for 3 overlapping reads | 3 | 1 (coalesced) |
+
+Byte-exactness verified by sha256 across clients; overlapping regions
+identical.
+
+### Blocking incompatibility found (why the default is still `provider`)
+Routing through the data plane requires a durable ProviderPlacement the
+data plane can serve. On this deployment, 119 of 122 active-bound
+TorrentFiles are TorBox-only, and their TorBox resources are stale, so
+Rust's cached-only acquisition fails (502 / hang). The pre-change `/stream`
+route could resolve those on the fly via Real-Debrid cross-provider add,
+which the data plane deliberately cannot do (cache-only).
+
+The same staleness already breaks Plex's `/vfs` path for those titles
+(pre-existing; verified by stashing this change and re-testing). So the
+routing change is not a new failure class — but enabling it by default
+would move Jellyfin from "works via on-the-fly RD" to "fails on provider
+rot".
+
+Decision: `STREAM_BYTE_ROUTE` gates the new path and defaults to
+`provider` (no regression). Set it to `cached` once placements are healthy;
+the mechanism, contract tests, and measurements are all in place.
+
+### Failure semantics (objective 10 preserved)
+- no Binding + `cached` policy → 409 `NO_AUTHORITATIVE_BINDING` (loud; no
+  silent degradation to the amplification path);
+- data-plane 416 → surfaced as 416 to the client (players need it);
+- data-plane 5xx / exhaustion → surfaced as that status with the data
+  plane's code, never retargeted at a provider URL;
+- no-Binding + `provider` policy → historical redirect with
+  `x-hashsucker-byte-route: provider-direct`.
