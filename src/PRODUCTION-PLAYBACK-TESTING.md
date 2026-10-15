@@ -1056,3 +1056,43 @@ cost or an ambiguous either-way decision.
 
 **Not yet wired.** `notifyPlex()` itself remains fire-and-forget for the case
 where the seam does not verify.
+
+## Jellyfin concurrency characterization (2026-10-15)
+
+Measured against the real deployment (Jellyfin 12.1.0, library at
+`/home/patrick/hashsucker-data/strm/Movies` → STRM → `http://<edge>/stream/movie/<id>`).
+
+Observed client behavior (Jellyfin server-side fetch, `Lavf/62.12.103`):
+- playback issues a mid-file probe (`bytes=122599-`), a near-EOF tail read
+  (`bytes=4340536276-`), and a full read (`bytes=0-`);
+- each request opens a fresh connection (`Connection: close`);
+- `/Videos/{id}/stream` ignores the caller's Range and Jellyfin re-slices
+  internally, so the client's Range header does not bound the provider pull.
+
+Path asymmetry (this is the important part):
+- **Jellyfin plays through the `/stream` resolver**, which 307-redirects to
+  the provider CDN. Bytes therefore bypass the data-plane cache and the
+  coalescer entirely.
+- **Plex plays through the `/vfs` WebDAV path** into the data plane, where
+  fixed-grid caching, per-chunk single-flight coalescing, and the breaker
+  apply.
+
+Consequences measured in this pass:
+- two Jellyfin sessions on the SAME TorrentFile each pulled the full file:
+  2 x 4,324,743,102 B from the provider (~8.6 GB) for one title. Fill
+  amplification is linear in sessions and unbounded by file size.
+- a Jellyfin transcode of a full-quality title over the redirect source
+  exceeds Jellyfin's own transcode budget and dies with FFmpeg exit 234 →
+  HTTP 500 from `/Videos/{id}/stream`. The provider-side redirect gives no
+  caching to amortize it.
+
+Serve-layer coalescing itself is proven (data-plane tests
+`serve_layer_coalescing.rs`, 7 tests): two overlapping readers produce
+exactly one origin fill, a late joiner attaches to an in-flight fill,
+cancellation does not cancel the other reader's work, no duplicate durable
+writes, no cross-TorrentFile sharing, and near-EOF/416 semantics are exact.
+
+Implication for future work: routing Jellyfin through the VFS/data-plane
+path (or a cache-fronted stream path) is the only way Jellyfin concurrency
+stops multiplying provider work. That is a product routing decision, not a
+coalescing defect.
