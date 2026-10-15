@@ -354,6 +354,10 @@ pub struct CapabilityManager {
     neg_ttl: Duration,
     pub pool_growth_reasons: Mutex<Vec<String>>,
     pool_max_default: usize,
+    /// Endpoint-scoped provider backoff evidence (see retry_after.rs). Scoped
+    /// to the ACQUISITION API boundary (provider, account_scope) because that
+    /// endpoint's quota is per account; byte delivery stays per-capability.
+    retry_after: Arc<crate::retry_after::RetryAfterLedger>,
 }
 
 /// Transient errors (429/5xx) must never become long-lived negative state (§7). Only
@@ -464,6 +468,7 @@ impl CapabilityManager {
             keys,
             client,
             metrics,
+            retry_after: Arc::new(crate::retry_after::RetryAfterLedger::new()),
             inflight: AsyncMutex::new(HashMap::new()),
             neg_cache: Mutex::new(HashMap::new()),
             neg_ttl,
@@ -597,6 +602,13 @@ impl CapabilityManager {
                     }
                 }
                 let res = provider::acquire(&coord, &tf, &keys, &client, &metrics).await;
+                // A11: a provider Retry-After from the acquisition API describes
+                // the ACCOUNT (this endpoint's quota), not this one resource, so
+                // it is recorded at (provider, account_scope) and suppresses
+                // acquire for every resource of that scope until it expires.
+                if let Err(AcquireError::RateLimited(Some(ra))) = &res {
+                    self.retry_after.record(&coord.provider, &coord.account_scope, *ra);
+                }
                 // P15: log first-ever attempt per slot (one line per slot per
                 // process lifetime, guarded by a static mutex). This is the
                 // evidence that a given provider's slot was actually exercised
@@ -723,6 +735,16 @@ impl CapabilityManager {
             for _ in 0..evicted {
                 self.metrics.record_cap_eviction();
             }
+        }
+        // 0a) endpoint-scoped provider backoff: the acquisition API for this
+        // (provider, account_scope) is inside a server-instructed Retry-After
+        // horizon. Skip WITHOUT recording a breaker failure (a provider
+        // directive is not a capability defect) and leave the slot intact so
+        // the horizon's expiry restores eligibility. Scopes unaffected by the
+        // directive still acquire normally.
+        if let Some(wait) = self.retry_after.blocked_for(&slot.coord.provider, &slot.coord.account_scope) {
+            self.metrics.record_retry_after(None, wait.as_secs());
+            return Err(AcquireError::RateLimited(Some(wait)));
         }
         // 1) existing usable + free capability -> REUSE (counted)
         if let Some(cap) = self.first_usable_free(slot, now) {
@@ -1587,5 +1609,129 @@ impl CapabilityManager {
         }
         let slots_after = fresh.slots.len();
         finish(RefreshStatus::Refreshed, fresh, slots_before, slots_after)
+    }
+}
+
+
+// ---- Endpoint-scoped Retry-After (A11) wiring tests -------------------------
+//
+// Deterministic: the manager is built with EMPTY api keys, so a slot that is
+// NOT suppressed reaches `provider::acquire` and fails fast with
+// `NoCapability("missing API key")` — zero network. A suppressed slot must
+// answer with the provider directive instead, which is the observable
+// difference the pre-check produces.
+#[cfg(test)]
+mod retry_after_scope_tests {
+    use super::*;
+    use crate::capability::ApiKeys;
+    use crate::control::{ControlTorrentFile, ProviderCoord};
+
+    fn tf() -> ControlTorrentFile {
+        ControlTorrentFile {
+            id: "tf-a11".into(),
+            info_hash: "a".repeat(40),
+            canonical_internal_path: Some("Show/Season 01/Show - S01E01.mkv".into()),
+            size: 1000,
+        }
+    }
+
+    fn coord(provider: &str, account_scope: &str, resource: &str, file: &str) -> ProviderCoord {
+        ProviderCoord {
+            provider: provider.into(),
+            account_scope: account_scope.into(),
+            provider_resource_id: resource.into(),
+            provider_file_id: file.into(),
+            state: "ready".into(),
+            canonical_internal_path: Some("Show/Season 01/Show - S01E01.mkv".into()),
+            size: 1000,
+        }
+    }
+
+    fn build(coords: Vec<ProviderCoord>) -> CapabilityManager {
+        CapabilityManager::new(
+            tf(),
+            coords,
+            ApiKeys { torbox: String::new(), realdebrid: String::new() },
+            reqwest::Client::new(),
+            Arc::new(Metrics::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_account_directive_suppresses_acquire_for_every_resource_of_that_scope() {
+        let mgr = build(vec![
+            coord("torbox", "default", "res-a", "0"),
+            coord("torbox", "default", "res-b", "0"),
+            coord("torbox", "secondary", "res-c", "0"),
+        ]);
+        assert_eq!(mgr.slots.len(), 3, "one slot per placement");
+
+        // The provider says: this ACCOUNT must not acquire for 60s.
+        mgr.retry_after.record("torbox", "default", Duration::from_secs(60));
+
+        let now = Instant::now();
+        for slot in mgr.slots.iter().filter(|s| s.coord.account_scope == "default") {
+            let err = match mgr.try_slot(slot, now, 0).await {
+            Ok(_) => panic!("suppressed"),
+            Err(e) => e,
+        };
+            assert!(
+                matches!(err, AcquireError::RateLimited(Some(_))),
+                "the provider directive is surfaced, got {err:?}"
+            );
+        }
+        // The other account scope of the SAME provider is unaffected, and its
+        // slot reaches the (fast-failing, keyless) acquire path — a DIFFERENT
+        // error class proves it was not blocked by the directive.
+        let other = mgr.slots.iter().find(|s| s.coord.account_scope == "secondary").unwrap();
+        let blocked = matches!(
+            mgr.try_slot(other, now, 0).await,
+            Err(AcquireError::RateLimited(_))
+        );
+        assert!(!blocked,
+            "an unrelated account scope must not inherit the directive");
+    }
+
+    #[tokio::test]
+    async fn another_provider_is_never_suppressed_by_a_torbox_directive() {
+        let mgr = build(vec![
+            coord("torbox", "default", "res-a", "0"),
+            coord("realdebrid", "default", "res-b", "0"),
+        ]);
+        mgr.retry_after.record("torbox", "default", Duration::from_secs(60));
+
+        let now = Instant::now();
+        let rd = mgr.slots.iter().find(|s| s.coord.provider == "realdebrid").unwrap();
+        let blocked = matches!(
+            mgr.try_slot(rd, now, 0).await,
+            Err(AcquireError::RateLimited(_))
+        );
+        assert!(!blocked, "provider scoping is respected");
+    }
+
+    #[tokio::test]
+    async fn expired_evidence_restores_eligibility() {
+        let mgr = build(vec![coord("torbox", "default", "res-a", "0")]);
+        mgr.retry_after.record("torbox", "default", Duration::from_secs(60));
+        let slot = &mgr.slots[0];
+        let now = Instant::now();
+        assert!(matches!(
+            mgr.try_slot(slot, now, 0).await,
+            Err(AcquireError::RateLimited(Some(_)))
+        ));
+
+        // Force the horizon into the past (monotonic clock; no sleeps). The
+        // stale evidence must read as absent, restoring normal eligibility.
+        let past = Instant::now() - Duration::from_secs(1);
+        mgr.retry_after
+            .blocked_until
+            .lock()
+            .unwrap()
+            .insert(("torbox".to_string(), "default".to_string()), past);
+        let blocked = matches!(
+            mgr.try_slot(slot, now, 0).await,
+            Err(AcquireError::RateLimited(_))
+        );
+        assert!(!blocked, "expired evidence must never suppress");
     }
 }

@@ -678,7 +678,7 @@ test('A9: CDN 429 → temporary evidence, capability retained', () => {
 // never built: temporary evidence expires on a fixed TTL. This test
 // documents the gap and stays skipped until that behavior is implemented.
 // The surrounding temporary-not-terminal contract is covered by A8/A9.
-test('A10: CDN 429 Retry-After honored, capability retained, one safe replay', { skip: 'unbuilt: temporary evidence expiry ignores Retry-After (fixed TTL)' }, async () => {
+test('A10: CDN 429 Retry-After honored, capability retained, one safe replay', async () => {
   const controlPlane = createControlPlaneStore({ now: () => 1_700_000_000_000 });
   const evidence = createTerminalDeliveryEvidenceStore({
     controlPlaneStore: controlPlane,
@@ -718,7 +718,7 @@ test('A10: CDN 429 Retry-After honored, capability retained, one safe replay', {
 
 // Same reason as A10: per-endpoint backoff accounting was never built.
 // Skipped (documents the gap); A8/A9 cover temporary-not-terminal.
-test('A11: temporary TorBox backoff does not invoke RD repeatedly', { skip: 'unbuilt: endpoint-scoped backoff accounting' }, () => {
+test('A11: temporary TorBox backoff does not invoke RD repeatedly', () => {
   const controlPlane = createControlPlaneStore({ now: () => 1_700_000_000_000 });
   const evidence = createTerminalDeliveryEvidenceStore({
     controlPlaneStore: controlPlane,
@@ -753,6 +753,79 @@ test('A11: temporary TorBox backoff does not invoke RD repeatedly', { skip: 'unb
   assert.equal(evidence.findTerminal(backing), null, 'still not terminal');
   // The temp is not "stale" — Retry-After is honored.
   assert.ok(temp.expiresAt > 1_700_000_000_000);
+});
+
+// ---------------------------------------------------------------------------
+// A10/A11 follow-through: the durable evidence contract for provider
+// Retry-After directives (the runtime enforcement is Rust-side; this proves
+// the durable evidence layer records the instruction and scopes it).
+// ---------------------------------------------------------------------------
+
+test('A10a: Retry-After sets the durable horizon; a value over the policy TTL is bounded', () => {
+  const controlPlane = createControlPlaneStore({ now: () => 1_700_000_000_000 });
+  const evidence = createTerminalDeliveryEvidenceStore({
+    controlPlaneStore: controlPlane,
+    now: () => 1_700_000_000_000,
+  });
+  const placement = controlPlane.recordPlacement({
+    provider: 'torbox', accountScope: 'default',
+    infoHash: PRIMARY_HASH, providerResourceId: 'torbox-ttl',
+    state: 'ready', ownership: 'owned', ownerKey: 'worker-a-test',
+    provenance: 'torbox-delivery-resolver',
+    observedAt: 1_700_000_000_000 - 1_000,
+    expiresAt: 1_700_000_000_000 + 5 * 60_000,
+  });
+  const backing = { provider: 'torbox', accountScope: 'default', placementId: placement.id, providerFileId: '5' };
+
+  // Under the policy TTL: the instruction IS the horizon.
+  evidence.recordTemporary({ ...backing, retryAfter: 30, endpointClass: 'cdn', observedAt: 1_700_000_000_000 });
+  const under = evidence.findTemporary(backing);
+  assert.equal(under.retryAfter, 30, 'instruction recorded in provider units');
+  assert.equal(under.endpointClass, 'cdn', 'the reporting execution scope is recorded');
+  assert.equal(under.expiresAt, 1_700_000_000_000 + 30_000, 'horizon == instruction');
+
+  // Over the policy TTL: a bogus header cannot outlive the evidence policy.
+  evidence.recordTemporary({ ...backing, retryAfter: 86_400, endpointClass: 'cdn', observedAt: 1_700_000_000_000 });
+  const over = evidence.findTemporary(backing);
+  assert.ok(over.expiresAt <= 1_700_000_000_000 + 5 * 60_000,
+    'durable evidence is bounded by the policy TTL even for an absurd instruction');
+
+  // Malformed: falls back to the policy TTL, never a bogus horizon.
+  evidence.recordTemporary({ ...backing, retryAfter: 'soon', endpointClass: 'cdn', observedAt: 1_700_000_000_000 });
+  const bad = evidence.findTemporary(backing);
+  assert.equal(bad.expiresAt, 1_700_000_000_000 + 5 * 60_000, 'malformed Retry-After -> policy TTL');
+});
+
+test('A11a: backoff evidence is scoped to the reporting endpoint, not the mapping', () => {
+  const controlPlane = createControlPlaneStore({ now: () => 1_700_000_000_000 });
+  const evidence = createTerminalDeliveryEvidenceStore({
+    controlPlaneStore: controlPlane,
+    now: () => 1_700_000_000_000,
+  });
+  const placement = controlPlane.recordPlacement({
+    provider: 'torbox', accountScope: 'default',
+    infoHash: PRIMARY_HASH, providerResourceId: 'torbox-scope',
+    state: 'ready', ownership: 'owned', ownerKey: 'worker-a-test',
+    provenance: 'torbox-delivery-resolver',
+    observedAt: 1_700_000_000_000 - 1_000,
+    expiresAt: 1_700_000_000_000 + 5 * 60_000,
+  });
+  const cdnBacking = { provider: 'torbox', accountScope: 'default', placementId: placement.id, providerFileId: '5' };
+  const siblingBacking = { provider: 'torbox', accountScope: 'default', placementId: placement.id, providerFileId: '6' };
+
+  evidence.recordTemporary({ ...cdnBacking, retryAfter: 60, endpointClass: 'cdn', observedAt: 1_700_000_000_000 });
+
+  // The throttled file is bounded; its sibling is untouched — a CDN backoff is
+  // per capability, not per placement.
+  assert.equal(evidence.findTemporary(cdnBacking).endpointClass, 'cdn');
+  assert.equal(evidence.findTemporary(siblingBacking), null,
+    "an unrelated provider file must not inherit another file backoff");
+  assert.equal(evidence.classifyProviderState(siblingBacking), 'usable',
+    'the sibling mapping is not penalized by a backoff it never saw');
+
+  // A temporary row never promotes the mapping to terminal.
+  assert.equal(evidence.findTerminal(cdnBacking), null, 'backoff is not a dead mapping');
+  assert.equal(evidence.classifyProviderState(cdnBacking), 'temporary');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

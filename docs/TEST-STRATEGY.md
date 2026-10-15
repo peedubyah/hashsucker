@@ -59,6 +59,15 @@ when the behavior is deliberately broken (local patches only, never committed).
 | Republish ingest-confirm branch removed | `publication-contract.test.js` (P5/P6) |
 | Stale handoff allowed to override active Binding | `vfs-authoritative-invariants.test.js`, `binding-authority-slice.test.js` |
 
+Rust-side mutations (proved with the data-plane's own suite):
+
+| Mutation | Caught by |
+|---|---|
+| `addOnlyIfCached: true → false` (uncached acquisition) | `capability::retry_after_tests` + `torbox-cache-only-callsite.test.js` |
+| Retry-After horizon unbounded (a bogus header wedges a capability) | `capability::retry_after_tests::delta_seconds_are_bounded_...` |
+| Backoff evidence keyed too widely (provider-only, ignoring account scope) | `manager::retry_after_scope_tests::a_directive_blocks_only_its_own_scope` |
+| Retry-After evidence never expiring | `retry_after::tests::evidence_expires_automatically_and_reads_as_absent` |
+
 Run the mutation harness to re-verify after any change to these paths.
 
 ## What only the production canary proves
@@ -77,16 +86,18 @@ never the canary's outcome.
 
 Skipped tests must carry an explicit reason in the `skip:` field. Current skips:
 
-Exactly **5** skipped tests, each with a reason. Reconcile this table against
+Exactly **3** skipped tests, each with a reason. Reconcile this table against
 the runner's `skipped` count whenever it changes:
 
 | Skip | Reason | Revisit when |
 |---|---|---|
-| `worker-a-torbox-promotion` A10 | Documented unimplemented behavior (`unbuilt:` Retry-After TTL) | built — then implement or delete the test |
-| `worker-a-torbox-promotion` A11 | Documented unimplemented behavior (`unbuilt:` endpoint-scoped backoff) | built — then implement or delete the test |
 | `stage3-fixture-harness` ranking fixture | External Stage 3 artifact; gated by `STAGE3_RANKING_FIXTURE=1` | the artifact is published |
 | `server.test.js` stream-404 | Requires live provider credentials | not planned |
 | `rd-acquisition` 1M benchmark | Opt-in (`RD_BENCH=1`) | performance work |
+
+(A10 and A11 were `unbuilt:` skips documenting data-plane reliability gaps;
+both behaviors are now implemented with Rust-native tests, and the Node-side
+durable-evidence contract tests are live. The skips no longer exist.)
 
 (`stage3-fixture-harness` also contains a conditional `t.skip` for the
 functional fixture that only fires when that artifact is absent; it does not

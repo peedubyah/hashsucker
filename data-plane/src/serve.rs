@@ -3297,9 +3297,11 @@ enum FetchItem {
 /// version of this arithmetic was written inline and computed the LENGTH from
 /// `cs` instead of from `os`:
 ///
+/// ```text
 ///     let a = (os - cs);          // start offset inside the buffer
 ///     let z = (oe - cs + 1);      // end offset, NOT a length
 ///     b.slice(a..a + z)           // overruns whenever os > cs
+/// ```
 ///
 /// That is only wrong when the buffer straddles the window start, which is
 /// exactly any non-chunk-aligned first byte — so it passed a chunk-aligned

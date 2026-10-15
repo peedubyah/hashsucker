@@ -352,6 +352,8 @@ CREATE TABLE IF NOT EXISTS provider_delivery_evidence (
   state TEXT NOT NULL CHECK (state IN ('usable', 'temporary', 'terminal')),
   reason TEXT,
   failure_category TEXT,
+  endpoint_class TEXT,
+  retry_after_ms INTEGER,
   observed_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
   recorded_at INTEGER NOT NULL,
@@ -432,6 +434,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   db.exec(CONTROL_PLANE_SCHEMA);
   db.exec(CONSUMER_OBSERVATIONS_SCHEMA);
   migrateExposureSchema(db);
+  migrateDeliveryEvidenceDirective(db);
   migrateRepairEvidenceSchema(db);
   let closed = false;
 
@@ -703,20 +706,26 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       INSERT INTO provider_delivery_evidence (
         provider, account_scope, placement_id, provider_file_id,
         info_hash, file_index_key, state, reason, failure_category,
+        endpoint_class, retry_after_ms,
         observed_at, expires_at, recorded_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(provider, account_scope, placement_id, provider_file_id) DO UPDATE SET
         info_hash = excluded.info_hash,
         file_index_key = excluded.file_index_key,
         state = excluded.state,
         reason = excluded.reason,
         failure_category = excluded.failure_category,
+        endpoint_class = excluded.endpoint_class,
+        retry_after_ms = excluded.retry_after_ms,
         observed_at = excluded.observed_at,
         expires_at = excluded.expires_at,
         recorded_at = excluded.recorded_at
     `).run(
       provider, accountScope, placement.id, providerFileId,
       infoHash, fileIndexKey, state, input.reason ?? null, input.failureCategory ?? null,
+      input.endpointClass ?? null,
+      Number.isFinite(input.retryAfterMs) && input.retryAfterMs > 0
+        ? Math.trunc(input.retryAfterMs) : null,
       observedAt, expiresAt, timestamp,
     );
     return rowToDeliveryEvidence(db.prepare(`
@@ -2252,6 +2261,8 @@ function rowToDeliveryEvidence(row) {
     state: row.state,
     reason: row.reason,
     failureCategory: row.failure_category,
+    endpointClass: row.endpoint_class ?? null,
+    retryAfterMs: row.retry_after_ms ?? null,
     observedAt: row.observed_at,
     expiresAt: row.expires_at,
     recordedAt: row.recorded_at,
@@ -2389,6 +2400,17 @@ function queryRowsForIds(db, prefix, ids) {
   const placeholders = ids.map(() => '?').join(', ');
   return db.prepare(`${prefix} IN (${placeholders})`).all(...ids);
 }
+function migrateDeliveryEvidenceDirective(db) {
+  const cols = db.prepare('PRAGMA table_info(provider_delivery_evidence)').all();
+  if (cols.length === 0) return;
+  if (!cols.some((row) => row.name === 'endpoint_class')) {
+    db.exec('ALTER TABLE provider_delivery_evidence ADD COLUMN endpoint_class TEXT');
+  }
+  if (!cols.some((row) => row.name === 'retry_after_ms')) {
+    db.exec('ALTER TABLE provider_delivery_evidence ADD COLUMN retry_after_ms INTEGER');
+  }
+}
+
 function migrateExposureSchema(db) {
   const columns = db.prepare('PRAGMA table_info(exposures)').all();
   if (columns.length === 0) return;

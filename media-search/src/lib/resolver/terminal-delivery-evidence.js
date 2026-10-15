@@ -19,6 +19,10 @@
  *   - `temporary` a transient failure (e.g. 429) was observed. The
  *                capability might recover once the upstream backoff
  *                window passes. Never becomes terminal on its own.
+ *   - `temporary` rows carry the provider's own directive: `endpointClass`
+ *     names the execution scope that reported it (e.g. `cdn`, `requestdl`)
+ *     and `retryAfterMs` the instruction, so a bounded backoff attributable
+ *     to that scope survives a restart without becoming execution policy.
  *   - `terminal`  the current exact mapping is unusable. Promoted
  *                only after the bounded fresh capability retry also
  *                fails protocol validation, OR after two consecutive
@@ -64,8 +68,19 @@ function normalizeInput(input) {
     fileIndexKey: input.fileIndexKey == null ? -1 : input.fileIndexKey,
     reason: input.reason ?? null,
     failureCategory: input.failureCategory ?? null,
+    endpointClass: input.endpointClass ?? null,
+    retryAfterMs: positiveInt(input.retryAfterMs ?? msFromSeconds(input.retryAfter)),
     observedAt: input.observedAt,
   };
+}
+
+/** Provider Retry-After in seconds -> ms, or null when absent/malformed. */
+function msFromSeconds(seconds) {
+  return Number.isFinite(seconds) && seconds > 0 ? Math.trunc(seconds) * 1000 : null;
+}
+
+function positiveInt(value) {
+  return Number.isFinite(value) && value > 0 ? Math.trunc(value) : null;
 }
 
 /**
@@ -102,14 +117,28 @@ export function createTerminalDeliveryEvidenceStore({
     return usableTtlMs;
   }
 
+  /**
+   * Temporary (transient) evidence honours the provider's own Retry-After
+   * directive when one was reported by the runtime: the durable row's horizon
+   * is the instruction, bounded by the store's policy TTL so a bogus header
+   * cannot outlive the evidence policy. Absent/malformed -> the policy TTL.
+   */
+  function temporaryHorizonMs(retryAfterMs) {
+    if (retryAfterMs == null) return ttlFor(TERMINAL_DELIVERY_STATES.TEMPORARY);
+    return Math.min(retryAfterMs, ttlFor(TERMINAL_DELIVERY_STATES.TEMPORARY));
+  }
+
   function recordState(state, input) {
     const normalized = normalizeInput(input);
     const observedAt = normalized.observedAt ?? now();
+    const ttl = state === TERMINAL_DELIVERY_STATES.TEMPORARY
+      ? temporaryHorizonMs(normalized.retryAfterMs)
+      : ttlFor(state);
     return controlPlaneStore.recordDeliveryEvidence({
       ...normalized,
       state,
       observedAt,
-      expiresAt: observedAt + ttlFor(state),
+      expiresAt: observedAt + ttl,
     });
   }
 
@@ -131,6 +160,12 @@ export function createTerminalDeliveryEvidenceStore({
    * never have to think about TTL.
    */
   function findTerminalEvidence({ provider, accountScope = 'default', placementId, providerFileId }) {
+    const row = lookup({ provider, accountScope, placementId, providerFileId });
+    return row;
+  }
+
+  /** The row for a capability tuple, or null when absent/expired. */
+  function lookup({ provider, accountScope = 'default', placementId, providerFileId }) {
     const row = controlPlaneStore.findDeliveryEvidence({
       provider,
       accountScope,
@@ -139,6 +174,33 @@ export function createTerminalDeliveryEvidenceStore({
     });
     if (!row) return null;
     if (row.expiresAt <= now()) return null;
+    return row;
+  }
+
+  /**
+   * TEMPORARY evidence only (provider told us to back off; the capability is
+   * retained, never promoted to terminal by a transient signal). Returns the
+   * row with `retryAfter` in SECONDS (the provider's own units) so callers can
+   * reason about the instruction, not our stored millis.
+   */
+  function findTemporary({ provider, accountScope = 'default', placementId, providerFileId }) {
+    const row = lookup({ provider, accountScope, placementId, providerFileId });
+    if (!row || row.state !== TERMINAL_DELIVERY_STATES.TEMPORARY) return null;
+    return {
+      ...row,
+      retryAfter: row.retryAfterMs == null ? null : Math.round(row.retryAfterMs / 1000),
+    };
+  }
+
+  /**
+   * TERMINAL evidence only. A temporary (backoff) row is deliberately NOT
+   * returned here: "provider said wait" and "this mapping is dead" are
+   * different facts, and conflating them would retire a mapping that is
+   * merely throttled.
+   */
+  function findTerminal({ provider, accountScope = 'default', placementId, providerFileId }) {
+    const row = lookup({ provider, accountScope, placementId, providerFileId });
+    if (!row || row.state !== TERMINAL_DELIVERY_STATES.TERMINAL) return null;
     return row;
   }
 
@@ -158,6 +220,8 @@ export function createTerminalDeliveryEvidenceStore({
     recordTemporary,
     recordTerminal,
     findTerminalEvidence,
+    findTemporary,
+    findTerminal,
     classifyProviderState,
     listForCoordinate({ infoHash, fileIndexKey }) {
       const rows = controlPlaneStore.listDeliveryEvidenceForHash(infoHash, fileIndexKey ?? -1);
