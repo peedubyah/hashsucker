@@ -1038,10 +1038,18 @@ bounded (25 s/client). Retry ownership stays single-layer per surface.
 
 ### 5. Known-bad route suppression without corrupting durable truth
 
-Attempted TF-level suppression in Node, then REVERTED after it blocked a
-healthy alternate (see §6). Route health is per (provider, placement, file);
-the registry is now a SIGNAL only. Route selection stays in the data plane,
-which owns the route set.
+First attempt: a Node-level TorrentFile short-circuit. REVERTED — it blocked a
+healthy alternate (see §6); route health is per (provider, placement, file).
+
+Final (`1d4d431`): the data plane now marks a route that could not be REACHED
+(connection refused/reset/TLS, or a body cut mid-stream) unreachable for a
+bounded 20 s window and SKIPS it (`usable_now` false, `first_waitable` skips).
+An alternate exact route is preferred immediately; repeated clients do not
+hammer a known-bad route; the cap and its URL are retained and it is half-open
+after the window (cleared on any 206). Distinct from Throttled (a load signal
+that is waited out and reused). Runtime-only — durable placement truth is
+untouched. Test `r2g_unreachable_route_is_skipped_for_the_alternate`. The Node
+`byte-health` registry remains the cross-layer serviceability SIGNAL.
 
 ### 6. Healthy alternate exact routes adopted (two real defects found + fixed)
 
@@ -1108,13 +1116,15 @@ TorrentFile / republish change.
   also RD-cached (or TorBox CDN recovers). Not a HashSucker defect.
 - Still open: `acquire_failover_lane` only cold-acquires the alternate when the
   slot has capacity; a genuinely busy alternate still means "no alternate right
-  now" (bounded, not a wedge). Route-level (per-provider) backoff is not yet
-  implemented in Rust; the data plane re-attempts a broken route ~3×/read
+  now" (bounded, not a wedge). Within a single read the transport still retries
+  the failed route up to 3× before the mark takes effect on the NEXT acquire
   (bounded, ~0.1–0.5 s).
 
 ### Verification
 
-Rust `cargo test` 153 + 14 + 12 + 7 green. Node full suite 3333/3330/0/3 (plus
-new byte-health + per-action-budget tests). Production: Lowdown reads 502 in
-<0.7 s (was 90 s+); fresh request usable boundary in ~10 s; Black Panther real
-bytes byte-identical through VFS and Plex Part.
+Rust `cargo test` 153 + 14 + 13 + 7 green. Node full suite 3337/3334/0/3 (plus
+new byte-health + per-action-budget tests; one timing-sensitive reuse test
+(`wallMs < 5000`) flaked once at 8016 ms under full-suite load and passed on
+re-run — a load-tight bound, not a product defect). Production: Lowdown reads
+502 in <0.7 s (was 90 s+); fresh request usable boundary in ~10 s; Black
+Panther real bytes byte-identical through VFS and Plex Part.
