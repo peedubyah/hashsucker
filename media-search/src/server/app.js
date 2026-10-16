@@ -1198,19 +1198,21 @@ export function createRequestHandler(dependencies = {}) {
             // No Binding (or an unreadable control plane) keeps the existing
             // provider ladders below unchanged, and that case is loudly
             // instrumented at the redirect via `x-hashsucker-byte-route`.
-            // Byte-route policy. `cached` is the target end state: Binding
+            // Byte-route policy. `cached` is now the PRODUCT DEFAULT: Binding
             // authority → Rust cached bytes, so concurrent sessions share
-            // provider work and the provider API is untouched at resolve
-            // time. It is gated because the data plane can only serve
-            // TorrentFiles whose durable ProviderPlacement is still healthy,
-            // and on this deployment 119 of 122 active-bound TorrentFiles
-            // are TorBox-only with a stale placement (the same rot that
-            // already breaks Plex's VFS path for them). `provider` keeps the
-            // historical redirect. The chosen route is always instrumented
-            // via `x-hashsucker-byte-route` and the counters below.
-            const byteRoutePolicy = (env.STREAM_BYTE_ROUTE ?? 'provider').trim().toLowerCase() === 'cached'
-              ? 'cached'
-              : 'provider';
+            // provider work and the provider API is untouched at resolve time.
+            // The historical gate existed only because the data plane could not
+            // reach the TorBox CDN from this deployment (AT&T injected
+            // SNI-specific resets for `nexus.erth.tb-cdn.earth`); that external
+            // block is lifted, and TorBox + RD byte delivery are both proven
+            // through Rust. `provider` remains an explicit operator escape
+            // hatch (`STREAM_BYTE_ROUTE=provider`) for debugging/regression
+            // isolation — it is not a supported second product mode. The chosen
+            // route is always instrumented via `x-hashsucker-byte-route` and
+            // the counters below.
+            const byteRoutePolicy = (env.STREAM_BYTE_ROUTE ?? 'cached').trim().toLowerCase() === 'provider'
+              ? 'provider'
+              : 'cached';
             if (byteRoutePolicy === 'cached') inc('byte_route_policy_cached_total');
             else inc('byte_route_policy_provider_total');
             const byteRoute = byteRoutePolicy === 'cached'
