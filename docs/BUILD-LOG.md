@@ -1133,3 +1133,129 @@ new byte-health + per-action-budget tests; one timing-sensitive reuse test
 re-run — a load-tight bound, not a product defect). Production: Lowdown reads
 502 in <0.7 s (was 90 s+); fresh request usable boundary in ~10 s; Black
 Panther real bytes byte-identical through VFS and Plex Part.
+
+## 2026-10-16 — execution-quality selection: prefer a serviceable cached representation — FIXED + DEPLOYED
+
+Slice: serviceability-aware representation selection (commits `8d1b40b`,
+`d7fd6b9`). Follows the hardening slice. Problem: HashSucker could select and
+publish a representation that was already knowably unserviceable from this
+deployment (The Batman: published in 9 s, Plex-indexed, byte probe immediately
+said the TorBox route was dead).
+
+### 1. The Batman candidate reconstruction (negative case)
+
+Request `1091` (`tt1877830`, 2026-10-16 17:33). Top ranked candidates and their
+route evidence at selection time:
+
+| rank | infoHash | file | size | score | cached providers | RD evidence | rejection |
+|---|---|---|---|---|---|---|---|
+| 1 | 1835f8aa951c… | fik -1 | 74685231105 | 0.705 | none recorded | none | TorBox PATH A failed; RD not cached |
+| 2 | 7e693dc16085… | fik -1 | 76086158025 | 0.704 | none | none | same |
+| 3 | 08e6aedf0d58… | fik 0 | 75751010583 | 0.702 | torbox ready (120289342) | none | **bound (TorBox) → probe unserviceable → CDN reset** |
+
+`provider_observations` held zero rows for any Batman candidate; the RD account
+scan (15 torrents) matched **zero** Batman hashes; only `08e6aedf0d58` had a
+ProviderPlacement (torbox). **Answer: no RD-serviceable alternative existed at
+request time or now.** The external blocker is exact: the sole cached
+representation is TorBox-only and `nexus.erth.tb-cdn.earth` resets.
+
+### 2. Provider preference mechanism (audited)
+
+`selectBindableCandidate` tries, per candidate, TorBox PATH A (exact-size) /
+PATH B (cached inventory) BEFORE RD PATH C; the availability ordering uses
+`availability.torbox.state`. So TorBox is the historical primary provider and
+RD is a fallback — historical policy + first-provider ordering, not a
+performance measurement and not configurable. It is not inverted here; instead
+selection now consults runtime byte serviceability.
+
+### 3. Selection contract (A/B/C/D, bounded)
+
+Candidates are classified by the probe: **A serviceable** (recent byte-health
+says serviceable, or a bounded byte read succeeds), **B probably serviceable**
+(cached route, no negative evidence → same as A from the probe's view),
+**C currently blocked** (recent runtime failure), **D not cached** (outside
+policy). Selection strongly prefers A/B over C where representations are
+otherwise acceptable. C is never permanently blacklisted — runtime health is
+transient and half-open.
+
+### 4. Implementation
+
+- `selectBindableCandidate` gains an optional `serviceabilityProbeFn`. A bound
+  candidate is accepted only when its exact TorrentFile is (or proves it is)
+  byte-serviceable. An unserviceable bind is skipped and the traversal
+  continues; the best-ranked unserviceable bind is retained as a fallback so a
+  request with no serviceable candidate still publishes (visible) with an
+  explicit `serviceability:{state:'blocked',reason,provider}`. Bounded to
+  `maxServiceabilityAlternates` (default 4) further candidates. No probe seam
+  ⇒ exact pre-change behavior.
+- `serviceability.js`: cheap-first — recent runtime byte-health (no provider
+  work), else ONE bounded byte read through the real serve path (no provider
+  sweep, no durable truth touched).
+- Wired through `/api/media-request` and the Seerr ingress (movie + TV fan-out).
+  Response carries `serviceability`.
+- Existing Binding is untouched: this runs only in fresh selection. Same-TF
+  alternate-route recovery for a bound item is unchanged.
+
+### 5. Real defect fixed: RD placements were durably unbindable
+
+`d7fd6b9`. The RD ensure recorded its provider-file inventory without
+`authoritative`/`complete`/`expiresAt`, so `activateBinding` rejected EVERY
+RD-bound placement ("Binding requires an authoritative complete inventory
+snapshot"). RD could serve bytes via same-TF failover but could never be the
+durable representation. The RD torrent-info file list is the provider's own
+COMPLETE inventory and every file is materialized, so it is now recorded
+authoritative+complete with a 60 s observation TTL (TorBox parity).
+
+### 6. Production proofs
+
+**Negative (The Batman, external blocker retained).** A re-request selects the
+same TorBox-only representation; the gate probes it, finds it unserviceable,
+and (no alternative) keeps it as the fallback. Byte reads return 502 in
+<0.8 s. Exact blocker: TorBox CDN SNI reset, no RD-cached release.
+
+**Positive (Harakiri `tt0056058`, natural fresh request, no manual
+intervention).** 18:39:00 request accepted → the gate probed a TorBox candidate
+`tf_f2218197` (unserviceable, `byte-probe-failed`) at 18:39:11, rejected it,
+probed the RD candidate `tf_2e5ac783` (serviceable, `bytes-observed`) at
+18:39:14, and selected it → `published:true`,
+`serviceability:{state:'serviceable',source:'probe'}` → Binding (RD) → Plex
+visible (`ratingKey 615`, Harakiri 1962) → VFS reads 206 + 1 MiB at offset 0
+and 206 + 1 MiB at a 6 GB seek. Total 14.0 s.
+
+Also `Barbie tt1517268`: the gate moved past two unserviceable TorBox
+candidates to a serviceable RD candidate that binds and serves 206 bytes.
+
+### 7. Probe/API budget + latency
+
+Per fresh request: 1 probe when the first bind is serviceable; otherwise 1
+probe per bound candidate, bounded by `maxServiceabilityAlternates` (≤ 4
+extra). No provider API calls are added by the gate itself (the traversal's
+ensure calls are unchanged); the probe is one byte read through the existing
+serve path. Observed: The Batman (no gate, baseline) ~9 s; Harakiri (gate, 2
+probes) 14.0 s; Barbie (gate, 3 probes) 10–18 s. The added cost is bounded by
+the probe count and dominated by the RD cold cache fill.
+
+### 8. Failure semantics + recovery
+
+All-blocked ⇒ the request still publishes the best-ranked bind but reports
+`serviceability:{state:'blocked',reason,provider}` — materially distinct from
+`no cached representation exists` (which is a selection `no-bindable-candidate`
+with no handoff). Recovery is automatic: the probe/health is half-open, so a
+later request (or the anticipation byte probe) clears the block when the route
+recovers or an RD placement appears.
+
+### Verification
+
+Node full suite 3344/3341/0/3. New `selection-serviceability.test.js`: top
+blocked/second serviceable wins; top serviceable ⇒ one probe, no alternate
+provider work; all-blocked bounded fallback; alternate-search bounded; no-seam
+unchanged; provider preference cannot override serviceability; transient health
+recovers. `rd-ensure` suite green after the authoritative/complete change.
+
+### Remaining route-selection weaknesses
+
+- The gate adds up to ~5 s when probing is needed (RD cold fill dominates).
+- `maxServiceabilityAlternates=4` is a first bound; a serviceable alternative
+  ranked beyond the top-N after a rejection is not reached.
+- Selection still cannot distinguish B from A without a read; the first bind is
+  always probed when no recent health exists.

@@ -22,7 +22,24 @@ playback passed after reconstruction. Missing retained truth returns 409 and
 fails closed. This is an earned continuity primitive, not a general
 consumer-replacement framework.
 
-Active product slice: **hardening — no single failure can wedge request →
+Active product slice: **execution-quality selection — prefer a serviceable
+cached representation** — FIXED + DEPLOYED (`8d1b40b`, `d7fd6b9`; evidence in
+`docs/BUILD-LOG.md` 2026-10-16). Problem: selection could publish a
+representation that was already knowably unserviceable here (The Batman:
+TorBox-only, CDN reset). Fix: a bounded serviceability gate in
+`selectBindableCandidate` (probe = recent byte-health, else ONE bounded byte
+read) so a cached-but-dead representation does not win over an executable one;
+best-ranked unserviceable bind retained as fallback with
+`serviceability:{state:'blocked',reason,provider}`; bounded to 4 extra
+candidates; no probe seam ⇒ pre-change behavior. Also fixed a real defect: RD
+placements were durably unbindable (inventory not authoritative/complete).
+Gate: a natural fresh request whose top cached candidate is unserviceable
+selects a serviceable one and serves real bytes (Harakiri: RD-bound, 206 +
+seek, Plex-visible); The Batman retains the exact external blocker. Non-goals:
+uncached acquisition, identity-model change, binding churn for an existing
+Binding, provider-preference inversion.
+
+Prior active slice: **hardening — no single failure can wedge request →
 playback** — FIXED + DEPLOYED (`0bdfcfd`, `0f7292e`, `f3e3f2f`, `ae41376`;
 evidence in `docs/BUILD-LOG.md` 2026-10-16). Follows the responsiveness slice
 (`d9f647e`, `3e1855b`, `2141315`) whose "after" Plex result used a manual
