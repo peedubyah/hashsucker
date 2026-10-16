@@ -1444,3 +1444,83 @@ fresh requests are genuinely playable again.
 no secrets; adds/removes at most two temporary /32 routes). No HashSucker code
 changed: the investigation exposed no product regression, and the fix was
 network-side as attributed.
+
+## 2026-10-16 — cached byte routing default cutover — NOT FLIPPED (concurrency blocker)
+
+Slice: flip `STREAM_BYTE_ROUTE` to `cached` and validate. Outcome: the flip was
+made (`fcd7967`), validated, and REVERTED (`8f1b9e1`) because a reproducible
+concurrency defect failed the acceptance gate. A separate regression was fixed
+(`b889f70`).
+
+### 1. Default boundary (traced before the flip)
+
+`STREAM_BYTE_ROUTE` controls ONLY the Jellyfin `/stream` resolver:
+- `cached` → `resolveAuthoritativeByteRoute` (active Binding) → 307 to
+  `/bytes/:tfId` → `serveAuthoritativeBytes` → `streamFromDataPlane` (Rust). No
+  Binding → explicit 409 `NO_AUTHORITATIVE_BINDING` (no silent legacy fallback).
+- `provider` → the historical TorBox/RD CDN redirect ladders.
+Unaffected surfaces: the Plex VFS path (`streamFromDataPlane`, already
+Rust-authoritative for tfId-present entries), `/bytes/:tfId` (always Rust), and
+`/media/:infoHash/:fileIndex` (legacy; not gated).
+
+### 2-3. Flip + no silent fallback
+
+`fcd7967` set the default to `cached` in `compose.yaml` and `app.js`, keeping
+`STREAM_BYTE_ROUTE=provider` as the explicit operator escape hatch. The
+`cached` path already fails loudly (409) when no Binding exists and never
+retargets a provider URL on failure.
+
+### 4. Acceptance matrix (post-flip) — the flip itself worked
+
+Verified via `/stream` → `/bytes/:tfId` (307 with
+`x-hashsucker-byte-route: data-plane`, `x-provider-check-occurred: false`) →
+206, then forward/distant seeks and repeat (cache hit) reads:
+
+| item | route | init | fwd | distant | repeat |
+|---|---|---|---|---|---|
+| Avengers Endgame (TorBox) | torbox | 206/5.5 ms | 206/1.85 s | 206/2.81 s | 206/5.0 ms |
+| The Batman (TorBox) | torbox | 206/5.3 ms | 206/0.93 s | 206/1.18 s | 206/4.9 ms |
+| Lowdown S01E05 (TorBox) | torbox | 206/5.5 ms | 206/1.03 s | 206/0.97 s | 206/4.5 ms |
+| Harakiri (RD-only) | realdebrid | 206/3.9 ms | 206/1.87 s | 206/1.41 s | 206/4.4 ms |
+| Black Panther (dual-route) | same TF | 206/4.6 ms | 206/1.92 s | 206/1.36 s | 206/4.7 ms |
+
+Repeat reads hit the cache (~5 ms); forward/distant reads fill the new chunk.
+
+### 5. Concurrency — BLOCKER (the reason for the revert)
+
+Cold multi-chunk spans read concurrently intermittently truncate: a joiner of an
+in-flight fill gets a 206 whose body is cut (Node surfaces 502, byte-health
+`provider-body-truncated`). Coalescing itself is correct — metrics show ONE
+chunk fill and ONE provider connection for N concurrent readers (no duplicate
+pulls; `bytes_upstream_issued` grows by exactly the fill span). But delivery to
+joiners is unreliable:
+
+- 3 concurrent, cold 10 MB spans: 8/8 runs had a failure.
+- 2 concurrent, cold 10 MB spans: 3/6, then 2/6 (intermittent).
+
+The prior slice's mid-body failover (`f3e3f2f`) made it worse and was reverted
+(`b889f70`); the residual is a deeper fill/join race (the joiner waits on the
+fill's record and reads the chunk from the cache — the fill occasionally marks
+the joined chunk failed / the body is cut). This is in the Rust path the Plex
+VFS already used, so it is not introduced by the flip; the flip would extend it
+to Jellyfin.
+
+### 6-10. Not run to completion
+
+Because criterion 6 fails, the Jellyfin/Plex/fresh-request/amplification/soak
+acceptance was not completed against a flipped default.
+
+### Verdict
+
+**NOT FLIPPED.** `STREAM_BYTE_ROUTE` default is back to `provider` (`8f1b9e1`).
+The next earned slice is the fill/join concurrency race (cold multi-chunk
+concurrent readers); once fixed, the flip is a one-line change with a proven
+escape hatch (`STREAM_BYTE_ROUTE=provider`).
+
+### Regression fixed this slice
+
+`b889f70` reverts the mid-body same-TF failover added in `f3e3f2f`: it broke
+concurrent fills (2 concurrent cold spans 3/6 failed with it, 0/6 without) and
+its motivation (the AT&T-injected TorBox mid-body truncation) is resolved; the
+pre-existing mid-body resume still handles genuine truncation. Rust suite green
+(153/14/11/7).
