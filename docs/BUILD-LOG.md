@@ -1345,11 +1345,14 @@ Production proof (autonomous, no human request): before the fix intents
 154/155/156 (`released-request-follow-up` for the blocked movies) stayed at
 `attempts=0` for hours. On the first drain after the fix (20:23:24) the tick
 processed P0 `id=98` → P1 `id=152` (errored, tick continued) → P2 `id=153` →
-**P4 `id=154` (The Batman) `anticipated → prepared`**. Intent 154 now
-progresses through the normal prepare → publish (serviceability gate) → probe
-path; when the route recovers it publishes/confirms without a human request.
-No hot loop: the follow-up cadence and the byte-probe half-open window bound
-re-checks.
+**P4 `id=154` (The Batman) `anticipated → prepared`**. On the next drain
+(20:55:34) the same intent progressed `prepared → published_preparing`
+(`consumer-publication-unconfirmed`) after 2555 ms — i.e. the follow-up
+autonomously re-ran the full prepare → publish (serviceability gate) → byte
+probe path. When the route recovers the probe succeeds and the item becomes
+playable/confirmed with no human request. No hot loop: the follow-up cadence
+and the byte-probe half-open window bound re-checks. (Intents 155/156 run on
+subsequent drains, one class turn each.)
 
 ### 10. Serviceability health lifetime — audited + hardened
 
