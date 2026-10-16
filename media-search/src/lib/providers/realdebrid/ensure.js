@@ -28,6 +28,9 @@ import { canonicalizeRdPath } from '../../control-plane/rd-placement-realizer.js
 
 const HEX40 = /^[a-f0-9]{40}$/i;
 const RD_PROVIDER_ID = 'realdebrid';
+// Bounded lifetime of an RD inventory observation (parity with TorBox's 60s
+// observation TTL). A binding must happen within this window of the ensure.
+const RD_INVENTORY_TTL_MS = 60_000;
 
 function isValidSize(n) {
   return Number.isSafeInteger(n) && n > 0;
@@ -239,6 +242,12 @@ export function createRdEnsure({ store, client, now = () => Date.now(), log = ()
       });
       const mappedBase = String(mapped.path ?? '').split('/').filter(Boolean).pop()
         || String(filename ?? '').split('/').filter(Boolean).pop() || 'file';
+      // The RD torrent-info file list is the provider's own COMPLETE inventory
+      // for this torrent, and every file is materialized below — so the
+      // snapshot is authoritative + complete + bounded. Omitting these made the
+      // placement durably unbindable (`activateBinding` requires an
+      // authoritative complete, non-stale inventory), which silently blocked
+      // any RD-bound representation (execution-quality tranche exposed it).
       store.replaceProviderFileInventory(
         placement.id,
         (info2.files || []).map((f) => ({
@@ -248,7 +257,12 @@ export function createRdEnsure({ store, client, now = () => Date.now(), log = ()
           size: Number(f.bytes),
           selected: String(f.id) === String(mapped.id),
         })),
-        { observedAt: now() },
+        {
+          observedAt: now(),
+          expiresAt: now() + RD_INVENTORY_TTL_MS,
+          authoritative: true,
+          complete: true,
+        },
       );
       const tf = typeof store.findTorrentFile === 'function'
         ? store.findTorrentFile(hash, fullPath)
