@@ -1336,9 +1336,20 @@ ran — 9 blocked `published_preparing` episodes (P0, hourly retry, always
 blocked) filled every tick's wall-clock budget, so the P4 follow-ups stayed at
 `attempts=0` for hours. Fixed (`1ca03e1`): the drain interleaves actionable
 rows across priority classes (round-robin by class rank), so every present
-class gets a turn while preserving priority order within a class. Test "class
-fairness: a blocked P0 backlog cannot starve a P4 follow-up". No hot loop: the
-follow-up cadence and the byte probe half-open window bound re-checks.
+class gets a turn while preserving priority order within a class. A second
+starvation source was also fixed (`ece13e9`): an erroring action previously
+RETURNED from the tick, so one persistently-erroring P1 publish ended the tick
+before later classes; it now re-parks its own row and continues.
+
+Production proof (autonomous, no human request): before the fix intents
+154/155/156 (`released-request-follow-up` for the blocked movies) stayed at
+`attempts=0` for hours. On the first drain after the fix (20:23:24) the tick
+processed P0 `id=98` → P1 `id=152` (errored, tick continued) → P2 `id=153` →
+**P4 `id=154` (The Batman) `anticipated → prepared`**. Intent 154 now
+progresses through the normal prepare → publish (serviceability gate) → probe
+path; when the route recovers it publishes/confirms without a human request.
+No hot loop: the follow-up cadence and the byte-probe half-open window bound
+re-checks.
 
 ### 10. Serviceability health lifetime — audited + hardened
 
