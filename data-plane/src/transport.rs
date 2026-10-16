@@ -579,7 +579,13 @@ impl ResilientRangeReader {
                 self.current = ReaderCapability::Owned(reserved);
                 true
             }
-            None => false,
+            None => {
+                eprintln!(
+                    "[failover] no alternate lane tf={} provider={} slots={}",
+                    old.torrent_file_id, old.provider, self.manager.slots.len(),
+                );
+                false
+            }
         }
     }
 

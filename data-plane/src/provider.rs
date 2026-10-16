@@ -502,19 +502,30 @@ async fn acquire_rd_mode_a(
     }
     let file_idx = file_idx.unwrap();
 
-    // Pick the unrestrictable link for the identified file (aligned 1:1 with `files`).
-    let link = if let Some(la) = links {
-        la.get(file_idx)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    } else {
-        None
-    }
-    .ok_or_else(|| {
-        AcquireError::NoCapability(format!(
-            "rd info: no link for file idx={file_idx} (torrent status={status})"
-        ))
-    })?;
+    // Pick the unrestrictable link for the identified file. RD returns links at
+    // the TORRENT level, one per SELECTED file in order — NOT 1:1 with the full
+    // `files` array. A single link is unambiguous (a torrent where only our file
+    // is selected, the common case). Otherwise map by the file's position, with
+    // a fallback to the first link. Mirrors the Node resolver's
+    // `getRdPlaybackUrl` so both layers select the same link.
+    let link = links
+        .and_then(|la| {
+            if la.is_empty() {
+                None
+            } else if la.len() == 1 {
+                la[0].as_str().map(|s| s.to_string())
+            } else {
+                la.get(file_idx)
+                    .and_then(|v| v.as_str())
+                    .or_else(|| la[0].as_str())
+                    .map(|s| s.to_string())
+            }
+        })
+        .ok_or_else(|| {
+            AcquireError::NoCapability(format!(
+                "rd info: no link for file idx={file_idx} (torrent status={status})"
+            ))
+        })?;
 
     // Step 3: POST /unrestrict/link to obtain the actual CDN delivery URL.
     let unres_started = std::time::Instant::now();
