@@ -51,6 +51,7 @@ const MODE_503: u8 = 2; // transient upstream
 const MODE_429: u8 = 3; // transient, load-signalling
 const MODE_SHORT_BODY: u8 = 4; // malformed/truncated provider payload
 const MODE_HANG: u8 = 5; // never answers (timeout class)
+const MODE_MIDBODY_ERROR: u8 = 6; // commits 206 then the body ERRORS mid-stream
 
 #[derive(Clone, Default)]
 struct OriginStats {
@@ -137,6 +138,20 @@ async fn serve_origin(
                 // Malformed: claims 206 + the correct range metadata, then
                 // truncates the payload hard.
                 return build_hdrs(206, hdrs, body_for(start, 1));
+            }
+            if st.mode.load(Ordering::SeqCst) == MODE_MIDBODY_ERROR {
+                // Commits a valid 206 with the correct range metadata, delivers
+                // one short chunk, then the body errors (connection reset).
+                let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = vec![
+                    Ok(bytes::Bytes::from(body_for(start, 8))),
+                    Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "mid-body reset")),
+                ];
+                let body = axum::body::Body::from_stream(futures_util::stream::iter(chunks));
+                let mut b = axum::response::Response::builder().status(206);
+                for (k, v) in hdrs {
+                    b = b.header(k, v);
+                }
+                return b.body(body).unwrap();
             }
             build_hdrs(206, hdrs, body_for(start, end - start + 1))
         }
@@ -641,6 +656,27 @@ async fn r2e_malformed_provider_payload_fails_over() {
     assert_eq!(body, expected(0, CHUNK as usize), "the client still gets the full bytes");
     assert_eq!(winner.range_requests() - winner_before, 1,
         "the still-cached route delivered the read");
+}
+
+// ===========================================================================
+// R2f — a route that commits 206 then cuts the body must still fail over
+// ===========================================================================
+
+#[tokio::test]
+async fn r2f_midbody_truncation_fails_over_to_alternate() {
+    let st = build_stack(FILE_SIZE, None).await;
+    let served_by = lane_that_serves(&st).await;
+    let loser = if served_by == "torbox" { &st.primary } else { &st.alternate };
+    let winner = if served_by == "torbox" { &st.alternate } else { &st.primary };
+    loser.fault(MODE_MIDBODY_ERROR);
+    let winner_before = winner.range_requests();
+    let (status, body, _p) = read(&st, CHUNK, 2 * CHUNK - 1).await;
+    assert_eq!(status, 206, "a mid-body truncation must not fail the client");
+    assert_eq!(body, expected(CHUNK, CHUNK as usize), "the alternate delivers exact bytes");
+    assert!(
+        winner.range_requests() > winner_before,
+        "the healthy alternate route actually delivered the read"
+    );
 }
 
 // ===========================================================================

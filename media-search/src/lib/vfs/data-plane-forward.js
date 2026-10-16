@@ -25,8 +25,6 @@ import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
 
 import {
-  getServiceability,
-  isSuppressed,
   recordServiceable,
   recordUnserviceable,
 } from './byte-health.js';
@@ -176,22 +174,12 @@ export async function streamFromDataPlane({
   onServingAttribution = null,
   headerTimeoutMs = DATA_PLANE_HEADER_TIMEOUT_MS,
 }) {
-  // Known-bad runtime route: short-circuit inside the backoff window instead of
-  // re-forwarding to a route that just proved it cannot serve bytes. This is
-  // the "do not hammer a known-bad route" gate; it recovers automatically when
-  // the window expires (half-open) or a success clears it. Durable placement
-  // truth is never touched — this is runtime-only.
-  if (isSuppressed(tfId)) {
-    const health = getServiceability(tfId);
-    throw new DataPlaneError(
-      `route suppressed for tfId=${tfId}: ${health.reason}`
-        + (health.provider ? ` (provider=${health.provider})` : ''),
-      503,
-      'PROVIDER_ROUTE_SUPPRESSED',
-      'C',
-    );
-  }
-
+  // NOTE: this layer deliberately does NOT short-circuit a "known-bad" route.
+  // Route health is per (provider, placement, file), and the exact TorrentFile
+  // may have a healthy ALTERNATE route. Suppressing at the TorrentFile level
+  // would block that alternate (observed on a dual TorBox+RD item: the healthy
+  // RD route was never tried). Route-level suppression belongs in the data
+  // plane, which owns the route set; here the registry is a SIGNAL only.
   const upstreamUrl = `${String(baseUrl).replace(/\/+$/, '')}/files/${encodeURIComponent(tfId)}`;
   const upstreamHeaders = {};
   // Forward the client Range verbatim. The data plane owns Range parsing,

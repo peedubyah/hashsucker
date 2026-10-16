@@ -126,16 +126,6 @@ export function getServiceability(tfId, nowMs = Date.now()) {
   };
 }
 
-/**
- * Should a read be short-circuited for this TorrentFile right now? True only
- * while a known route failure is still inside its backoff window (half-open
- * after). This is the "do not hammer a known-bad route" gate.
- */
-export function isSuppressed(tfId, nowMs = Date.now()) {
-  const entry = tfId ? registry.get(tfId) : null;
-  return Boolean(entry && entry.state === 'unserviceable' && entry.until > nowMs);
-}
-
 /** Test-only reset. */
 export function __resetByteHealth() {
   registry.clear();

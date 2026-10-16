@@ -12,33 +12,28 @@ import { ReadableStream } from 'node:stream/web';
 import {
   __resetByteHealth,
   getServiceability,
-  isSuppressed,
   recordServiceable,
   recordUnserviceable,
 } from '../src/lib/vfs/byte-health.js';
-import { streamFromDataPlane, DataPlaneError } from '../src/lib/vfs/data-plane-forward.js';
+import { streamFromDataPlane } from '../src/lib/vfs/data-plane-forward.js';
 
 test('unobserved TorrentFile is unknown, never claimed serviceable', () => {
   __resetByteHealth();
   const s = getServiceability('tf_never');
   assert.equal(s.state, 'unknown');
-  assert.equal(isSuppressed('tf_never'), false, 'unknown must not be suppressed');
+  assert.equal(s.retryInMs, null);
 });
 
-test('a failed read suppresses the route; success clears it (half-open recovery)', () => {
+test('a failed read reports unserviceable with a bounded retry; success clears it', () => {
   __resetByteHealth();
   recordUnserviceable('tf_a', { reason: 'provider-body-truncated', provider: 'torbox' });
   const bad = getServiceability('tf_a');
   assert.equal(bad.state, 'unserviceable');
   assert.equal(bad.provider, 'torbox');
-  assert.equal(isSuppressed('tf_a'), true, 'inside backoff window');
-  // Backoff expires -> half-open (not suppressed) so a later read can probe.
-  const later = Date.now() + 10 * 60_000;
-  assert.equal(isSuppressed('tf_a', later), false);
-  // Success clears the failure entirely.
+  assert.ok(bad.retryInMs > 0 && bad.retryInMs <= 20_000, 'bounded retry window');
+  // Success clears the failure entirely (recovery is observable).
   recordServiceable('tf_a', { provider: 'torbox' });
   assert.equal(getServiceability('tf_a').state, 'serviceable');
-  assert.equal(isSuppressed('tf_a'), false);
 });
 
 test('consecutive failures escalate the backoff but stay bounded', () => {
@@ -94,18 +89,6 @@ function bodyResponse(chunks) {
     body: webBody(chunks),
   };
 }
-
-test('forwarder short-circuits a suppressed route without calling the data plane', async () => {
-  __resetByteHealth();
-  recordUnserviceable('tf_supp', { reason: 'provider-body-truncated', provider: 'torbox' });
-  let calls = 0;
-  const fetchFn = async () => { calls += 1; return bodyResponse([Buffer.from('x')]); };
-  await assert.rejects(
-    () => streamFromDataPlane({ fetchFn, baseUrl: 'http://dp', tfId: 'tf_supp', request: fakeRequest(), response: fakeResponse() }),
-    (e) => e instanceof DataPlaneError && e.code === 'PROVIDER_ROUTE_SUPPRESSED',
-  );
-  assert.equal(calls, 0, 'no data-plane call while suppressed');
-});
 
 // ---------------------------------------------------------------------------
 // Failure-mode matrix: EVERY provider failure must surface as a BOUNDED typed

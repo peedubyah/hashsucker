@@ -836,6 +836,21 @@ impl ResilientRangeReader {
                         self.finalize(true);
                         return Step::Eof;
                     }
+                    // Truncated body (provider closed early). Prefer a same-TF
+                    // ALTERNATE route before resuming on the failed one: a route
+                    // that commits 206 then cuts the body is as unusable as one
+                    // that never answers, and the exact TorrentFile may have a
+                    // healthy alternate. One failover per read.
+                    self.metrics.record_recovery_attempt();
+                    if self.try_failover().await {
+                        match self.open_at().await {
+                            Ok(()) => continue,
+                            Err(e) => {
+                                self.finalize(false);
+                                return Step::Terminal(e);
+                            }
+                        }
+                    }
                     match self.open_at().await {
                         Ok(()) => continue,
                         Err(e) => {
@@ -858,6 +873,16 @@ impl ResilientRangeReader {
                     self.metrics.record_recovery_attempt();
                     if let Some(s) = self.stage.as_ref() {
                         s.set_attempt_recovery_path(self.recovery.attempt, "mid_body_resume");
+                    }
+                    // Same-TF alternate route before retrying the failed one.
+                    if self.try_failover().await {
+                        match self.open_at().await {
+                            Ok(()) => continue,
+                            Err(e) => {
+                                self.finalize(false);
+                                return Step::Terminal(e);
+                            }
+                        }
                     }
                     self.recovery.same_cap_retries += 1;
                     if self.recovery.same_cap_retries <= MAX_SAME_CAP_RETRIES {
