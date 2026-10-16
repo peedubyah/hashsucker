@@ -552,6 +552,7 @@ export async function handleSeerrIngress(
         tvdbId: operationalIntent.tvdbId,
       });
 
+      const childTraceStartedAt = Date.now();
       try {
         // Fresh request-scoped mylist memoization per episode child: the
         // coordinator must not outlive one searchByMedia call, otherwise a
@@ -644,6 +645,18 @@ export async function handleSeerrIngress(
         searchCache.db.prepare(
           'UPDATE media_intents SET last_error = NULL, last_processed_at = ? WHERE id = ?'
         ).run(Date.now(), childIntentId);
+        // One concise end-to-end trace line per episode, so "why is this
+        // episode not playable yet?" is answerable from the request log
+        // without cross-referencing five subsystems. Later stages (Plex
+        // ingest, byte route) log their own lines; this anchors the request
+        // stage with the elapsed time and the durable outcome.
+        const lastChild = childResults[childResults.length - 1];
+        console.log(
+          `media-search: episode-trace media=${operationalIntent.mediaId} s${seasonNum}e${ep.episodeNumber} `
+          + `source=seerr stage=${lastChild?.deferred ? 'deferred' : 'selected'} `
+          + `stage_ms=${Date.now() - childTraceStartedAt} candidates=${result?.total ?? 0} `
+          + `defer_reason=${lastChild?.deferReason ?? 'none'} result=${lastChild?.deferred ? 'deferred' : 'fulfilled'}`,
+        );
       } catch (episodeErr) {
         // Per-episode failure isolation: a transient pipeline failure
         // becomes durable deferred intent (exact S/E); a deterministic
@@ -691,6 +704,11 @@ export async function handleSeerrIngress(
           childIntentId,
           error: episodeErr.message,
         });
+        console.log(
+          `media-search: episode-trace media=${operationalIntent.mediaId} s${seasonNum}e${ep.episodeNumber} `
+          + `source=seerr stage=failed stage_ms=${Date.now() - childTraceStartedAt} `
+          + `result=error detail=${String(episodeErr.message).slice(0, 120)}`,
+        );
       }
     }
   }
