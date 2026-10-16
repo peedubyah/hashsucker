@@ -22,7 +22,24 @@ playback passed after reconstruction. Missing retained truth returns 409 and
 fails closed. This is an earned continuity primitive, not a general
 consumer-replacement framework.
 
-Active product slice: **execution-quality selection — prefer a serviceable
+Active product slice: **TorBox delivery attribution + blocked-item handling** —
+DIAGNOSED + HARDENED (`1ca03e1`; evidence in `docs/BUILD-LOG.md` 2026-10-16,
+incident `artifacts/incident/torbox-cdn-sni-reset.md`). The `nexus.erth.tb-cdn.earth`
+TLS reset is NOT a TorBox/CDN fault: it is an SNI-exact, destination-independent
+reset on the operator's WAN path (AT&T gateway/ISP filter) — proven by resetting
+that one SNI against 8.8.8.8/1.1.1.1/Google while random SNIs succeed. No
+supported TorBox alternative and no regeneration path exists. 132/136 active
+bindings (97%) are TorBox-only and currently unserviceable. Fix (operator
+action, not applied): allowlist the hostname or route it via a trusted alternate
+egress. Product hardening landed: class-fair scheduler drain (a blocked P0
+backlog no longer starves `released-request-follow-up` P4 recovery rows);
+positive byte-health now decays after 10 min; blocked-publication policy
+evaluated and Policy A retained with a truthful `serviceability` state. Gate:
+blocked items recover autonomously when the route recovers (no human request).
+Non-goals: unsafe workarounds (TLS bypass, SNI spoofing, URL rewrite, DNS
+pinning, third-party proxy), durable identity change.
+
+Prior active slice: **execution-quality selection — prefer a serviceable
 cached representation** — FIXED + DEPLOYED (`8d1b40b`, `d7fd6b9`; evidence in
 `docs/BUILD-LOG.md` 2026-10-16). Problem: selection could publish a
 representation that was already knowably unserviceable here (The Batman:

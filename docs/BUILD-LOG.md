@@ -1259,3 +1259,124 @@ recovers. `rd-ensure` suite green after the authoritative/complete change.
   ranked beyond the top-N after a rejection is not reached.
 - Selection still cannot distinguish B from A without a read; the first bind is
   always probed when no recent health exists.
+
+## 2026-10-16 — TorBox CDN reset attribution + blocked-item handling — DIAGNOSED + HARDENED
+
+Slice: TorBox delivery + blocked-item handling (commits `1ca03e1`; incident
+bundle `artifacts/incident/torbox-cdn-sni-reset.md`). Follows the
+execution-quality selection slice.
+
+### 1-2. TorBox delivery-URL characterization + reset attribution — DECISIVE
+
+Bounded sample of 12 current cached TorrentFiles (distinct resources
+95797857…120334360, files 0/1): **every** `requestdl` (JSON and
+`redirect=true` 307) returned the SAME host `nexus.erth.tb-cdn.earth`
+(Cloudflare: `172.66.155.241`, `104.20.42.216`; IPv6 has no route here). TLS
+resets after ClientHello in ~35 ms, deterministic.
+
+The reset is **SNI-exact and destination-independent** — the decisive test:
+
+- on `172.66.155.241`: `nexus.erth.tb-cdn.earth` → ECONNRESET; but
+  `api.torbox.app`, `erth.tb-cdn.earth`, `tb-cdn.earth`, `cloudflare.com`,
+  `random.example.com` → all OK;
+- against 8.8.8.8, 1.1.1.1, and Google: the SAME SNI resets while
+  `random.example.com` / `totally-unrelated.test` / `foo.bar.invalid` succeed.
+
+A reset keyed on ONE exact SNI regardless of the destination server can only be
+a **middlebox on the operator's WAN path** (AT&T Arris gateway `192.168.1.254`
+or AT&T DPI), NOT TorBox, NOT Cloudflare's edge, NOT the destination. Identical
+from host and container; no local filter service, no proxy, no SNI-capable nft
+rule; IPv4/IPv6 does not explain it.
+
+**Correction to prior attribution:** earlier slices recorded this as a
+"TorBox/CDN edge" fault. It is a local/ISP SNI filter. This is why TorBox byte
+delivery fails for the whole deployment.
+
+### 3-4. Supported alternatives + regeneration — NONE
+
+`requestdl` is the only delivery surface (no API-host byte proxy;
+`/torrents/download`, `/torrents/file` → 404). URL regeneration is
+deterministic: the host is always `nexus.erth.tb-cdn.earth`. No recovery by
+regeneration. No unsafe workaround attempted (no TLS-verification bypass, no
+SNI spoofing, no signed-URL rewrite, no DNS pinning, no third-party proxy).
+
+### 6. Narrow fix (operator action; not applied)
+
+Allowlist/unblock the exact hostname in the gateway's content filter, or route
+that hostname through a trusted alternate egress the operator already controls
+(e.g. a Tailscale exit node). Tailscale is up with several peers, but none
+advertises an exit node and no peer SSH access is available from this
+deployment, so this was not applied. Impact if unfixed: **132/136 active
+bindings (97%) are TorBox-only and currently unserviceable**; only 3 are
+dual-route and 1 RD-only.
+
+### 8. Blocked-publication policy — DECISION: keep Policy A (publish), with truth
+
+Evaluated against the product objective ("requested media should appear as
+playable media quickly"):
+
+- Evidence: the blocker is a **network filter**, not a provider/permanent
+  fault, and it is fixable; the item recovers **in place** (no re-ingest)
+  when the route recovers. 132/136 items are blocked, so Policy B (withhold)
+  would make the library appear almost empty and make a real request
+  indistinguishable from a failed one — worse for "appear quickly".
+- Retained: publish the best-ranked bind even when blocked, carrying
+  `serviceability:{state:'blocked',reason,provider}`; the operator UI shows
+  "Not serviceable — <reason>". Plex cannot express unavailability, so the
+  truthful state lives in HashSucker's own surface.
+- Revisit: if the blocker is permanent/provider-side, Policy B (prepare but
+  withhold consumer publication, with the follow-up wake) is preferable.
+
+### 9. Autonomous blocked-item recovery — gap found + fixed
+
+`released-request-follow-up` future_intents ARE created for blocked released
+requests (verified: `tt1877830`/`tt1517268`/`tt6056058` → intents 154/155/156),
+and the scheduler's byte probe feeds byte-health. **Gap:** those intents never
+ran — 9 blocked `published_preparing` episodes (P0, hourly retry, always
+blocked) filled every tick's wall-clock budget, so the P4 follow-ups stayed at
+`attempts=0` for hours. Fixed (`1ca03e1`): the drain interleaves actionable
+rows across priority classes (round-robin by class rank), so every present
+class gets a turn while preserving priority order within a class. Test "class
+fairness: a blocked P0 backlog cannot starve a P4 follow-up". No hot loop: the
+follow-up cadence and the byte probe half-open window bound re-checks.
+
+### 10. Serviceability health lifetime — audited + hardened
+
+- Negative health: bounded backoff, half-open (existing, tested).
+- **New:** a POSITIVE observation decays to `unknown` after 10 min, so a stale
+  "serviceable" cannot report "Ready to watch" forever after delivery breaks;
+  the next read/probe re-verifies.
+- Process-local/runtime-only (correct): a restart clears runtime assumptions
+  safely; durable truth is untouched. Test: "a stale positive decays to
+  unknown".
+
+### 11. Selection bound of four — keep (evidence limited but consistent)
+
+Observed fresh requests: Harakiri (TorBox candidate rejected at probe #1, RD
+candidate accepted at probe #2), Barbie (two TorBox rejected, then RD), The
+Batman (one rejected, no alternative). In every observed case the first
+serviceable candidate was within 1–2 candidates of the first reject, well
+inside `maxServiceabilityAlternates=4`. Sample is small (3 gate-observed
+requests); keep 4 until a larger distribution shows otherwise.
+
+### 12. Serviceability probe cost
+
+The probe is `probeByteReady` (`range: bytes=0-65535`) through the real serve
+path. The data-plane's fixed grid is **8 MiB**, so a cache miss requests one
+8 MiB chunk (measured: `chunk_size=8388608`; a probe request moved
+`bytes_upstream_issued` by ~8.4 MiB, `bytes_requested_total` by ~65 KiB). On a
+healthy route this fills the chunk — i.e. the probe is also cache-warming, not
+pure overhead. On a dead route the transfer truncates (206 + 0 bytes). A
+smaller probe would need a separate byte path (not created — no fake delivery
+path). Failed probes short-circuit on recent negative health (0 bytes).
+
+### Verification
+
+Node full suite 3346/3343/0/3. Rust unchanged. Incident bundle committed.
+
+### Remaining external blocker
+
+The WAN SNI filter for `nexus.erth.tb-cdn.earth` (operator/ISP). Until it is
+removed or bypassed via a trusted alternate egress, TorBox-backed fresh
+requests cannot be playable here; HashSucker reports the exact blocker and
+keeps the item recoverable.
