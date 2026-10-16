@@ -942,3 +942,65 @@ async fn r6_restart_rebuilds_routes_and_keeps_durable_bytes() {
         "after restart Rust knows only the routes in control truth"
     );
 }
+
+// ===========================================================================
+// R7 — a route that cannot be reached at all must FAIL FAST
+// ===========================================================================
+//
+// A connection-establishment failure (refused / reset / TLS) is a `send()`
+// error with no provider HTTP status, so it carries no provider-load signal.
+// It must NOT pay the 30s `RECOVERY_BACKOFF_DEFAULT` x 3 (~90s) that an HTTP
+// 429/5xx load backoff pays. A broken route that takes ~90s to surface a
+// failure is long enough to wedge a downstream Plex scan on a hung read; the
+// product requirement is "unavailable items produce a precise blocker quickly".
+//
+// Both routes are repointed at a closed port so every attempt fails at connect
+// time (ECONNREFUSED) and failover has nowhere healthy to go. The read must
+// still surface an explicit 5xx, but in seconds, not minutes.
+
+#[tokio::test]
+async fn r7_connection_failure_fails_fast() {
+    let st = build_stack(FILE_SIZE, None).await;
+
+    // A port that is provably closed: bind :0, learn the port, drop the listener.
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let closed_port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let closed = format!("http://127.0.0.1:{closed_port}/cdn/x");
+
+    // Repoint BOTH warmed capabilities at the closed port. Every route now
+    // fails at connection establishment, so no failover can rescue the read.
+    for slot in st.manager.slots.iter() {
+        let provider = slot.coord.provider.clone();
+        let resource = slot.coord.provider_resource_id.clone();
+        let file = slot.coord.provider_file_id.clone();
+        let mut caps = slot.caps.lock().unwrap();
+        caps.clear();
+        caps.push(DeliveryCapability::new(
+            closed.clone(),
+            provider,
+            "default".into(),
+            st.tf.tf_id_durable.clone(),
+            resource,
+            file,
+            None,
+        ));
+    }
+
+    let started = std::time::Instant::now();
+    let (status, body, _p) = read(&st, 0, CHUNK - 1).await;
+    let elapsed = started.elapsed();
+
+    // Same honest-shape contract as R3: the failure is either explicit before
+    // the headers commit, or a visibly truncated stream — never a silent
+    // complete-looking success.
+    assert!(
+        status >= 500 || (status == 206 && body.len() < CHUNK as usize),
+        "an unreachable route must not look like a complete success (status={status}, body={})",
+        body.len()
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "connection failure must fail fast (no 30s x3 load backoff); took {elapsed:?}"
+    );
+}

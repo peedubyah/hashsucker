@@ -429,37 +429,37 @@ impl ResilientRangeReader {
                         self.metrics
                             .upstream_errors
                             .fetch_add(1, Ordering::SeqCst);
-                        // Branch: headerless reqwest timeout (no usable response headers) retries
-                        // the SAME capability immediately with zero cooldown. Generic transport
-                        // errors (connection refused, DNS failure, etc.) keep the existing 30s
-                        // throttle policy. The timeout carries no provider-load signal, so the
-                        // generic cooldown over-penalizes.
-                        // Reactive failover BEFORE any same-cap retry: a 25s
-                        // headerless timeout carries no provider-load signal, so
-                        // neither lane is throttled; the alternate simply gets
-                        // the first chance when one exists warm.
-                        if e.is_timeout() {
-                            if self.try_failover().await {
+                        // A `send()` error is always a transport-level failure with
+                        // NO provider HTTP status, so it carries no provider-load
+                        // signal. The generic `RECOVERY_BACKOFF_DEFAULT` (30s) is a
+                        // load backoff for HTTP 429/5xx; applying it here turned a
+                        // definitively-broken route (connection refused / reset /
+                        // TLS failure) into ~90s of pointless cooldown (3 x 30s)
+                        // before any failure surfaced — long enough to wedge a
+                        // downstream Plex scan on a hung read. Both sub-cases now
+                        // use the same zero-cooldown bounded budget:
+                        //   - headerless timeout (existing behavior);
+                        //   - connection-establishment failure (new): the route
+                        //     could not be reached at all.
+                        // Reactive failover BEFORE any same-cap retry: neither
+                        // failure carries a load signal, so the alternate same-TF
+                        // route gets the first chance when one exists warm.
+                        if self.try_failover().await {
+                            forced_status = None;
+                            continue;
+                        }
+                        let recovery_path = if e.is_timeout() {
+                            "headerless_timeout_zero_cooldown"
+                        } else {
+                            "connection_failure_zero_cooldown"
+                        };
+                        match self.apply_transient_headerless(recovery_path).await {
+                            Action::RetrySameCap => {
                                 forced_status = None;
                                 continue;
                             }
-                            match self.apply_transient_headerless_timeout().await {
-                                Action::RetrySameCap => {
-                                    forced_status = None;
-                                    continue;
-                                }
-                                Action::Fatal(e) => return Err(e),
-                                _ => unreachable!(),
-                            }
-                        } else {
-                            match self.apply_transient(None).await {
-                                Action::RetrySameCap => {
-                                    forced_status = None;
-                                    continue;
-                                }
-                                Action::Fatal(e) => return Err(e),
-                                _ => unreachable!(),
-                            }
+                            Action::Fatal(e) => return Err(e),
+                            _ => unreachable!(),
                         }
                     }
                 };
@@ -647,25 +647,32 @@ impl ResilientRangeReader {
         }
     }
 
-    /// Class B headerless timeout: reqwest timeout with NO usable response headers.
+    /// Class B headerless transport failure: a `send()` error with NO usable
+    /// response headers. Two kinds reach here, both carrying zero provider-load
+    /// signal:
+    ///   - a reqwest timeout (CDN host failed to respond within the client
+    ///     timeout);
+    ///   - a connection-establishment failure (refused / reset / TLS).
     ///
-    /// This is NOT a provider rate-limit directive (no Retry-After signal). It is a single
-    /// CDN host failing to respond within the reqwest client timeout. Applying the generic
-    /// 30s `RECOVERY_BACKOFF_DEFAULT` throttle here over-penalizes: it blocks this reader
-    /// AND every other reader sharing the capability from retrying promptly, even though the
-    /// failure carries zero information about provider load.
+    /// Neither is a provider rate-limit directive (no Retry-After signal).
+    /// Applying the generic 30s `RECOVERY_BACKOFF_DEFAULT` throttle here
+    /// over-penalizes: it blocks this reader AND every other reader sharing the
+    /// capability from retrying promptly, and it stretches a definitively-broken
+    /// route into ~90s before any failure surfaces.
     ///
-    /// So this path retries the SAME capability immediately (zero cooldown), consuming the
-    /// same-cap retry budget exactly like `apply_transient`. It does NOT throttle the
-    /// capability — other readers are not penalized.
-    async fn apply_transient_headerless_timeout(&mut self) -> Action {
+    /// So this path retries the SAME capability immediately (zero cooldown),
+    /// consuming the same-cap retry budget exactly like `apply_transient`. It
+    /// does NOT throttle the capability — other readers are not penalized.
+    /// `path` is the telemetry label (timeout vs connection failure) so the
+    /// timeline stays unambiguous.
+    async fn apply_transient_headerless(&mut self, path: &'static str) -> Action {
         self.enter_recovery();
         self.metrics.record_recovery_attempt();
         self.recovery.same_cap_retries += 1;
         // Telemetry: explicit zero cooldown so the timeline is unambiguous.
         if let Some(s) = self.stage.as_ref() {
             s.set_attempt_retry_wait(self.recovery.attempt, 0);
-            s.set_attempt_recovery_path(self.recovery.attempt, "headerless_timeout_zero_cooldown");
+            s.set_attempt_recovery_path(self.recovery.attempt, path);
         }
         self.recovery.attempt += 1;
         let applied_ms = 0;

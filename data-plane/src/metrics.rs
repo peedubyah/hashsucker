@@ -797,7 +797,7 @@ impl StageClock {
     }
 
     /// Set the recovery_path label on an existing attempt entry.
-    /// Used by apply_transient/apply_transient_headerless_timeout/apply_dead
+    /// Used by apply_transient/apply_transient_headerless/apply_dead
     /// to record which recovery path was taken after this attempt failed.
     pub fn set_attempt_recovery_path(&self, attempt: u32, recovery_path: &str) {
         if let Ok(mut g) = self.attempts.lock() {
