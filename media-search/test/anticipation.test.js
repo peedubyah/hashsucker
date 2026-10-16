@@ -251,6 +251,35 @@ test('ordinary drain executes up to four actionable rows in priority order', asy
   ]);
 });
 
+test('one slow action cannot starve the rest of the due set', async () => {
+  // Regression (2026-10-16): a single ~60s P0 row consumed the whole 30s
+  // nominal budget every tick, so `wall-clock-cap` ended the tick after one
+  // action and a due household season row behind it stayed unprocessed for
+  // ~6 hours. The wall-clock budget must not stop the drain before the floor.
+  const store = createFutureIntentStore({ db: memDb() });
+  for (let i = 0; i < 4; i += 1) store.seed({ mediaType: 'movie', mediaId: `tt-slow-${i}` });
+  let nowMs = 1_000_000;
+  const fetchFn = async (url) => {
+    if (url.endsWith('/api/media-prepare')) {
+      nowMs += 60_000; // one action exceeds the 30s nominal budget
+      return { status: 200, text: async () => JSON.stringify({ prepared: true, handoff: { torrentFileId: 'tf1' } }) };
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  const logs = [];
+  const sched = createAnticipationScheduler({
+    store, baseUrl: 'http://t', dataPlaneBaseUrl: 'http://d', fetchFn,
+    clock: () => nowMs, log: (msg) => logs.push(msg),
+  });
+  await sched.tickOnce();
+  assert.equal(
+    logs.filter((msg) => msg.startsWith('scheduler due-row')).length,
+    4,
+    'all four due rows drained despite one 60s action',
+  );
+  assert.ok(logs.some((msg) => msg.includes('scheduler drain actions=4')));
+});
+
 test('priority classifier uses durable intent state and ownership fields', () => {
   const nowMs = 1_000_000;
   assert.equal(classifyIntentPriority({ state: 'published_preparing' }, nowMs).className, 'P0');

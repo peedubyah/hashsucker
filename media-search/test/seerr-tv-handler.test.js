@@ -32,10 +32,14 @@ function buildCache() {
   return createDiscoveryCache({ dbPath: ':memory:' });
 }
 
-function buildHandler(cache) {
+function buildHandler(cache, hooks = {}) {
   // Same harness-drift stub as seerr-ingress.test.js (pre-existing on
   // clean e971ec8): ingress never touches playback.
-  return createRequestHandler({ searchCache: cache, terminalEvidenceStore: { get: () => null, set: () => {} } });
+  return createRequestHandler({
+    searchCache: cache,
+    terminalEvidenceStore: { get: () => null, set: () => {} },
+    ...hooks,
+  });
 }
 
 function setSeerrToken() {
@@ -140,7 +144,8 @@ test('TV handler: one requested season → N concrete child scopes; parent never
   process.env.SEERR_API_KEY = 'k';
   try {
     const cache = buildCache();
-    const handler = buildHandler(cache);
+    let nudges = 0;
+    const handler = buildHandler(cache, { schedulingNudge: () => { nudges += 1; } });
     // Seed a candidate for the resolved IMDb so searchByMedia has something
     // to persist as a media_request row.
     for (let i = 0; i < 7; i += 1) {
@@ -162,6 +167,10 @@ test('TV handler: one requested season → N concrete child scopes; parent never
     assert.equal(body.parentIntentId > 0, true);
     assert.equal(body.childCount, 7);
     assert.equal(body.childResults.length, 7);
+    // Fresh human season demand must nudge the existing scheduler so the
+    // anticipation/reconcile work starts immediately, not at the next
+    // generic interval. Exactly one nudge per accepted fan-out.
+    assert.equal(nudges, 1, 'one scheduler nudge per accepted TV fan-out');
 
     // Every successful child must report a non-zero resultCount. This
     // proves the handler reads the real return contract `result.total`,

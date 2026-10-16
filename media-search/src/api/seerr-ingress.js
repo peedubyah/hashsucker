@@ -762,6 +762,15 @@ export async function handleSeerrIngress(
     ).run(Date.now(), parentIntentId);
   }
 
+  // Fresh human season demand is urgent: the durable season/episode
+  // obligations are now recorded, so pull the anticipation scheduler's next
+  // tick forward instead of waiting for the generic interval. This is a direct
+  // worker nudge into the EXISTING scheduler (single-flight + atomic claim keep
+  // it idempotent); it starts no second scheduler and does no work itself.
+  try {
+    schedulingNudge?.();
+  } catch {}
+
   return sendJson(response, 200, {
     status: 'tv-fan-out',
     identityStatus,

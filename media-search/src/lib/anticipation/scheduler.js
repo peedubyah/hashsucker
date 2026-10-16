@@ -35,6 +35,17 @@ const MAX_ACTIONS_PER_TICK = 8;
 // ~17s (observed), so a tick may exceed this nominal bound. The cap bounds how
 // many actions are STARTED, not an absolute deadline.
 const MAX_TICK_WORK_MS = 30_000;
+// Floor on actions per tick, applied BEFORE the wall-clock budget can stop the
+// drain. Runtime evidence (2026-10-16): one slow speculative P0 row
+// (published_preparing re-running the full request path, ~60s) consumed the
+// whole 30s budget every tick, so `stopReason=wall-clock-cap` ended the tick
+// after a single action. A due requested-season row behind it (the exact
+// household demand) stayed unprocessed for ~6 hours. The budget is a
+// spend-control on NEW work, not a licence for one expensive row to starve the
+// rest of the due set; every tick now starts at least this many actions (still
+// hard-bounded by MAX_ACTIONS_PER_TICK) so cheap/consumer-ready work is never
+// starved by one slow row.
+const MIN_ACTIONS_PER_TICK = 4;
 const PUBLISHED_CONFIRMATION_RETRY_MS = 60 * 60 * 1000;
 const PUBLICATION_UNCONFIRMED = 'consumer-publication-unconfirmed';
 // Keep the per-tick scan bounded, but large enough to pass a parked/exhausted
@@ -650,9 +661,10 @@ export function createAnticipationScheduler({
     let stopReason = 'snapshot-exhausted';
     for (const { row: original, priority } of orderedDue) {
       if (actions >= MAX_ACTIONS_PER_TICK) { stopReason = 'action-cap'; break; }
-      // Nominal budget: do not START another action once it is spent. The
-      // action already in flight is allowed to finish.
-      if (actions > 0 && now() - ordinaryTickStartedAt >= MAX_TICK_WORK_MS) { stopReason = 'wall-clock-cap'; break; }
+      // Nominal budget: do not START another action once it is spent — but
+      // never before MIN_ACTIONS_PER_TICK, so one slow row cannot starve the
+      // rest of the due set. The action already in flight is allowed to finish.
+      if (actions >= MIN_ACTIONS_PER_TICK && now() - ordinaryTickStartedAt >= MAX_TICK_WORK_MS) { stopReason = 'wall-clock-cap'; break; }
       let intent = original;
       // A released future-not-released row may have exhausted its pre-release
       // retry budget. Re-arm it and continue through the normal claim in this
@@ -688,7 +700,7 @@ export function createAnticipationScheduler({
         // row made no progress, so another episode can still advance.
         // An attempts-exhausted row is parked state, not useful work.
         if (result?.reason === 'attempts-exhausted') continue;
-        if (now() - ordinaryTickStartedAt >= MAX_TICK_WORK_MS) { stopReason = 'wall-clock-cap'; break; }
+        if (actions >= MIN_ACTIONS_PER_TICK && now() - ordinaryTickStartedAt >= MAX_TICK_WORK_MS) { stopReason = 'wall-clock-cap'; break; }
         continue;
       } catch (err) {
         store.transition(intent.id, INTENT_STATES.ANTICIPATED, {
