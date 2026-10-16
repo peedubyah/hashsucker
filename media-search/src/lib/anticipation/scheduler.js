@@ -651,6 +651,31 @@ export function createAnticipationScheduler({
       .filter(({ priority }) => priority.actionable)
       .sort((a, b) => (a.priority.rank - b.priority.rank) || (a.index - b.index));
 
+    // Class-fair ordering: interleave actionable rows across priority classes
+    // (round-robin by class rank) so a large same-class backlog cannot
+    // monopolize the whole tick. Runtime evidence (2026-10-16): 9 blocked
+    // `published_preparing` episodes (P0, hourly retry, always blocked) filled
+    // every tick's wall-clock budget, so `released-request-follow-up` rows (P4)
+    // that must re-probe a recovered route NEVER ran (attempts stayed 0 for
+    // hours). Interleaving guarantees every present class gets a turn while
+    // preserving priority order within a class.
+    const byClass = new Map();
+    for (const item of orderedDue) {
+      const key = item.priority.className;
+      if (!byClass.has(key)) byClass.set(key, []);
+      byClass.get(key).push(item);
+    }
+    const classOrder = [...byClass.keys()]
+      .sort((a, b) => byClass.get(a)[0].priority.rank - byClass.get(b)[0].priority.rank);
+    const fairOrder = [];
+    for (let progressed = true; progressed;) {
+      progressed = false;
+      for (const key of classOrder) {
+        const queue = byClass.get(key);
+        if (queue.length > 0) { fairOrder.push(queue.shift()); progressed = true; }
+      }
+    }
+
     // Cheap waiting for unreleased rows. A future-not-released row whose
     // prepare window has not opened is not actionable, but without this its
     // poll stays at seed time, so every interval re-classifies it (and every
@@ -680,7 +705,7 @@ export function createAnticipationScheduler({
     let actions = 0;
     let lastResult = null;
     let stopReason = 'snapshot-exhausted';
-    for (const { row: original, priority } of orderedDue) {
+    for (const { row: original, priority } of fairOrder) {
       if (actions >= MAX_ACTIONS_PER_TICK) { stopReason = 'action-cap'; break; }
       // Nominal budget: do not START another action once it is spent — but
       // never before MIN_ACTIONS_PER_TICK, so one slow row cannot starve the

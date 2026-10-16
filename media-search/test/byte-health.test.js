@@ -36,6 +36,17 @@ test('a failed read reports unserviceable with a bounded retry; success clears i
   assert.equal(getServiceability('tf_a').state, 'serviceable');
 });
 
+test('a stale positive decays to unknown (positive health is not trusted forever)', () => {
+  __resetByteHealth();
+  recordServiceable('tf_pos', { provider: 'realdebrid' });
+  assert.equal(getServiceability('tf_pos').state, 'serviceable');
+  // 10 minutes later the positive observation is stale -> re-verify.
+  const later = Date.now() + 11 * 60_000;
+  const s = getServiceability('tf_pos', later);
+  assert.equal(s.state, 'unknown');
+  assert.equal(s.reason, 'stale-positive');
+});
+
 test('consecutive failures escalate the backoff but stay bounded', () => {
   __resetByteHealth();
   const first = (recordUnserviceable('tf_b', { reason: 'r' }), getServiceability('tf_b').retryInMs);

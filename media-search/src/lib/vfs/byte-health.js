@@ -30,6 +30,11 @@
 const DEFAULT_BACKOFF_MS = 20_000;
 const MAX_BACKOFF_MS = 5 * 60_000;
 const MAX_ENTRIES = 4096;
+// A POSITIVE observation is not trusted forever: delivery can break after a
+// healthy read (a CDN edge can start resetting, a signed URL can expire). After
+// this window a "serviceable" entry decays to unknown so the next read/probe
+// re-verifies it instead of reporting "Ready to watch" indefinitely.
+const SERVICEABLE_TTL_MS = 10 * 60_000;
 
 /** @type {Map<string, {state:string, reason:string, provider:string|null, failures:number, until:number, observedAt:number}>} */
 const registry = new Map();
@@ -116,6 +121,10 @@ export function recordUnserviceable(tfId, { reason = 'provider-route-failure', p
 export function getServiceability(tfId, nowMs = Date.now()) {
   const entry = tfId ? registry.get(tfId) : null;
   if (!entry) return { state: 'unknown', reason: null, provider: null, retryInMs: null };
+  if (entry.state === 'serviceable' && nowMs - entry.observedAt > SERVICEABLE_TTL_MS) {
+    // Stale positive: re-verify rather than claim serviceable forever.
+    return { state: 'unknown', reason: 'stale-positive', provider: entry.provider, retryInMs: 0 };
+  }
   const retryInMs = entry.until > nowMs ? entry.until - nowMs : 0;
   return {
     state: entry.state,

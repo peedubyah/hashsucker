@@ -278,6 +278,43 @@ test('per-action budget bounds a hung action so the tick cannot wedge', async ()
   );
 });
 
+test('class fairness: a blocked P0 backlog cannot starve a P4 follow-up', async () => {
+  // Runtime gap (2026-10-16): 9 blocked published_preparing episodes (P0)
+  // consumed every tick, so released-request-follow-up rows (P4) never ran and
+  // a recovered route was never re-probed. Interleaving by class fixes it.
+  const store = createFutureIntentStore({ db: memDb() });
+  for (let i = 0; i < 8; i += 1) {
+    const { intent } = store.seed({ mediaType: 'series', mediaId: `tt-p0-${i}`, season: 1, episode: 1 });
+    store.transition(intent.id, INTENT_STATES.PUBLISHED_PREPARING, { torrent_file_id: 'tf-p0', next_check_at: 0 });
+  }
+  const follow = store.seed({
+    mediaType: 'movie', mediaId: 'tt-follow',
+    source: 'released-request-follow-up', deferReason: 'released-unfulfilled',
+  }).intent;
+  let nowMs = 1_000_000;
+  const logs = [];
+  const fetchFn = async (url) => {
+    nowMs += 60_000; // every action is slow: the wall-clock cap would end the tick
+    if (url.endsWith('/api/media-request')) {
+      return { status: 200, text: async () => JSON.stringify({ handoff: { torrentFileId: 'tf' }, reuseMode: 'republish', fulfilled: true, published: true }) };
+    }
+    if (url.endsWith('/api/media-prepare')) {
+      return { status: 200, text: async () => JSON.stringify({ prepared: true, handoff: { torrentFileId: 'tf' } }) };
+    }
+    if (url.includes('/files/')) return { status: 503, text: async () => '' };
+    throw new Error(`unexpected ${url}`);
+  };
+  const sched = createAnticipationScheduler({
+    store, baseUrl: 'http://t', dataPlaneBaseUrl: 'http://d', fetchFn,
+    clock: () => nowMs, log: (msg) => logs.push(msg),
+  });
+  await sched.tickOnce();
+  const processed = logs
+    .filter((m) => m.startsWith('scheduler due-row'))
+    .map((m) => Number(m.match(/id=(\d+)/)[1]));
+  assert.ok(processed.includes(follow.id), `the P4 follow-up ran despite the P0 backlog (processed=${processed.join(',')})`);
+});
+
 test('one slow action cannot starve the rest of the due set', async () => {
   // Regression (2026-10-16): a single ~60s P0 row consumed the whole 30s
   // nominal budget every tick, so `wall-clock-cap` ended the tick after one
