@@ -1038,18 +1038,23 @@ bounded (25 s/client). Retry ownership stays single-layer per surface.
 
 ### 5. Known-bad route suppression without corrupting durable truth
 
-First attempt: a Node-level TorrentFile short-circuit. REVERTED — it blocked a
-healthy alternate (see §6); route health is per (provider, placement, file).
+Two attempts, both measured and both REVERTED — evidence over intent:
 
-Final (`1d4d431`): the data plane now marks a route that could not be REACHED
-(connection refused/reset/TLS, or a body cut mid-stream) unreachable for a
-bounded 20 s window and SKIPS it (`usable_now` false, `first_waitable` skips).
-An alternate exact route is preferred immediately; repeated clients do not
-hammer a known-bad route; the cap and its URL are retained and it is half-open
-after the window (cleared on any 206). Distinct from Throttled (a load signal
-that is waited out and reused). Runtime-only — durable placement truth is
-untouched. Test `r2g_unreachable_route_is_skipped_for_the_alternate`. The Node
-`byte-health` registry remains the cross-layer serviceability SIGNAL.
+1. Node-level TorrentFile short-circuit. Reverted: it blocked a healthy
+   alternate (see §6); route health is per (provider, placement, file).
+2. Data-plane per-route `Unreachable` window (`1d4d431`): mark a route that
+   could not be reached unreachable for 20 s and skip it. Reverted (`46d686e`):
+   production measurement showed it made repeated reads WORSE — 8 reads of one
+   broken TorrentFile at 2 s spacing took 0.6–6.1 s (variable) with the window,
+   vs a consistent 0.29–1.29 s after the revert. The skip changes pool
+   accounting enough to trigger avoidable work; the benefit (less hammering) was
+   not worth the regression.
+
+What remains (kept): the Node `byte-health` registry TRACKS and REPORTS
+runtime route health per exact TorrentFile (serviceability signal, no durable
+truth touched, bounded backoff, half-open recovery), and the data plane fails a
+broken route fast (~0.3 s, bounded) without API amplification. "Suppressed"
+is therefore truthful reporting + fast bounded failure, not route skipping.
 
 ### 6. Healthy alternate exact routes adopted (two real defects found + fixed)
 
@@ -1116,13 +1121,13 @@ TorrentFile / republish change.
   also RD-cached (or TorBox CDN recovers). Not a HashSucker defect.
 - Still open: `acquire_failover_lane` only cold-acquires the alternate when the
   slot has capacity; a genuinely busy alternate still means "no alternate right
-  now" (bounded, not a wedge). Within a single read the transport still retries
-  the failed route up to 3× before the mark takes effect on the NEXT acquire
-  (bounded, ~0.1–0.5 s).
+  now" (bounded, not a wedge). Repeated reads of a broken route re-attempt it
+  ~3× each (bounded, ~0.3 s total); a route-level skip was tried and reverted
+  (§5) after it regressed latency.
 
 ### Verification
 
-Rust `cargo test` 153 + 14 + 13 + 7 green. Node full suite 3337/3334/0/3 (plus
+Rust `cargo test` 153 + 14 + 12 + 7 green. Node full suite 3337/3334/0/3 (plus
 new byte-health + per-action-budget tests; one timing-sensitive reuse test
 (`wallMs < 5000`) flaked once at 8016 ms under full-suite load and passed on
 re-run — a load-tight bound, not a product defect). Production: Lowdown reads
