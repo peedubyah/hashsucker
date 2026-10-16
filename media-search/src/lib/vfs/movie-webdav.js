@@ -5,6 +5,7 @@ import { attemptRdResolution, getRdPlaybackUrl } from '../providers/realdebrid/r
 import { isUrlLive } from '../resolver/liveness.js';
 import { providerAccounting } from '../providers/provider-accounting.js';
 import { materializeVfsEntry, isUnpublishedHandoff } from './materialize.js';
+import { resolveVfsStateForEntry } from './binding-authority.js';
 import {
   validateRangeResponseBody,
   validateRangeResponseHeaders,
@@ -339,25 +340,36 @@ export function createMovieWebDav({
     }
     entries = searchCache.listVfsMovieEntries();
     const nextStates = [];
+    let isolated = 0;
     for (const entry of entries) {
       let state = states.get(entry.releaseKey);
       if (!state) {
-        const handoff = searchCache.getPlaybackHandoffByReleaseKey(entry.mediaId, entry.releaseKey);
-        if (!handoff) {
-          throw new VfsError(
-            `Durable handoff is missing for VFS movie ${entry.mediaId}`,
-            503,
-            'HANDOFF_MISSING',
-          );
+        const resolved = resolveVfsStateForEntry({
+          searchCache,
+          controlPlaneStore,
+          entry: { ...entry, mediaType: 'movie' },
+          log: (m) => console.log(m),
+        });
+        if (!resolved.state) {
+          // Isolated: one unbackable entry must not take the whole
+          // collection down. It is logged loudly and skipped; nothing is
+          // guessed and no bytes are served for it.
+          isolated += 1;
+          continue;
         }
-        validateHandoff(handoff);
-        state = { entry, handoff, metadataPromise: null };
+        if (resolved.action !== 'handoff') validateHandoff(resolved.state.handoff);
+        state = { ...resolved.state, metadataPromise: null };
         states.set(entry.releaseKey, state);
-        console.log(`[vfs] bound media=${entry.mediaId} release=${entry.releaseKey}`);
+        console.log(`[vfs] bound media=${entry.mediaId} release=${entry.releaseKey} via=${resolved.action}`);
       } else if (state.entry.size == null && entry.size != null) {
         state.entry = entry;
       }
       nextStates.push(state);
+    }
+    if (isolated > 0) {
+      // Report, never hide: the operator must see the count and can read the
+      // per-entry lines above for the reason.
+      console.warn(`[vfs] catalog isolated ${isolated} entr${isolated === 1 ? 'y' : 'ies'} without authoritative backing`);
     }
     const tree = buildTree(nextStates);
     catalogCache = { watermark, tree, sweptAt: nowMs, statesSize: states.size };

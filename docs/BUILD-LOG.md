@@ -766,3 +766,71 @@ Pre-existing, unrelated to this slice: `/vfs/Movies` PROPFIND returns 503
 `01981d99…:0` while its only playback handoff is `07309290…:torrent`
 (rows date to 2026-09-11), and one divergent row fails the whole collection
 listing.
+
+## 2026-10-16 — VFS handoff-supersede divergence repaired; TorBox CDN SNI boundary isolated
+
+**VFS divergence — root cause.** `playback_handoffs` has a UNIQUE index on
+`(media_type, media_id, season, episode)`, and its upsert's `WHERE` clause
+deliberately fires when both rows are authoritative but their
+`torrent_file_id` differs. A new request that selects a DIFFERENT authoritative
+TorrentFile therefore **overwrites the published release's handoff in place**.
+The Binding and the VFS row keep naming the old release, whose handoff no
+longer exists, and the read path resolved runtime identity from
+`getPlaybackHandoffByReleaseKey(mediaId, releaseKey)` → `HANDOFF_MISSING`.
+
+**Blast radius (measured, `scripts/scan-vfs-divergence.mjs`):** 26 movie rows
++ 3 TV rows where the published release's handoff was superseded; 29 handoffs
+whose release differs from the active Binding; 1 row with `:0` vs `:torrent`
+notation drift (same hash, same TorrentFile); 5 rows with no active Binding
+(they keep working through their handoff). One divergent row failed the whole
+`/vfs/Movies` listing, so the visible blast radius was the entire Movies
+collection. Nothing is a migration/orphan-cleanup artifact: it is the
+handoff slot being single-row-per-media while publication is durable
+per-release.
+
+**Fix — Binding authority wins** (`src/lib/vfs/binding-authority.js`, new).
+When the handoff for the published release is gone, the runtime identity is
+rebuilt from the active Binding and its TorrentFile (control plane = durable
+truth). Nothing is selected, no discovery runs, the Binding is never changed to
+satisfy the VFS, and no handoff row is written. A handoff that belongs to a
+different release is not this entry's handoff (the TV path's historical check,
+now applied to both surfaces). Isolated + reported, never served, when neither
+a handoff nor an authoritative Binding backs a row.
+
+**Live proof:** `/vfs/Movies` and `/vfs/TV` PROPFIND → **207** (67 rows / 66
+movie titles; 22 TV responses). `tt1630029` — the title that failed — resolves
+through its authoritative Binding (`via=recovered`) and is listed. 28 entries
+were recovered from Binding authority in the measured window; **0 isolated**.
+
+**TorBox CDN boundary — isolated by SNI, not by network or client.** From the
+same container: TCP connect to `nexus.erth.tb-cdn.earth:443` succeeds, then the
+handshake is reset immediately after the ClientHello (`write:errno=104`, "read
+0 bytes"). The decisive test: the SAME IP with SNI `api.torbox.app` completes
+the handshake and returns `CN=torbox.app`; with the TorBox CDN SNI it resets.
+Other HTTPS hosts from the same containers succeed. `checkcached`/`requestdl`
+(and RD's whole surface) are healthy. curl, wget, openssl and the Rust client
+fail identically → treated as network/provider-edge. No retries added.
+
+**Live cached bytes from a healthy route (Real-Debrid).** RD's CDN is reachable
+from this deployment (206/100 bytes, 0.6 s).
+- Jellyfin: `GET /stream/movie/tt1825683` with `STREAM_BYTE_ROUTE=cached` →
+  307 `location: /bytes/tf_5de34a78…` with `x-hashsucker-byte-route: data-plane`,
+  `x-availability-source: authoritative-binding`, **`x-provider-check-occurred:
+  false`**; following it returns 206 with bytes byte-identical to the provider
+  CDN.
+- Plex: `/vfs/Movies/Black Panther (2018)/….mkv` range read → 206, 100 bytes,
+  byte-identical to the provider CDN.
+- Same-file concurrency: 3 concurrent readers of one fresh chunk → all
+  206/100000, identical bytes, and exactly **ONE 8 MB upstream pull**
+  (`chunk_fills +1`, `bytes_upstream +8388608`), zero truncations, zero
+  failovers.
+
+Verification: Node 3326 tests / 3323 pass / 0 fail / 3 skips
+(`test/vfs-binding-authority.test.js` B1–B6, `test/vfs-collection-resilience.test.js`
+C1–C5). Rust unchanged (184 green).
+
+Pre-existing and unchanged by this slice: the legacy `/stream` resolver path
+(provider mode) 404s with `FILE_NOT_FOUND` for `:torrent`-style handoffs and
+502s `TORBOX_REQUESTDL_FAILED` where the CDN can't be validated; neither path
+was touched here (`torbox-delivery.js` is untouched by every commit in this
+slice).

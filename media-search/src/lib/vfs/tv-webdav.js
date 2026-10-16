@@ -17,6 +17,7 @@ import { finished } from 'node:stream/promises';
 import { attemptRdResolution, getRdPlaybackUrl } from '../providers/realdebrid/resolve.js';
 import { isUrlLive } from '../resolver/liveness.js';
 import { materializeVfsEntry, isUnpublishedHandoff } from './materialize.js';
+import { resolveVfsStateForEntry } from './binding-authority.js';
 import { providerAccounting } from '../providers/provider-accounting.js';
 import {
   validateRangeResponseBody,
@@ -349,31 +350,21 @@ export function createTvWebDav({
       const stateKey = entry.mediaId + ':' + entry.season + ':' + entry.episode;
       let state = states.get(stateKey);
       if (!state) {
-        const handoff = searchCache.getTvPlaybackHandoff(entry.mediaId, entry.season, entry.episode);
-        if (!handoff) {
-          throw new VfsError(
-            'Durable handoff is missing for VFS episode ' + entry.mediaId + ' S' + entry.season + 'E' + entry.episode,
-            503,
-            'HANDOFF_MISSING',
-          );
-        }
-        const identityMismatch = entry.torrentFileId
-          ? entry.torrentFileId !== handoff.torrentFileId
-            || entry.infoHash !== handoff.infoHash
-          : entry.releaseKey !== handoff.releaseKey
-            || entry.infoHash !== handoff.infoHash
-            || entry.fileIndex !== handoff.fileIndex;
-        if (identityMismatch) {
-          // A divergent unrelated episode must not make the entire TV tree
-          // unservable. Keep the row out of this projection until its own
-          // reconciliation repairs it; exact requested entries continue to
-          // resolve against their matching handoff/TorrentFile.
-          console.warn(`[vfs-tv] skipping divergent entry media=${entry.mediaId} S${entry.season}E${entry.episode}`);
+        const resolved = resolveVfsStateForEntry({
+          searchCache,
+          controlPlaneStore,
+          entry: { ...entry, mediaType: 'episode' },
+          log: (m) => console.log(m),
+        });
+        if (!resolved.state) {
+          // Isolated. A divergent or unbacked unrelated episode must not make
+          // the entire TV tree unservable: it is reported loudly above and
+          // skipped, and no bytes are invented for it.
           continue;
         }
-        state = { entry, handoff, metadataPromise: null };
+        state = { ...resolved.state, metadataPromise: null };
         states.set(stateKey, state);
-        console.log('[vfs-tv] bound media=' + entry.mediaId + ' S' + entry.season + 'E' + entry.episode + ' release=' + entry.releaseKey);
+        console.log('[vfs-tv] bound media=' + entry.mediaId + ' S' + entry.season + 'E' + entry.episode + ' release=' + entry.releaseKey + ' via=' + resolved.action);
       } else if (state.entry.size == null && entry.size != null) {
         state.entry = entry;
       }
