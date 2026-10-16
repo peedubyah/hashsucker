@@ -834,3 +834,144 @@ Pre-existing and unchanged by this slice: the legacy `/stream` resolver path
 502s `TORBOX_REQUESTDL_FAILED` where the CDN can't be validated; neither path
 was touched here (`torbox-delivery.js` is untouched by every commit in this
 slice).
+
+## 2026-10-16 — request → playable responsiveness on a broken provider route — FIXED + DEPLOYED
+
+Slice: end-to-end request → playable responsiveness (The Lowdown S01/S02 as
+the live acceptance case). Commits `d9f647e` (data-plane), `3e1855b`
+(scheduler), `2141315` (observability).
+
+### Before timeline — The Lowdown (`tt31289994`), production evidence
+
+16 episode obligations (S01 E1–E8 + S02 E1–E8). Aired/eligible = **10**
+(S01 E1–E8 + S02 E1–E2); S02 E3–E8 are `future-not-released`
+(expected_at 2026-10-21 … 2026-11-25, after the 2026-10-16 request).
+
+S01 (all 8 aired), timestamps UTC:
+
+| ep | request (intent) | published (library_paths) | Plex ratingKey added |
+|---|---|---|---|
+| E1 | 06:24:03 | 06:24:10.050 | 06:24:54 (rk 571) |
+| E2 | 06:24:10 | 06:24:18.979 | — |
+| E3 | 06:24:19 | 06:24:24.369 | — |
+| E4 | 06:24:24 | 06:24:29.732 | — |
+| E5 | 06:24:29 | 06:24:35.527 | — |
+| E6 | 06:24:35 | 06:24:41.029 | — |
+| E7 | 06:24:41 | 06:24:46.404 | — |
+| E8 | 06:24:46 | 06:24:51.810 | — |
+
+`[Plex] partial-refresh dispatch section=3 path=…/Season 01` at **06:24:51.862**;
+PMS created show 569 + season 570 + episode 571 at **06:24:54**.
+
+S02: S02E1 requested 06:27:39 → published 06:27:58; S02E2 requested 06:27:58 →
+published 06:28:11. S02E3–E8 never published (no aired episode-scoped candidate).
+
+**The failure:** request → published was fast (E1 in 7 s, all 8 in 48 s), and
+Plex indexed E1 in 3 s. Then PMS never indexed E2–E8 and never became playable.
+For **5+ hours** PMS held exactly one episode (`allLeaves size=1`) and one
+activity `library.update.item.metadata / "Updating Metadata" / "The Lowdown S01
+E01" / progress 49`, with `Plex Media Scanner --match/--analyze --item 571`
+stuck in **D (uninterruptible I/O)** state. Root cause chain (mechanism, not
+correlation):
+
+1. Every Lowdown TorrentFile is **TorBox-only** (10/10 placements; 0 RD).
+2. TorBox's CDN is unreachable from this deployment — `requestdl` returns 200
+   with host `nexus.erth.tb-cdn.earth`, then the CDN resets immediately after
+   ClientHello (`ECONNRESET`, ~36 ms, 5/5 probes; Node `fetch` cause
+   `ECONNRESET`). External, SNI-specific, unchanged from the 10-12 entry.
+3. The Rust reader treated a **connection-level `send()` error** as a generic
+   transient and paid `RECOVERY_BACKOFF_DEFAULT` (30 s) × 3 ≈ **90 s** before
+   surfacing any failure (measured: data-plane range read 73.6 s, then 90.4 s;
+   Node client aborted at 25 s with no response). The VFS then hung on the
+   forward (`streamFromDataPlane` has no timeout).
+4. rclone (`webdav-local:` mount, `--low-level-retries` default) retried the
+   resulting 5xx; FFMPEG/PMS retried the read. The first file read never
+   returned in bounded time, so **the scanner blocked on E1 and never reached
+   E2–E8** — the whole season stayed invisible. Nothing was playable.
+5. The same ~90 s broken-route read also wedged the anticipation scheduler: a
+   single speculative P0 row (`future_intents` 98 = MobLand S02E05,
+   `published_preparing`, `byte-probe-pending`) re-ran the full request path
+   for **~60–125 s every tick**. With `MAX_TICK_WORK_MS = 30 s` checked after
+   the first action, `stopReason=wall-clock-cap` ended the tick after **one**
+   action, so a due requested-season row behind it stayed unprocessed for ~6 h
+   (Lowdown `plex-absence-reconcile` intents 138–145 were due from 06:24:53 but
+   only ran at **12:33:20**).
+
+### Changes
+
+- `data-plane/src/transport.rs` (`d9f647e`): a `send()` error is a
+  transport-level failure with no provider HTTP status, so it carries no
+  provider-load signal. Both headerless sub-cases (timeout, connection failure)
+  now use the same **zero-cooldown bounded** same-cap budget with same-TF
+  failover first, instead of the 30 s × 3 load backoff. HTTP 429/5xx keep the
+  load backoff. Renamed `apply_transient_headerless_timeout` →
+  `apply_transient_headerless(path)`.
+- `media-search/src/lib/anticipation/scheduler.js` (`3e1855b`): both wall-clock
+  checks now honour a `MIN_ACTIONS_PER_TICK = 4` floor (still hard-bounded by
+  `MAX_ACTIONS_PER_TICK = 8`), so one slow row cannot starve the due set.
+- `media-search/src/api/seerr-ingress.js` (`3e1855b`): an accepted TV fan-out
+  now nudges the EXISTING anticipation scheduler (`schedulingNudge`) instead of
+  waiting for the generic 15-minute interval.
+- `media-search/src/api/seerr-ingress.js` (`2141315`): one concise
+  `episode-trace` line per fan-out child (`media | sNeM | source | stage |
+  stage_ms | candidates | defer_reason | result`).
+
+### After — production evidence
+
+- **Byte path fails fast.** WebDAV reads of Lowdown: S01E01 502 / **0.29 s**,
+  S01E03 502 / 0.58 s, S01E05 0.15 s, S01E08 0.14 s, S02E01 0.59 s, S02E02
+  0.14 s (was: no response ≥ 25 s, data-plane 73–90 s). Data-plane direct read
+  180 ms–1.5 s. No multi-minute silence; the failure is an explicit 502.
+- **Plex ingest unblocked.** The stuck D-state scanner processes exited once
+  reads failed fast. A targeted refresh of the same path HashSucker dispatches
+  (`/library/sections/3/refresh?path=…/Season 01`) then indexed **all 8 S01
+  episodes** (E2 at +70 s, E8 by ~10 min; Plex's own per-item metadata-agent
+  pacing, not HashSucker). S02 refresh indexed S02E1 + S02E2. Plex now holds
+  **10/10 aired episodes**, each with ratingKey + Part + exact `MediaPart.file`
+  + exact size matching the Binding (earliest usable boundary satisfied).
+- **Scheduler anti-starvation, production-proven.** The 15:50:28 drain tick on
+  the deployed build ran `scheduler drain actions=4 stopReason=wall-clock-cap
+  durationMs=141648` — intent 98 (MobLand S02E05) then Lowdown S01E01/E02/E03
+  (future-intent 138/139/140) in the SAME tick. Before the fix the same tick
+  shape ran `actions=1` and stopped after the first ~60 s row. Intent 98's own
+  action time also fell ~62 s → ~30 s (the byte-probe read no longer pays the
+  transport backoff). Also pinned by test
+  (`test/anticipation.test.js` "one slow action cannot starve the rest of the
+  due set": 1 → 4 actions); `seerr-tv-handler` asserts exactly one nudge per
+  accepted fan-out. Rust: `cargo test` 153 + 14 + 11 + 7 green, including new
+  `r7_connection_failure_fails_fast` (closed-port route surfaces an honest
+  failure in < 5 s; was ~90 s). Node: 46 anticipation + 100 seerr + 147
+  scheduler/ingress tests green.
+
+### Product metrics (The Lowdown, cache-only policy)
+
+- request → first aired episode playable: **never** (byte route is the external
+  TorBox CDN blocker; 0 playable).
+- request → 50% / all satisfiable playable: **0** — identical root cause.
+- request → first aired episode **visible** (ratingKey + Part + exact path +
+  size): E1 **51 s** (06:24:03 → 06:24:54).
+- request → all 10 aired **visible**: blocked indefinitely before the fix
+  (1/10 for 5+ h); after the fix all 10 index as fast as PMS paces the scan
+  (S01 8/8 in ~10 min from a targeted refresh).
+
+### Exact remaining external blocker
+
+`nexus.erth.tb-cdn.earth` TLS reset after ClientHello from this deployment
+(same IP + SNI `api.torbox.app` succeeds). Every Lowdown TorrentFile is
+TorBox-only and no Lowdown release is RD-cached, so under the cache-only policy
+there is no alternate route. `STREAM_BYTE_ROUTE` is irrelevant here (the
+failure is below both byte routes). This is network/provider-edge, not HashSucker
+code; HashSucker now reports it in < 1 s instead of hanging.
+
+### Unproven / assumptions changed
+
+- Not proven: a clean request→visible measurement for a *fresh* season arriving
+  after the fix (the after measurement used a targeted refresh of an item whose
+  original scan was already dead). The scheduler MIN_ACTIONS fix is pinned by
+  test but its production effect on a live backlog was not separately replayed.
+- Assumption corrected: "a slow action is fine because the cap only stops NEW
+  work" was false in practice — the cap stopped the tick after the *first*
+  action, so one slow row starved all cheaper due work for hours.
+- Assumption corrected: the request→playable blocker was NOT ranking/discovery/
+  VFS; publication was already fast. The blocker was a downstream byte read with
+  no bounded failure, which propagated into PMS ingest and the scheduler.

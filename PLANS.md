@@ -22,25 +22,34 @@ playback passed after reconstruction. Missing retained truth returns 409 and
 fails closed. This is an earned continuity primitive, not a general
 consumer-replacement framework.
 
-Active product slice: **N1 accepted representation memory**. Baseline
-instrumentation is in place and production history shows 483 recent requests,
-307 repeated decisions, 190 adjacent same-infoHash outcomes, and 37 adjacent
-same-known-size outcomes. Traffic is mixed: 126 anticipation, 7 upgrade-watch,
-190 Seerr, 77 API, and historical proof/audit sources. Persistence is GO for
-this narrow fact, but no ranking behavior changes. Gate: real successful
-playback writes an exact LibraryItem→TorrentFile acceptance fact; deterministic
-read/idempotence tests pass; request behavior remains unchanged. Non-goals:
-known-bad memory, compatibility taxonomy, route health, provider state,
-selection changes, prediction, and UI.
+Active product slice: **end-to-end request → playable responsiveness** —
+FIXED + DEPLOYED (`d9f647e`, `3e1855b`, `2141315`; evidence in
+`docs/BUILD-LOG.md` 2026-10-16). Live acceptance case: The Lowdown S01/S02.
+Measured root cause (not ranking/discovery/VFS): request → published was
+already fast, but a **connection-level provider byte-read failure** paid a
+30 s × 3 load backoff (~90 s, unbounded to the client) and blocked PMS ingest
+(the scanner stuck in D-state, 1/10 episodes indexed for 5+ h) and starved the
+anticipation scheduler (~6 h). Fix: Rust transport fails a headerless
+`send()` error in the bounded zero-cooldown path (same-TF failover first);
+scheduler wall-clock cap now honours a per-tick action floor; fresh season
+fan-out nudges the existing scheduler; one `episode-trace` line per child.
+Gate: Lowdown byte reads return an explicit 502 in < 1 s; all 10 aired
+episodes reach the earliest usable Plex boundary; exact external blocker
+identified. External, unfixed: `nexus.erth.tb-cdn.earth` TLS reset (all
+Lowdown routes TorBox-only; no RD-cached release) → 0 playable, reported fast.
+Non-goals: cache-only policy changes, RD acquisition, representation changes,
+new scheduler, tracing platform.
 
-N1 result: exact accepted-TorrentFile fact now writes from an observed PMS
-session with positive progression and the exact active Binding/TorrentFile.
-No request selection behavior consumes it yet; this slice proves trustworthy
-memory, not a ranking optimization. Observation uses a bounded 10-second
-Plex-session poll only when published active bindings exist; it is not a
-continuous one-second loop.
+Prior active slice: **N1 accepted representation memory**. Exact
+accepted-TorrentFile fact writes from an observed PMS session with positive
+progression and the exact active Binding/TorrentFile. No request selection
+behavior consumes it yet; this slice proved trustworthy memory, not a ranking
+optimization. Baseline instrumentation: 483 recent requests, 307 repeated
+decisions, 190 adjacent same-infoHash outcomes, 37 adjacent same-known-size
+outcomes. Observation uses a bounded 10-second Plex-session poll only when
+published active bindings exist.
 
-Prior active slice — repo documentation/control-plane reconciliation —
+Prior slice — repo documentation/control-plane reconciliation —
 completed by the documentation lane; no product-code work is reopened here.
 
 Prior active slice — exit-condition canary — capability achieved, gate
