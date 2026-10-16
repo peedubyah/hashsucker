@@ -23,7 +23,7 @@ fails closed. This is an earned continuity primitive, not a general
 consumer-replacement framework.
 
 Active product slice: **TorBox delivery attribution + blocked-item handling** —
-DIAGNOSED + HARDENED (`1ca03e1`; evidence in `docs/BUILD-LOG.md` 2026-10-16,
+RESOLVED (AT&T block lifted) + HARDENED (`1ca03e1`; evidence in `docs/BUILD-LOG.md` 2026-10-16,
 incident `artifacts/incident/torbox-cdn-sni-reset.md`). The `nexus.erth.tb-cdn.earth`
 TLS reset is NOT a TorBox/CDN fault: it is an SNI-exact, destination-independent
 reset on the operator's WAN path (AT&T gateway/ISP filter) — proven by resetting

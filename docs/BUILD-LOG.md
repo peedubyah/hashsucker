@@ -1394,3 +1394,53 @@ The WAN SNI filter for `nexus.erth.tb-cdn.earth` (operator/ISP). Until it is
 removed or bypassed via a trusted alternate egress, TorBox-backed fresh
 requests cannot be playable here; HashSucker reports the exact blocker and
 keeps the item recoverable.
+
+## 2026-10-16 — TorBox CDN SNI reset localized and RESOLVED — RESTORED
+
+Follows the TorBox reachability slice. Packet-level localization then operator
+fix. Commits: incident/validation artifacts only (no product code change).
+
+### Localization (before the fix)
+
+`tcpdump` on `ens18` captured the failing flow: TCP handshake completed, the
+client sent the ClientHello (1565 bytes), and ~3 ms later a **RST** arrived
+with the destination's source IP and the destination's ISN+1 as seq, **ttl 64**,
+duplicated. The server's SYN-ACK was **ttl 51** (Cloudflare) and, against
+8.8.8.8, **ttl 122** (Google) — the RST ttl was 64 in every case, so the RST did
+not travel the destination's path: it was injected/spoofed, keyed on the exact
+SNI, destination-independent.
+
+Decisive discriminator test (temporary /32 route, removed immediately): the
+host is multi-homed — `ens18` → Arris gateway `192.168.1.254` (default), and
+`ens19` → **pfSense `192.168.2.1`** (a different uplink, first hop
+`107.136.214.174` vs the Arris's `108.200.184.1`; both converge at AT&T hop
+`99.176.77.40`). Via the **pfSense** path the failing SNI completed the
+handshake (`subject=CN=tb-cdn.earth`) and a real `requestdl` URL returned
+**206 + 65536 bytes**; via the **Arris** path it reset. So the reset was on the
+Arris/AT&T path; pfSense and local software were exonerated.
+
+### Resolution
+
+The operator reports **AT&T was blocking `nexus.erth.tb-cdn.earth`** and lifted
+it. Re-validation on the default egress: failing SNI handshake OK with **0 RSTs**
+in capture; real `requestdl` Range 206 + 65536 bytes; Rust data-plane byte read
+206 + 65536 bytes. Previously-blocked TorBox-only items serve again (The Batman
+VFS 206, Lowdown S01E05 VFS 206).
+
+### Fresh TorBox-backed acceptance (no manual refresh)
+
+`tt4154796` (Avengers Endgame) at 21:14:31 → 16.3 s → `published:true`,
+`serviceability:{state:'serviceable',source:'probe'}`, handoff `provider=torbox`,
+byte-health `unknown->serviceable provider=torbox` → VFS read 206 + 1 MiB at
+offset 0 and 206 + 1 MiB at a **9 GB seek** → Plex visible (`ratingKey 625`,
+exact Part `/mnt/hashsucker-vfs/Movies/Avengers Endgame/Avengers Endgame.mkv`,
+size `18519691273`) → **Plex Part range read 206 in 0.29 s**. TorBox-backed
+fresh requests are genuinely playable again.
+
+### Verification / artifacts
+
+`artifacts/incident/torbox-cdn-sni-reset.md` (attribution + resolution),
+`artifacts/incident/validate-torbox-egress.sh` (repeatable before/after matrix;
+no secrets; adds/removes at most two temporary /32 routes). No HashSucker code
+changed: the investigation exposed no product regression, and the fix was
+network-side as attributed.
