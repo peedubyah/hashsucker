@@ -22,6 +22,19 @@ playback passed after reconstruction. Missing retained truth returns 409 and
 fails closed. This is an earned continuity primitive, not a general
 consumer-replacement framework.
 
+Active product slice: **cached byte routing default cutover** — NOT FLIPPED
+(`fcd7967` made `STREAM_BYTE_ROUTE` default `cached`, validated, then `8f1b9e1`
+reverted it; `b889f70` fixed a related regression). The `cached` path itself
+works end to end for TorBox-only, RD-only, and dual-route items (307 → /bytes →
+Rust 206 + seeks + cache hits), but the acceptance gate failed on **same-file
+concurrency**: concurrent readers of a cold multi-chunk fill intermittently get
+a truncated body (coalescing is correct — one fill, one provider connection, no
+duplicate pulls — but joiner delivery is unreliable). The residual is a
+fill/join race in the Rust path the Plex VFS already used. Next earned slice:
+fix that race, then re-run this cutover (a one-line default change with a proven
+escape hatch `STREAM_BYTE_ROUTE=provider`). Non-goals: architecture refactor,
+new provider behavior, representation change.
+
 Active product slice: **TorBox delivery attribution + blocked-item handling** —
 RESOLVED (AT&T block lifted) + HARDENED (`1ca03e1`; evidence in `docs/BUILD-LOG.md` 2026-10-16,
 incident `artifacts/incident/torbox-cdn-sni-reset.md`). The `nexus.erth.tb-cdn.earth`
