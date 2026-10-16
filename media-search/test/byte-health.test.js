@@ -107,6 +107,69 @@ test('forwarder short-circuits a suppressed route without calling the data plane
   assert.equal(calls, 0, 'no data-plane call while suppressed');
 });
 
+// ---------------------------------------------------------------------------
+// Failure-mode matrix: EVERY provider failure must surface as a BOUNDED typed
+// result (never an unbounded read). This is the deterministic proof behind
+// "one broken route cannot wedge the scanner": no read path blocks.
+// ---------------------------------------------------------------------------
+
+const FAILURE_MODES = [
+  {
+    name: 'connection reset',
+    fetch: async () => { const e = new TypeError('fetch failed'); e.cause = { code: 'ECONNRESET' }; throw e; },
+    expect: (e) => e.code === 'DATA_PLANE_UNREACHABLE' && e.status === 502,
+  },
+  {
+    name: '429 rate limit',
+    fetch: async () => ({ status: 429, headers: new Map(), text: async () => JSON.stringify({ error: { code: 'RUST_RATE_LIMITED' } }) }),
+    expect: (e) => e.status === 429 && e.code === 'RUST_RATE_LIMITED',
+  },
+  {
+    name: '5xx upstream',
+    fetch: async () => ({ status: 503, headers: new Map(), text: async () => JSON.stringify({ error: { code: 'PROVIDER_EXHAUSTED' } }) }),
+    expect: (e) => e.code === 'PROVIDER_EXHAUSTED' && e.class === 'D',
+  },
+  {
+    name: '416 range',
+    fetch: async () => ({ status: 416, headers: new Map(), text: async () => '' }),
+    expect: (e) => e.status === 416,
+  },
+];
+
+for (const mode of FAILURE_MODES) {
+  test(`forwarder bounds and classifies: ${mode.name}`, async () => {
+    __resetByteHealth();
+    const started = Date.now();
+    await assert.rejects(
+      () => streamFromDataPlane({
+        fetchFn: mode.fetch, baseUrl: 'http://dp', tfId: `tf_${mode.name}`,
+        request: fakeRequest(), response: fakeResponse(),
+      }),
+      mode.expect,
+    );
+    assert.ok(Date.now() - started < 1000, `${mode.name} fails fast`);
+  });
+}
+
+test('forwarder bounds a hung data plane with a typed timeout', async () => {
+  __resetByteHealth();
+  // The data plane accepts the request but never produces headers.
+  const fetchFn = (url, opts = {}) => new Promise((_, reject) => {
+    opts.signal?.addEventListener('abort', () => {
+      const e = new Error('aborted'); e.name = 'AbortError'; reject(e);
+    }, { once: true });
+  });
+  const started = Date.now();
+  await assert.rejects(
+    () => streamFromDataPlane({
+      fetchFn, baseUrl: 'http://dp', tfId: 'tf_hang',
+      request: fakeRequest(), response: fakeResponse(), headerTimeoutMs: 60,
+    }),
+    (e) => e.code === 'DATA_PLANE_TIMEOUT' && e.status === 504,
+  );
+  assert.ok(Date.now() - started < 1000, 'a hung data plane is bounded');
+});
+
 test('forwarder records serviceable on a completed body and unserviceable on truncation', async () => {
   __resetByteHealth();
   await streamFromDataPlane({ fetchFn: async () => bodyResponse([new Uint8Array([104, 105])]), baseUrl: 'http://dp', tfId: 'tf_ok', request: fakeRequest(), response: fakeResponse() });

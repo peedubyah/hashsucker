@@ -2754,7 +2754,7 @@ export function createRequestHandler(dependencies = {}) {
           // serviceability of the exact bound TorrentFile so "ready" never
           // hides a route that just proved it cannot serve bytes. Runtime-only
           // signal (never durable placement truth); 'unknown' until observed.
-          const serviceability = getServiceability(handoff?.torrentFileId ?? null);
+          const serviceability = getServiceability(handoff?.torrent_file_id ?? handoff?.torrentFileId ?? null);
           const unserviceable = serviceability.state === 'unserviceable';
           const baseMessage = stage === 'ready' ? 'Ready to watch' : stage === 'retry scheduled' ? 'Provider temporarily rate-limited — retry scheduled' : stage === 'failed' ? (failure || 'Could not find a viable release') : stage === 'preparing' ? 'Preparing playback…' : 'Finding a viable release…';
           const message = stage === 'ready' && unserviceable
