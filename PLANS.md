@@ -22,23 +22,35 @@ playback passed after reconstruction. Missing retained truth returns 409 and
 fails closed. This is an earned continuity primitive, not a general
 consumer-replacement framework.
 
-Active product slice: **end-to-end request → playable responsiveness** —
-FIXED + DEPLOYED (`d9f647e`, `3e1855b`, `2141315`; evidence in
-`docs/BUILD-LOG.md` 2026-10-16). Live acceptance case: The Lowdown S01/S02.
-Measured root cause (not ranking/discovery/VFS): request → published was
-already fast, but a **connection-level provider byte-read failure** paid a
-30 s × 3 load backoff (~90 s, unbounded to the client) and blocked PMS ingest
-(the scanner stuck in D-state, 1/10 episodes indexed for 5+ h) and starved the
-anticipation scheduler (~6 h). Fix: Rust transport fails a headerless
-`send()` error in the bounded zero-cooldown path (same-TF failover first);
-scheduler wall-clock cap now honours a per-tick action floor; fresh season
-fan-out nudges the existing scheduler; one `episode-trace` line per child.
-Gate: Lowdown byte reads return an explicit 502 in < 1 s; all 10 aired
-episodes reach the earliest usable Plex boundary; exact external blocker
-identified. External, unfixed: `nexus.erth.tb-cdn.earth` TLS reset (all
-Lowdown routes TorBox-only; no RD-cached release) → 0 playable, reported fast.
-Non-goals: cache-only policy changes, RD acquisition, representation changes,
-new scheduler, tracing platform.
+Active product slice: **hardening — no single failure can wedge request →
+playback** — FIXED + DEPLOYED (`0bdfcfd`, `0f7292e`, `f3e3f2f`, `ae41376`;
+evidence in `docs/BUILD-LOG.md` 2026-10-16). Follows the responsiveness slice
+(`d9f647e`, `3e1855b`, `2141315`) whose "after" Plex result used a manual
+refresh. Closed here: consumer-visible vs byte-serviceable are now
+distinguishable (runtime `byte-health` registry + operator `serviceable`
+field); every VFS read failure mode is bounded (deterministic matrix + 30 s
+forward header timeout); the scheduler per-action budget bounds a hung action
+and nudges are no longer dropped in flight; two real alternate-route defects
+fixed (mid-body-truncation failover; RD torrent links→selected-file mapping).
+Gate: natural fresh request reaches the earliest usable Plex boundary without
+manual refresh and reports a precise serviceability blocker; a healthy-route
+item serves byte-identical bytes through VFS and the Plex Part; recovery is
+observable. External, unfixed: `nexus.erth.tb-cdn.earth` TLS reset — a
+TorBox-cached-only release is unserviceable (reported fast, not silent).
+Non-goals: cache-only policy changes, uncached acquisition, representation
+changes, new scheduler, tracing platform, route-level Rust backoff (noted
+open).
+
+Prior active slice: **end-to-end request → playable responsiveness** — FIXED
++ DEPLOYED (`d9f647e`, `3e1855b`, `2141315`). Live case The Lowdown S01/S02.
+Root cause (not ranking/discovery/VFS): request → published was already fast,
+but a connection-level provider byte-read failure paid a 30 s × 3 load backoff
+(~90 s, unbounded to the client), blocking PMS ingest (scanner stuck in
+D-state, 1/10 episodes for 5+ h) and starving the anticipation scheduler
+(~6 h). Fix: Rust transport fails a headerless `send()` error in the bounded
+zero-cooldown path; scheduler action floor; fresh-season nudge; episode trace.
+External, unfixed: `nexus.erth.tb-cdn.earth` TLS reset (Lowdown routes
+TorBox-only) → 0 playable, reported fast.
 
 Prior active slice: **N1 accepted representation memory**. Exact
 accepted-TorrentFile fact writes from an observed PMS session with positive

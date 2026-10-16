@@ -975,3 +975,146 @@ code; HashSucker now reports it in < 1 s instead of hanging.
 - Assumption corrected: the request→playable blocker was NOT ranking/discovery/
   VFS; publication was already fast. The blocker was a downstream byte read with
   no bounded failure, which propagated into PMS ingest and the scheduler.
+
+## 2026-10-16 — hardening: no single failure can wedge request → playback — FIXED + DEPLOYED
+
+Slice: hardening after the Lowdown responsiveness slice. Commits `0bdfcfd`,
+`0f7292e`, `f3e3f2f`, `ae41376`. The prior slice's "after" Plex result used a
+manual targeted refresh; this slice replaces it with a clean natural-request
+proof and closes the wedge surfaces around it.
+
+### 1. Serviceability semantics (audit + fix)
+
+Which states imply byte serviceability:
+
+| state | means | serviceable? |
+|---|---|---|
+| `prepared` | handoff + TorrentFile durable | no |
+| `published` / `vfsPublished` | VFS/library row written | no |
+| `fulfilled` (media-request response) | Binding + Plex visible + `mediaPart.file` | **no** |
+| Plex ratingKey + Part | consumer indexed | no |
+| `playable` (future-intent state) | anticipation byte probe succeeded | yes, at probe time only |
+| operator `ready` / "Ready to watch" | handoff exists | **was no — now gated on runtime serviceability** |
+
+Gap fixed: `byte-health.js` — a bounded, process-local, runtime-only registry
+per exact TorrentFile (`serviceable` / `unserviceable` / `unknown`), driven only
+by OBSERVED reads (no new provider probe), with an escalating bounded backoff
+and half-open recovery. It never touches durable placement/binding/TF truth. The
+VFS forward records the outcome of every read; the operator media-requests
+projection exposes `serviceable` + `serviceability` and never shows "Ready to
+watch" for a runtime-unserviceable binding. Observed live: Lowdown S01E03
+`stage=ready svc=unserviceable | Not serviceable — provider-body-truncated
+(torbox); retry in 20s`.
+
+### 2. A provider failure must not wedge Plex ingest (blast radius)
+
+Deterministic proof (`test/byte-health.test.js`): connection reset, 429, 5xx,
+416, and a hung data plane each surface a BOUNDED typed result (the forwarder
+also bounds the header wait at 30 s → 504). No read path can block a consumer
+scanner. Empirically, all 10 aired Lowdown episodes (every route TorBox-broken)
+indexed once reads failed fast, and a fresh request (below) indexed its movie
+sibling-free — one broken route does not hold the others.
+
+### 3. Scheduler fairness beyond MIN_ACTIONS=4 (adversarial)
+
+`MIN_ACTIONS_PER_TICK=4` survived only after adding a cooperative per-action
+wall-clock budget (`actionBudgetMs`, default 60 s) that aborts the action's
+in-flight HTTP call, so a hung action cannot multiply across the tick. New test
+"per-action budget bounds a hung action so the tick cannot wedge": four actions
+whose HTTP call never resolves complete the tick in 41 ms (was: four hung
+actions would wedge the single-flight worker for minutes). Also fixed: a nudge
+arriving while a tick is in flight is no longer DROPPED — the worker re-arms at
+5 s on completion (`workers.js` nudge-pending), so fresh human demand cannot
+wait a full interval behind a slow tick.
+
+### 4. External-call timeout audit
+
+Every request/season/publication-path call has a bound: Seerr identity/season
+8 s; Stremio addon `ADDON_FETCH_TIMEOUT_MS`; Torznab 5 s; TorBox/RD control
+5–30 s; Plex/Jellyfin 5–10 s; Plex ingest `waitForScanQuiet` 120 s. The one
+unbounded call was the VFS→data-plane forward (relied on Rust); it now has a
+30 s header timeout with a typed 504. Provider acquisition inside Rust is
+bounded (25 s/client). Retry ownership stays single-layer per surface.
+
+### 5. Known-bad route suppression without corrupting durable truth
+
+Attempted TF-level suppression in Node, then REVERTED after it blocked a
+healthy alternate (see §6). Route health is per (provider, placement, file);
+the registry is now a SIGNAL only. Route selection stays in the data plane,
+which owns the route set.
+
+### 6. Healthy alternate exact routes adopted (two real defects found + fixed)
+
+Fresh-request evidence exposed two defects on a dual TorBox+RD item:
+
+- `f3e3f2f` (transport): a route that commits 206 then CUTS the body never
+  failed over — only send errors did. Both the early-EOF and mid-body-error
+  paths now prefer a same-TF alternate before resuming. Test
+  `r2f_midbody_truncation_fails_over_to_alternate` (loser commits 206 then
+  errors; alternate delivers exact bytes).
+- `ae41376` (provider): `acquire_rd_mode_a` indexed `links[file_idx]`, but RD
+  returns links at the TORRENT level, one per SELECTED file (not 1:1 with
+  `files[]`). Any multi-file torrent whose selected file was not at index 0
+  returned NoCapability, so the RD alternate could never be acquired. Now
+  mirrors the Node resolver: single link unambiguous, else position + first-link
+  fallback. Verified live: a dual-route item served 1 MiB + a distant seek via
+  RD after the fix (before: 503).
+
+### 7. Fresh natural request proof (no manual refresh)
+
+`POST /api/media-request { mediaId: tt1877830 (The Batman 2022), movie }` at
+**17:33:31**:
+
+- published (VFS materialized): **17:33:39.97** (9.0 s; discovery + availability
+  + publication)
+- Binding bound via handoff: 17:33:40.37
+- targeted Plex ingest dispatched: **17:33:41.12** (`partial-refresh section=2
+  path=/mnt/hashsucker-vfs/Movies/The Batman`), `Notified via partial-refresh`
+- byte probe → `byte-health ... unserviceable provider=torbox
+  reason=provider-body-truncated`
+- Plex visible (ratingKey 585) + Part committed: file
+  `/mnt/hashsucker-vfs/Movies/The Batman/The Batman.mkv`, size `75751010583`
+  (exact Binding size) — no manual refresh
+- serviceable: **no** — TorBox-only route, CDN broken; reported precisely.
+
+The natural path reached the earliest usable boundary and a precise blocker in
+~10 s + Plex's own pacing. It did NOT reach playback: the selected release is
+TorBox-cached only (`coverage ... -> unavailable providers=torbox`), i.e. the
+external CDN blocker, not a HashSucker defect.
+
+### 8. Actual playback proof with real bytes (healthy route)
+
+Real library item Black Panther (`tf_5de34a78…`, TorBox broken + RD healthy):
+VFS read 206 + 1 MiB; distant seek (17159858057) 206 + 1 MiB; SHA-256
+`52daa79d…` and `9dc9c719…` — byte-identical to the established baseline. Same
+through the **Plex Part** endpoint (`/library/parts/527/1788676009/file.mkv`):
+206 + identical hashes on both ranges. `byte-health ... unknown->serviceable
+reason=bytes-observed`. Representation unchanged (same TorrentFile).
+
+### 9. Recovery
+
+`byte-health` half-open recovery is unit-pinned (backoff expiry → next read
+allowed → success clears) and observed live: a failed read marked unserviceable
+(`retry_in_ms=20000`), a later successful read on the same exact TorrentFile
+transitioned `unserviceable->serviceable reason=bytes-observed`. No Binding /
+TorrentFile / republish change.
+
+### Remaining external limitations / what can still wedge
+
+- `nexus.erth.tb-cdn.earth` TLS reset (SNI-specific) remains. Any item whose
+  selected release is TorBox-cached-only is unserviceable and now reported fast.
+- A fresh request resolves to the best cached release; the resolver prefers
+  TorBox-cached, so a fresh request is only playable if its selected release is
+  also RD-cached (or TorBox CDN recovers). Not a HashSucker defect.
+- Still open: `acquire_failover_lane` only cold-acquires the alternate when the
+  slot has capacity; a genuinely busy alternate still means "no alternate right
+  now" (bounded, not a wedge). Route-level (per-provider) backoff is not yet
+  implemented in Rust; the data plane re-attempts a broken route ~3×/read
+  (bounded, ~0.1–0.5 s).
+
+### Verification
+
+Rust `cargo test` 153 + 14 + 12 + 7 green. Node full suite 3333/3330/0/3 (plus
+new byte-health + per-action-budget tests). Production: Lowdown reads 502 in
+<0.7 s (was 90 s+); fresh request usable boundary in ~10 s; Black Panther real
+bytes byte-identical through VFS and Plex Part.
