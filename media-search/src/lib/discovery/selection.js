@@ -185,6 +185,24 @@ export async function selectBindableCandidate(results, options = {}) {
     // set: if everything exceeds the cap, fall back unfiltered rather
     // than failing the request.
     maxTier = null,
+    // Serviceability-aware selection (execution-quality tranche). When
+    // provided, a candidate that BINDS is not accepted until this probe
+    // confirms the exact TorrentFile can actually deliver bytes here. An
+    // unserviceable bind is skipped and the traversal continues to the next
+    // acceptable candidate, so a representation that is merely cached-but-dead
+    // no longer wins over one that is actually executable.
+    //
+    //   serviceabilityProbeFn(torrentFileId, { provider, infoHash, rank })
+    //     -> { serviceable: boolean, reason?: string, source?: string }
+    //
+    // Omitted (null) => EXACT pre-change behavior (no probe, first bind wins).
+    serviceabilityProbeFn = null,
+    // Bound on how many EXTRA candidates are attempted after the first
+    // unserviceable bind. Prevents "probe the world": we never call providers
+    // for every ranked candidate. The first unserviceable bind is retained as
+    // the fallback so the request still publishes (visible + precise blocker)
+    // when no serviceable candidate exists.
+    maxServiceabilityAlternates = 4,
   } = options;
 
   if (!Array.isArray(results) || results.length === 0) {
@@ -216,6 +234,54 @@ export async function selectBindableCandidate(results, options = {}) {
   // exit below behaves exactly as before this change (zero behavior
   // delta for TorBox-only deployments).
   const hasRdSeam = typeof ensureRealDebridFileIdentityFn === 'function';
+
+  // ---- Serviceability gate (execution-quality tranche) ----
+  // A bound candidate is accepted only when the exact TorrentFile is (or can
+  // prove it is) byte-serviceable. The FIRST unserviceable bind is kept as the
+  // fallback so that when nothing is serviceable the request still publishes
+  // the best-ranked representation and reports the exact blocker; but if a
+  // later acceptable candidate IS serviceable, it wins.
+  const probeServiceability = typeof serviceabilityProbeFn === 'function' ? serviceabilityProbeFn : null;
+  const maxAlternates = Number.isFinite(maxServiceabilityAlternates)
+    ? Math.max(0, maxServiceabilityAlternates) : 4;
+  // How many candidates are inspected AFTER the first unserviceable bind. This
+  // is the "small top-N" bound: it stops the alternate search so providers are
+  // never called for every ranked candidate.
+  let serviceabilityVisitedAfterReject = 0;
+  let serviceabilityFallback = null; // { selection, binding, reason, candidate, probe }
+  let serviceability = null;         // outcome for the winning candidate
+
+  async function acceptBound(candidate) {
+    if (!probeServiceability) return true; // no gate: exact pre-change behavior
+    const binding = selected?._binding ?? null;
+    const provider = binding?.provider ?? 'torbox';
+    let probe;
+    try {
+      probe = await probeServiceability(selected._torrentFileId, {
+        provider, infoHash: candidate.infoHash, rank: candidate.rank,
+      });
+    } catch (err) {
+      probe = { serviceable: false, reason: `probe-error:${String(err?.message || err).slice(0, 60)}` };
+    }
+    if (probe?.serviceable) {
+      serviceability = { state: 'serviceable', source: probe.source ?? 'probe' };
+      return true;
+    }
+    // Remember the best-ranked unserviceable bind as the publish fallback, and
+    // reject this bind so the traversal continues to a possibly-serviceable one.
+    if (!serviceabilityFallback) {
+      serviceabilityFallback = { selection: selected, binding, reason, candidate, probe };
+    }
+    skipped.push({
+      infoHash: candidate.infoHash,
+      rank: candidate.rank,
+      torboxState: candidate.availability?.torbox?.state || 'unknown',
+      reason: `bound-unserviceable:${probe?.reason ?? 'unknown'}`,
+    });
+    selected = null;
+    reason = '';
+    return false;
+  }
 
   // Two-phase traversal: candidates the fresh availability batch proved
   // uncached are deferred to a fallback pass. Under static provider truth
@@ -252,6 +318,28 @@ export async function selectBindableCandidate(results, options = {}) {
     .map(([c]) => c);
 
   for (const candidate of ordered) {
+    // Alternate-search budget: once a bind has been rejected as unserviceable,
+    // inspect at most `maxAlternates` further candidates, then publish the
+    // best-ranked unserviceable bind with a precise blocker. Bounds provider
+    // work: never "probe the world".
+    if (probeServiceability && serviceabilityFallback) {
+      if (serviceabilityVisitedAfterReject >= maxAlternates) {
+        selected = serviceabilityFallback.selection;
+        reason = serviceabilityFallback.reason;
+        serviceability = {
+          state: 'blocked',
+          reason: serviceabilityFallback.probe?.reason ?? 'unknown',
+          provider: serviceabilityFallback.binding?.provider ?? null,
+        };
+        break;
+      }
+      serviceabilityVisitedAfterReject += 1;
+    }
+    // Set when PATH A/B bound this candidate but the serviceability gate
+    // rejected it; the later same-candidate paths are then skipped so we do not
+    // re-bind the same exact TorrentFile, and PATH C (RD) may still discover an
+    // RD route for the SAME hash.
+    let pathARejected = false;
     // ---- PATH A: exact-file-size binding (existing Slice 1.75 fast path) ----
     const selectedFileSize =
       Number.isSafeInteger(candidate.exactFileSize) && candidate.exactFileSize > 0
@@ -287,7 +375,8 @@ export async function selectBindableCandidate(results, options = {}) {
             selectedFileSize,
           };
           reason = 'exact-size bound';
-          break;
+          if (await acceptBound(candidate)) break;
+          pathARejected = true;
         }
       } catch (err) {
         // exact-size failed; PATH B below decides whether a retry is worthwhile.
@@ -318,7 +407,8 @@ export async function selectBindableCandidate(results, options = {}) {
     // cached-only placement create (addOnlyIfCached=true; never an
     // uncached download) plus the inventory fetch driven by the same
     // ensureTorBoxFileIdentityFn factory. No nested retries.
-    if (!tvCoordinates
+    if (!pathARejected
+        && !tvCoordinates
         && selectedFileSize == null
         && typeof ensureTorBoxFileIdentityFn === 'function'
         && controlPlaneStore) {
@@ -404,13 +494,15 @@ export async function selectBindableCandidate(results, options = {}) {
             size: torrentFile.size,
           };
           reason = 'movie-cached-single-file bound';
-          break;
+          if (await acceptBound(candidate)) break;
+          pathARejected = true;
         }
       }
     }
 
     // ---- PATH B: TV episode resolution from cached-only TorBox inventory ----
-    if (tvCoordinates && typeof resolveTvTorrentFileFn === 'function' && controlPlaneStore) {
+    if (!pathARejected
+        && tvCoordinates && typeof resolveTvTorrentFileFn === 'function' && controlPlaneStore) {
       const { season, episode } = tvCoordinates;
       if (Number.isSafeInteger(season) && season >= 1 &&
           Number.isSafeInteger(episode) && episode >= 1) {
@@ -484,7 +576,8 @@ export async function selectBindableCandidate(results, options = {}) {
             episode,
           };
           reason = `tv-episode bound S${season}E${episode}`;
-          break;
+          if (await acceptBound(candidate)) break;
+          pathARejected = true;
         } catch (err) {
           // unbindable: EPISODE_NOT_PLAYABLE | EPISODE_NOT_FOUND | EPISODE_AMBIGUOUS
           // skip to next candidate
@@ -532,7 +625,8 @@ export async function selectBindableCandidate(results, options = {}) {
             source: rdResult.source ?? null,
           };
           reason = `rd-cached bound (${rdResult.source ?? 'probe'})`;
-          break;
+          if (await acceptBound(candidate)) break;
+          continue;
         }
         skipped.push({
           infoHash: candidate.infoHash,
@@ -621,5 +715,21 @@ export async function selectBindableCandidate(results, options = {}) {
     reason = eligible.length > 0 ? 'no-bindable-candidate' : 'no candidates';
   }
 
-  return { selected, reason, alternates, skipped };
+  // No serviceable candidate was found and the traversal ran out of
+  // candidates: fall back to the best-ranked unserviceable bind so the request
+  // still publishes (visible) with an explicit blocked state.
+  if (!selected && serviceabilityFallback) {
+    selected = serviceabilityFallback.selection;
+    reason = serviceabilityFallback.reason;
+    serviceability = {
+      state: 'blocked',
+      reason: serviceabilityFallback.probe?.reason ?? 'unknown',
+      provider: serviceabilityFallback.binding?.provider ?? null,
+    };
+  }
+
+  // `serviceability` is null when no probe seam was supplied (exact pre-change
+  // behavior); otherwise {state:'serviceable'|'blocked', ...} describes the
+  // winning representation's runtime byte serviceability.
+  return { selected, reason, alternates, skipped, serviceability };
 }

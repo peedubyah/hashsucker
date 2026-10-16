@@ -170,7 +170,7 @@ export async function handleSeerrIngress(
     torBoxProvider = null, torBoxApiKey = null, torBoxApiBase = undefined,
     clock = () => Date.now(), hasExplicitEnsureFn = false,
     futureIntentStore = null, availabilityWakeLog = null, schedulingNudge = null,
-    rdClient = null, ensureRealDebridFileIdentity = null } = {},
+    rdClient = null, ensureRealDebridFileIdentity = null, serviceabilityProbe = null } = {},
 ) {
   // 1. Auth
   const authHeader = request.headers && typeof request.headers.authorization === 'string'
@@ -425,6 +425,7 @@ export async function handleSeerrIngress(
         controlPlaneStore,
         futureIntentStore,
         clock,
+        serviceabilityProbe,
       });
     }
     // For series with parse failure, we stop here — the parent is durable
@@ -614,6 +615,9 @@ export async function handleSeerrIngress(
           // codepath.
           ...(canonicalMediaTitle ? { canonicalTitle: canonicalMediaTitle } : {}),
           ...(canonicalMediaYear != null ? { canonicalYear: canonicalMediaYear } : {}),
+          // Execution-quality tranche: prefer a serviceable cached
+          // representation for this episode (bounded probe, no provider sweep).
+          ...(typeof serviceabilityProbe === 'function' ? { serviceabilityProbe } : {}),
         });
         childResults.push({
           season: seasonNum,
@@ -879,6 +883,7 @@ async function runSingleSearchByMedia({
   identityStatus, notificationType, response, hydrateVfs = null,
   ensureTorBoxFileIdentity = null, ensureRealDebridFileIdentity = null,
   controlPlaneStore = null, futureIntentStore = null, clock = () => Date.now(),
+  serviceabilityProbe = null,
 }) {
   try {
     const result = await searchByMedia(searchCache, {
@@ -917,6 +922,7 @@ async function runSingleSearchByMedia({
       // unreleased (no live fallback); anything else defaults to
       // released.
       ...(canonicalReleaseDate ? { releaseDate: canonicalReleaseDate } : {}),
+      ...(typeof serviceabilityProbe === 'function' ? { serviceabilityProbe } : {}),
     });
     searchCache.db.prepare(
       'UPDATE media_intents SET last_processed_at = ?, last_result_count = ?, last_error = NULL WHERE id = ?'

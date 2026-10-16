@@ -103,6 +103,13 @@ export function buildRequestContext(cache, request) {
       : null,
     controlPlaneStore: request.controlPlaneStore ?? null,
     maxTier: request.maxTier ?? null,
+    // Execution-quality tranche: bounded serviceability probe used by
+    // selection to prefer a representation that can actually deliver bytes
+    // here. Null (default) preserves exact pre-change selection behavior.
+    serviceabilityProbeFn: typeof request.serviceabilityProbe === 'function'
+      ? request.serviceabilityProbe
+      : null,
+    maxServiceabilityAlternates: request.maxServiceabilityAlternates,
     // Test seams, explicit and defaulted to the real implementation. Both
     // replace network-boundary behavior (live discovery aggregation, Plex
     // presence probing) and never change production behavior when absent.
@@ -629,6 +636,8 @@ export async function selectCandidateForRequest({ explainable, ctx }) {
     tvCoordinates,
     controlPlaneStore: ctx.controlPlaneStore,
     maxTier: ctx.maxTier,
+    serviceabilityProbeFn: ctx.serviceabilityProbeFn,
+    maxServiceabilityAlternates: ctx.maxServiceabilityAlternates,
   });
 }
 

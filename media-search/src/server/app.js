@@ -93,6 +93,7 @@ import { resolveTorBoxRedirect, RedirectResolutionError, formatRedirectLog } fro
 import { createAlternateFallback, FALLBACK_REASON } from '../lib/resolver/alternate-fallback.js';
 import { materializeVfsEntry } from '../lib/vfs/materialize.js';
 import { getServiceability } from '../lib/vfs/byte-health.js';
+import { createServiceabilityProbe } from '../lib/vfs/serviceability.js';
 import { createRevalidator, mapRevalidationToHttp, REVALIDATION_SOURCE, REVALIDATION_OUTCOME } from '../lib/resolver/availability-revalidation.js';
 import { createTerminalDeliveryEvidenceStore } from '../lib/resolver/terminal-delivery-evidence.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
@@ -999,6 +1000,14 @@ export function createRequestHandler(dependencies = {}) {
     hydrateMovie: (releaseKey) => handleMovieWebDav.hydrateVfsMovieEntry(releaseKey),
     hydrateTv: ({ mediaId, season, episode }) => handleTvWebDav.hydrateVfsTvEntry({ mediaId, season, episode }),
   };
+
+  // Execution-quality tranche: selection-time serviceability probe. Prefers
+  // recent runtime byte-health and only falls back to a single bounded byte
+  // read, so a cached-but-dead representation does not win over an executable
+  // one. One probe per bound candidate, bounded by selection's alternate cap.
+  const serviceabilityProbeForRequest = createServiceabilityProbe({
+    dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://data-plane:3001',
+  });
 
   // Root VFS handler — lists Movies and TV collections
   async function handleVfsRoot(request, response, url) {
@@ -2124,6 +2133,7 @@ export function createRequestHandler(dependencies = {}) {
           availabilityWakeLog: getAvailabilityWakeLog(),
           schedulingNudge,
           rdClient,
+          serviceabilityProbe: serviceabilityProbeForRequest,
         });
       }
       // Library unpublish: remove VFS/STRM presentation for an exact movie
@@ -2991,6 +3001,7 @@ export function createRequestHandler(dependencies = {}) {
             maxTier,
             hydrateVfs: hydrateVfsForRequest,
             controlPlaneStore,
+            serviceabilityProbe: serviceabilityProbeForRequest,
             ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
             ...rdEnsureForRequest({ rdClient, controlPlaneStore, clock }),
           });

@@ -693,7 +693,7 @@ async function runLivePipeline(ctx, { titleIndex, titleInputs }) {
     // publication falls through to the pending response below (demand
     // promotion still runs) — exactly as before.
     if (!ctx.prepareOnly) {
-      const confirmed = await confirmAuthoritativePublication({ ctx, base, handoff });
+      const confirmed = await confirmAuthoritativePublication({ ctx, base, handoff, selection });
       if (confirmed) return confirmed;
     }
   }
@@ -923,7 +923,7 @@ async function runCorpusPipeline(ctx, { titleIndex, titleInputs, candidates }) {
  * Returns the fulfilled response when the Binding and Plex both confirm,
  * otherwise null so the caller falls through to the pending response.
  */
-async function confirmAuthoritativePublication({ ctx, base, handoff }) {
+async function confirmAuthoritativePublication({ ctx, base, handoff, selection = null }) {
   const itemKey = createLibraryIdentityKey({
     mediaType: ctx.mediaType === 'movie' ? 'movie' : 'episode',
     mediaId: ctx.mediaId,
@@ -954,6 +954,7 @@ async function confirmAuthoritativePublication({ ctx, base, handoff }) {
       fulfilled: true,
       unfulfilled: false,
       retryOwned: false,
+      serviceability: selection?.serviceability ?? null,
       plex,
     };
   }
@@ -980,6 +981,11 @@ function publishedOrPendingResponse({ ctx, base, handoff, selection, explainable
     unfulfilled: !ctx.prepareOnly,
     retryOwned: !ctx.prepareOnly,
     reason: !ctx.prepareOnly ? 'plex-confirmation-pending' : undefined,
+    // Execution-quality tranche: runtime byte serviceability of the selected
+    // representation. {state:'serviceable'|'blocked', reason, provider} when a
+    // selection probe ran; null otherwise. A 'blocked' selection still
+    // publishes (visible) but reports the exact route blocker.
+    serviceability: selection?.serviceability ?? null,
     ...skippedCandidatesOf(selection ?? { selected: null }),
   };
 }
