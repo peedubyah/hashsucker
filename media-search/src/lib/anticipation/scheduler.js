@@ -762,11 +762,19 @@ export function createAnticipationScheduler({
         if (actions >= MIN_ACTIONS_PER_TICK && now() - ordinaryTickStartedAt >= MAX_TICK_WORK_MS) { stopReason = 'wall-clock-cap'; break; }
         continue;
       } catch (err) {
+        // One erroring action re-parks ITS row and the tick CONTINUES: ending
+        // the whole tick on the first error let a persistently-erroring row
+        // (e.g. a P1 publish that keeps failing) starve every later class —
+        // the same starvation the class-fair ordering fixes for success paths.
         store.transition(intent.id, INTENT_STATES.ANTICIPATED, {
           last_error: String(err?.message || err).slice(0, 200),
           next_check_at: now() + intentBackoffMs(intent.attempts ?? 0),
         });
-        return { acted: true, intentId: intent.id, from: intent.state, to: 'anticipated', ms: 0, error: true };
+        actions += 1;
+        lastResult = { acted: true, intentId: intent.id, from: intent.state, to: 'anticipated', ms: 0, error: true };
+        log(`scheduler due-row id=${intent.id} state=${intent.state} class=${priority.className} attempts=${intent.attempts} result=error:${String(err?.message || err).slice(0, 120)}`);
+        if (actions >= MIN_ACTIONS_PER_TICK && now() - ordinaryTickStartedAt >= MAX_TICK_WORK_MS) { stopReason = 'wall-clock-cap'; break; }
+        continue;
       }
     }
     log(`scheduler drain actions=${actions} stopReason=${stopReason} durationMs=${now() - ordinaryTickStartedAt} nominalCapMs=${MAX_TICK_WORK_MS}`);
