@@ -22,6 +22,7 @@ import { DEFER_REASONS } from '../defers/seerr-defer.js';
 import { judgeReleaseQuality, ANTICIPATION_QUALITY } from './quality-gate.js';
 import { probeByteReady, prewarmRanges } from './prewarm.js';
 import { unpublishMedia } from '../library/unpublish.js';
+import { recordServiceable, recordUnserviceable } from '../vfs/byte-health.js';
 
 const PREPARE_TIMEOUT_MS = 5 * 60 * 1000;
 const PLEX_CONFIRM_ATTEMPTS = 6;
@@ -156,15 +157,28 @@ export function createAnticipationScheduler({
   // quality floor applies while the release is upcoming or fresh.
   // Older catalog falls back to the ranker's existing behavior bit-for-bit.
   qualityHorizonDays = 90,
+  // Cooperative per-action wall-clock budget. A single intent action runs the
+  // full request/prepare pipeline over HTTP; one pathological action must not
+  // consume the whole tick (and four of them must not blow the tick bound).
+  // On expiry the in-flight HTTP call is aborted and the action surfaces as a
+  // bounded failure the tick's existing handler re-parks. One layer owns retry
+  // (the intent backoff); this is a bound, not a retry.
+  actionBudgetMs = 60_000,
 } = {}) {
   if (!store) throw new Error('anticipation scheduler requires store');
   if (!baseUrl) throw new Error('anticipation scheduler requires baseUrl');
   const now = () => clock();
   let seasonReconciledLastTick = false;
+  // Signal for the action currently in flight (single-flight tick, so one at a
+  // time). Set by the tick, consumed by post() so the budget aborts the HTTP
+  // call cooperatively instead of abandoning it.
+  let actionSignal = null;
 
   async function post(path, body, timeoutMs) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    const onExternalAbort = () => ctl.abort();
+    if (actionSignal) actionSignal.addEventListener('abort', onExternalAbort, { once: true });
     try {
       const res = await fetchFn(`${String(baseUrl).replace(/\/+$/, '')}${path}`, {
         method: 'POST',
@@ -178,6 +192,7 @@ export function createAnticipationScheduler({
       return { status: res.status, json };
     } finally {
       clearTimeout(timer);
+      if (actionSignal) actionSignal.removeEventListener('abort', onExternalAbort);
     }
   }
 
@@ -311,8 +326,14 @@ export function createAnticipationScheduler({
   async function byteProbe(torrentFileId) {
     if (!dataPlaneBaseUrl) return false;
     try {
-      return await probeByteReady({ dataPlaneBaseUrl, torrentFileId, fetchFn });
+      const ok = await probeByteReady({ dataPlaneBaseUrl, torrentFileId, fetchFn });
+      // Feed the runtime serviceability registry so a published-but-unusable
+      // exact TorrentFile is reported truthfully even before any consumer read.
+      if (ok) recordServiceable(torrentFileId);
+      else recordUnserviceable(torrentFileId, { reason: 'byte-probe-failed' });
+      return ok;
     } catch {
+      recordUnserviceable(torrentFileId, { reason: 'byte-probe-error' });
       return false;
     }
   }
@@ -692,7 +713,20 @@ export function createAnticipationScheduler({
         return { acted: true, intentId: intent.id, from: 'preparing', to: 'anticipated', ms: 0 };
       }
       try {
-        const result = await processIntent(intent);
+        // Cooperative per-action budget: abort the action's in-flight HTTP
+        // call once the budget expires so one pathological action cannot
+        // consume (or multiply across) the tick. The abort surfaces as a
+        // thrown error handled by the existing catch below (re-park + retry).
+        const actionCtl = new AbortController();
+        const actionTimer = setTimeout(() => actionCtl.abort(), actionBudgetMs);
+        actionSignal = actionCtl.signal;
+        let result;
+        try {
+          result = await processIntent(intent);
+        } finally {
+          clearTimeout(actionTimer);
+          actionSignal = null;
+        }
         lastResult = result;
         actions += 1;
         log(`scheduler due-row id=${intent.id} state=${intent.state} class=${priority.className} attempts=${intent.attempts} next=${intent.next_check_at} result=${JSON.stringify(result)}`);

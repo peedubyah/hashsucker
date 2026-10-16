@@ -92,6 +92,7 @@ import { resolveStream, parseMediaIdentity, StreamResolverError } from '../lib/s
 import { resolveTorBoxRedirect, RedirectResolutionError, formatRedirectLog } from '../lib/resolver/torbox-redirect.js';
 import { createAlternateFallback, FALLBACK_REASON } from '../lib/resolver/alternate-fallback.js';
 import { materializeVfsEntry } from '../lib/vfs/materialize.js';
+import { getServiceability } from '../lib/vfs/byte-health.js';
 import { createRevalidator, mapRevalidationToHttp, REVALIDATION_SOURCE, REVALIDATION_OUTCOME } from '../lib/resolver/availability-revalidation.js';
 import { createTerminalDeliveryEvidenceStore } from '../lib/resolver/terminal-delivery-evidence.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
@@ -2749,14 +2750,28 @@ export function createRequestHandler(dependencies = {}) {
           } catch {}
           const retryScheduled = row.status === 'failed' && /429|rate|transient|retry|timeout|network/i.test(String(failure ?? ''));
           const stage = handoff ? 'ready' : retryScheduled ? 'retry scheduled' : row.status === 'failed' ? 'failed' : row.candidate_count > 0 ? 'preparing' : 'discovering';
+          // Consumer-visible is NOT serviceable. Report the runtime byte
+          // serviceability of the exact bound TorrentFile so "ready" never
+          // hides a route that just proved it cannot serve bytes. Runtime-only
+          // signal (never durable placement truth); 'unknown' until observed.
+          const serviceability = getServiceability(handoff?.torrentFileId ?? null);
+          const unserviceable = serviceability.state === 'unserviceable';
+          const baseMessage = stage === 'ready' ? 'Ready to watch' : stage === 'retry scheduled' ? 'Provider temporarily rate-limited — retry scheduled' : stage === 'failed' ? (failure || 'Could not find a viable release') : stage === 'preparing' ? 'Preparing playback…' : 'Finding a viable release…';
+          const message = stage === 'ready' && unserviceable
+            ? `Not serviceable — ${serviceability.reason}`
+              + (serviceability.provider ? ` (${serviceability.provider})` : '')
+              + (serviceability.retryInMs > 0 ? `; retry in ${Math.ceil(serviceability.retryInMs / 1000)}s` : '')
+            : baseMessage;
           return {
             id: String(row.id), mediaId: row.media_id, mediaType: row.media_type,
             season: row.season ?? null, episode: row.episode ?? null,
             title: row.media_title || row.media_id, year: row.media_year ?? null,
             posterUrl: row.poster_url ?? null, stage,
+            serviceable: serviceability.state,
+            serviceability,
             intentLabel: row.request_intent === 'watch' ? 'Watch once' : row.request_intent === 'immediate' ? 'Best available now' : 'Add to library',
             qualityProfile: row.quality_profile || 'balanced',
-            message: stage === 'ready' ? 'Ready to watch' : stage === 'retry scheduled' ? 'Provider temporarily rate-limited — retry scheduled' : stage === 'failed' ? (failure || 'Could not find a viable release') : stage === 'preparing' ? 'Preparing playback…' : 'Finding a viable release…',
+            message,
             createdAt: row.created_at,
           };
         });

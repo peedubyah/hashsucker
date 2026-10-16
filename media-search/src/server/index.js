@@ -24,9 +24,15 @@ import { buildDiagnostics, summarizeForStartup } from '../lib/diagnostics/readin
 import { listLibrary } from '../lib/library/listing.js';
 import { readRetirementPolicy } from '../lib/consumers/eligibility.js';
 import { recoverStaleCorpusState } from '../lib/discovery/corpus-lifecycle.js';
+import { setByteHealthLogger } from '../lib/vfs/byte-health.js';
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '0.0.0.0';
+
+// Runtime byte-serviceability transitions are logged immediately so a
+// published-but-unserviceable item is visible in the product log the moment a
+// real read proves it, instead of only inside data-plane internals.
+setByteHealthLogger((msg) => console.log(`media-search: ${msg}`));
 
 // ─── durable stores ───────────────────────────────────────────────────
 const discoveryCache = createDiscoveryCache(process.env.DISCOVERY_DB ? { dbPath: process.env.DISCOVERY_DB } : {});

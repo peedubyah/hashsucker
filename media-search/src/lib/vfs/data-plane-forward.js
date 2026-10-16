@@ -24,6 +24,13 @@
 import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
 
+import {
+  getServiceability,
+  isSuppressed,
+  recordServiceable,
+  recordUnserviceable,
+} from './byte-health.js';
+
 /**
  * Headers the Rust data plane may emit that must be preserved on the client
  * response. We deliberately do NOT rewrite Range / Content-Range / status — the
@@ -151,6 +158,14 @@ export function extractServingAttribution(upstreamHeaders) {
  *   function always resolves to an object on success paths. Rejects with
  *   DataPlaneError exactly as before on non-2xx/classified failures.
  */
+// Time to first response HEADERS from the data plane. The data plane commits
+// 206 before a fill completes, so this bounds only the acquire/first-response
+// phase — never a healthy streaming body. It exists so a wedged data-plane
+// (or an unbounded internal recovery) cannot hang a client read for minutes:
+// the read surfaces a typed 504 instead. The body, once headers arrive, is
+// bounded by the client (Range) and the request/response close listeners.
+export const DATA_PLANE_HEADER_TIMEOUT_MS = 30_000;
+
 export async function streamFromDataPlane({
   fetchFn,
   baseUrl,
@@ -159,7 +174,24 @@ export async function streamFromDataPlane({
   response,
   contentType,
   onServingAttribution = null,
+  headerTimeoutMs = DATA_PLANE_HEADER_TIMEOUT_MS,
 }) {
+  // Known-bad runtime route: short-circuit inside the backoff window instead of
+  // re-forwarding to a route that just proved it cannot serve bytes. This is
+  // the "do not hammer a known-bad route" gate; it recovers automatically when
+  // the window expires (half-open) or a success clears it. Durable placement
+  // truth is never touched — this is runtime-only.
+  if (isSuppressed(tfId)) {
+    const health = getServiceability(tfId);
+    throw new DataPlaneError(
+      `route suppressed for tfId=${tfId}: ${health.reason}`
+        + (health.provider ? ` (provider=${health.provider})` : ''),
+      503,
+      'PROVIDER_ROUTE_SUPPRESSED',
+      'C',
+    );
+  }
+
   const upstreamUrl = `${String(baseUrl).replace(/\/+$/, '')}/files/${encodeURIComponent(tfId)}`;
   const upstreamHeaders = {};
   // Forward the client Range verbatim. The data plane owns Range parsing,
@@ -169,20 +201,31 @@ export async function streamFromDataPlane({
   // handled in Node and never reaches here, but be defensive.
   const method = (request.method || 'GET').toUpperCase();
 
+  // Bound the header wait. A timeout here means the data plane did not even
+  // produce response headers in time — a terminal class-C failure, never a
+  // silent hang.
+  const headerCtl = new AbortController();
+  const headerTimer = headerTimeoutMs > 0
+    ? setTimeout(() => headerCtl.abort(), headerTimeoutMs)
+    : null;
   let upstream;
   try {
-    upstream = await fetchFn(upstreamUrl, { method, headers: upstreamHeaders });
+    upstream = await fetchFn(upstreamUrl, { method, headers: upstreamHeaders, signal: headerCtl.signal });
   } catch (error) {
-    // The data plane itself is unreachable. P5 proof D: this is an explicit
-    // failure — there is no durable TorrentFile Rust can serve, so re-forwarding
-    // a persisted alternate would only hit the same dead data plane. Class C:
-    // terminal, NO silent fall-through to the legacy Node provider byte path.
+    // The data plane itself is unreachable OR did not answer in time. P5
+    // proof D: this is an explicit failure — there is no durable TorrentFile
+    // Rust can serve, so re-forwarding a persisted alternate would only hit
+    // the same dead data plane. Class C: terminal, NO silent fall-through to
+    // the legacy Node provider byte path.
+    const timedOut = error?.name === 'AbortError' || error?.name === 'TimeoutError';
     throw new DataPlaneError(
-      `data-plane unreachable for tfId=${tfId}: ${error?.message || error}`,
-      502,
-      'DATA_PLANE_UNREACHABLE',
+      `${timedOut ? 'data-plane timed out' : 'data-plane unreachable'} for tfId=${tfId}: ${error?.message || error}`,
+      timedOut ? 504 : 502,
+      timedOut ? 'DATA_PLANE_TIMEOUT' : 'DATA_PLANE_UNREACHABLE',
       'C',
     );
+  } finally {
+    if (headerTimer) clearTimeout(headerTimer);
   }
 
   // P5: classify the data-plane response before proxying. A 200/206 is a
@@ -233,13 +276,27 @@ export async function streamFromDataPlane({
     }
 
     const stream = Readable.fromWeb(upstream.body);
-    const abort = () => stream.destroy();
+    // Distinguish a CLIENT-initiated teardown (normal for players that close
+    // after their range) from a PROVIDER body truncation: only the latter is
+    // evidence the route cannot serve bytes.
+    let clientAborted = false;
+    const abort = () => { clientAborted = true; stream.destroy(); };
     request.once('aborted', abort);
     response.once('close', abort);
     try {
       stream.pipe(response);
       await finished(stream);
+      // A completed body is the strongest serviceability evidence there is.
+      recordServiceable(tfId, { provider: attribution?.provider ?? null });
     } catch (error) {
+      if (!clientAborted) {
+        // Provider committed headers then cut the body (e.g. CDN connection
+        // reset after the 206): the exact route cannot serve bytes now.
+        recordUnserviceable(tfId, {
+          reason: 'provider-body-truncated',
+          provider: attribution?.provider ?? null,
+        });
+      }
       if (!response.headersSent) throw error;
       // Headers already on the wire — cannot 502 now; tear down cleanly.
       response.destroy(error);
@@ -270,6 +327,17 @@ export async function streamFromDataPlane({
     }
   }
   const errorClass = classifyDataPlaneError(code, status);
+  // Record runtime serviceability for provider/route failures (never for a
+  // client range error, which says nothing about the route). Durable placement
+  // truth is untouched.
+  if (status !== 416) {
+    const reason = status === 429 || code === 'RUST_RATE_LIMITED'
+      ? 'provider-rate-limited'
+      : code === 'PROVIDER_EXHAUSTED'
+        ? 'all-known-routes-failed'
+        : `provider-error-${status}`;
+    recordUnserviceable(tfId, { reason });
+  }
   throw new DataPlaneError(
     `data-plane returned ${status} for tfId=${tfId}: ${code}`,
     status,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Readable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 
 import {
   streamFromDataPlane,
@@ -26,14 +26,12 @@ function fakeReqRes() {
     removeListener: () => {},
   };
   const written = {};
-  const response = {
-    writeHead: (status, headers) => { written.status = status; written.headers = headers; },
-    end: () => { written.ended = true; },
-    destroy: () => {},
-    once: () => {},
-    removeListener: () => {},
-    headersSent: true,
-  };
+  // A real response is a writable stream; the forwarder pipes into it. A fake
+  // object would make the pipe fail and (correctly) record a provider body
+  // failure — so use a real Writable and keep the fixture honest.
+  const response = new Writable({ write(chunk, enc, cb) { cb(); } });
+  response.writeHead = (status, headers) => { written.status = status; written.headers = headers; };
+  response.headersSent = true;
   return { request, response, written };
 }
 

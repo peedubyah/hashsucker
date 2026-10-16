@@ -193,7 +193,12 @@ const anticipationFlag = String(process.env.ANTICIPATION_ENABLED ?? '').toLowerC
 const anticipationOn = anticipationFlag !== '0' && anticipationFlag !== 'false';
 let anticipationTimer = null;
 let anticipationInFlight = false;
+let anticipationNudgePending = false;
 let anticipationTick = 0;
+// Delay used when a nudge (fresh human demand / availability wake) asks the
+// scheduler to run soon. Short enough to be "immediate", long enough to
+// debounce a burst of nudges into one pass.
+const NUDGE_DELAY_MS = 5000;
 const anticipationStore = createFutureIntentStore({ db: discoveryCache.db });
 const seasonBackfill = anticipationStore.backfillRequestedSeasonsFromSeerr({ mediaIntentDb: discoveryCache.db });
 console.log(`media-search: requested-season backfill seasons=${seasonBackfill.seasons} episodes=${seasonBackfill.episodes}`);
@@ -259,8 +264,16 @@ function armAnticipationTimer(delayMs) {
     } catch (error) {
       console.warn(`media-search: anticipation tick=${tick} error=${error?.stack || error?.message}`);
     } finally {
-      armAnticipationTimer(anticipationIntervalMs());
-      console.log(`media-search: anticipation tick=${tick} completed nextMs=${anticipationIntervalMs()}`);
+      // A nudge that arrived while this tick was in flight must NOT be dropped:
+      // fresh human demand would otherwise wait a full interval after the tick.
+      if (anticipationNudgePending) {
+        anticipationNudgePending = false;
+        armAnticipationTimer(NUDGE_DELAY_MS);
+        console.log(`media-search: anticipation tick=${tick} completed nextMs=${NUDGE_DELAY_MS} (nudge-pending)`);
+      } else {
+        armAnticipationTimer(anticipationIntervalMs());
+        console.log(`media-search: anticipation tick=${tick} completed nextMs=${anticipationIntervalMs()}`);
+      }
     }
   }, delayMs);
 }
@@ -964,11 +977,15 @@ if (hygiene) {
     // periodic tick is already running instead of starting a second one.
     routeReconcileInFlight: () => Boolean(routeReconcileRunner?.inFlight()),
     nudgeScheduling: () => {
-      if (!anticipationOn || anticipationInFlight) return;
+      if (!anticipationOn) return;
+      // In-flight tick: remember the nudge so the tick re-arms immediately on
+      // completion instead of silently dropping fresh human demand behind a
+      // full interval.
+      if (anticipationInFlight) { anticipationNudgePending = true; return; }
       try {
         if (anticipationTimer) clearTimeout(anticipationTimer);
       } catch {}
-      armAnticipationTimer(5000);
+      armAnticipationTimer(NUDGE_DELAY_MS);
     },
     enrichmentStatus: () => enrichment?.getStatus() ?? { enabled: false },
     hygieneStatus: () => hygiene?.getStatus() ?? { enabled: false },

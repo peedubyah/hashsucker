@@ -251,6 +251,33 @@ test('ordinary drain executes up to four actionable rows in priority order', asy
   ]);
 });
 
+test('per-action budget bounds a hung action so the tick cannot wedge', async () => {
+  // Adversarial: every action's HTTP call hangs forever (only rejects when
+  // aborted). The cooperative per-action budget must abort each one so the
+  // tick completes in bounded time and every row is re-parked, rather than
+  // four hung actions wedging the single-flight worker for minutes.
+  const store = createFutureIntentStore({ db: memDb() });
+  for (let i = 0; i < 4; i += 1) store.seed({ mediaType: 'movie', mediaId: `tt-hang-${i}` });
+  const fetchFn = (url, opts = {}) => new Promise((_, reject) => {
+    const s = opts.signal;
+    if (s) s.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+  });
+  const sched = createAnticipationScheduler({
+    store, baseUrl: 'http://t', dataPlaneBaseUrl: 'http://d', fetchFn,
+    clock: () => 1_000_000, log: () => {},
+    actionBudgetMs: 40,
+  });
+  const started = Date.now();
+  await sched.tickOnce();
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000, `tick must be bounded by the per-action budget, took ${elapsed}ms`);
+  assert.equal(
+    store.list({ state: INTENT_STATES.ANTICIPATED, limit: 10 }).length,
+    4,
+    'every hung action is bounded and re-parked',
+  );
+});
+
 test('one slow action cannot starve the rest of the due set', async () => {
   // Regression (2026-10-16): a single ~60s P0 row consumed the whole 30s
   // nominal budget every tick, so `wall-clock-cap` ended the tick after one
