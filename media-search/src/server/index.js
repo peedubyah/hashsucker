@@ -17,10 +17,12 @@ import { createControlPlaneStore } from '../lib/control-plane/store.js';
 import { createDiscoveryCache } from '../lib/discovery/cache.js';
 import { createApp } from './app.js';
 import { startBackgroundWorkers } from './workers.js';
+import { createTorBoxProvider } from '../lib/providers/torbox.js';
+import { createTorBoxInventoryProvider } from '../lib/providers/torbox-inventory.js';
+import { createRealDebridClient } from '../lib/providers/realdebrid/client.js';
 import { buildDiagnostics, summarizeForStartup } from '../lib/diagnostics/readiness.js';
 import { listLibrary } from '../lib/library/listing.js';
 import { readRetirementPolicy } from '../lib/consumers/eligibility.js';
-import { createRealDebridClient } from '../lib/providers/realdebrid/client.js';
 import { recoverStaleCorpusState } from '../lib/discovery/corpus-lifecycle.js';
 
 const port = Number(process.env.PORT || 3000);
@@ -32,17 +34,36 @@ const controlPlaneStore = createControlPlaneStore(
   process.env.CONTROL_PLANE_DB ? { dbPath: process.env.CONTROL_PLANE_DB } : {},
 );
 
+// ─── shared provider clients ──────────────────────────────────────────
+// Built once here and injected into BOTH the request handler and the
+// background workers, so the two can never disagree about how a provider
+// surface is constructed (or how many clients exist per process).
+const torBoxProvider = createTorBoxProvider({ apiKey: process.env.TORBOX_API_KEY });
+const torBoxInventoryProvider = createTorBoxInventoryProvider({ apiKey: process.env.TORBOX_API_KEY });
+const rdClient = process.env.REALDEBRID_API_KEY
+  ? createRealDebridClient({ apiKey: process.env.REALDEBRID_API_KEY, minIntervalMs: 100 })
+  : null;
+
 // ─── background workers ───────────────────────────────────────────────
 // Every ticker (reconcile, corpus maintenance, anticipation, playback
 // observation, upgrade watch/retirement, promotion, downloads, *arr sync,
-// enrichment, hygiene) is armed inside workers.js with its own env flag.
-// The handles below are the only knobs the server surface needs.
-const workers = startBackgroundWorkers({ discoveryCache, controlPlaneStore, port });
+// enrichment, hygiene, stale-route reconciliation) is armed inside
+// workers.js with its own env flag. The handles below are the only knobs
+// the server surface needs.
+const workers = startBackgroundWorkers({
+  discoveryCache,
+  controlPlaneStore,
+  port,
+  dependencies: { torBoxProvider, torBoxInventoryProvider, rdClient },
+});
 
 // ─── HTTP server ──────────────────────────────────────────────────────
 const server = createApp({
   searchCache: discoveryCache,
   controlPlaneStore,
+  torBoxProvider,
+  torBoxInventoryProvider,
+  rdClient,
   // Availability tranche: a Seerr MEDIA_AVAILABLE wake that actually
   // awakened deferred intent pulls the next anticipation tick forward
   // (5 s, debounced inside the worker by replacing the pending timer).

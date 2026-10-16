@@ -40,6 +40,9 @@ import { createCorpusHygiene, hygieneIntervalMs } from '../lib/discovery/corpus-
 import { getMediaById } from '../lib/metadata/unified-search.js';
 import { checkTorBoxCached } from '../lib/providers/torbox.js';
 import { createArrClient } from '../lib/anticipation/arr-client.js';
+import { createSecondPlacementEnsurer } from '../lib/control-plane/second-placement.js';
+import { createRouteProviderSurfaces } from '../lib/control-plane/route-providers.js';
+import { reconcileStaleRoutes } from '../lib/control-plane/route-reconciler.js';
 import { createArrSync } from '../lib/anticipation/arr-sync.js';
 import { createSeasonReconciler } from '../lib/anticipation/season-reconciliation.js';
 import { resolveSeerrSeasonEpisodes } from '../lib/intents/providers/seerr.js';
@@ -56,7 +59,7 @@ import { notifyPlex } from '../lib/requests/plex-notifier.js';
 // TorBox delivery) stay untouched; its calls are no-ops without a
 // registered scheduler, which no longer exists.
 
-export function startBackgroundWorkers({ discoveryCache, controlPlaneStore, port }) {
+export function startBackgroundWorkers({ discoveryCache, controlPlaneStore, port, dependencies = {} }) {
   const timers = new Set();
   // Every worker timer is tracked so stop() can clear the ones armed at
   // the time of shutdown.
@@ -656,6 +659,67 @@ if (downloadWorker) {
 function arrSyncIntervalMs() {
   return envNumber(process.env, 'ARR_SYNC_INTERVAL_HOURS', { fallback: 6, min: 0.5 }) * 60 * 60 * 1000;
 }
+// ─── stale ProviderPlacement reconciliation ────────────────────────────
+// Durable route inventory drifts (provider frees a cached resource, account
+// rotation). A stale placement is still recorded `ready`, so presentProviders()
+// keeps covering that provider and nothing re-probes it. On a slow cadence,
+// TorrentFiles whose recorded routes are all unusable get a bounded,
+// cache-only alternate-route lookup (the existing second-placement
+// discover-only surface). No uncached acquisition, no identity change.
+function routeReconcileIntervalMs() {
+  return envNumber(process.env, 'ROUTE_RECONCILE_INTERVAL_MIN', { fallback: 360, min: 30 }) * 60 * 1000;
+}
+const routeReconcileOn = (() => {
+  const v = String(process.env.ROUTE_RECONCILE_ENABLED ?? '1').toLowerCase();
+  return v !== '0' && v !== 'false';
+})();
+let routeReconcileTimer = null;
+let routeReconcileInFlight = false;
+async function runRouteReconcilePass({ limit } = {}) {
+  if (!controlPlaneStore) return { scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [] };
+  const surfaces = createRouteProviderSurfaces({
+    torBoxProvider: dependencies.torBoxProvider ?? null,
+    torBoxInventoryProvider: dependencies.torBoxInventoryProvider ?? null,
+    rdClient: dependencies.rdClient ?? null,
+    env: process.env,
+  });
+  const ensurer = createSecondPlacementEnsurer({
+    store: controlPlaneStore,
+    ...surfaces,
+    now: () => Date.now(),
+  });
+  return reconcileStaleRoutes({
+    store: controlPlaneStore,
+    secondPlacement: ensurer,
+    providers: surfaces,
+    limit: limit ?? envNumber(process.env, 'ROUTE_RECONCILE_BATCH', { fallback: 25, min: 1, max: 500 }),
+    log: (msg) => console.log(`media-search: ${msg}`),
+  });
+}
+function armRouteReconcileTimer(delayMs) {
+  routeReconcileTimer = setTimeout(async () => {
+    if (routeReconcileOn && controlPlaneStore && !routeReconcileInFlight) {
+      routeReconcileInFlight = true;
+      try {
+        const result = await runRouteReconcilePass();
+        if (result.scanned > 0) {
+          console.log(`media-search: route reconcile scanned=${result.scanned} repaired=${result.repaired} unavailable=${result.unavailable} failed=${result.failed}`);
+        }
+      } catch (error) {
+        console.warn('media-search: route reconcile pass failed', error?.message);
+      } finally {
+        routeReconcileInFlight = false;
+      }
+    }
+    armRouteReconcileTimer(routeReconcileIntervalMs());
+  }, delayMs);
+  if (routeReconcileTimer.unref) routeReconcileTimer.unref();
+}
+if (routeReconcileOn && controlPlaneStore) {
+  armRouteReconcileTimer(envNumber(process.env, 'ROUTE_RECONCILE_FIRST_DELAY_MIN', { fallback: 10, min: 1 }) * 60 * 1000);
+  console.log(`media-search: route reconcile armed intervalMs=${routeReconcileIntervalMs()}`);
+}
+
 const arrSyncClients = (() => {
   const out = {};
   if (process.env.RADARR_URL) {

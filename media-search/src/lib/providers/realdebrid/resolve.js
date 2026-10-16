@@ -335,14 +335,71 @@ export async function attemptRdResolution(client, searchCache, candidate, option
   // For cached or missing/stale: attempt RD resolution (resolver-safe)
   // If cooldown is active, this will fail fast
   let torrentId = null;
+  let createdTorrentId = null;
   const rdTiming = {};
   try {
-    // Step 1: Add magnet
+    // Step 0: CACHE-ONLY GATE.
+    //
+    // The playback resolver must not manufacture an uncached download.
+    // Historically this path called addMagnet unconditionally, which made
+    // RD start downloading any title that TorBox no longer had cached,
+    // then deleted the torrent again in the finally block below. That
+    // single behaviour produced two defects:
+    //   (a) it violated the cache-only provider boundary — playback was
+    //       silently driving pirate-network downloads;
+    //   (b) it masked stale durable ProviderPlacement inventory: the
+    //       resolver "succeeded" without ever recording a route, so the
+    //       control plane kept reporting TorBox placements that no longer
+    //       exist and nothing ever reconciled them.
+    //
+    // Recovery is limited to a route RD ALREADY has cached: a read-only
+    // exact-hash lookup of the account's downloaded torrents. When the
+    // exact representation is not already there, this is a cache miss and
+    // is reported as such (distinguishable from a market miss, and never
+    // conflated with one).
     const magnetUri = buildMagnetUri(infoHash);
+    const tPre = now();
+    let alreadyCached = null;
+    // Identity is exact, and hashes are case-insensitive on the wire:
+    // normalize the candidate side too, or a mixed-case infoHash would
+    // never match the normalized list entry and every cached route would
+    // read as a cache miss.
+    const normalizedInfoHash = String(infoHash || '').trim().toLowerCase();
+    try {
+      const listed = await client.listTorrents({ limit: 100, resolverSafe: true });
+      rdTiming.cacheProbe = now() - tPre;
+      const exact = (Array.isArray(listed) ? listed : []).filter(
+        (entry) => String(entry?.hash ?? '').trim().toLowerCase() === normalizedInfoHash,
+      );
+      if (exact.length === 1) alreadyCached = String(exact[0]?.id ?? '').trim() || null;
+      else if (exact.length > 1) alreadyCached = 'ambiguous';
+    } catch (probeError) {
+      // A failed probe is not a cache verdict; fail closed rather than
+      // fall through to an uncached add.
+      providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
+      return {
+        status: 'failed',
+        error: new RdResolutionError(
+          `RD cache probe failed: ${probeError.message}`,
+          'RD_CACHE_PROBE_FAILED',
+          { category: probeError.category || 'unknown' },
+        ),
+      };
+    }
+    if (!alreadyCached) {
+      providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
+      providerAccounting.increment('realdebrid', 'realdebrid_not_cached_skipped');
+      return { status: 'skipped', reason: 'rd-not-cached' };
+    }
+    if (alreadyCached === 'ambiguous') {
+      providerAccounting.increment('realdebrid', 'realdebrid_fallback_failed');
+      return { status: 'skipped', reason: 'rd-ambiguous-account-torrents' };
+    }
+
+    // Step 1: reuse the cached torrent id (no addMagnet, no download).
     const t0 = now();
-    const addResult = await client.addMagnet(magnetUri, { resolverSafe: true });
-    rdTiming.addMagnet = now() - t0;
-    torrentId = addResult.id;
+    torrentId = alreadyCached;
+    rdTiming.addMagnet = 0;
 
     // Step 2: Get torrent info to see files
     const t1 = now();
@@ -477,10 +534,12 @@ export async function attemptRdResolution(client, searchCache, candidate, option
       ),
     };
   } finally {
-    // Always clean up the temporary RD torrent
-    if (torrentId) {
+    // Clean up ONLY a torrent this call created. Reusing an already-cached
+    // account torrent is durable route inventory now, and deleting it would
+    // destroy the very route we just proved usable.
+    if (createdTorrentId) {
       try {
-        await client.deleteTorrent(torrentId, { resolverSafe: true });
+        await client.deleteTorrent(createdTorrentId, { resolverSafe: true });
       } catch {
         // Ignore cleanup errors
       }

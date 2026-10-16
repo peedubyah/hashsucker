@@ -53,13 +53,19 @@ function freshAccounting() {
   providerAccounting.reset();
 }
 
-function makeMockRdClient({ files, status = 'downloaded', id = E02_TORRENT_ID, links } = {}) {
+function makeMockRdClient({ files, status = 'downloaded', id = E02_TORRENT_ID, links, cachedHashes = [E02_INFOHASH] } = {}) {
   const calls = { addMagnet: 0, getTorrentInfo: 0, selectFiles: 0, deleteTorrent: 0, unrestrictLink: 0 };
   return {
     calls,
     async addMagnet(_magnet, _opts) {
       calls.addMagnet++;
       return { id, uri: `https://real-debrid.com/torrents/${id}` };
+    },
+    // Cache-only gate: the account already has this torrent downloaded, so
+    // the resolver reuses the cached route instead of manufacturing one.
+    async listTorrents() {
+      calls.listTorrents = (calls.listTorrents ?? 0) + 1;
+      return cachedHashes.map((hash) => ({ id, hash, status: 'downloaded' }));
     },
     async getTorrentInfo(_torrentId, _opts) {
       calls.getTorrentInfo++;
@@ -196,7 +202,12 @@ test('B2: unknown persisted alternate => exactly one bounded active evaluation',
   // duplicate addMagnet for concurrent same-TorrentFile resolutions; the
   // single evaluation here is the one bounded attempt the negative cache
   // requires. Client was hit exactly once for the full chain.
-  assert.equal(client.calls.addMagnet, 1);
+  //
+  // Cache-only boundary: the route already exists in the account, so the
+  // cached torrent id is reused — zero addMagnet, zero download. The one
+  // bounded evaluation is the cache-only probe itself.
+  assert.equal(client.calls.addMagnet, 0, 'no uncached acquisition');
+  assert.equal(client.calls.listTorrents, 1, 'exactly one bounded cache probe');
   assert.equal(client.calls.selectFiles, 1);
 });
 

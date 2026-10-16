@@ -66,13 +66,18 @@ function freshAccounting() {
   providerAccounting.reset();
 }
 
-function makeMockRdClient({ files, status = 'downloaded', id = E02_TORRENT_ID, links } = {}) {
+function makeMockRdClient({ files, status = 'downloaded', id = E02_TORRENT_ID, links, cachedHashes = [E02_INFOHASH] } = {}) {
   const calls = { addMagnet: 0, getTorrentInfo: 0, selectFiles: 0, deleteTorrent: 0, unrestrictLink: 0 };
   return {
     calls,
     async addMagnet(_magnet, _opts) {
       calls.addMagnet++;
       return { id, uri: `https://real-debrid.com/torrents/${id}` };
+    },
+    // Cache-only gate: the account already has this torrent downloaded.
+    async listTorrents() {
+      calls.listTorrents = (calls.listTorrents ?? 0) + 1;
+      return [{ id, hash: cachedHashes[0] ?? E02_INFOHASH, status: 'downloaded' }];
     },
     async getTorrentInfo(_torrentId, _opts) {
       calls.getTorrentInfo++;
@@ -263,6 +268,7 @@ test('B11: walk past negative — negative cache does not poison a fresh-positiv
     const OTHER_HASH = '1111111111111111111111111111111111111111';
     const otherClient = makeMockRdClient({
       id: 'torrent-other',
+      cachedHashes: [OTHER_HASH],
       files: [{
         id: 'rd-file-other',
         path: 'When.They.See.Us.S01E02.1080p.NF.WEB-DL.Atmos.DDP5.1.HDR.H.265-ExREN.mkv',
@@ -277,7 +283,12 @@ test('B11: walk past negative — negative cache does not poison a fresh-positiv
       size: E02_SIZE,
     });
     assert.equal(positiveResult.status, 'resolved', 'a different hash must not be blocked by sibling negative');
-    assert.equal(otherClient.calls.addMagnet, 1);
+    // Cache-only boundary: the cached route is reused, never re-acquired.
+    // (This is stronger than the original "addMagnet called once" — the
+    // resolver now proves it can serve the sibling without manufacturing
+    // an uncached download.)
+    assert.equal(otherClient.calls.addMagnet, 0, 'a cached route is reused, not re-acquired');
+    assert.equal(otherClient.calls.listTorrents, 1, 'the cache-only gate probed the account');
 
     cache.close();
   } finally {

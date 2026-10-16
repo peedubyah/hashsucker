@@ -623,3 +623,73 @@ No planned work as completed. No vague "healthy." No speculative causes.
   The five skips are explicit and reasoned (external fixtures unavailable,
   two documented "unbuilt" behaviors, one live-credential test, one opt-in
   benchmark) — no hidden known-failing baseline remains.
+
+## 2026-10-15 — playback drove uncached RD acquisition AND masked rotted routes — FIXED (recovery slice: 0 repairs needed)
+
+- Changed: `media-search/src/lib/providers/realdebrid/resolve.js`
+  (`attemptRdResolution`) now gates every resolution behind a cache-only
+  probe: a read-only exact-hash `listTorrents` lookup. Not-cached returns
+  `skipped/rd-not-cached` (counter `realdebrid_not_cached_skipped`), an
+  unanswerable probe fails closed with `RD_CACHE_PROBE_FAILED`, and a
+  confirmed route is reused with `addMagnet` never called and no
+  `deleteTorrent` of the reused id.
+- Root cause (mechanism): the resolver called `addMagnet()`
+  unconditionally, then `deleteTorrent()` in `finally`. Two defects from one
+  behaviour: (a) playback silently started RD downloads for titles TorBox no
+  longer had cached — the cache-only boundary had no enforcement point in the
+  resolver; (b) the resolver "succeeded" via that download, so a stale
+  durable ProviderPlacement was never the failure that surfaced it, and the
+  control plane kept reporting routes that no longer exist.
+- Recovery slice: `media-search/src/lib/control-plane/route-reconciler.js`
+  (new) plus `route-providers.js` (new) — one construction of the TorBox/RD
+  cache-only surfaces shared by the request handler and the background
+  reconciler. The reconciler only ever asks the existing second-placement
+  ensurer with `discoverOnly: true`; it never acquires, never changes
+  Release/TorrentFile identity, and never demotes a placement because one
+  probe failed. Wired as a bounded worker
+  (`ROUTE_RECONCILE_ENABLED` default 1, every 6 h, batch 25, first pass
+  after 10 min).
+- Staleness criterion is live, not assumed: `findStaleRouteTorrentFiles` is
+  the durable-only criterion (shares `presentProviders()`'s blind spot), and
+  `findRottedRouteTorrentFiles` verifies each recorded route with
+  cache-only reads (one batched TorBox `checkcached`, one RD `torrents`
+  list). An unanswerable probe defers the TorrentFile rather than declaring
+  rot.
+- Production evidence (live control plane, 2026-10-15):
+  - 123 active-bound TorrentFiles; 123 have a recorded route; 0 do not.
+  - all 123 recorded TorBox routes resolve in the live mylist and
+    `checkcached` reports every hash still cached → live-verified usable 123,
+    rotted 0.
+  - 3 TorrentFiles also carry a Real-Debrid route; 1 of those (hash
+    `09e83cef…`, rid `M4Q7D3JF7PUDI`) is absent from the RD account, and
+    that same TorrentFile already has a live TorBox route (rid `96107317`),
+    so no title is unserviceable.
+  - One bounded pass through the deployed worker path:
+    `{scanned: 0, repaired: 0, unavailable: 0, failed: 0}`.
+- This corrects the earlier working hypothesis for this slice, which
+  reported ~100 rotted TorBox placements and ~98 TorrentFiles with no
+  cached route anywhere. Measured against live provider state the true
+  numbers are 0 rotted and 0 unserviceable: the earlier classification did
+  not verify route ids/hashes against live provider truth, so it counted
+  healthy inventory as stale. The cache-only resolver gate is therefore the
+  user-visible fix from this slice; the reconciler is the standing guard for
+  the rot case, not a repair that had work to do today.
+- Verification: Node suite 3309 tests / 3306 pass / 0 fail / 3 documented
+  skips. The three previously-failing `test/rd-filename-filter.test.js`
+  integration tests asserted the removed behaviour (`addMagnet` on every
+  resolution) and now assert the cache-only contract; the code-35
+  infringing observation is still persisted, but reached by reading a cached
+  route instead of creating a download. `test/route-reconciler.test.js`
+  (13 tests) covers: usable route never probed, no-route is a candidate,
+  removed placement not usable, alternate-cached repair for the same
+  TorrentFile with Binding unchanged, no fake placement on a miss,
+  representation mismatch is not a repair, probe error never demotes,
+  bounded passes, live verification (incl. provider-side rot and
+  unanswerable probes), and RD-rotted/TorBox-live recovery.
+- Rust suite unchanged from `c760d40` (153 + 14 + 7 green, docker
+  toolchain).
+- Unproven: no title was actually repaired in production, because no
+  recorded route was rotted. The reconciler's repair path is proven by test
+  (T4, T12) and by one live pass that found no work, not by a live repair.
+- Artifacts: `media-search/scripts/live-route-reconcile.mjs` reproduces the
+  classification and runs one bounded pass.

@@ -142,6 +142,12 @@ const CATEGORIES = Object.freeze([
   // prediction, not an RD observation; it must never be persisted as
   // provider evidence.
   'realdebrid_filename_filter_short_circuit',
+  // Cache-only boundary: attemptRdResolution found the exact
+  // representation NOT already downloaded on RD. Playback never
+  // manufactures an uncached download; this counter is how the
+  // operator sees the cache-only boundary being hit instead of a
+  // market miss.
+  'realdebrid_not_cached_skipped',
   // Worker A — delivery/CDN byte-read 429 state machine. The
   // requestdl-layer 429 categories above account for the provider
   // API; the Delivery_* categories below account for the byte-read
@@ -405,6 +411,7 @@ export function formatProviderAccounting(snapshot, { title, provider = 'torbox' 
       'realdebrid_file_ambiguous',
       'realdebrid_file_absent',
       'realdebrid_filename_filter_short_circuit',
+      'realdebrid_not_cached_skipped',
     ];
     if (value === 0 && !alwaysRender.includes(cat)) continue;
     const label = cat.replaceAll('_', ' ');

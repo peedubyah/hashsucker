@@ -34,6 +34,11 @@ function makeMockRdClient({ status = 'downloaded', files } = {}) {
       calls.addMagnet++;
       return { id: 'torrent-1' };
     },
+    // Cache-only gate: the account already has this torrent downloaded.
+    async listTorrents() {
+      calls.listTorrents = (calls.listTorrents ?? 0) + 1;
+      return [{ id: 'torrent-1', hash: TEST_INFOHASH, status: 'downloaded' }];
+    },
     async getTorrentInfo(_torrentId, _opts) {
       calls.getTorrentInfo++;
       return {
@@ -158,10 +163,14 @@ test('integration: negative filename → resolver proceeds (addMagnet called onc
       filename,
       size: TEST_SIZE,
     });
-    // The resolver proceeds to addMagnet — it may resolve or fail based on
-    // the mock, but it MUST NOT short-circuit with rd_filename_filter_match.
+    // The resolver proceeds — it may resolve or fail based on the mock, but
+    // it MUST NOT short-circuit with rd_filename_filter_match.
     assert.notEqual(result.reason, 'rd_filename_filter_match', `must not short-circuit for ${filename}`);
-    assert.equal(client.calls.addMagnet, 1, `addMagnet must be called for ${filename}`);
+    // Cache-only boundary: proceeding now means reusing an already-cached
+    // route. The old unconditional addMagnet was the defect this slice
+    // removed, so acquisition must be zero for every filename.
+    assert.equal(client.calls.addMagnet, 0, `no uncached acquisition for ${filename}`);
+    assert.equal(client.calls.listTorrents, 1, `cache-only gate ran for ${filename}`);
     assert.equal(client.calls.getTorrentInfo, 1, `getTorrentInfo must be called for ${filename}`);
   }
 });
@@ -199,7 +208,10 @@ test('integration: fresh cached observation → predictor does not fire, resolve
   });
   // Fresh cached observation wins — predictor does NOT fire
   assert.notEqual(result.reason, 'rd_filename_filter_match');
-  assert.equal(client.calls.addMagnet, 1, 'addMagnet must be called when cached observation exists');
+  // Cache-only boundary: the cached observation means the route already
+  // exists, so the resolver proceeds without acquiring.
+  assert.equal(client.calls.addMagnet, 0, 'a fresh cached observation reuses the cached route');
+  assert.equal(client.calls.getTorrentInfo, 1, 'the resolver still proceeds to the file inventory');
 });
 
 test('integration: fresh infringing observation → predictor does not fire, skipped as infringing', async () => {
@@ -260,13 +272,23 @@ test('integration: predictor does NOT persist provider observation', async () =>
 test('integration: non-blocked filename that RD rejects with code 35 → existing catch block persists infringing observation', async () => {
   freshAccounting();
   const cache = makeEmptyCache();
+  const infringing = () => Object.assign(new Error('Infringing file'), {
+    rdErrorCode: 35, rdError: 'infringing_file',
+  });
+  // Cache-only boundary: acquisition (addMagnet) can never happen, so the
+  // code-35 verdict now arrives from reading an already-cached route
+  // instead of from creating a download. The catch block is unchanged and
+  // must still persist the infringing observation.
   const client = {
     calls: { addMagnet: 0, getTorrentInfo: 0, selectFiles: 0, deleteTorrent: 0 },
-    async addMagnet(_magnet, _opts) {
+    async addMagnet() {
       this.calls.addMagnet++;
-      throw Object.assign(new Error('Infringing file'), { rdErrorCode: 35, rdError: 'infringing_file' });
+      throw infringing();
     },
-    async getTorrentInfo() { this.calls.getTorrentInfo++; return null; },
+    async listTorrents() {
+      return [{ id: 'torrent-1', hash: TEST_INFOHASH, status: 'downloaded' }];
+    },
+    async getTorrentInfo() { this.calls.getTorrentInfo++; throw infringing(); },
     async selectFiles() { this.calls.selectFiles++; },
     async deleteTorrent() { this.calls.deleteTorrent++; },
   };
@@ -280,6 +302,8 @@ test('integration: non-blocked filename that RD rejects with code 35 → existin
   // The existing code-35 catch block fires — observation persisted, RD_INFRINGING error
   assert.equal(result.status, 'failed');
   assert.equal(result.error.code, 'RD_INFRINGING');
+  assert.equal(client.calls.addMagnet, 0, 'no uncached acquisition');
+  assert.equal(client.calls.getTorrentInfo, 1, 'the verdict came from reading the cached route');
   assert.equal(cache.observations.length, 1, 'catch block must persist the infringing observation');
   assert.equal(cache.observations[0].errorCategory, 'infringing');
 });

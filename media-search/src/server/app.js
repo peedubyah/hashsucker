@@ -129,8 +129,8 @@ import { isWithinRoot as isWithinDownloadRoot } from '../lib/download/paths.js';
 import { getRdResolutionCache } from '../lib/providers/realdebrid/rd-resolution-cache.js';
 import { createMovieWebDav } from '../lib/vfs/movie-webdav.js';
 import { createTvWebDav } from '../lib/vfs/tv-webdav.js';
-import { PROVIDER_CAPABILITIES } from '../lib/providers/capabilities.js';
 import { createSecondPlacementEnsurer } from '../lib/control-plane/second-placement.js';
+import { createRouteProviderSurfaces } from '../lib/control-plane/route-providers.js';
 import { createPrewarmCaller } from '../lib/control-plane/prewarm.js';
 import { createPlaybackRedundancy, isPlaybackRedundancyEnabled } from '../lib/control-plane/playback-redundancy.js';
 
@@ -907,25 +907,15 @@ export function createRequestHandler(dependencies = {}) {
   // Injectable via dependencies for deterministic tests.
   // T7 provider surfaces (shared by the redundancy controller and the
   // coverage ensurer below). Built once whenever either client exists.
-  const t7Torbox = (torBoxProvider && torBoxInventoryProvider) ? {
-    // T7 TorBox surface adapted from the existing provider stack
-    // (cached-only creation semantics preserved; no new TorBox logic).
-    createPlacement: (input) => torBoxProvider
-      .require(PROVIDER_CAPABILITIES.PLACEMENT_CREATE).createPlacement(input),
-    checkCached: (hashes) => checkTorBoxCached(hashes, { apiKey: env.TORBOX_API_KEY }),
-    lookupPlacement: (input, ctx) => torBoxInventoryProvider
-      .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP).lookupPlacement(input, ctx),
-    getFileInventory: (resource, ctx) => torBoxInventoryProvider
-      .require(PROVIDER_CAPABILITIES.FILE_INVENTORY).getFileInventory(resource, ctx),
-  } : null;
-  // T7 Real-Debrid surface is the existing rdClient verbatim
-  // (listTorrents/getTorrentInfo/addMagnet/selectFiles).
-  const t7RealDebrid = rdClient ? {
-    listTorrents: (args) => rdClient.listTorrents(args),
-    getTorrentInfo: (id, opts) => rdClient.getTorrentInfo(id, opts),
-    addMagnet: (magnet, opts) => rdClient.addMagnet(magnet, opts),
-    selectFiles: (id, ids, opts) => rdClient.selectFiles(id, ids, opts),
-  } : null;
+  // T7 provider surfaces, built by the shared factory so the request handler
+  // and the background route reconciler can never disagree about how a
+  // provider is probed.
+  const { torbox: t7Torbox, realdebrid: t7RealDebrid } = createRouteProviderSurfaces({
+    torBoxProvider,
+    torBoxInventoryProvider,
+    rdClient,
+    env,
+  });
   // Coverage ensurer (dual-provider enrichment tranche): the same T7
   // second-placement surfaces, built whenever either client exists —
   // independent of the T10 flag below. The publish hook and any future

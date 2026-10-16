@@ -53,13 +53,22 @@ function makeMockSearchCache() {
   };
 }
 
-function makeMockRdClient({ files, status = 'downloaded', id = 'torrent-1' } = {}) {
-  const calls = { addMagnet: 0, getTorrentInfo: 0, selectFiles: 0, deleteTorrent: 0 };
+function makeMockRdClient({ files, status = 'downloaded', id = 'torrent-1', accountTorrents = null } = {}) {
+  const calls = { addMagnet: 0, getTorrentInfo: 0, selectFiles: 0, deleteTorrent: 0, listTorrents: 0 };
   return {
     calls,
     async addMagnet(_magnet, _opts) {
       calls.addMagnet++;
       return { id, uri: `https://real-debrid.com/torrents/${id}` };
+    },
+    // Read-only account cache probe. Defaults to "this exact hash is already
+    // downloaded" so the cache-only gate passes; tests override to prove the
+    // not-cached and ambiguous cases.
+    async listTorrents(_opts) {
+      calls.listTorrents++;
+      const entries = accountTorrents ?? [{ id, hash: E02_INFOHASH, status }];
+      const out = entries.map((entry) => ({ id: entry.id ?? id, hash: entry.hash ?? E02_INFOHASH, status: entry.status ?? status }));
+      return out;
     },
     async getTorrentInfo(_torrentId, _opts) {
       calls.getTorrentInfo++;
@@ -114,7 +123,7 @@ test('B1: attemptRdResolution returns status=resolved on exact match', async () 
     filename: E02_FILENAME,
     size: E02_SIZE,
   });
-  assert.equal(result.status, 'resolved');
+  assert.equal(result.status, 'resolved', JSON.stringify(result));
   assert.equal(result.rdFileId, E02_RD_FILE_ID);
   assert.equal(result.torrentId, 'torrent-1');
   // Accounting assertions: attempted + resolved + match, and never ambiguous/absent
@@ -181,8 +190,10 @@ test('B2: attemptRdResolution returns failed RD_FILE_MAPPING_FAILED when no file
   assert.equal(snap.realdebrid_file_absent, 1);
   // selectFiles must NOT have been called
   assert.equal(client.calls.selectFiles, 0);
-  // cleanup still happens
-  assert.equal(client.calls.deleteTorrent, 1);
+  // Cache-only: the route was reused from the account, so nothing was
+  // created and nothing is deleted.
+  assert.equal(client.calls.addMagnet, 0);
+  assert.equal(client.calls.deleteTorrent, 0);
 });
 
 test('B3: ambiguous (multiple files with same basename but different sizes) → fail closed', () => {
@@ -220,6 +231,8 @@ test('B3: attemptRdResolution returns failed when basename matches multiple file
   });
   assert.equal(result.status, 'failed');
   assert.equal(result.error.code, 'RD_FILE_MAPPING_FAILED');
+  assert.equal(client.calls.addMagnet, 0, 'the route came from the account cache, not an add');
+  assert.equal(client.calls.deleteTorrent, 0, 'nothing was created, so nothing is deleted');
   const snap = rdCounterSnapshot();
   assert.equal(snap.realdebrid_file_ambiguous, 1);
   assert.equal(snap.realdebrid_file_absent, 0);
@@ -360,10 +373,39 @@ test('attemptRdResolution: skipped (fresh uncached) → failed accounting, no cl
   assert.equal(snap.realdebrid_fallback_failed, 1);
 });
 
-test('attemptRdResolution: torrent not downloaded → failed with RD_FILE_NOT_CACHED', async () => {
+test('cache-only: representation not already downloaded on RD → skipped, nothing created', async () => {
   freshAccounting();
   const files = [rdFile({ id: E02_RD_FILE_ID, path: E02_FILENAME, bytes: E02_SIZE })];
-  const client = makeMockRdClient({ files, status: 'downloading' });
+  // The account does NOT have this exact hash cached: it is queued.
+  const client = makeMockRdClient({
+    files,
+    accountTorrents: [{ id: 'other', hash: 'f'.repeat(40), status: 'downloaded' }],
+  });
+  const searchCache = makeMockSearchCache();
+  const result = await attemptRdResolution(client, searchCache, {
+    infoHash: E02_INFOHASH,
+    fileIndex: 0,
+    filename: E02_FILENAME,
+    size: E02_SIZE,
+  });
+  // A cache miss is NOT a market miss and must never become a download.
+  assert.equal(result.status, 'skipped');
+  assert.equal(result.reason, 'rd-not-cached');
+  const snap = rdCounterSnapshot();
+  assert.equal(snap.realdebrid_not_cached_skipped, 1, 'the cache-only boundary is observable');
+  assert.equal(snap.realdebrid_fallback_resolved, 0);
+  // No account mutation of any kind: no add, no select, no delete.
+  assert.equal(client.calls.addMagnet, 0, 'playback must never manufacture an uncached download');
+  assert.equal(client.calls.selectFiles, 0);
+  assert.equal(client.calls.deleteTorrent, 0);
+  assert.equal(client.calls.listTorrents, 1, 'exactly one read-only cache probe');
+});
+
+test('cache-only: a probe failure fails closed instead of downloading', async () => {
+  freshAccounting();
+  const files = [rdFile({ id: E02_RD_FILE_ID, path: E02_FILENAME, bytes: E02_SIZE })];
+  const client = makeMockRdClient({ files });
+  client.listTorrents = async () => { throw Object.assign(new Error('rd unavailable'), { category: 'transient' }); };
   const searchCache = makeMockSearchCache();
   const result = await attemptRdResolution(client, searchCache, {
     infoHash: E02_INFOHASH,
@@ -372,12 +414,26 @@ test('attemptRdResolution: torrent not downloaded → failed with RD_FILE_NOT_CA
     size: E02_SIZE,
   });
   assert.equal(result.status, 'failed');
-  assert.equal(result.error.code, 'RD_FILE_NOT_CACHED');
-  const snap = rdCounterSnapshot();
-  assert.equal(snap.realdebrid_fallback_failed, 1);
-  assert.equal(snap.realdebrid_fallback_resolved, 0);
-  // Still cleans up
-  assert.equal(client.calls.deleteTorrent, 1);
+  assert.equal(result.error.code, 'RD_CACHE_PROBE_FAILED');
+  assert.equal(client.calls.addMagnet, 0, 'a failed probe must never fall through to an add');
+});
+
+test('cache-only: a pre-existing account torrent is reused, never deleted', async () => {
+  freshAccounting();
+  const files = [rdFile({ id: E02_RD_FILE_ID, path: E02_FILENAME, bytes: E02_SIZE })];
+  const client = makeMockRdClient({ files });
+  const searchCache = makeMockSearchCache();
+  const result = await attemptRdResolution(client, searchCache, {
+    infoHash: E02_INFOHASH,
+    fileIndex: 0,
+    filename: E02_FILENAME,
+    size: E02_SIZE,
+  });
+  assert.equal(result.status, 'resolved');
+  assert.equal(result.torrentId, 'torrent-1');
+  assert.equal(client.calls.addMagnet, 0, 'the cached route is reused, not re-added');
+  assert.equal(client.calls.deleteTorrent, 0,
+    'the reused route is durable inventory now; deleting it would destroy the route');
 });
 
 test('B6: concurrent same-TorrentFile RD resolution coalesces via single-flight', async () => {
