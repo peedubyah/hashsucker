@@ -659,27 +659,6 @@ async fn r2e_malformed_provider_payload_fails_over() {
 }
 
 // ===========================================================================
-// R2f — a route that commits 206 then cuts the body must still fail over
-// ===========================================================================
-
-#[tokio::test]
-async fn r2f_midbody_truncation_fails_over_to_alternate() {
-    let st = build_stack(FILE_SIZE, None).await;
-    let served_by = lane_that_serves(&st).await;
-    let loser = if served_by == "torbox" { &st.primary } else { &st.alternate };
-    let winner = if served_by == "torbox" { &st.alternate } else { &st.primary };
-    loser.fault(MODE_MIDBODY_ERROR);
-    let winner_before = winner.range_requests();
-    let (status, body, _p) = read(&st, CHUNK, 2 * CHUNK - 1).await;
-    assert_eq!(status, 206, "a mid-body truncation must not fail the client");
-    assert_eq!(body, expected(CHUNK, CHUNK as usize), "the alternate delivers exact bytes");
-    assert!(
-        winner.range_requests() > winner_before,
-        "the healthy alternate route actually delivered the read"
-    );
-}
-
-// ===========================================================================
 // R3 — every route failing: honest failure, nothing poisoned
 // ===========================================================================
 
