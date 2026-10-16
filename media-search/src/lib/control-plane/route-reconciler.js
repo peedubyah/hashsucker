@@ -102,12 +102,89 @@ export async function findRottedRouteTorrentFiles(store, {
   providers,
   log = () => {},
 } = {}) {
+  const verdicts = await verifyRecordedRoutes(store, { providers, log });
   const max = Math.max(1, Math.trunc(Number(limit) || 25));
+  const rotted = [];
+  for (const info of verdicts) {
+    if (!info.rotted) continue;
+    rotted.push(info.torrentFileId);
+    if (rotted.length >= max) break;
+  }
+  return rotted;
+}
+
+/**
+ * Bounded retirement of placements the provider has objectively disproven.
+ *
+ * Removal is a durability verdict, so it is allowed only for durable
+ * provider-truth failures: the exact hash is confirmed absent from the
+ * provider account (not a timeout, not a 5xx, not a rate limit). Two further
+ * guards keep it safe:
+ *
+ *   - REDUNDANT ONLY. A placement is retired only when the same TorrentFile
+ *     has at least one other live route. Retiring a title's last route would
+ *     un-serve it for as long as discovery takes to find a replacement.
+ *   - PROVEN, NOT INFERRED. A probe that cannot be answered is UNKNOWN and is
+ *     never a removal reason, so a provider outage cannot retire inventory.
+ *
+ * Idempotent: a retired placement is already `removed` in durable truth and
+ * disappears from the S-1 projection, so a later pass finds nothing to do.
+ *
+ * @returns {Promise<{retired: Array<{torrentFileId,provider,resourceId,placementId}>, deferred:number}>}
+ */
+export async function retireVerifiedDeadRedundantRoutes({
+  store,
+  limit = 25,
+  providers,
+  log = () => {},
+} = {}) {
+  const result = { retired: [], deferred: 0 };
+  const verdicts = await verifyRecordedRoutes(store, { providers, log });
+  if (verdicts.length === 0) return result;
+  const max = Math.max(1, Math.trunc(Number(limit) || 25));
+
+  for (const info of verdicts) {
+    if (info.unknown) result.deferred += 1;
+    if (!info.hasLiveRoute) continue; // never retire a title's last route here
+    for (const route of info.deadRoutes) {
+      if (result.retired.length >= max) return result;
+      try {
+        store.markPlacementRemoved(route.placementId, {
+          reason: 'route-verification-absent',
+          observedAt: Date.now(),
+        });
+      } catch (error) {
+        log(`route-reconcile retire skipped placement=${route.placementId}: ${error?.message ?? error}`);
+        continue;
+      }
+      result.retired.push({
+        torrentFileId: info.torrentFileId,
+        provider: route.provider,
+        resourceId: route.resourceId,
+        placementId: route.placementId,
+      });
+      log(`route-reconcile retired placement=${route.placementId} provider=${route.provider} `
+        + `resource=${route.resourceId} tf=${info.torrentFileId} reason=provider-absent`);
+    }
+  }
+  return result;
+}
+
+/**
+ * One live verification of every recorded route, shared by the rotted-route
+ * finder and the retirement pass so a pass makes ONE probe set, never two.
+ *
+ * @returns {Promise<Array<{torrentFileId:string,infoHash:string,routes:Array,
+ *   liveRoutes:Array, deadRoutes:Array, hasLiveRoute:boolean, rotted:boolean,
+ *   unknown:boolean}>>}
+ */
+async function verifyRecordedRoutes(store, { providers, log = () => {} } = {}) {
   if (!store || typeof store.db?.prepare !== 'function' || !providers) return [];
 
   const rows = store.db.prepare(`
     SELECT DISTINCT tf.id AS torrent_file_id, tf.info_hash AS info_hash,
-           pl.provider AS provider, pl.provider_resource_id AS resource_id
+           pl.provider AS provider, pl.provider_resource_id AS resource_id,
+           pl.id AS placement_id
     FROM torrent_files tf
     JOIN bindings b ON b.torrent_file_id = tf.id AND b.status = 'active'
     JOIN provider_files pf ON pf.torrent_file_id = tf.id AND pf.present = 1
@@ -119,39 +196,53 @@ export async function findRottedRouteTorrentFiles(store, {
 
   const byTf = new Map();
   for (const row of rows) {
-    if (!byTf.has(row.torrent_file_id)) byTf.set(row.torrent_file_id, { infoHash: row.info_hash, routes: [] });
-    byTf.get(row.torrent_file_id).routes.push({ provider: row.provider, resourceId: row.resource_id });
+    if (!byTf.has(row.torrent_file_id)) {
+      byTf.set(row.torrent_file_id, { infoHash: row.info_hash, routes: [] });
+    }
+    byTf.get(row.torrent_file_id).routes.push({
+      provider: row.provider,
+      resourceId: row.resource_id,
+      placementId: row.placement_id,
+    });
   }
 
-  const hashes = [...new Set([...byTf.values()].map((v) => String(v.infoHash ?? '').trim().toLowerCase()).filter(Boolean))];
+  const hashes = [...new Set(
+    [...byTf.values()].map((v) => String(v.infoHash ?? '').trim().toLowerCase()).filter(Boolean),
+  )];
   const torboxCached = await readTorBoxCached(providers, hashes, log);
   const rdHashes = await readRdHashes(providers, log);
 
-  const rotted = [];
+  const verdicts = [];
   for (const [torrentFileId, info] of byTf) {
     const hash = String(info.infoHash ?? '').trim().toLowerCase();
     if (!hash) continue; // no exact identity recorded: nothing to verify
-    let live = false;
+    const liveRoutes = [];
+    const deadRoutes = [];
     let unknown = false;
     for (const route of info.routes) {
       const provider = String(route.provider ?? '').toLowerCase();
+      let live = null; // null = could not answer
       if (provider === 'torbox') {
-        if (!torboxCached) unknown = true;
-        else if (torboxCached.has(hash)) live = true;
+        if (torboxCached) live = torboxCached.has(hash);
       } else if (provider === 'realdebrid') {
-        if (!rdHashes) unknown = true;
-        else if (rdHashes.has(hash)) live = true;
+        if (rdHashes) live = rdHashes.has(hash);
       }
+      if (live === null) unknown = true;
+      else if (live) liveRoutes.push(route);
+      else deadRoutes.push(route);
     }
-    if (live) continue;
-    if (unknown) {
-      // A route we could not verify is not a rotted route. Defer it.
-      continue;
-    }
-    rotted.push(torrentFileId);
-    if (rotted.length >= max) break;
+    verdicts.push({
+      torrentFileId,
+      infoHash: hash,
+      routes: info.routes,
+      liveRoutes,
+      deadRoutes,
+      hasLiveRoute: liveRoutes.length > 0,
+      rotted: liveRoutes.length === 0 && !unknown,
+      unknown,
+    });
   }
-  return rotted;
+  return verdicts;
 }
 
 async function readTorBoxCached(providers, hashes, log) {

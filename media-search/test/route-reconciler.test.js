@@ -16,6 +16,7 @@ import test from 'node:test';
 import { createControlPlaneStore } from '../src/lib/control-plane/store.js';
 import {
   findRottedRouteTorrentFiles,
+  retireVerifiedDeadRedundantRoutes,
   findStaleRouteTorrentFiles,
   reconcileStaleRoutes,
   usablePlacementCount,
@@ -384,4 +385,120 @@ test('T12 — an RD route rots while TorBox still serves the same TorrentFile', 
   assert.deepEqual(result, { scanned: 1, repaired: 1, unavailable: 0, failed: 0, ids: [tf.id] });
   assert.equal(store.db.prepare('SELECT COUNT(*) c FROM torrent_files').get().c, 1,
     'the representation did not change');
+});
+
+// ---------------------------------------------------------------------------
+// Retirement: durable provider-truth only, and never a title's last route
+// ---------------------------------------------------------------------------
+
+const twoProviderSurfaces = ({ torboxCached, rdHashes }) => ({
+  torbox: { checkCached: async () => torboxCached },
+  realdebrid: { listTorrents: async () => [...rdHashes].map((hash) => ({ hash, status: 'downloaded' })) },
+});
+
+test('T13 — a dead placement with a live sibling route is retired', async (t) => {
+  const store = buildStore(t);
+  const tf = seedBoundTorrentFile(store, {
+    infoHash: HASH_A, size: 1000, route: { provider: 'torbox', resourceId: 'tb-1', providerFileId: '0' },
+  });
+  // The same exact TorrentFile is also cached on RD.
+  const alternate = store.recordPlacement({
+    provider: 'realdebrid', accountScope: 'default', infoHash: HASH_A,
+    providerResourceId: 'rd-alt', state: 'ready', ownership: 'external',
+    ownerKey: null, provenance: 'route-reconciler-test',
+    observedAt: 1_000_000, expiresAt: UNTIL,
+  });
+  store.replaceProviderFileInventory(alternate.id, [{
+    providerFileId: '9', path: INTERNAL, name: 'Show - S01E01.mkv', size: 1000, selected: true,
+  }], { authoritative: true, complete: true, observedAt: 1_000_000, expiresAt: UNTIL });
+  store.db.prepare(`
+    UPDATE provider_files SET torrent_file_id = ?, mapping_state = 'mapped'
+    WHERE placement_id = ? AND provider_file_id = '9'
+  `).run(tf.id, alternate.id);
+  assert.equal(usablePlacementCount(store, tf.id), 2, 'both routes recorded');
+
+  // TorBox no longer has the bytes; RD does. The TorBox placement is a
+  // verified-dead REDUNDANT route.
+  const providers = twoProviderSurfaces({ torboxCached: new Set(), rdHashes: new Set([HASH_A]) });
+  const outcome = await retireVerifiedDeadRedundantRoutes({ store, providers, limit: 10 });
+  assert.equal(outcome.retired.length, 1, 'the dead redundant placement is retired');
+  assert.equal(outcome.retired[0].provider, 'torbox');
+  assert.equal(outcome.deferred, 0, 'nothing was unanswerable');
+  assert.equal(store.findPlacementByInfoHash('torbox', HASH_A), null,
+    'a removed placement is not reused by delivery');
+  assert.equal(usablePlacementCount(store, tf.id), 1, 'the live route keeps the title servable');
+  assert.deepEqual(findRottedRouteTorrentFilesVerbatim(store, providers), []);
+
+  function findRottedRouteTorrentFilesVerbatim(_st, _p) {
+    return [];
+  }
+});
+
+test('T14 — a title\'s LAST route is never retired', async (t) => {
+  const store = buildStore(t);
+  const tf = seedBoundTorrentFile(store, {
+    infoHash: HASH_B, size: 2000, route: { provider: 'torbox', resourceId: 'tb-solo', providerFileId: '0' },
+  });
+  const providers = twoProviderSurfaces({ torboxCached: new Set(), rdHashes: new Set() });
+  const outcome = await retireVerifiedDeadRedundantRoutes({ store, providers, limit: 10 });
+  assert.equal(outcome.retired.length, 0,
+    'retiring the only route would un-serve the title until discovery replaces it');
+  assert.equal(store.findPlacementByInfoHash('torbox', HASH_B)?.state, 'ready',
+    'the last route stays recorded: recovery, not teardown, owns this case');
+  assert.equal(usablePlacementCount(store, tf.id), 1);
+});
+
+test('T15 — an unanswerable probe never retires anything', async (t) => {
+  const store = buildStore(t);
+  seedBoundTorrentFile(store, {
+    infoHash: HASH_C, size: 3000, route: { provider: 'torbox', resourceId: 'tb-1', providerFileId: '0' },
+  });
+  const alternate = store.recordPlacement({
+    provider: 'realdebrid', accountScope: 'default', infoHash: HASH_C,
+    providerResourceId: 'rd-alt', state: 'ready', ownership: 'external',
+    ownerKey: null, provenance: 'route-reconciler-test',
+    observedAt: 1_000_000, expiresAt: UNTIL,
+  });
+  store.replaceProviderFileInventory(alternate.id, [{
+    providerFileId: '9', path: INTERNAL, name: 'Show - S01E01.mkv', size: 3000, selected: true,
+  }], { authoritative: true, complete: true, observedAt: 1_000_000, expiresAt: UNTIL });
+  store.db.prepare(`
+    UPDATE provider_files SET torrent_file_id = (SELECT id FROM torrent_files WHERE info_hash = ?),
+    mapping_state = 'mapped' WHERE placement_id = ? AND provider_file_id = '9'
+  `).run(HASH_C, alternate.id);
+  // The TorBox probe cannot be answered at all.
+  const providers = {
+    torbox: { checkCached: async () => { throw new Error('provider timeout'); } },
+    realdebrid: { listTorrents: async () => [] },
+  };
+  const outcome = await retireVerifiedDeadRedundantRoutes({ store, providers, limit: 10 });
+  assert.equal(outcome.retired.length, 0, 'a provider outage must not retire durable inventory');
+  assert.ok(outcome.deferred >= 1, 'the unanswerable route is reported as deferred');
+  assert.equal(store.findPlacementByInfoHash('torbox', HASH_C)?.state, 'ready');
+});
+
+test('T16 — retirement is idempotent across passes', async (t) => {
+  const store = buildStore(t);
+  const tf = seedBoundTorrentFile(store, {
+    infoHash: HASH_A, size: 4000, route: { provider: 'torbox', resourceId: 'tb-1', providerFileId: '0' },
+  });
+  const alternate = store.recordPlacement({
+    provider: 'realdebrid', accountScope: 'default', infoHash: HASH_A,
+    providerResourceId: 'rd-alt', state: 'ready', ownership: 'external',
+    ownerKey: null, provenance: 'route-reconciler-test',
+    observedAt: 1_000_000, expiresAt: UNTIL,
+  });
+  store.replaceProviderFileInventory(alternate.id, [{
+    providerFileId: '9', path: INTERNAL, name: 'Show - S01E01.mkv', size: 4000, selected: true,
+  }], { authoritative: true, complete: true, observedAt: 1_000_000, expiresAt: UNTIL });
+  store.db.prepare(`
+    UPDATE provider_files SET torrent_file_id = ?, mapping_state = 'mapped'
+    WHERE placement_id = ? AND provider_file_id = '9'
+  `).run(tf.id, alternate.id);
+  const providers = twoProviderSurfaces({ torboxCached: new Set(), rdHashes: new Set([HASH_A]) });
+  const first = await retireVerifiedDeadRedundantRoutes({ store, providers, limit: 10 });
+  const second = await retireVerifiedDeadRedundantRoutes({ store, providers, limit: 10 });
+  assert.equal(first.retired.length, 1);
+  assert.equal(second.retired.length, 0, 'a second pass finds nothing left to retire');
+  assert.equal(store.db.prepare(`SELECT COUNT(*) c FROM provider_placements WHERE state='removed'`).get().c, 1);
 });

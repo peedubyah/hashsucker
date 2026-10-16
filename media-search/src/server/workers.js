@@ -42,7 +42,10 @@ import { checkTorBoxCached } from '../lib/providers/torbox.js';
 import { createArrClient } from '../lib/anticipation/arr-client.js';
 import { createSecondPlacementEnsurer } from '../lib/control-plane/second-placement.js';
 import { createRouteProviderSurfaces } from '../lib/control-plane/route-providers.js';
-import { reconcileStaleRoutes } from '../lib/control-plane/route-reconciler.js';
+import {
+  reconcileStaleRoutes,
+  retireVerifiedDeadRedundantRoutes,
+} from '../lib/control-plane/route-reconciler.js';
 import { createArrSync } from '../lib/anticipation/arr-sync.js';
 import { createSeasonReconciler } from '../lib/anticipation/season-reconciliation.js';
 import { resolveSeerrSeasonEpisodes } from '../lib/intents/providers/seerr.js';
@@ -666,57 +669,112 @@ function arrSyncIntervalMs() {
 // TorrentFiles whose recorded routes are all unusable get a bounded,
 // cache-only alternate-route lookup (the existing second-placement
 // discover-only surface). No uncached acquisition, no identity change.
-function routeReconcileIntervalMs() {
-  return envNumber(process.env, 'ROUTE_RECONCILE_INTERVAL_MIN', { fallback: 360, min: 30 }) * 60 * 1000;
+//
+// Two operators, one probe set, one single-flight:
+//   - request-time recovery is Rust's own (same-TorrentFile failover inside a
+//     read) and never routes through here, so the worker cannot fight it and
+//     cannot duplicate a provider pull: reconciliation is cache-only control
+//     reads plus discover-only lookups;
+//   - retirement only ever fires for a placement the provider has objectively
+//     disproven AND that has a live sibling route, so an outage, a timeout or
+//     a rate limit can never retire durable inventory.
+/**
+ * Build the reconciliation runner bound to one store + provider set.
+ *
+ * The runner is the single owner of the single-flight guard, so the periodic
+ * worker and any operator/test invocation share one in-flight pass instead of
+ * starting a second one that would duplicate provider probes.
+ *
+ * @returns {{run: (options?: {limit?: number}) => Promise<object>, inFlight: () => boolean}}
+ */
+function createRouteReconcileRunner({ store, dependencies, env = process.env }) {
+  let inFlight = null;
+  /**
+   * Not `async`: returning the shared promise object is the point. An async
+   * wrapper would hand each caller a DIFFERENT promise for the same pass, so
+   * identity could not be used to prove single-flight.
+   */
+  function run({ limit } = {}) {
+    if (!store) return Promise.resolve({ scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [], retired: 0 });
+    if (inFlight) return inFlight;
+    const pass = runPass({ limit });
+    inFlight = pass;
+    pass.then(
+      () => { if (inFlight === pass) inFlight = null; },
+      () => { if (inFlight === pass) inFlight = null; },
+    );
+    return pass;
+  }
+  async function runPass({ limit } = {}) {
+    {
+      const surfaces = createRouteProviderSurfaces({
+        torBoxProvider: dependencies.torBoxProvider ?? null,
+        torBoxInventoryProvider: dependencies.torBoxInventoryProvider ?? null,
+        rdClient: dependencies.rdClient ?? null,
+        torboxCheckCached: dependencies.torboxCheckCached ?? null,
+        env,
+      });
+      const ensurer = createSecondPlacementEnsurer({
+        store, ...surfaces, now: () => Date.now(),
+      });
+      const batch = limit ?? envNumber(env, 'ROUTE_RECONCILE_BATCH', { fallback: 25, min: 1, max: 500 });
+      const recovery = await reconcileStaleRoutes({
+        store,
+        secondPlacement: ensurer,
+        providers: surfaces,
+        limit: batch,
+        log: (msg) => console.log(`media-search: ${msg}`),
+      });
+      // Hygiene: retire placements the provider disproved, but only where a
+      // live sibling route exists (route-reconciler.js holds the guards).
+      const retireFlag = String(env.ROUTE_RECONCILE_RETIRE ?? '1').toLowerCase();
+      let retired = 0;
+      if (retireFlag !== '0' && retireFlag !== 'false') {
+        const outcome = await retireVerifiedDeadRedundantRoutes({
+          store,
+          providers: surfaces,
+          limit: batch,
+          log: (msg) => console.log(`media-search: ${msg}`),
+        });
+        retired = outcome.retired.length;
+        if (outcome.deferred > 0) {
+          console.log(`media-search: route retire deferred=${outcome.deferred} (probe unanswered)`);
+        }
+      }
+      return { ...recovery, retired };
+    }
+  }
+  return { run, inFlight: () => inFlight !== null };
+}
+
+function routeReconcileIntervalMs(env = process.env) {
+  return envNumber(env, 'ROUTE_RECONCILE_INTERVAL_MIN', { fallback: 360, min: 30 }) * 60 * 1000;
 }
 const routeReconcileOn = (() => {
   const v = String(process.env.ROUTE_RECONCILE_ENABLED ?? '1').toLowerCase();
   return v !== '0' && v !== 'false';
 })();
+const routeReconcileRunner = controlPlaneStore
+  ? createRouteReconcileRunner({ store: controlPlaneStore, dependencies })
+  : null;
 let routeReconcileTimer = null;
-let routeReconcileInFlight = false;
-async function runRouteReconcilePass({ limit } = {}) {
-  if (!controlPlaneStore) return { scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [] };
-  const surfaces = createRouteProviderSurfaces({
-    torBoxProvider: dependencies.torBoxProvider ?? null,
-    torBoxInventoryProvider: dependencies.torBoxInventoryProvider ?? null,
-    rdClient: dependencies.rdClient ?? null,
-    env: process.env,
-  });
-  const ensurer = createSecondPlacementEnsurer({
-    store: controlPlaneStore,
-    ...surfaces,
-    now: () => Date.now(),
-  });
-  return reconcileStaleRoutes({
-    store: controlPlaneStore,
-    secondPlacement: ensurer,
-    providers: surfaces,
-    limit: limit ?? envNumber(process.env, 'ROUTE_RECONCILE_BATCH', { fallback: 25, min: 1, max: 500 }),
-    log: (msg) => console.log(`media-search: ${msg}`),
-  });
-}
 function armRouteReconcileTimer(delayMs) {
-  routeReconcileTimer = setTimeout(async () => {
-    if (routeReconcileOn && controlPlaneStore && !routeReconcileInFlight) {
-      routeReconcileInFlight = true;
+  routeReconcileTimer = arm(async () => {
+    if (routeReconcileOn && routeReconcileRunner) {
       try {
-        const result = await runRouteReconcilePass();
-        // Always logged: a zero-candidate pass is the expected steady
-        // state, and an operator needs to see that the reconciler is
-        // alive and verifying rather than silently idle.
-        console.log(`media-search: route reconcile scanned=${result.scanned} repaired=${result.repaired} unavailable=${result.unavailable} failed=${result.failed}`);
+        const result = await routeReconcileRunner.run();
+        // Always logged: a zero-candidate pass is the expected steady state,
+        // and an operator needs to see the reconciler is alive and verifying
+        // rather than silently idle.
+        console.log(`media-search: route reconcile scanned=${result.scanned} repaired=${result.repaired} unavailable=${result.unavailable} failed=${result.failed} retired=${result.retired}`);
       } catch (error) {
         console.warn('media-search: route reconcile pass failed', error?.message);
-      } finally {
-        routeReconcileInFlight = false;
       }
     }
     armRouteReconcileTimer(routeReconcileIntervalMs());
   }, delayMs);
-  if (routeReconcileTimer.unref) routeReconcileTimer.unref();
 }
-if (routeReconcileOn && controlPlaneStore) {
+if (routeReconcileOn && routeReconcileRunner) {
   armRouteReconcileTimer(envNumber(process.env, 'ROUTE_RECONCILE_FIRST_DELAY_MIN', { fallback: 10, min: 1 }) * 60 * 1000);
   console.log(`media-search: route reconcile armed intervalMs=${routeReconcileIntervalMs()}`);
 }
@@ -894,6 +952,17 @@ if (hygiene) {
 
 
   return {
+    /**
+     * The reconciliation pass the worker runs, exposed so tests and
+     * operational tooling share one implementation and one single-flight.
+     * `run()` joins an in-flight pass rather than starting a second.
+     */
+    runRouteReconcilePass: (options) => (routeReconcileRunner
+      ? routeReconcileRunner.run(options)
+      : Promise.resolve({ scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [], retired: 0 })),
+    // The in-flight pass itself, so a caller can await the SAME promise a
+    // periodic tick is already running instead of starting a second one.
+    routeReconcileInFlight: () => Boolean(routeReconcileRunner?.inFlight()),
     nudgeScheduling: () => {
       if (!anticipationOn || anticipationInFlight) return;
       try {

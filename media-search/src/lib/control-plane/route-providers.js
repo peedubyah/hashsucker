@@ -23,6 +23,10 @@ import { checkTorBoxCached } from '../providers/torbox.js';
  * @param {Object|null} params.torBoxProvider
  * @param {Object|null} params.torBoxInventoryProvider
  * @param {Object|null} params.rdClient
+ * @param {Function} [params.torboxCheckCached] - Test seam for the
+ *   cache-only hash probe. Production always uses the real provider call;
+ *   injecting it lets a test verify reconciliation against a provider it
+ *   controls without reaching the network.
  * @param {Object} [params.env]
  * @returns {{ torbox: Object|null, realdebrid: Object|null }}
  */
@@ -30,6 +34,7 @@ export function createRouteProviderSurfaces({
   torBoxProvider,
   torBoxInventoryProvider,
   rdClient,
+  torboxCheckCached = null,
   env = process.env,
 } = {}) {
   const torbox = (torBoxProvider && torBoxInventoryProvider)
@@ -37,7 +42,9 @@ export function createRouteProviderSurfaces({
       // Cached-only creation semantics preserved; no new TorBox logic.
       createPlacement: (input) => torBoxProvider
         .require(PROVIDER_CAPABILITIES.PLACEMENT_CREATE).createPlacement(input),
-      checkCached: (hashes) => checkTorBoxCached(hashes, { apiKey: env.TORBOX_API_KEY }),
+      checkCached: (hashes) => (typeof torboxCheckCached === 'function'
+        ? torboxCheckCached(hashes)
+        : checkTorBoxCached(hashes, { apiKey: env.TORBOX_API_KEY })),
       lookupPlacement: (input, ctx) => torBoxInventoryProvider
         .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP).lookupPlacement(input, ctx),
       getFileInventory: (resource, ctx) => torBoxInventoryProvider

@@ -693,3 +693,76 @@ No planned work as completed. No vague "healthy." No speculative causes.
   (T4, T12) and by one live pass that found no work, not by a live repair.
 - Artifacts: `media-search/scripts/live-route-reconcile.mjs` reproduces the
   classification and runs one bounded pass.
+
+## 2026-10-16 — same-TorrentFile alternate-route recovery proven; worker bug fixed; live CDN blocked
+
+**Recovery path (measured, not assumed).** `/bytes/:tfId` (Jellyfin) and the
+VFS path both forward to Rust `/files/:tfId`, which re-reads S-1 control truth
+per request but caches the per-TorrentFile route inventory for the process
+lifetime. So:
+
+- route selection across same-TorrentFile placements is Rust's own
+  (`CapabilityManager::acquire_for_read` slot order + the reactive
+  one-way lane switch in `ResilientRangeReader::try_failover`);
+- Node never sees a failed route, so there is nothing to fight: request-time
+  recovery cannot duplicate a provider probe and the 6 h reconciliation worker
+  is cache-only control reads plus discover-only lookups;
+- a placement Rust did not know about is adopted only through the prewarm
+  endpoint's `refresh_slots` (or a restart) — there is no TTL and no push
+  signal from Node;
+- request-scoped `x-hashsucker-serving-provider` is a snapshot of the
+  capability the demand initially selected and is deliberately not rewritten
+  by a failover, so which route DELIVERED the bytes is proven by origin
+  counters, not by that header;
+- Node's class-D path switches to a DIFFERENT durable TorrentFile (Plex VFS
+  only); `/bytes/:tfId` has no such fallback and surfaces the classified
+  failure instead. Same-TorrentFile recovery is Rust's, by design.
+
+Changed:
+- `data-plane/tests/same_tf_route_recovery.rs` (new, 10 tests): real serve-layer
+  HTTP over two exact routes with injectable provider faults — 404 (dead cap +
+  failover), 5xx (throttle + breaker, never dead), 429 (zero provider-control
+  calls), real headerless timeout, malformed 206/truncated payload, total
+  exhaustion (502 or a visibly truncated stream, always a correct prefix,
+  nothing published), coalesced recovery (one pull on the surviving route for
+  three concurrent readers, no duplicate full-file provider work),
+  refresh-adoption of a placement discovered after startup (zero API calls,
+  same TorrentFile), and restart (durable chunks survive, route set rebuilt).
+- `media-search/src/lib/control-plane/route-reconciler.js`: live verification is
+  now shared by the rotted-route finder and a new bounded retirement pass,
+  `retireVerifiedDeadRedundantRoutes`. Retirement fires only for durable
+  provider-truth (the exact hash is confirmed absent) AND only when the same
+  TorrentFile has another live route. An unanswerable probe is UNKNOWN and
+  never retires. Idempotent.
+- `media-search/src/server/workers.js`: the reconciliation pass is now a
+  single-flight runner owned by one function and exposed on the workers handle
+  (`runRouteReconcilePass`, `routeReconcileInFlight`), so the periodic tick and
+  any manual pass share one in-flight pass. **Bug fixed: the previous wiring
+  called a pass function that referenced worker-local variables from module
+  scope, so every tick threw `ReferenceError` and was swallowed by the timer's
+  catch — the worker logged `armed` and never ran a pass.**
+- `media-search/src/lib/control-plane/route-providers.js`: `checkCached` is now
+  injectable (test seam only; production still uses the real provider call).
+
+Verification: Node 3317 tests / 3314 pass / 0 fail / 3 skips; Rust 153 + 14 +
+10 + 7 all green. Live proof on this deployment after deploying the fix:
+`route reconcile scanned=0 repaired=0 unavailable=0 failed=0 retired=1`, and the
+retired placement is the redundant RD route (`M4Q7D3JF7PUDI`, hash
+`09e83cef…`) whose TorBox sibling (`96107317`) is live — the TorrentFile now has
+exactly one usable route and is still servable.
+
+Blocked, not proven (environment): the live Jellyfin byte-route measurement
+cannot complete because the TorBox CDN host resets TLS from this deployment
+(`nexus.erth.tb-cdn.earth:443` → connection reset by peer; a fresh requestdl
+URL returns quickly and `checkcached` still reports the hash cached). The
+data-plane therefore answers `206` with the correct `content-length` and then
+truncates the body (`recovery.client_truncated` +1, `chunk_fills_failed` +1),
+which is the harness's documented exhaustion shape, not a new defect. A
+data-plane restart clears a stale in-memory capability pool (acquisition
+17.5 s → 252 ms) but the CDN read still fails, so the block is network-side.
+
+Pre-existing, unrelated to this slice: `/vfs/Movies` PROPFIND returns 503
+`HANDOFF_MISSING` for `tt1630029` because its VFS row names release key
+`01981d99…:0` while its only playback handoff is `07309290…:torrent`
+(rows date to 2026-09-11), and one divergent row fails the whole collection
+listing.
