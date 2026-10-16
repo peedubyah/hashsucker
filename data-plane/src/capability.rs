@@ -65,6 +65,15 @@ pub struct DeliveryCapability {
     expires_at: Mutex<Option<Instant>>,
     status: Mutex<CapabilityStatus>,
     throttled_until: Mutex<Instant>,
+    /// Route-level runtime health: until this instant the route could not be
+    /// REACHED at all (connection refused / reset / TLS, or a body that was cut
+    /// mid-stream). Distinct from `throttled_until` (a provider LOAD signal we
+    /// wait out and then reuse): an unreachable route is SKIPPED so an
+    /// alternate exact route is preferred and repeated clients do not hammer a
+    /// known-bad route. It is never pruned (the same route may recover) and it
+    /// clears automatically after the window (half-open) or on a success.
+    /// Runtime-only; never touches durable placement truth.
+    unreachable_until: Mutex<Instant>,
     // maxInFlight = 1 per capability (per spec §limiter).
     pub limiter: Arc<Semaphore>,
     pub in_flight: AtomicU64,
@@ -99,6 +108,7 @@ impl DeliveryCapability {
             expires_at: Mutex::new(ttl.map(|d| Instant::now() + d)),
             status: Mutex::new(CapabilityStatus::Alive),
             throttled_until: Mutex::new(Instant::now()),
+            unreachable_until: Mutex::new(Instant::now()),
             limiter: Arc::new(Semaphore::new(1)),
             in_flight: AtomicU64::new(0),
         })
@@ -137,7 +147,24 @@ impl DeliveryCapability {
         {
             return false;
         }
+        // A route that could not be reached is skipped (not waited): an
+        // alternate exact route is preferred, and repeated clients do not
+        // hammer a known-bad route. Clears after the window (half-open).
+        if self.is_unreachable(now) {
+            return false;
+        }
         true
+    }
+
+    /// Mark this route unreachable until `until`. Runtime-only; the capability
+    /// and its URL are retained (the same route may recover).
+    pub fn mark_unreachable(&self, until: Instant) {
+        *self.unreachable_until.lock().unwrap() = until;
+    }
+
+    /// Is this route currently inside its unreachable window?
+    pub fn is_unreachable(&self, now: Instant) -> bool {
+        now < *self.unreachable_until.lock().unwrap()
     }
 
     /// Should this cap be removed from the pool? Dead caps and expired (CASE A) caps

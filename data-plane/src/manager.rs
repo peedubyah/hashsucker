@@ -697,7 +697,14 @@ impl CapabilityManager {
             .lock()
             .unwrap()
             .iter()
-            .find(|c| !matches!(c.status(), CapabilityStatus::Dead) && !c.prunable(now))
+            // Never WAIT on an unreachable route: it is skipped so the caller
+            // can fail over to an alternate exact route, or fail fast when
+            // none exists. (Throttled caps are still waited out and reused.)
+            .find(|c| {
+                !matches!(c.status(), CapabilityStatus::Dead)
+                    && !c.prunable(now)
+                    && !c.is_unreachable(now)
+            })
             .cloned()
     }
 

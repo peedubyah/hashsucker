@@ -35,6 +35,10 @@ use crate::provider::host_of;
 const MAX_SAME_CAP_RETRIES: u32 = 3; // transient 429/5xx/transport reopen attempts per read
 const MAX_REACQUIRES: u32 = 1; // dead-link single-flight reacquire-once
 const RECOVERY_BACKOFF_DEFAULT: Duration = Duration::from_secs(30); // applied when no Retry-After
+// How long a route that could not be REACHED (connection refused/reset/TLS, or
+// a body cut mid-stream) is skipped before it is retried (half-open). Bounded
+// so a recovered route is adopted automatically; runtime-only, never durable.
+const UNREACHABLE_BACKOFF: Duration = Duration::from_secs(20);
 
 /// Default-off fault gates (validation scaffold only; never set in production).
 #[derive(Clone, Copy)]
@@ -493,6 +497,9 @@ impl ResilientRangeReader {
                         }
                     }
                     self.response = Some(Box::new(resp));
+                    // Route reached: clear any unreachable window (half-open
+                    // success). A later mid-body truncation re-marks it.
+                    self.cap_ref().mark_unreachable(Instant::now());
                     // Stamp headers receipt instant for T4/body timing.
                     self.last_headers_at = Some(Instant::now());
                     return Ok(());
@@ -674,6 +681,14 @@ impl ResilientRangeReader {
     async fn apply_transient_headerless(&mut self, path: &'static str) -> Action {
         self.enter_recovery();
         self.metrics.record_recovery_attempt();
+        // A connection-establishment failure means the route could not be
+        // reached at all. Mark it unreachable (bounded) so this read's next
+        // acquire prefers an alternate exact route and subsequent reads do not
+        // hammer a known-bad route. A timeout is NOT marked (it may just be
+        // slow). Half-open after the window; cleared on success.
+        if path == "connection_failure_zero_cooldown" {
+            self.cap_ref().mark_unreachable(Instant::now() + UNREACHABLE_BACKOFF);
+        }
         self.recovery.same_cap_retries += 1;
         // Telemetry: explicit zero cooldown so the timeline is unambiguous.
         if let Some(s) = self.stage.as_ref() {
@@ -847,6 +862,7 @@ impl ResilientRangeReader {
                     // that commits 206 then cuts the body is as unusable as one
                     // that never answers, and the exact TorrentFile may have a
                     // healthy alternate. One failover per read.
+                    self.cap_ref().mark_unreachable(Instant::now() + UNREACHABLE_BACKOFF);
                     self.metrics.record_recovery_attempt();
                     if self.try_failover().await {
                         match self.open_at().await {
@@ -881,6 +897,7 @@ impl ResilientRangeReader {
                         s.set_attempt_recovery_path(self.recovery.attempt, "mid_body_resume");
                     }
                     // Same-TF alternate route before retrying the failed one.
+                    self.cap_ref().mark_unreachable(Instant::now() + UNREACHABLE_BACKOFF);
                     if self.try_failover().await {
                         match self.open_at().await {
                             Ok(()) => continue,

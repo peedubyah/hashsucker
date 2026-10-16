@@ -980,6 +980,39 @@ async fn r6_restart_rebuilds_routes_and_keeps_durable_bytes() {
 }
 
 // ===========================================================================
+// R2g — a route that could not be reached is skipped for the alternate
+// ===========================================================================
+
+#[tokio::test]
+async fn r2g_unreachable_route_is_skipped_for_the_alternate() {
+    let st = build_stack(FILE_SIZE, None).await;
+    let served_by = lane_that_serves(&st).await;
+    let slot = st
+        .manager
+        .slots
+        .iter()
+        .find(|s| s.coord.provider == served_by)
+        .unwrap();
+    let cap = slot.caps.lock().unwrap().first().cloned().expect("a warm cap");
+    // A route that could not be reached (connection reset / truncated body) is
+    // marked unreachable: it is not usable and must NOT be waited on.
+    cap.mark_unreachable(std::time::Instant::now() + Duration::from_secs(60));
+    assert!(!cap.usable_now(std::time::Instant::now()), "unreachable is not usable");
+    let reserved = match st.manager.acquire_for_read(0).await {
+        Ok(r) => r,
+        Err(_) => panic!("an alternate exact route is preferred"),
+    };
+    assert_ne!(reserved.cap.provider, served_by, "the unreachable route is skipped");
+    assert_eq!(
+        reserved.cap.torrent_file_id, st.tf.tf_id_durable,
+        "same TorrentFile, no representation change"
+    );
+    // Half-open: after the window the route is eligible again (auto recovery).
+    cap.mark_unreachable(std::time::Instant::now());
+    assert!(!cap.is_unreachable(std::time::Instant::now()));
+}
+
+// ===========================================================================
 // R7 — a route that cannot be reached at all must FAIL FAST
 // ===========================================================================
 //
