@@ -702,9 +702,10 @@ function armRouteReconcileTimer(delayMs) {
       routeReconcileInFlight = true;
       try {
         const result = await runRouteReconcilePass();
-        if (result.scanned > 0) {
-          console.log(`media-search: route reconcile scanned=${result.scanned} repaired=${result.repaired} unavailable=${result.unavailable} failed=${result.failed}`);
-        }
+        // Always logged: a zero-candidate pass is the expected steady
+        // state, and an operator needs to see that the reconciler is
+        // alive and verifying rather than silently idle.
+        console.log(`media-search: route reconcile scanned=${result.scanned} repaired=${result.repaired} unavailable=${result.unavailable} failed=${result.failed}`);
       } catch (error) {
         console.warn('media-search: route reconcile pass failed', error?.message);
       } finally {
