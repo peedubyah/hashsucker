@@ -22,7 +22,7 @@ services:
       # provider transfer per TorrentFile); 'provider' (default) keeps the
       # historical direct CDN redirect. Enable 'cached' once durable
       # ProviderPlacements are healthy for the library.
-      STREAM_BYTE_ROUTE: ${STREAM_BYTE_ROUTE:-provider}
+      STREAM_BYTE_ROUTE: ${STREAM_BYTE_ROUTE:-cached}
       PORT: "3000"
       HOST: "0.0.0.0"
       REQUESTS_ROOT: /requests
