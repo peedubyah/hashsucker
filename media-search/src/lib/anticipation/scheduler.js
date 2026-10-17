@@ -61,6 +61,7 @@ const DEFAULT_PREPARE_DAYS = 3;
 /** Defer reasons that describe a retryable market miss rather than a defect. */
 function isRetryableMarketDefer(reason) {
   return reason === DEFER_REASONS.RELEASED_NO_CANDIDATE
+    || reason === DEFER_REASONS.RELEASED_UNFULFILLED
     || reason === DEFER_REASONS.CANDIDATE_NOT_FULFILLABLE;
 }
 
@@ -219,6 +220,44 @@ export function createAnticipationScheduler({
   }
 
   /**
+   * Durable-truth fallback for the publish-side quality floor. A fresh
+   * zero-write probe can find nothing for older catalog (live sources
+   * move on) while an already-prepared release sits ready with
+   * affirmative home-quality evidence in persisted attributes. Parking
+   * that forever on a missing source tag serves the gate's purpose not
+   * at all — the gate exists to block theatrical captures, and the
+   * theatrical scan runs first here too. Returns ACCEPTABLE only on:
+   * clean theatrical scan + persisted resolution in {720p,1080p,2160p}
+   * + parse confidence >= 0.9. Anything else → null, and the caller
+   * keeps waiting. Never touches global ranking.
+   */
+  function judgePreparedCandidate(intent) {
+    try {
+      const tfId = intent?.torrent_file_id;
+      if (!tfId) return null;
+      const tf = controlPlaneStore?.getTorrentFile?.(tfId);
+      // rowToTorrentFile maps to camelCase; tolerate either shape.
+      const infoHash = tf?.infoHash ?? tf?.info_hash;
+      if (!infoHash) return null;
+      const rows = cache?.getReleaseAttributes?.(String(infoHash).toLowerCase()) ?? [];
+      const attrs = Array.isArray(rows) ? rows[0] : null;
+      const filename = attrs?.filename || tf.internalPath || tf.internal_path || null;
+      if (!filename) return null;
+      const gateVerdict = judgeReleaseQuality({ filename, sourceType: attrs?.sourceType ?? null });
+      if (gateVerdict === ANTICIPATION_QUALITY.GARBAGE) return null;
+      if (gateVerdict === ANTICIPATION_QUALITY.ACCEPTABLE) return ANTICIPATION_QUALITY.ACCEPTABLE;
+      const res = String(attrs?.resolution || '').toLowerCase();
+      const conf = Number(attrs?.confidence ?? 0);
+      if ((res === '720p' || res === '1080p' || res === '2160p') && conf >= 0.9) {
+        return ANTICIPATION_QUALITY.ACCEPTABLE;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Pick the winning candidate out of a prepare response for quality
    * judging: the ranker's SELECTED candidate matched back into results
    * (exact attrs), else the top-ranked result, else the persisted
@@ -340,11 +379,11 @@ export function createAnticipationScheduler({
 
   async function confirmConsumerPublication(intent, { initial = false } = {}) {
     if (typeof confirmConsumerPublicationFn !== 'function') return false;
-    const vfsEntry = intent.media_type === 'series' && intent.season != null && intent.episode != null
+    const vfsEntry = (intent.season != null && intent.episode != null)
       ? cache?.getVfsTvEntry?.(intent.media_id, intent.season, intent.episode)
-      : null;
+      : cache?.getVfsMovieEntry?.(intent.media_id);
     // Only the authoritative VFS publication is acceptable. There is no
-    // synthesised fallback: every series row that reaches confirmation carries
+    // synthesised fallback: every row that reaches confirmation carries
     // a canonical path, and a guessed path could never match the real
     // MediaPart, so a fallback would silently fail a converged publication.
     const expectedPartFile = vfsPartFile(vfsEntry?.canonicalPath ?? null);
@@ -514,10 +553,18 @@ export function createAnticipationScheduler({
         const probe = await probeIntent(intent);
         const verdict = (probe.ok && probe.winner) ? judgeReleaseQuality(probe.winner) : ANTICIPATION_QUALITY.UNKNOWN;
         if (verdict !== ANTICIPATION_QUALITY.ACCEPTABLE) {
-          return done(intent.state, {
-            last_error: `waiting-for-acceptable-quality:${verdict}`,
-            next_check_at: now() + intentBackoffMs(intent.attempts),
-          });
+          // The fresh probe found nothing acceptable (often: nothing at
+          // all for older catalog). Before parking, judge the
+          // already-prepared candidate from durable truth — withholding
+          // a bound, ready, high-confidence home-quality release on a
+          // missing source tag is not what this floor is for.
+          const fallback = judgePreparedCandidate(intent);
+          if (fallback !== ANTICIPATION_QUALITY.ACCEPTABLE) {
+            return done(intent.state, {
+              last_error: `waiting-for-acceptable-quality:${verdict}`,
+              next_check_at: now() + intentBackoffMs(intent.attempts),
+            });
+          }
         }
       }
       const pub = await publishIntent(intent);
@@ -586,8 +633,7 @@ export function createAnticipationScheduler({
         // Rows without a retryable defer reason (operator seeds, Arr
         // rows, deterministic failures) keep the old exhaustion behavior.
         const d = intent.defer_reason;
-        if (d === DEFER_REASONS.RELEASED_NO_CANDIDATE
-          || d === DEFER_REASONS.CANDIDATE_NOT_FULFILLABLE) {
+        if (isRetryableMarketDefer(d)) {
           // Cold reconsideration: re-arm due now so the NEXT tick performs
           // exactly one preparation attempt. `retry` increments attempts (never
           // resets it), so a repeat market miss fails the exhaustion check
@@ -618,9 +664,58 @@ export function createAnticipationScheduler({
     return { exhausted: true, ...(await withdrawIntent(intent, `probe-failed+uncached tf=${intent.torrent_file_id}`)) };
   }
 
+  /**
+   * Stale-playable convergence: a row claiming playable with neither a
+   * VFS projection nor an active binding is not playable — its binding
+   * was superseded/withdrawn after the fact (e.g. a misassociated
+   * release that was correctly unbound). Demote at most one per tick
+   * back to anticipated with next_check now so it reconverges
+   * immediately through the normal path. Fail-closed: without the VFS
+   * accessors, or when the binding answer is unknowable, demote
+   * nothing. Never destroys durable truth (torrent_file_id kept).
+   */
+  function auditStalePlayable() {
+    if (typeof cache?.getVfsTvEntry !== 'function' || typeof cache?.getVfsMovieEntry !== 'function') return null;
+    let rows = [];
+    try {
+      rows = store.list({ state: INTENT_STATES.PLAYABLE, limit: 200 });
+    } catch {
+      return null;
+    }
+    for (const row of rows) {
+      let vfs = null;
+      try {
+        vfs = (row.season != null && row.episode != null)
+          ? cache.getVfsTvEntry(row.media_id, row.season, row.episode)
+          : cache.getVfsMovieEntry(row.media_id);
+      } catch {
+        continue;
+      }
+      if (vfs?.canonicalPath) continue;
+      let bound = null;
+      try {
+        bound = row.torrent_file_id
+          ? controlPlaneStore?.hasActiveBindingForTorrentFile?.(row.torrent_file_id)
+          : false;
+      } catch {
+        continue;
+      }
+      if (bound !== false) continue;
+      store.transition(row.id, INTENT_STATES.ANTICIPATED, {
+        last_error: 'stale-playable-demoted:no-binding-no-vfs',
+        next_check_at: now(),
+      });
+      log(`scheduler stale-playable-demoted id=${row.id} media=${row.media_id}`);
+      return { acted: true, intentId: row.id, media: row.media_id, from: INTENT_STATES.PLAYABLE, to: INTENT_STATES.ANTICIPATED, ms: 0, stalePlayable: true };
+    }
+    return null;
+  }
+
   /** One bounded tick: claim a single due intent and process it. */
   async function tickOnce() {
     const ordinaryTickStartedAt = now();
+    const stale = auditStalePlayable();
+    if (stale) return stale;
     if (typeof reconcileRequestedSeasonFn === 'function' && !seasonReconciledLastTick) {
       const seasons = store.listDueRequestedSeasons?.(1) ?? [];
       if (seasons.length > 0) {

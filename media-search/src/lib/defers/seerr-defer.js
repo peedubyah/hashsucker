@@ -11,6 +11,9 @@
  *   fulfilled                 — candidates exist; normal path owns it.
  *   future-not-released       — strong metadata says release/air is future.
  *   released-no-candidate     — should exist, but no usable candidate yet.
+ *   released-unfulfilled      — a released request never fulfilled (the
+ *                               follow-up path); same continuing market
+ *                               miss as released-no-candidate.
  *   candidate-not-fulfillable — pipeline failed transiently (provider,
  *                               availability, hydration); retry may help.
  *   hard-failure              — invalid identity/mapping/config; never retry.
@@ -21,6 +24,7 @@
 export const DEFER_REASONS = Object.freeze({
   FUTURE_NOT_RELEASED: 'future-not-released',
   RELEASED_NO_CANDIDATE: 'released-no-candidate',
+  RELEASED_UNFULFILLED: 'released-unfulfilled',
   CANDIDATE_NOT_FULFILLABLE: 'candidate-not-fulfillable',
   HARD_FAILURE: 'hard-failure',
 });

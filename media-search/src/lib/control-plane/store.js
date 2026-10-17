@@ -1136,6 +1136,25 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
    * immutable physical object. Callers must not use handoffs, ranked request
    * results, or provider observations as a substitute for this lookup.
    */
+  /**
+   * Read-only convergence probe: does any active binding still point at
+   * this exact TorrentFile? Used by the anticipation scheduler to detect
+   * stale playable rows (binding gone, projection gone) without mutating
+   * anything. Returns null when the answer is unknowable (DB error) so
+   * callers fail closed and never demote on missing evidence.
+   */
+  function hasActiveBindingForTorrentFile(torrentFileId) {
+    if (!torrentFileId) return false;
+    try {
+      const row = db.prepare(
+        "SELECT 1 AS ok FROM bindings WHERE torrent_file_id = ? AND status = 'active' LIMIT 1",
+      ).get(torrentFileId);
+      return !!row;
+    } catch {
+      return null;
+    }
+  }
+
   function getActiveBindingForLibraryItem(libraryItemId) {
     const item = requireLibraryItem(libraryItemId);
     const row = db.prepare(`
@@ -2173,6 +2192,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     listAcceptedTorrentFiles,
     getProviderFile,
     getActiveBindingForLibraryItem,
+    hasActiveBindingForTorrentFile,
     findTorrentFile,
     listTorrentFilesForRelease,
     listProviderRefsForTorrentFile,

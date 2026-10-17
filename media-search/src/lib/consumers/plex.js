@@ -87,6 +87,35 @@ export async function listPlexLibrary() {
 }
 
 export async function confirmPlexEpisode({ mediaId, season, episode, expectedPartFile = null }) {
+  // Movies carry no season/episode coordinates: match by IMDb guid in the
+  // movies section and verify the authoritative part file, exactly like
+  // the episode path below. Without this branch movie publications could
+  // never confirm (the TV lookup cannot match them) and wedged in
+  // published_preparing forever despite exact Plex visibility.
+  if (season == null || episode == null) {
+    const sectionId = process.env.PLEX_MOVIES_SECTION_ID;
+    if (!sectionId) return { visible: false, ratingKey: null, mediaPart: null };
+    const all = await getJson(`/library/sections/${sectionId}/all`, { includeGuids: 1 });
+    const found = (all?.MediaContainer?.Metadata ?? []).find((candidate) => {
+      const ids = (candidate.Guid ?? []).map((g) => imdbFromGuid(g.id));
+      return ids.includes(mediaId);
+    });
+    if (!found) return { visible: false, ratingKey: null, mediaPart: null };
+    const movie = (await getJson(found.key, { includeExtras: 0, includeMarkers: 0, includeRelated: 0 }))?.MediaContainer?.Metadata?.[0] ?? found;
+    // Multi-edition items carry several Parts: match the authoritative
+    // projection when one is expected, otherwise take the first file.
+    // (Taking the first Part and comparing afterwards misconfirms
+    // whenever our edition is not listed first.)
+    const movieParts = movie.Media?.flatMap((m) => m.Part ?? []).filter((p) => p.file) ?? [];
+    const exactMoviePart = expectedPartFile
+      ? movieParts.find((p) => p.file === expectedPartFile) ?? null
+      : movieParts[0] ?? null;
+    return {
+      visible: exactMoviePart != null,
+      ratingKey: movie.ratingKey ?? null,
+      mediaPart: exactMoviePart ? { id: exactMoviePart.id ?? null, file: exactMoviePart.file, size: exactMoviePart.size ?? null, container: exactMoviePart.container ?? null } : null,
+    };
+  }
   const sectionId = process.env.PLEX_TV_SECTION_ID;
   if (!sectionId) return { visible: false, ratingKey: null, mediaPart: null };
   const all = await getJson(`/library/sections/${sectionId}/all`, { includeGuids: 1 });
@@ -103,8 +132,10 @@ export async function confirmPlexEpisode({ mediaId, season, episode, expectedPar
   const entry = episodes.find((candidate) => candidate.index === episode);
   if (!entry) return { visible: false, ratingKey: null, mediaPart: null };
   const item = (await getJson(entry.key, { includeExtras: 0, includeMarkers: 0, includeRelated: 0 }))?.MediaContainer?.Metadata?.[0] ?? entry;
-  const part = item.Media?.flatMap((m) => m.Part ?? []).find((p) => p.file);
-  const exactPart = part && (!expectedPartFile || part.file === expectedPartFile) ? part : null;
+  const parts = item.Media?.flatMap((m) => m.Part ?? []).filter((p) => p.file) ?? [];
+  const exactPart = expectedPartFile
+    ? parts.find((p) => p.file === expectedPartFile) ?? null
+    : parts[0] ?? null;
   return {
     visible: exactPart != null,
     ratingKey: item.ratingKey ?? null,

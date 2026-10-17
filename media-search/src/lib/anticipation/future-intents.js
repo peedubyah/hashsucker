@@ -526,39 +526,48 @@ export function intentBackoffMs(attempts) {
  * of the intent row so it is testable without a database.
  */
 export function explainIntent(intent, nowMs = Date.now(), maxAttempts = 6) {
-  if (!intent) return { cause: 'no-obligation', nextAction: 'request-or-seed', nextAt: null };
+  if (!intent) return { cause: 'no-obligation', nextAction: 'request-or-seed', nextAt: null, attempts: 0, retryClass: 'none' };
+  const attemptInfo = {
+    attempts: intent.attempts ?? 0,
+    // A large lifetime counter reflects accumulated cold cycles, not a hot
+    // loop: hot budget is `maxAttempts`, cold re-arms add one per park.
+    retryClass: (intent.attempts ?? 0) >= maxAttempts ? 'cold-park' : 'hot-budget',
+  };
   const { state, defer_reason, expected_at, next_check_at, attempts, last_error } = intent;
-  if (state === 'playable') return { cause: 'playable', nextAction: 'none', nextAt: null };
-  if (state === 'withdrawn') return { cause: 'withdrawn', nextAction: 're-request-to-revive', nextAt: null };
+  const withAttempts = (r) => ({ ...r, ...attemptInfo });
+  if (state === 'playable') return withAttempts({ cause: 'playable', nextAction: 'none', nextAt: null });
+  if (state === 'withdrawn') return withAttempts({ cause: 'withdrawn', nextAction: 're-request-to-revive', nextAt: null });
   if (defer_reason === 'future-not-released' && expected_at != null && expected_at > nowMs) {
-    return { cause: 'future', nextAction: 'wait-for-release', nextAt: expected_at };
+    return withAttempts({ cause: 'future', nextAction: 'wait-for-release', nextAt: expected_at });
   }
   if (state === 'prepared') {
     if (String(last_error || '').startsWith('waiting-for-acceptable-quality')) {
-      return { cause: 'prepared-waiting-quality', nextAction: 'scheduler-retry', nextAt: next_check_at ?? null };
+      return withAttempts({ cause: 'prepared-waiting-quality', nextAction: 'scheduler-retry', nextAt: next_check_at ?? null });
     }
-    return { cause: 'prepared-publication-pending', nextAction: 'scheduler-publish', nextAt: next_check_at ?? null };
+    return withAttempts({ cause: 'prepared-publication-pending', nextAction: 'scheduler-publish', nextAt: next_check_at ?? null });
   }
   if (state === 'published_preparing') {
-    return { cause: 'publication-unconfirmed', nextAction: 'consumer-confirm-retry', nextAt: next_check_at ?? null };
+    return withAttempts({ cause: 'publication-unconfirmed', nextAction: 'consumer-confirm-retry', nextAt: next_check_at ?? null });
   }
-  if (state === 'failed' && (attempts ?? 0) >= maxAttempts
-    && defer_reason !== 'released-no-candidate' && defer_reason !== 'candidate-not-fulfillable') {
-    return { cause: 'exhausted-terminal', nextAction: 'operator-or-rerequest', nextAt: null };
+  const marketMiss = defer_reason === 'released-no-candidate'
+    || defer_reason === 'released-unfulfilled'
+    || defer_reason === 'candidate-not-fulfillable';
+  if (state === 'failed' && (attempts ?? 0) >= maxAttempts && !marketMiss) {
+    return withAttempts({ cause: 'exhausted-terminal', nextAction: 'operator-or-rerequest', nextAt: null });
   }
   if (state === 'failed') {
-    return {
-      cause: defer_reason === 'released-no-candidate' ? 'no-cached-route-cold-park' : 'failed-retry-pending',
+    return withAttempts({
+      cause: marketMiss ? 'no-cached-route-cold-park' : 'failed-retry-pending',
       nextAction: 'scheduler-retry', nextAt: next_check_at ?? null,
-    };
+    });
   }
   if (defer_reason === 'released-no-candidate') {
-    return { cause: 'no-cached-route', nextAction: 'scheduler-retry', nextAt: next_check_at ?? null };
+    return withAttempts({ cause: 'no-cached-route', nextAction: 'scheduler-retry', nextAt: next_check_at ?? null });
   }
   if (defer_reason === 'candidate-not-fulfillable') {
-    return { cause: 'candidate-not-fulfillable', nextAction: 'scheduler-retry', nextAt: next_check_at ?? null };
+    return withAttempts({ cause: 'candidate-not-fulfillable', nextAction: 'scheduler-retry', nextAt: next_check_at ?? null });
   }
-  return { cause: `state-${state}`, nextAction: 'scheduler-retry', nextAt: next_check_at ?? null };
+  return withAttempts({ cause: `state-${state}`, nextAction: 'scheduler-retry', nextAt: next_check_at ?? null });
 }
 
 /**
