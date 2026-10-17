@@ -712,6 +712,7 @@ async function runCorpusPipeline(ctx, { titleIndex, titleInputs, candidates }) {
   const eligibilityByHash = new Map();
   const rankingInputs = candidates.map((candidate) => buildCorpusRankingInput({
     cache: ctx.cache, candidate, ctx, eligibilityByHash, metadataByHash,
+    wantedIdentity: titleIndex?.wanted ?? null,
   }));
 
   // Stage 2b: corpus eligible count. For an exact TV request, generic

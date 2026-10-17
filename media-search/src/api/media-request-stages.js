@@ -191,7 +191,7 @@ export async function collectTitleIndexInputs(ctx) {
         audio: row.audio ?? undefined,
       };
       const eligibility = evaluateIdentityEligibility(
-        { releaseAttributes: releaseAttrs, sources: [{ origin: 'corpus-title-index' }] },
+        { releaseAttributes: releaseAttrs, sources: [{ origin: 'corpus-title-index' }], filename: row.filename ?? null },
         { season, episode, mediaType, mediaTitle: wanted.title, year: wanted.year ?? canonicalYear },
       );
       eligibilityByHash.set(key, eligibility);
@@ -294,10 +294,18 @@ export async function runLiveDiscoveryStage(ctx, { wantedIdentity, withHistorica
         releaseGroup: live.releaseGroup,
       };
 
+      // Identity gate uses the resolved wanted title (Cinemeta/caller),
+      // not just the caller-supplied one: scheduler-driven requests
+      // carry no mediaTitle, and without it the title cross-check
+      // silently no-ops for every live candidate. Mirrors the year
+      // handling on the next line. Missing data still passes (only
+      // positive contradictions reject), so this cannot starve
+      // legitimate live results.
       const eligibility = evaluateIdentityEligibility(
-        { releaseAttributes: releaseAttrs, sources: live.sources ?? null },
-        { season, episode, mediaType, mediaTitle, year: wantedIdentity?.year ?? canonicalYear }
+        { releaseAttributes: releaseAttrs, sources: live.sources ?? null, filename: live.filename ?? live.title ?? null },
+        { season, episode, mediaType, mediaTitle: wantedIdentity?.title ?? mediaTitle ?? null, year: wantedIdentity?.year ?? canonicalYear }
       );
+
       liveEligibilityByHash.set(key, eligibility);
       if (eligibility.eligible) liveEligibleCount++;
 
@@ -387,7 +395,7 @@ export function mergeTitleInputsIntoLive({ titleInputs, titleEligibilityByHash, 
  * historical availability prior are all resolved here so ranking sees one
  * uniform input shape regardless of source.
  */
-export function buildCorpusRankingInput({ cache, candidate, ctx, eligibilityByHash, metadataByHash }) {
+export function buildCorpusRankingInput({ cache, candidate, ctx, eligibilityByHash, metadataByHash, wantedIdentity = null }) {
   const { mediaId, mediaType, season, episode, mediaTitle, canonicalYear } = ctx;
   const attrs = getStrongestReleaseAttributes(cache, candidate.infoHash, candidate.fileIndex);
   const associations = cache.getMediaAssociations(candidate.infoHash, candidate.fileIndex);
@@ -427,10 +435,16 @@ export function buildCorpusRankingInput({ cache, candidate, ctx, eligibilityByHa
     releaseGroup: attrs.releaseGroup,
   } : {};
 
-  // Evaluate identity eligibility for this candidate
+  // Evaluate identity eligibility for this candidate. The resolved
+  // wanted title (Cinemeta/caller) is required here, not just the
+  // caller-supplied one: scheduler-driven requests carry no mediaTitle,
+  // and without it the title cross-check silently no-ops for every
+  // association-retrieved corpus row. Missing data still passes (only
+  // positive contradictions reject), so this cannot starve legitimate
+  // association-backed candidates.
   const eligibility = evaluateIdentityEligibility(
-    { releaseAttributes: releaseAttrs, sources: candidate.sources ?? null },
-    { season, episode, mediaType, year: ctx.wantedIdentity?.year ?? canonicalYear }
+    { releaseAttributes: releaseAttrs, sources: candidate.sources ?? null, filename: candidate.filename ?? null },
+    { season, episode, mediaType, mediaTitle: wantedIdentity?.title ?? mediaTitle ?? null, year: wantedIdentity?.year ?? canonicalYear ?? null }
   );
   eligibilityByHash.set(key, eligibility);
 

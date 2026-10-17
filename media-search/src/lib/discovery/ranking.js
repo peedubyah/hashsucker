@@ -192,6 +192,50 @@ function seasonTokenPresent(bare, season) {
   return filenameSeasons(bare).has(Number(season));
 }
 
+/** Strip container extension + trailing -GROUP tag (same as the Prowlarr guard). */
+function stripContainerAndGroup(bare) {
+  return String(bare || '')
+    .replace(/\.(mkv|mp4|avi|mov|m4v|mpg|mpeg|wmv|flv|webm|ts|iso|img|torrent)$/i, '')
+    .replace(/-[A-Za-z0-9]{1,12}$/, '');
+}
+
+/**
+ * Series-title portion of a release filename: text before the first
+ * season/episode token whose numbers agree with the parsed coordinates.
+ *
+ * Scene convention puts the series title first
+ * (Series.SxxExx.EpisodeTitle), so anything after the S/E token may be
+ * an EPISODE title that must never satisfy a SERIES-title comparison
+ * ("Making of a Mogul" is not "Mogul"). Returns null when uncomputable
+ * (no agreeing token, or empty prefix); callers fall back to the full
+ * parsed title so this never introduces new false negatives.
+ */
+export function seriesTitleBeforeEpisodeToken(filename, parsedSeason, parsedEpisode) {
+  const bare = stripContainerAndGroup(filename);
+  if (!bare) return null;
+  const cands = [];
+  const push = (idx, s, e) => { if (idx >= 0) cands.push({ idx, s, e }); };
+  let m;
+  const reSE = /\bS(\d{1,2})E(\d{1,3})(?![0-9])/gi;
+  while ((m = reSE.exec(bare)) !== null) push(m.index, Number(m[1]), Number(m[2]));
+  const reX = /\b(\d{1,2})x(\d{1,3})\b/gi;
+  while ((m = reX.exec(bare)) !== null) push(m.index, Number(m[1]), Number(m[2]));
+  const reS = /\bseason\s*(\d{1,2})\b/gi;
+  while ((m = reS.exec(bare)) !== null) {
+    const me = /\bepisode\s*(\d{1,3})\b/i.exec(bare.slice(m.index));
+    push(m.index, Number(m[1]), me ? Number(me[1]) : null);
+  }
+  cands.sort((a, b) => a.idx - b.idx);
+  for (const c of cands) {
+    if (parsedSeason != null && c.s !== parsedSeason) continue;
+    if (parsedEpisode != null && c.e != null && c.e !== parsedEpisode) continue;
+    const prefix = bare.slice(0, c.idx).replace(/[.\s_\-[\]()]+$/g, '').trim();
+    if (!prefix) return null;
+    return prefix;
+  }
+  return null;
+}
+
 /** Lowest explicit non-query season token, or null when none contradicts. */
 function extractOtherSeasonToken(bare, querySeason) {
   const found = filenameSeasons(bare);
@@ -218,7 +262,15 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
   // (which have no season/episode constraints to fall back on).
   if (requestedMediaTitle) {
     if (parsedTitle) {
-      const titleResult = titlesMatch(requestedMediaTitle, parsedTitle);
+      // Compare against the series-title portion when computable: the
+      // parsed title routinely embeds the episode title after the S/E
+      // token, and an episode-title token must never satisfy a series
+      // comparison. Falls back to the full parsed title when the series
+      // portion is uncomputable (movies, packs without S/E tokens), so
+      // this only adds rejections, never new acceptances.
+      const tvShaped = querySeason != null || queryEpisode != null || parsedSeason != null || parsedEpisode != null;
+      const seriesPortion = tvShaped ? seriesTitleBeforeEpisodeToken(filename, parsedSeason, parsedEpisode) : null;
+      const titleResult = titlesMatch(requestedMediaTitle, seriesPortion || parsedTitle);
       if (titleResult === false) {
         return {
           eligible: false,
