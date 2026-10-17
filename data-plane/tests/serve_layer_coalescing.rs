@@ -52,6 +52,11 @@ struct OriginState {
     gate: Arc<tokio::sync::Notify>,
     gate_target: Arc<AtomicUsize>,
     size: u64,
+    // Streaming mode: send the body in two parts, awaiting `mid_gate` between
+    // them. Mirrors a real CDN that delivers a multi-chunk span over the wire
+    // chunk-by-chunk, so a concurrent joiner can arrive mid-fill.
+    stream_split_at: Option<u64>,
+    mid_gate: Arc<tokio::sync::Notify>,
 }
 
 async fn origin_handler(AxState(st): AxState<OriginState>, headers: HeaderMap) -> axum::response::Response {
@@ -78,15 +83,32 @@ async fn origin_handler(AxState(st): AxState<OriginState>, headers: HeaderMap) -
             let end = e.min(st.size - 1);
             st.ranges.fetch_add(1, Ordering::SeqCst);
             let len = (end - s + 1) as usize;
+            let hdrs = vec![
+                ("content-range", format!("bytes {s}-{end}/{}", st.size)),
+                ("content-length", len.to_string()),
+            ];
+            // Streaming mode: split the body and await `mid_gate` between parts.
+            if let Some(split) = st.stream_split_at {
+                if split > s && split <= end {
+                    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
+                    let gate = st.mid_gate.clone();
+                    let part0: Vec<u8> = (s..split).map(byte_at).collect();
+                    let part1: Vec<u8> = (split..=end).map(byte_at).collect();
+                    tokio::spawn(async move {
+                        let _ = tx.send(Ok(bytes::Bytes::from(part0))).await;
+                        gate.notified().await;
+                        let _ = tx.send(Ok(bytes::Bytes::from(part1))).await;
+                    });
+                    let mut b = axum::response::Response::builder().status(206);
+                    for (k, v) in &hdrs {
+                        b = b.header(*k, v);
+                    }
+                    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+                    return b.body(axum::body::Body::from_stream(stream)).unwrap();
+                }
+            }
             let body: Vec<u8> = (s..=end).map(byte_at).collect();
-            build(
-                206,
-                vec![
-                    ("content-range", format!("bytes {s}-{end}/{}", st.size)),
-                    ("content-length", len.to_string()),
-                ],
-                body,
-            )
+            build(206, hdrs, body)
         }
         None => build(200, vec![], (0..st.size).map(byte_at).collect()),
     }
@@ -100,6 +122,7 @@ struct Refs {
     origin_ranges: Arc<AtomicUsize>,
     gate: Arc<tokio::sync::Notify>,
     gate_target: Arc<AtomicUsize>,
+    mid_gate: Arc<tokio::sync::Notify>,
 }
 
 /// One HTTP Range read through the real serve-layer router.
@@ -157,7 +180,11 @@ impl Stack {
 
 /// Build a full serve-layer stack for one TorrentFile and serve it over HTTP.
 async fn build_stack(info_hash: &str, canonical_path: &str, size: u64, chunk_size: u64, origin_path: &str) -> Stack {
-    build_stack_with_caps(info_hash, canonical_path, size, chunk_size, origin_path, 1).await
+    build_stack_with_caps(info_hash, canonical_path, size, chunk_size, origin_path, 1, None).await
+}
+
+async fn build_stack_streaming(info_hash: &str, canonical_path: &str, size: u64, chunk_size: u64, origin_path: &str, split: u64) -> Stack {
+    build_stack_with_caps(info_hash, canonical_path, size, chunk_size, origin_path, 1, Some(split)).await
 }
 
 /// `warm_caps` pre-warms N capabilities in the slot. Production grows the
@@ -171,6 +198,7 @@ async fn build_stack_with_caps(
     chunk_size: u64,
     origin_path: &str,
     warm_caps: usize,
+    stream_split_at: Option<u64>,
 ) -> Stack {
     std::env::set_var("SLICE4_CHUNK_SIZE", chunk_size.to_string());
     let dir = tempfile::tempdir().unwrap();
@@ -189,12 +217,15 @@ async fn build_stack_with_caps(
     let origin_ranges = Arc::new(AtomicUsize::new(0));
     let gate = Arc::new(tokio::sync::Notify::new());
     let gate_target = Arc::new(AtomicUsize::new(0));
+    let mid_gate = Arc::new(tokio::sync::Notify::new());
     let st = OriginState {
         requests: origin_requests.clone(),
         ranges: origin_ranges.clone(),
         gate: gate.clone(),
         gate_target: gate_target.clone(),
         size,
+        stream_split_at,
+        mid_gate: mid_gate.clone(),
     };
     let origin_app = Router::new()
         .route(origin_path, get(origin_handler))
@@ -279,6 +310,7 @@ async fn build_stack_with_caps(
             origin_ranges,
             gate,
             gate_target,
+            mid_gate,
         },
         cache,
         _origin_task,
@@ -421,7 +453,7 @@ async fn s5_near_eof_and_unsatisfiable_ranges() {
 async fn s6_same_file_two_seeks_stay_exact_and_isolated() {
     // Two warm capabilities = two concurrent readers of the SAME TorrentFile,
     // which is what the production pool grows to under pressure.
-    let st = build_stack_with_caps(&"1".repeat(40), "Show/S01/Show - S01E07.mkv", 24_000, 8_192, "/cdn/4", 2).await;
+    let st = build_stack_with_caps(&"1".repeat(40), "Show/S01/Show - S01E07.mkv", 24_000, 8_192, "/cdn/4", 2, None).await;
     let refs = st.refs.clone();
     // Client 1 holds the origin inside chunk 0; client 2 seeks to chunk 2.
     refs.gate_target.store(1, Ordering::SeqCst);
@@ -449,6 +481,76 @@ async fn s6_same_file_two_seeks_stay_exact_and_isolated() {
 }
 
 // ===========================================================================
+// S8 — MULTI-CHUNK span, concurrent joiners must all be byte-exact
+// ===========================================================================
+
+#[tokio::test]
+async fn s8_multi_chunk_concurrent_joiners_are_exact() {
+    // The observed production failure is specific to a cold MULTI-CHUNK span
+    // with concurrent readers. The pre-existing harness only covered a single
+    // chunk; this covers a 2-chunk span with 3 simultaneous readers, repeated.
+    for iter in 0..40u32 {
+        let st = build_stack(&format!("{:0<40}", iter), "Show/S01/Show - S01E09.mkv", 24_000, 8_192, "/cdn/6").await;
+        let refs = st.refs.clone();
+        refs.gate_target.store(1, Ordering::SeqCst);
+        let r1 = refs.clone();
+        let c1 = tokio::spawn(async move { read(&r1, 0, 16_383).await });
+        await_origin_requests(&refs, 1).await;
+        let r2 = refs.clone();
+        let c2 = tokio::spawn(async move { read(&r2, 0, 16_383).await });
+        let r3 = refs.clone();
+        let c3 = tokio::spawn(async move { read(&r3, 0, 16_383).await });
+        yield_budget(300).await;
+        refs.gate.notify_waiters();
+        let (s1, b1) = c1.await.unwrap();
+        let (s2, b2) = c2.await.unwrap();
+        let (s3, b3) = c3.await.unwrap();
+        assert_eq!(s1, 206, "iter {iter}: reader 1 status");
+        assert_eq!(s2, 206, "iter {iter}: reader 2 status");
+        assert_eq!(s3, 206, "iter {iter}: reader 3 status");
+        assert_eq!(b1, expected(0, 16_384), "iter {iter}: reader 1 exact");
+        assert_eq!(b2, expected(0, 16_384), "iter {iter}: reader 2 exact");
+        assert_eq!(b3, expected(0, 16_384), "iter {iter}: reader 3 exact");
+        assert_eq!(refs.origin_ranges.load(Ordering::SeqCst), 1, "iter {iter}: one origin fill");
+    }
+}
+
+// ===========================================================================
+// S9 — STREAMING origin: joiner arrives mid-fill (chunk 1 still in-flight)
+// ===========================================================================
+
+#[tokio::test]
+async fn s9_streaming_origin_midfill_join_is_exact() {
+    let cs: u64 = 8 << 20;
+    for iter in 0..8u32 {
+        let st = build_stack_streaming(
+            &format!("{:0<40}", format!("s{iter}")),
+            "Show/S01/Show - S01E10.mkv",
+            cs * 3, cs, "/cdn/7", cs,
+        ).await;
+        let refs = st.refs.clone();
+        // A starts the 2-chunk fill; the origin sends chunk 0 then blocks.
+        let r1 = refs.clone();
+        let c1 = tokio::spawn(async move { read(&r1, 0, cs * 2 - 1).await });
+        await_origin_requests(&refs, 1).await;
+        yield_budget(300).await;
+        // B joins while chunk 1 is still in-flight.
+        let r2 = refs.clone();
+        let c2 = tokio::spawn(async move { read(&r2, 0, cs * 2 - 1).await });
+        yield_budget(300).await;
+        // Release the origin's second part.
+        refs.mid_gate.notify_waiters();
+        let (s1, b1) = c1.await.unwrap();
+        let (s2, b2) = c2.await.unwrap();
+        assert_eq!(s1, 206, "iter {iter}: A status");
+        assert_eq!(s2, 206, "iter {iter}: B status");
+        assert_eq!(b1, expected(0, (cs * 2) as usize), "iter {iter}: A exact");
+        assert_eq!(b2, expected(0, (cs * 2) as usize), "iter {iter}: B exact");
+        assert_eq!(refs.origin_ranges.load(Ordering::SeqCst), 1, "iter {iter}: one fill");
+    }
+}
+
+// ===========================================================================
 // S7 — same-file concurrency still coalesces OVERLAPPING work
 // ===========================================================================
 
@@ -456,7 +558,7 @@ async fn s6_same_file_two_seeks_stay_exact_and_isolated() {
 async fn s7_same_file_overlapping_reads_still_coalesce() {
     // Two warm capabilities, but the readers ask for the SAME chunk: the
     // in-flight join must win over opening a second provider connection.
-    let st = build_stack_with_caps(&"2".repeat(40), "Show/S01/Show - S01E08.mkv", 24_000, 8_192, "/cdn/5", 2).await;
+    let st = build_stack_with_caps(&"2".repeat(40), "Show/S01/Show - S01E08.mkv", 24_000, 8_192, "/cdn/5", 2, None).await;
     let refs = st.refs.clone();
     refs.gate_target.store(1, Ordering::SeqCst);
     let r1 = refs.clone();

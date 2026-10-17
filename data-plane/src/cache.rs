@@ -908,6 +908,7 @@ impl CacheEngine {
             tag: STAGE_TAG.fetch_add(1, Ordering::Relaxed),
             cur: Mutex::new(None),
             promoted: Mutex::new(Vec::new()),
+            pending: Mutex::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -1104,6 +1105,7 @@ pub struct ChunkStager {
     tag: u64,
     cur: Mutex<Option<OpenChunk>>,
     promoted: Mutex<Vec<u64>>,
+    pending: Mutex<std::collections::HashMap<u64, u64>>,
 }
 
 impl ChunkStager {
@@ -1134,11 +1136,11 @@ impl ChunkStager {
                 None => true,
             };
             if need_open {
-                // The previous chunk must already be complete: bytes arrive in
-                // ascending order, so once we move past a chunk we will never
-                // write to it again. If it is somehow short, dropping it here is
-                // the correct (and safe) outcome — it never becomes PRESENT.
-                self.close_current(&mut cur, false)?;
+                // Serve-window-first fills stage the client window before the
+                // chunk prefix, so an incomplete chunk may be revisited by the
+                // prefix backfill. Keep its staged bytes (do not discard) so the
+                // backfill can resume and complete it.
+                self.close_current(&mut cur, true)?;
                 *cur = Some(self.open_chunk(idx, expected)?);
             }
             let c = cur.as_mut().unwrap();
@@ -1190,6 +1192,7 @@ impl ChunkStager {
                     .publish_chunk(&self.key, idx_done, expected_done)?
                 {
                     self.promoted.lock().push(idx_done);
+                    self.pending.lock().remove(&idx_done);
                     promoted_here.push(idx_done);
                 }
             }
@@ -1202,16 +1205,17 @@ impl ChunkStager {
 
     fn open_chunk(&self, idx: u64, expected: u64) -> rusqlite::Result<OpenChunk> {
         let tmp = self.engine.staging_path(&self.key, idx, self.tag);
+        let written = self.pending.lock().remove(&idx).unwrap_or(0);
         let f = OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .open(&tmp)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         Ok(OpenChunk {
             index: idx,
             expected,
-            written: 0,
+            written,
             file: f,
             tmp,
         })
@@ -1225,6 +1229,9 @@ impl ChunkStager {
             drop(c.file);
             if !keep {
                 let _ = fs::remove_file(&c.tmp);
+                self.pending.lock().remove(&c.index);
+            } else if c.written < c.expected {
+                self.pending.lock().insert(c.index, c.written);
             }
         }
         Ok(())
@@ -1275,6 +1282,7 @@ impl ChunkStager {
     pub fn abort(&self) {
         let mut cur = self.cur.lock();
         let _ = self.close_current(&mut cur, false);
+        self.pending.lock().clear();
     }
 
     pub fn promoted(&self) -> Vec<u64> {
