@@ -311,9 +311,18 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
       return { intent: findByIdentity({ mediaId, season, episode }), changed: true };
     }
     const owners = new Set(String(existing.season_owners || '').split(',').filter(Boolean));
+    const isNewOwner = !owners.has(owner);
     owners.add(owner);
     const nextExpected = expectedAt != null ? expectedAt : existing.expected_at;
-    const nextCheck = nextExpected != null && nextExpected > t ? nextExpected : Math.min(existing.next_check_at, t);
+    // Never clobber the scheduler's backoff/park for an existing owner:
+    // unconditionally taking min(next_check_at, now) on every reconcile
+    // turned every bounded park into a hot loop (observed: cold-parked
+    // rows re-cycling every ~15 min, attempts +192/day). Only a newly
+    // added owner justifies waking now (fresh demand); otherwise the
+    // existing poll time stands and the scheduler stays authoritative
+    // over retry timing.
+    const nextCheck = nextExpected != null && nextExpected > t ? nextExpected
+      : (isNewOwner ? Math.min(existing.next_check_at, t) : existing.next_check_at);
     db.prepare(`UPDATE future_intents
       SET season_owners = ?, expected_at = ?, next_check_at = ?,
           defer_reason = CASE WHEN state IN ('playable', 'withdrawn') THEN defer_reason ELSE CASE WHEN ? > ? THEN 'future-not-released' ELSE defer_reason END END,
