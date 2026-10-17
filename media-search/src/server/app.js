@@ -103,7 +103,7 @@ import { createTorBoxProvider } from '../lib/providers/torbox.js';
 import { createTorBoxInventoryProvider } from '../lib/providers/torbox-inventory.js';
 import { buildRequestScopedEnsureFn } from '../lib/requests/scoped-ensure.js';
 import { createCorpusLifecycle, corpusUpdateIntervalMs, corpusAutoBootstrap } from '../lib/discovery/corpus-lifecycle.js';
-import { createFutureIntentStore, isWantedByArr } from '../lib/anticipation/future-intents.js';
+import { createFutureIntentStore, explainIntent, isWantedByArr } from '../lib/anticipation/future-intents.js';
 import { createArrClient } from '../lib/anticipation/arr-client.js';
 import { createArrSync } from '../lib/anticipation/arr-sync.js';
 import { ensureTorBoxDelivery, TorBoxDeliveryError, resolveTorBoxDeliveryWithStaleRecovery } from '../lib/resolver/torbox-delivery.js';
@@ -2074,7 +2074,26 @@ export function createRequestHandler(dependencies = {}) {
             intents: store.list({ state: state || null }),
             counts: store.counts(),
             nextCheck: store.nextCheck(),
+            nextWake: store.nextWakeAt?.() ?? null,
           });
+        } catch (err) {
+          return sendJson(response, 500, { error: err?.message || String(err) });
+        }
+      }
+      // Operator answerability: why is series X season Y episode Z not
+      // playable yet — one small cause set with next action/time.
+      if (request.method === 'GET' && url.pathname === '/api/future-intents/reason') {
+        try {
+          const store = getFutureIntentStore();
+          const mediaId = url.searchParams.get('mediaId');
+          const seasonParam = url.searchParams.get('season');
+          const episodeParam = url.searchParams.get('episode');
+          const intent = store.findByIdentity({
+            mediaId,
+            season: seasonParam != null && seasonParam !== '' ? Number(seasonParam) : null,
+            episode: episodeParam != null && episodeParam !== '' ? Number(episodeParam) : null,
+          });
+          return sendJson(response, 200, { intent, explanation: explainIntent(intent, Date.now()) });
         } catch (err) {
           return sendJson(response, 500, { error: err?.message || String(err) });
         }

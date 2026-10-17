@@ -491,13 +491,74 @@ export function createFutureIntentStore({ db, clock = () => Date.now() } = {}) {
     return row?.t ?? null;
   }
 
-return { seed, findByIdentity, hasPendingForMedia, ensureReleasedFollowUp, ensureRequestedSeason, listDueRequestedSeasons, backfillRequestedSeasonsFromSeerr, scheduleRequestedSeason, ensureSeasonEpisode, withdrawSeasonEpisodes, revive, list, due, claim, retry, transition, counts, nextCheck, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest, wakeSeerrRequest, wakeMedia };
+  /**
+   * Earliest time the scheduler has a reason to run: the earliest poll
+   * plus the earliest future-release boundary. `due()` surfaces a
+   * future-not-released row as soon as its expected_at passes regardless
+   * of next_check_at, so the wake time must consider both — otherwise a
+   * release boundary crossed between fixed ticks waits a full interval.
+   */
+  function nextWakeAt() {
+    let wake = nextCheck();
+    try {
+      // Any future-not-released boundary matters: a passed one means the row
+      // is due now (due() surfaces it regardless of next_check_at), and an
+      // upcoming one is the exact moment it becomes actionable.
+      const row = db.prepare(`SELECT MIN(expected_at) AS t FROM future_intents
+        WHERE defer_reason = 'future-not-released' AND expected_at IS NOT NULL`).get();
+      if (row?.t != null && (wake == null || row.t < wake)) wake = row.t;
+    } catch {}
+    return wake;
+  }
+
+return { seed, findByIdentity, hasPendingForMedia, ensureReleasedFollowUp, ensureRequestedSeason, listDueRequestedSeasons, backfillRequestedSeasonsFromSeerr, scheduleRequestedSeason, ensureSeasonEpisode, withdrawSeasonEpisodes, revive, list, due, claim, retry, transition, counts, nextCheck, nextWakeAt, listArrSources, refreshArr, withdrawUnmonitored, withdrawSeerrRequest, wakeSeerrRequest, wakeMedia };
 }
 
 /** Backoff for retryable intent work: 15m, 1h, 4h, cap 24h. */
 export function intentBackoffMs(attempts) {
   const steps = [15 * 60 * 1000, 60 * 60 * 1000, 4 * 60 * 60 * 1000, 24 * 60 * 60 * 1000];
   return steps[Math.min(Math.max(0, attempts), steps.length - 1)];
+}
+
+/**
+ * Operator answerability: one small cause set for "why is this episode
+ * not playable yet", plus the next expected action/time. Pure function
+ * of the intent row so it is testable without a database.
+ */
+export function explainIntent(intent, nowMs = Date.now(), maxAttempts = 6) {
+  if (!intent) return { cause: 'no-obligation', nextAction: 'request-or-seed', nextAt: null };
+  const { state, defer_reason, expected_at, next_check_at, attempts, last_error } = intent;
+  if (state === 'playable') return { cause: 'playable', nextAction: 'none', nextAt: null };
+  if (state === 'withdrawn') return { cause: 'withdrawn', nextAction: 're-request-to-revive', nextAt: null };
+  if (defer_reason === 'future-not-released' && expected_at != null && expected_at > nowMs) {
+    return { cause: 'future', nextAction: 'wait-for-release', nextAt: expected_at };
+  }
+  if (state === 'prepared') {
+    if (String(last_error || '').startsWith('waiting-for-acceptable-quality')) {
+      return { cause: 'prepared-waiting-quality', nextAction: 'scheduler-retry', nextAt: next_check_at ?? null };
+    }
+    return { cause: 'prepared-publication-pending', nextAction: 'scheduler-publish', nextAt: next_check_at ?? null };
+  }
+  if (state === 'published_preparing') {
+    return { cause: 'publication-unconfirmed', nextAction: 'consumer-confirm-retry', nextAt: next_check_at ?? null };
+  }
+  if (state === 'failed' && (attempts ?? 0) >= maxAttempts
+    && defer_reason !== 'released-no-candidate' && defer_reason !== 'candidate-not-fulfillable') {
+    return { cause: 'exhausted-terminal', nextAction: 'operator-or-rerequest', nextAt: null };
+  }
+  if (state === 'failed') {
+    return {
+      cause: defer_reason === 'released-no-candidate' ? 'no-cached-route-cold-park' : 'failed-retry-pending',
+      nextAction: 'scheduler-retry', nextAt: next_check_at ?? null,
+    };
+  }
+  if (defer_reason === 'released-no-candidate') {
+    return { cause: 'no-cached-route', nextAction: 'scheduler-retry', nextAt: next_check_at ?? null };
+  }
+  if (defer_reason === 'candidate-not-fulfillable') {
+    return { cause: 'candidate-not-fulfillable', nextAction: 'scheduler-retry', nextAt: next_check_at ?? null };
+  }
+  return { cause: `state-${state}`, nextAction: 'scheduler-retry', nextAt: next_check_at ?? null };
 }
 
 /**

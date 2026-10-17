@@ -244,6 +244,25 @@ const anticipationScheduler = anticipationOn
   })
   : null;
 console.log(`media-search: anticipation scheduler enabled=${anticipationOn} intervalMs=${anticipationIntervalMs()} initialDelayMs=120000`);
+/**
+ * Wake-aware re-arm: never sleep past the earliest known reason to run
+ * (next poll or a future-release boundary), so a release that becomes
+ * actionable between fixed ticks wakes promptly instead of waiting a
+ * full interval. Overdue wakes re-arm in 60s (bounded, never a hot
+ * loop); future wakes are floored at the 5s nudge delay.
+ */
+function anticipationDelayMs() {
+  const interval = anticipationIntervalMs();
+  try {
+    const wake = anticipationStore.nextWakeAt?.();
+    if (wake == null) return interval;
+    const delay = wake - Date.now();
+    if (delay <= 0) return Math.min(interval, 60_000);
+    return Math.min(interval, Math.max(NUDGE_DELAY_MS, delay));
+  } catch {
+    return interval;
+  }
+}
 function armAnticipationTimer(delayMs) {
   console.log(`media-search: anticipation scheduler armed delayMs=${delayMs}`);
   anticipationTimer = arm(async () => {
@@ -271,8 +290,9 @@ function armAnticipationTimer(delayMs) {
         armAnticipationTimer(NUDGE_DELAY_MS);
         console.log(`media-search: anticipation tick=${tick} completed nextMs=${NUDGE_DELAY_MS} (nudge-pending)`);
       } else {
-        armAnticipationTimer(anticipationIntervalMs());
-        console.log(`media-search: anticipation tick=${tick} completed nextMs=${anticipationIntervalMs()}`);
+        const nextMs = anticipationDelayMs();
+        armAnticipationTimer(nextMs);
+        console.log(`media-search: anticipation tick=${tick} completed nextMs=${nextMs}`);
       }
     }
   }, delayMs);
