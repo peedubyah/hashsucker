@@ -322,6 +322,41 @@ test('stale-playable audit fails closed without evidence accessors', async () =>
   cache.close();
 });
 
+test('season reconcile never clobbers scheduler backoff for existing owners', () => {
+  // Production hot loop: ensureSeasonEpisode took min(next_check, now)
+  // on every reconcile, converting bounded 7-day parks into ~15-minute
+  // retries (attempts +192/day observed). The scheduler owns retry
+  // timing; reconcile only owns membership.
+  const { cache, store } = memStore();
+  const { intent } = store.seed({
+    mediaType: 'series', mediaId: 'tt-park', season: 1, episode: 2, checkInMs: 7 * 24 * 3600 * 1000,
+  });
+  store.transition(intent.id, 'failed', { last_error: 'prepare:no-handoff', next_check_at: T0 + 7 * 24 * 3600 * 1000 });
+  store.ensureSeasonEpisode({ mediaId: 'tt-park', season: 1, episode: 2, owner: 'season:tt-park:s01' });
+  // Re-park (simulating the scheduler's bounded park after the wake).
+  store.transition(intent.id, 'failed', { last_error: 'prepare:no-handoff', next_check_at: T0 + 7 * 24 * 3600 * 1000 });
+  const parked = store.findByIdentity({ mediaId: 'tt-park', season: 1, episode: 2 }).next_check_at;
+  // Repeat reconciles with the SAME owner must not touch the park.
+  store.ensureSeasonEpisode({ mediaId: 'tt-park', season: 1, episode: 2, owner: 'season:tt-park:s01' });
+  store.ensureSeasonEpisode({ mediaId: 'tt-park', season: 1, episode: 2, owner: 'season:tt-park:s01' });
+  const row = store.findByIdentity({ mediaId: 'tt-park', season: 1, episode: 2 });
+  assert.equal(row.next_check_at, parked, 'existing owner preserves the park');
+  assert.ok(row.season_owners.includes('season:tt-park:s01'));
+  cache.close();
+});
+
+test('season reconcile wakes promptly for a genuinely new owner', () => {
+  const { cache, store } = memStore();
+  const { intent } = store.seed({
+    mediaType: 'series', mediaId: 'tt-new', season: 1, episode: 2, checkInMs: 7 * 24 * 3600 * 1000,
+  });
+  store.transition(intent.id, 'failed', { last_error: 'x', next_check_at: T0 + 7 * 24 * 3600 * 1000 });
+  store.ensureSeasonEpisode({ mediaId: 'tt-new', season: 1, episode: 2, owner: 'season:tt-new:s01' });
+  const row = store.findByIdentity({ mediaId: 'tt-new', season: 1, episode: 2 });
+  assert.equal(row.next_check_at, T0, 'fresh demand wakes now');
+  cache.close();
+});
+
 test('future episode obligation is created once and converges, never clobbers', () => {
   const { cache, store } = memStore();
   const first = store.seed({
