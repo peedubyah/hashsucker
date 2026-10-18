@@ -73,3 +73,17 @@ seek/byte telemetry, no PMS/provider source divergence. Cost: tight coupling
 to Plex's player internals if using seams A/C/D. Seam F avoids that coupling
 and is worth a small prototype. Seams A/C/D are NOT worth building unless
 F fails. Verdict: VIABLE WITH LIMITATIONS.
+
+## Revision (2026-10-18, architecture review)
+
+The initial "Seam F (HTTP URL interception)" recommendation was wrong.
+mpv uses libavformat/ffmpeg directly; it does not honor system proxy for
+this request class, and Qt networking is not in the path. Seam F cannot be
+implemented without a JS webpack hook or a native hook.
+
+See `SEAM-ANALYSIS.md` for the full falsification, the actual Direct Play
+request anatomy, and the revised seam matrix.
+
+Revised verdict: `PROTOTYPE ANOTHER SEAM` (C or E), contingent on symbol
+resolution proof. If symbols are not dynamically resolvable, the moonshot
+has no right to exist beyond the existing VFS→Rust path.
