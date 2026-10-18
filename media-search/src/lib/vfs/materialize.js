@@ -9,7 +9,6 @@ import { notifyBindingActivated } from '../control-plane/durability-enroller.js'
 import { createDefaultRdPlacementRealizer } from '../control-plane/rd-placement-realizer.js';
 import { getMedia } from '../metadata/cinemeta.js';
 import { isPlayableVideoTorrentFile } from '../resolver/tv-episode-resolver.js';
-import { getServiceability } from './byte-health.js';
 
 // P19 — one lazily-bound RD placement realizer per process. The control-plane
 // store is a singleton, so we bind on first use. When Real-Debrid is not
@@ -174,7 +173,6 @@ function tryActivateAuthoritativeBinding({
 
   let binding;
   try {
-    console.log(`[vfs-debug] activateBinding placementId=${placementId} providerFileId=${providerFileId} torrentFileId=${torrentFile?.id} infoHash=${handoff?.infoHash}`);
     binding = controlPlaneStore.activateBinding({
       libraryItemId: item.id,
       libraryPathId: libraryPath.id,
@@ -207,43 +205,7 @@ function tryActivateAuthoritativeBinding({
       console.warn(`[vfs] orphan VFS cleanup failed: ${cleanupError.message}`);
     }
     const message = String(error?.message ?? error);
-    const health = getServiceability(torrentFile?.id ?? handoff?.torrentFileId);
-    const providerMatches = health.provider == null || health.provider === (handoff.provider === 'realdebrid' ? 'realdebrid' : 'torbox');
-    // Production fast path: a stale inventory observation may be extended
-    // only when the exact durable placement/file/TF already satisfies every
-    // identity invariant and the exact same TorrentFile has fresh positive
-    // byte evidence. Inventory is still required to be authoritative/complete
-    // and infoHash-matched; only its TTL is extended. Mylist is not called.
-    if (/stale or unbounded provider inventory observation/i.test(message)
-        && health.state === 'serviceable' && providerMatches) {
-      try {
-        const future = observedAt + 60_000;
-        controlPlaneStore.db.prepare(
-          "UPDATE provider_inventory_snapshots SET expires_at = ? WHERE placement_id = ?",
-        ).run(future, placementId);
-        controlPlaneStore.db.prepare(
-          "UPDATE provider_files SET inventory_expires_at = ? WHERE placement_id = ? AND provider_file_id = ?",
-        ).run(future, placementId, providerFileId);
-        binding = controlPlaneStore.activateBinding({
-          libraryItemId: item.id,
-          libraryPathId: libraryPath.id,
-          releaseKey: handoff.releaseKey,
-          infoHash: handoff.infoHash,
-          fileIndex: handoff.fileIndex ?? null,
-          torrentFileId: torrentFile.id,
-          placementId,
-          providerFileId,
-          exposureId: exposure.id,
-          reason,
-        });
-        bindingActivationRetryAt.delete(activationKey);
-        return binding;
-      } catch (retryError) {
-        console.warn(`[vfs] stale-inventory fast path failed: ${retryError.message}`);
-        binding = null;
-      }
-    }
-    if (!binding && /stale or unbounded provider inventory observation/i.test(message)) {
+    if (/stale or unbounded provider inventory observation/i.test(message)) {
       bindingActivationRetryAt.set(activationKey, observedAt + BINDING_ACTIVATION_RETRY_MS);
       if (bindingActivationRetryAt.size > 2048) {
         for (const [key, expiresAt] of bindingActivationRetryAt) {
@@ -699,24 +661,6 @@ export async function materializeVfsEntry(
         );
       }
       assertExistingIdentity(existing, handoff, torrentFile);
-      const pmsVisibleChanged = existing.torrentFileId !== (torrentFile?.id ?? null)
-        || String(existing.infoHash || '').toLowerCase() !== String(torrentFile?.infoHash ?? handoff.infoHash).toLowerCase()
-        || existing.size !== (torrentFile?.size ?? null);
-      if (pmsVisibleChanged) {
-        const previousGeneration = searchCache.db.prepare(
-          'SELECT MAX(updated_at) AS max_updated_at FROM vfs_movie_entries',
-        ).get()?.max_updated_at ?? 0;
-        const materializedAt = Math.max(now(), previousGeneration + 1000);
-        try {
-          searchCache.db.prepare(
-            'UPDATE vfs_movie_entries SET updated_at = ? WHERE media_id = ? AND release_key = ?',
-          ).run(materializedAt, existing.mediaId, existing.releaseKey);
-          existing.updatedAt = materializedAt;
-        } catch {
-          // Best-effort: the VFS row remains valid; only the invalidation
-          // signal is lost.
-        }
-      }
       return finalize(existing, 'vfs-movie-idempotent');
     }
     if (handoff.releaseKey !== releaseKeyFor(handoff)) {
@@ -744,10 +688,7 @@ export async function materializeVfsEntry(
         torrentFile?.id ?? handoff.releaseKey,
       );
     }
-    const previousGeneration = searchCache.db.prepare(
-      'SELECT MAX(updated_at) AS max_updated_at FROM vfs_movie_entries',
-    ).get()?.max_updated_at ?? 0;
-    const timestamp = Math.max(now(), previousGeneration + 1000);
+    const timestamp = now();
     let created;
     try {
       created = searchCache.createVfsMovieEntry({
@@ -871,10 +812,7 @@ export async function materializeVfsEntry(
       torrentFile?.id ?? handoff.releaseKey,
     );
   }
-  const previousGeneration = searchCache.db.prepare(
-    'SELECT MAX(updated_at) AS max_updated_at FROM vfs_tv_entries',
-  ).get()?.max_updated_at ?? 0;
-  const timestamp = Math.max(now(), previousGeneration + 1000);
+  const timestamp = now();
   let created;
   try {
     created = searchCache.createVfsTvEntry({
