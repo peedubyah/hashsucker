@@ -26,7 +26,7 @@ import { createRequestIntent } from '../lib/requests/intent.js';
 import { rankHitsTiered, classifyIdentityTier, evaluateIdentityEligibility } from '../lib/discovery/ranking.js';
 import { getStrongestReleaseAttributes } from '../lib/discovery/release-attributes.js';
 import { evaluateObservationFreshness } from '../lib/providers/observations.js';
-import { runLiveDiscovery } from '../lib/discovery/live-bridge.js';
+import { runLiveDiscovery, runBloodhoundDiscovery } from '../lib/discovery/live-bridge.js';
 import { createAvailabilityChecker } from '../lib/intents/availability.js';
 import { selectBindableCandidate } from '../lib/discovery/selection.js';
 import { lookupCorpusByTitle, resolveWantedIdentity, IDENTITY_TIERS } from '../lib/discovery/corpus-identity.js';
@@ -247,7 +247,7 @@ export async function runLiveDiscoveryStage(ctx, { wantedIdentity, withHistorica
   let liveEligibleCount = 0;
   let error = null;
   let rawCount = 0;
-  const discoverLive = ctx.liveDiscoveryFn ?? runLiveDiscovery;
+  const discoverLive = ctx.liveDiscoveryFn ?? runBloodhoundDiscovery;
 
   // Live discovery returns a flat release array; the bloodhound runner
   // returns { releases, sources } where `sources` carries per-route
