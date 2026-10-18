@@ -72,14 +72,15 @@ function clampWindow(value) {
  * collection roots, or different scan paths MUST produce different
  * keys or the contract is violated.
  */
-export function refreshKey({ sectionId, scanPath, collection, fullSection = false }) {
+export function refreshKey({ sectionId, scanPath, collection }) {
   const sid = safeString(sectionId);
   const path = safeString(scanPath);
   const col = safeString(collection);
   if (!sid) return null;
   if (path) return `${col || '?'}::${sid}::${path}`;
-  if (fullSection) return `${col || '?'}::${sid}::section`;
-  return null;
+  // Full-section refresh is keyed by section only so every publication in
+  // that section coalesces into one section scan.
+  return `${col || '?'}::${sid}::section`;
 }
 
 /**
@@ -238,7 +239,7 @@ export function createRefreshCoalescer({
     account.refresh_requested += 1;
     emitAccount();
 
-    const key = refreshKey({ sectionId, scanPath, collection, fullSection });
+    const key = refreshKey({ sectionId, scanPath, collection });
     if (key == null) {
       // Refuse to silently escalate. Caller forgot to wire
       // sectionId/scanPath — a code wiring error, not a runtime
@@ -471,7 +472,7 @@ export function createRefreshCoalescer({
       coalescedCount: bucket.callCount ?? (bucket.mediaIds?.size || 0),
     };
     account.actual_refresh_sent += 1;
-    if (bucket?.latest?.fullSection === true) {
+    if (entry?.latest?.fullSection === true) {
       account.full_section_refresh += 1;
     }
     emitAccount();
