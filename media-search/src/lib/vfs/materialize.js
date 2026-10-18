@@ -108,7 +108,7 @@ function tryActivateAuthoritativeBinding({
   // This is safe: the provider_files row exists because the same inventory
   // observation that created the TorrentFile also created the provider_file mapping.
   if ((!placementId || !providerFileId) && typeof controlPlaneStore.resolveDeliveryCoordinates === 'function') {
-    const coords = controlPlaneStore.resolveDeliveryCoordinates(handoff.infoHash, bindingTorrentFileId);
+    const coords = controlPlaneStore.resolveDeliveryCoordinates(handoff.infoHash, bindingTorrentFileId, handoff.provider === 'torbox' ? 'torbox' : (handoff.provider === 'realdebrid' ? 'realdebrid' : null));
     if (coords) {
       placementId = coords.placementId;
       providerFileId = coords.providerFileId;
@@ -173,10 +173,6 @@ function tryActivateAuthoritativeBinding({
 
   let binding;
   try {
-    // Diagnostic detail for a failed activation lives on the failure line
-    // below (bounded by the retry map), not on an attempt line: retries
-    // here are routine on the cache-only boundary and an attempt line per
-    // call buried the failures in noise.
     binding = controlPlaneStore.activateBinding({
       libraryItemId: item.id,
       libraryPathId: libraryPath.id,
@@ -574,7 +570,12 @@ export async function materializeVfsEntry(
     const item = controlPlaneStore.getLibraryItemByIdentityKey(identityKey);
     const active = item ? controlPlaneStore.getActiveBindingForLibraryItem(item.id) : null;
     const explicitRepresentationDecision = handoff.selectionReason === 'alternate-bounded-byte-validated';
-    if (active && active.torrentFile.id !== torrentFile.id && !explicitRepresentationDecision) {
+    // Only project onto an active Binding when it names the SAME release.
+    // A different release must create its own Binding version instead of
+    // being silently rewritten onto the old one (which would mismatch the
+    // provider placement and fail activation).
+    if (active && active.binding?.infoHash === handoff.infoHash
+        && active.torrentFile.id !== torrentFile.id && !explicitRepresentationDecision) {
       torrentFile = active.torrentFile;
       handoff = {
         ...handoff,
