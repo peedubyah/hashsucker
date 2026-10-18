@@ -16,10 +16,14 @@ import { detectTheatricalSource } from './quality-features.js';
 
 /**
  * Normalize a title for comparison.
- * Lowercases, removes punctuation, collapses whitespace.
+ * Lowercases, folds diacritics to ASCII (Amélie → amelie), removes
+ * punctuation, collapses whitespace. Folding is canonicalization, not
+ * fuzz: it never equates two distinct ASCII titles.
  */
 function normalizeTitle(title) {
   return String(title || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -81,7 +85,9 @@ function isLowInformationParsedTitle(parsedTitle, filename = null) {
 function isLowInformationTitleValue(value) {
   // Raw pattern: leftover Season/Episode label that the stripper missed
   // (e.g. filenames like "Season 02" with no extension or title prefix).
-  if (/^season\s*\d+(\s*[-~]\s*\d+)?$/i.test(value)) return true;
+  // Localized season words (Sezon/Saison/Temporada/Stagione) count: a bare
+  // residue label in any of them is equally title-less.
+  if (/^(?:season|sezon|saison|temporada|stagione)\s*\d+(\s*[-~]\s*\d+)?$/i.test(value)) return true;
   if (/^episode\s*\d+(\s*[-~]\s*\d+)?$/i.test(value)) return true;
 
   const normalized = normalizeTitle(value);
@@ -108,10 +114,32 @@ function isLowInformationTitleValue(value) {
  *   true  - titles match (same show)
  *   false - titles clearly differ (different show)
  *   null  - insufficient data to determine (missing title)
+ *
+ * Token-boundary contract (identity-correctness slice):
+ * - Comparison is on whole meaningful tokens, never character substrings.
+ *   "Up" does not match "Upscale"; "Mogul" does not match "Moguls".
+ * - A superstring parsed title only matches when every extra meaningful
+ *   token is benign (a 4-digit release year). "Myth and Mogul",
+ *   "Mogul Money", and "The Making of a Mogul" are NOT "Mogul".
+ * - Single-meaningful-token requests are exact: the parsed meaningful
+ *   token set must equal the requested set modulo benign extras. There is
+ *   no 60%-overlap gradient for one token (any shared token would be
+ *   100% and accept every superstring).
+ * - Multi-token requests keep the 60% meaningful-token overlap rule for
+ *   parser-damaged titles; movie sequels sharing 2/3 tokens are still
+ *   separated by the year gate, series by the S/E gate.
  */
 export function titlesMatch(requestedTitle, parsedTitle) {
-  const r = normalizeTitle(requestedTitle);
-  const p = normalizeTitle(parsedTitle);
+  // Sequel-number expressions ("Chapter 4", "Part 2") denote the same
+  // film as the bare number ("John Wick 4" IS "John Wick Chapter 4"), so
+  // fold them before comparison on BOTH sides. Digit forms only — word
+  // numbers ("Part Two") are canonical title words and stay intact. The
+  // bare digit remains and is still judged by the benign-extra rule, so
+  // "Dune 2" is not "Dune": the fold can only equate expressions that
+  // already agree on the number.
+  const foldSequelNumber = (s) => String(s || '').replace(/\b(chapter|part)\s+(\d{1,2})\b/gi, '$2');
+  const r = foldSequelNumber(normalizeTitle(requestedTitle));
+  const p = foldSequelNumber(normalizeTitle(parsedTitle));
 
   if (!r || !p) return null;
 
@@ -127,21 +155,358 @@ export function titlesMatch(requestedTitle, parsedTitle) {
   // 2009" for an "Up" request). For short-title requests, live results
   // from the media-scoped live-discovery path are the authoritative
   // source and will rank correctly above noise.
-  const rTokens = meaningfulTokens(r);
-  if (rTokens.length === 0) return null;
+  // Leading release-grammar strip (P2P prefix naming): some releases
+  // put source/resolution tags FIRST ("REMUX.2160p.Barbie.2023").
+  // A leading parsed token is dropped only when it is closed-class
+  // release grammar AND absent from the wanted title — so "Web Therapy"
+  // keeps its "Web" (wanted word) while "REMUX 2160p Barbie" reduces to
+  // the title. Stripping only removes disagreement; acceptance still
+  // requires the wanted tokens to be present in what remains
+  // (fail-closed by construction). The wanted side is never stripped:
+  // wanted titles are authoritative, never grammar.
+  const stripLeadingGrammar = (toks, wantedSet) => {
+    let i = 0;
+    while (i < toks.length && LEADING_GRAMMAR.has(toks[i]) && !wantedSet.has(toks[i])) i++;
+    return toks.slice(i);
+  };
+  const rTokensRaw = meaningfulTokens(r);
+  if (rTokensRaw.length === 0) return null;
+  const pTokensRaw = meaningfulTokens(p);
+  if (pTokensRaw.length === 0) {
+    // Parsed side carries no comparable token. When the raw strings
+    // differ this is indeterminate, not confirming — the caller decides
+    // via low-information handling. (Exact equality already returned.)
+    return null;
+  }
 
-  // Substring containment only counts as a match when the parsed title
-  // carries at least one meaningful token — otherwise a stopword-only
-  // parsed title ("the", "of", "a") would match almost any English
-  // request.
-  const pMeaningful = meaningfulTokens(p);
-  if (pMeaningful.length > 0 && (r.includes(p) || p.includes(r))) return true;
+  // Strip leading release grammar from the parsed side only (see above).
+  const rTokens = rTokensRaw;
+  const pMeaningful = stripLeadingGrammar(pTokensRaw, new Set(rTokensRaw));
 
-  // Token overlap on MEANINGFUL tokens (stopwords excluded) so common
-  // articles/prepositions do not falsely correlate unrelated shows.
-  const pTokens = new Set(pMeaningful);
-  const overlap = rTokens.filter(t => pTokens.has(t)).length;
-  return overlap / rTokens.length >= 0.6;
+  // Token-subset rule: every requested meaningful token present in the
+  // parsed set matches only when the parsed side adds nothing
+  // meaningful of its own (benign extras: release years, S/E coordinate
+  // residue). Otherwise the titles clearly differ — return false, not
+  // null, so the gate rejects.
+  //
+  // NOTE: no leetspeak/stylization folding here (Se7en ≠ Seven at this
+  // layer). Stylized spellings match only through explicit alias evidence
+  // (matchWantedTitle with accepted aliases from metadata), never through
+  // a global fuzzy map whose blast radius cannot be bounded.
+  const pSet = new Set(pMeaningful);
+  if (rTokens.every((t) => pSet.has(t))) {
+    return tokenSetsAgree(rTokens, pMeaningful) ? true : false;
+  }
+
+  // Multi-token overlap (parser-damage tolerance). Single-token requests
+  // never reach here with a shared token: a shared single token means the
+  // subset rule above already decided. So any overlap-based accept below
+  // implies at least two requested tokens.
+  if (rTokens.length >= 2) {
+    const overlap = rTokens.filter((t) => pSet.has(t)).length;
+    if (overlap / rTokens.length >= 0.6) return true;
+  }
+  return false;
+}
+
+/** True when the extra tokens beyond `requested` are all benign. */
+function tokenSetsAgree(requestedTokens, parsedTokens) {
+  const wanted = new Set(requestedTokens);
+  const parsedSet = new Set(parsedTokens);
+  // Audio companion: detached channel digits ("5 1", "2 0", "7 1") are
+  // mastering residue ONLY beside an explicit audio codec word in the
+  // same title. Without one, a bare digit is a sequel marker and rejects.
+  const hasAudioContext = [...parsedSet].some((t) => AUDIO_CODECS.has(t));
+  return parsedTokens.every((t) => {
+    if (wanted.has(t) || isBenignExtraToken(t)) return true;
+    if (hasAudioContext && /^\d{1,2}$/.test(t) && Number(t) <= 12) return true;
+    return false;
+  });
+}
+
+/**
+ * Third-party alteration markers: phrases that assert the content is a
+ * DERIVATION, not the canonical film/episode — fanedits, fan recuts,
+ * "honest trailer" parodies, commentary tracks, redubs. Matched as
+ * phrases on the raw filename (dots/dashes/spaces equivalent), never as
+ * single words: "cut" alone stays benign (official Director's/Final
+ * Cuts are legitimate representations), only the altering compounds
+ * reject.
+ */
+const ALTERED_CONTENT_PATTERNS = [
+  /fan[\s._-]*edit/i,
+  /re[\s._-]*cut/i,
+  /rogue[\s._-]*cut/i,
+  /alternative[\s._-]*cut/i,
+  /honest[\s._-]*trailer/i,
+  /rifftrax/i,
+  /\bcommentary\b/i,
+  /\bredub/i,
+];
+
+export function hasAlteredContentMarker(filename) {
+  const v = String(filename || '');
+  if (!v) return false;
+  return ALTERED_CONTENT_PATTERNS.some((re) => re.test(v));
+}
+
+/**
+ * Benign title extras: tokens that carry no series/movie identity of their
+ * own.
+ *
+ * - Release years (judged by the year gate for movies) and
+ *   season/episode-shaped tokens (judged by the S/E gate for TV) are
+ *   structural, not identity — e.g. parser residue "MobLand S01" is the
+ *   same show with coordinate text appended.
+ * - Pack words (complete, collection, trilogy, saga, anthology, duology)
+ *   describe a container holding the wanted title's content, not a
+ *   different title. Downstream exactness gates make this safe: a TV pack
+ *   still resolves its episode file via PATH B, and a movie pack with
+ *   more than one playable file fails PATH B cardinality. "The Godfather
+ *   trilogy" IS Godfather content; "Myth and Mogul" is not Mogul content
+ *   ("myth" is identity, not a container word).
+ *
+ * Bare numbers are NOT benign ("Dune 2" is not "Dune"). Codec, audio,
+ * language, source, and group residue is NOT benign either — it is
+ * handled structurally (series/movie filename-portion isolation), never
+ * via a stoplist whose blast radius cannot be bounded.
+ */
+function isBenignExtraToken(token) {
+  if (/^\d{4}$/.test(token)) {
+    const y = Number(token);
+    return y >= 1900 && y <= 2100;
+  }
+  // Bare resolution heights ("2160" without the "p", "1080" P2P residue):
+  // pure technical residue, never story. Sequel numbers are 1–2 digits
+  // and stay non-benign; 4-digit years are handled above.
+  if (RESOLUTION_HEIGHTS.has(token)) return true;
+  if (/^s\d{1,2}$/i.test(token)
+    || /^e\d{1,3}$/i.test(token)
+    || /^s\d{1,2}e\d{1,3}$/i.test(token)
+    || /^\d{1,2}x\d{1,3}$/i.test(token)) return true;
+  if (PACK_WORDS.has(token)) return true;
+  if (AUDIO_CODECS.has(token)) return true;
+  if (BIT_DEPTHS.has(token)) return true;
+  // Edition/format words describe a cut or mastering of the SAME story,
+  // never a different story: "The Shining EXTENDED" is The Shining, and
+  // the identity model treats a different cut as a different
+  // representation, not different media. Commentary, documentary, and
+  // tribute words are deliberately absent (Rifftrax is not the film).
+  return EDITION_WORDS.has(token);
+}
+
+/** Closed-class container words: the torrent holds the wanted title. */
+const PACK_WORDS = new Set([
+  'complete', 'collection', 'trilogy', 'saga', 'anthology', 'duology',
+]);
+
+/**
+ * Leading release-grammar words (P2P prefix naming): source, resolution,
+ * and codec tags that some releases put FIRST ("REMUX.2160p.Barbie.2023").
+ * Only ever stripped from the parsed side, and only when absent from the
+ * wanted title (so "Web Therapy" keeps its "Web"). Closed-class and
+ * positional — group names ("fsi"), languages, and story words are not
+ * here and still reject.
+ */
+const LEADING_GRAMMAR = new Set([
+  '2160p', '1080p', '720p', '480p', '360p', '4k', '8k', 'uhd',
+  'bluray', 'bdrip', 'brrip', 'webdl', 'webrip', 'web', 'hdtv', 'hddvd',
+  'dvd', 'remux', 'internal', 'repack', 'proper', 'rerip',
+  'x264', 'x265', 'h264', 'h265', 'hevc', 'avc', 'xvid', 'divx',
+  'hdr', 'dv', 'hd', 'sd',
+]);
+
+/**
+ * Edition/format words: same story, different cut or mastering. Each of
+ * these modifies the wanted title without denoting different media.
+ * Anything story-bearing (director names, "rifftrax", languages beyond
+ * the STRUCTURAL service list) stays non-benign and rejects.
+ */
+const EDITION_WORDS = new Set([
+  'extended', 'unrated', 'uncut', 'theatrical', 'remastered', 'ultimate',
+  'directors', 'criterion', 'collectors', 'imax', '3d', 'cut', 'edition',
+  // "Final" only ever benign as a cut-phrase word ("Final Cut" =
+  // official alternate cut, same story). Known residual: single-token
+  // wanted "Girls" would accept "The Final Girls" when years are
+  // unknown — accepted because cut-phrase rows ("Blade Runner: The Final
+  // Cut", "Apocalypse Now Final Cut") are same-story representations
+  // users legitimately bind, while no observed wrong-media pair turns
+  // on this word. The movie year gate mitigates when years are known.
+  'final',
+]);
+
+/**
+ * Bare technical residue. Bit depths ("10bit"), resolution heights
+ * without "p" ("2160" P2P residue), and audio codec words ("atmos",
+ * "dts") describe mastering, never story — no film is distinguished
+ * from another by these tokens alone. Sequel numbers stay non-benign
+ * ("Dune 2" is not "Dune"); detached channel digits ("5 1") are benign
+ * only beside an explicit audio codec word (see tokenSetsAgree's
+ * companion rule), because a bare digit is otherwise a sequel marker.
+ */
+const RESOLUTION_HEIGHTS = new Set(['480', '720', '1080', '1440', '2160', '4320']);
+const BIT_DEPTHS = new Set(['8bit', '10bit', '12bit']);
+const AUDIO_CODECS = new Set([
+  'ma', 'dts', 'ac3', 'ddp', 'atmos', 'truehd', 'flac', 'aac', 'eac3', 'hdma',
+]);
+
+function wantedTitleList(wanted) {
+  const titles = [];
+  if (wanted && typeof wanted.title === 'string' && wanted.title.trim()) titles.push(wanted.title.trim());
+  const aliases = Array.isArray(wanted?.aliases) ? wanted.aliases : [];
+  for (const a of aliases) {
+    if (typeof a === 'string' && a.trim()) titles.push(a.trim());
+  }
+  return titles;
+}
+
+/**
+ * Match a parsed title against a wanted identity: the canonical title
+ * plus any accepted aliases (original title, localized titles, explicit
+ * aliases — including intentional stylizations such as Se7en ↔ Seven or
+ * M3GAN ↔ Megan when the metadata source asserts them). Returns true
+ * when ANY comparable alias matches, false only when at least one alias
+ * is comparable and ALL comparable aliases contradict, null when nothing
+ * is comparable.
+ */
+export function matchWantedTitle(wanted, parsedTitle) {
+  const titles = wantedTitleList(wanted);
+  if (titles.length === 0) return null;
+  let sawComparable = false;
+  for (const t of titles) {
+    const r = titlesMatch(t, parsedTitle);
+    if (r === true) return true;
+    if (r === false) sawComparable = true;
+  }
+  // Affixed bilingual rendering ("Quei Bravi Ragazzi Goodfellas"): a
+  // known title anchors one end and the entire remainder is known-title
+  // words or benign extras. Fires only after every whole-title comparison
+  // failed, so it adds bilingual accepts and nothing else.
+  if (matchAffixTitle(titles, parsedTitle) != null) return true;
+  return sawComparable ? false : null;
+}
+
+/**
+ * Bilingual "Foreign - English" construction ("Via col vento - Gone with
+ * the Wind", "Testimone d'accusa-Witness for the Prosecution").
+ *
+ * Both halves must be KNOWN strings: every dash-separated segment is
+ * either an exact canonical/alias match (modulo benign extras) or a
+ * token-subset of a known title, and at least one segment matches
+ * exactly. A commentary/brand prefix ("Rifftrax- The Matrix") fails
+ * because the brand half is unknown — the rule can only confirm
+ * bilingual renderings of asserted titles, never bless new words.
+ * Returns { result: true } on accept, { result: false } on a shaped but
+ * unaccounted construction, { result: null } when there is no bilingual
+ * shape (fewer than two segments) so the whole-title verdict stands.
+ */
+export function matchBilingualSegments(wantedTitles, rawPortion) {
+  const titles = (Array.isArray(wantedTitles) ? wantedTitles : [wantedTitles])
+    .filter((t) => typeof t === 'string' && t.trim());
+  if (titles.length === 0) return { result: null, matchedAlias: null };
+  const segs = String(rawPortion || '').split(/\s*-\s*/)
+    .map((s) => s.replace(/[.\s_]+/g, ' ').trim())
+    .filter(Boolean);
+  if (segs.length < 2) return { result: null, matchedAlias: null };
+  let sawExact = false;
+  let exactAlias = null;
+  for (const seg of segs) {
+    let exact = false;
+    let exactTitle = null;
+    let subset = false;
+    for (const t of titles) {
+      const r = titlesMatch(t, seg);
+      if (r === true) { exact = true; exactTitle = t; break; }
+      const wt = new Set(meaningfulTokens(normalizeTitle(t)));
+      const st = meaningfulTokens(normalizeTitle(seg));
+      if (st.length > 0 && wt.size > 0 && st.every((tok) => wt.has(tok))) subset = true;
+    }
+    if (!exact && !subset) return { result: false, matchedAlias: null };
+    if (exact) {
+      sawExact = true;
+      if (exactTitle !== titles[0]) exactAlias = exactTitle;
+    }
+  }
+  return sawExact
+    ? { result: true, matchedAlias: exactAlias }
+    : { result: false, matchedAlias: null };
+}
+
+/**
+ * Affixed known-title construction ("Quei Bravi Ragazzi Goodfellas",
+ * "C'era una Volta in America Once Upon a Time in America" without a
+ * dash, "Ritorno al Futuro Back to the Future").
+ *
+ * A KNOWN title (canonical or alias) anchors one end of the token
+ * sequence; acceptance requires the ENTIRE remainder to be known-title
+ * words or benign extras. "Quei Bravi Ragazzi | Goodfellas" accepts
+ * (alias + canonical); "Rifftrax | The Matrix" rejects (brand unknown);
+ * "Myth and | Mogul" rejects ("myth" unknown); "Mogul | Money" rejects.
+ * The rule only fires when the whole-title comparison already failed,
+ * so it strictly adds bilingual accepts, never new fuzzy ones.
+ * Returns the anchoring known title on accept, null when it has no
+ * opinion (caller keeps the whole-title verdict).
+ */
+export function matchAffixTitle(wantedTitles, parsedTitle) {
+  const titles = (Array.isArray(wantedTitles) ? wantedTitles : [wantedTitles])
+    .filter((t) => typeof t === 'string' && t.trim());
+  const pt = meaningfulTokens(normalizeTitle(parsedTitle));
+  if (titles.length === 0 || pt.length === 0) return null;
+  const known = titles
+    .map((t) => ({ title: t, tokens: meaningfulTokens(normalizeTitle(t)) }))
+    .filter((k) => k.tokens.length > 0);
+  if (known.length === 0) return null;
+  const knownTokens = new Set(known.flatMap((k) => k.tokens));
+  const startsWith = (seq, sub) => seq.length > sub.length
+    && sub.every((t, i) => seq[i] === t);
+  const endsWith = (seq, sub) => seq.length > sub.length
+    && sub.every((t, i) => seq[seq.length - sub.length + i] === t);
+  for (const k of known) {
+    if (startsWith(pt, k.tokens) || endsWith(pt, k.tokens)) {
+      const rest = startsWith(pt, k.tokens)
+        ? pt.slice(k.tokens.length)
+        : pt.slice(0, pt.length - k.tokens.length);
+      if (rest.length > 0 && rest.every((t) => knownTokens.has(t) || isBenignExtraToken(t))) return k.title;
+    }
+  }
+  return null;
+}
+
+/**
+ * Match a structurally isolated filename portion against a wanted
+ * identity. Tries the whole cleaned portion first; on contradiction,
+ * tries the bilingual construction on the raw portion. Returns
+ * { result: true|false|null, matchedAlias: string|null }.
+ */
+export function matchWantedPortion(wanted, rawSeriesPortion, rawMoviePortion, fallbackTitle) {
+  const titles = wantedTitleList(wanted);
+  if (titles.length === 0) return { result: null, matchedAlias: null };
+  const raws = [rawSeriesPortion, rawMoviePortion].filter(Boolean);
+  const cleaned = raws.map(cleanReleasePortion).filter(Boolean);
+  // The fallback is raw parser output (residue-laden when no filename
+  // portion was computable). Cleaning it with the same rules is
+  // consistent — and fail-closed by construction, exactly like portions.
+  const target = cleaned.length > 0 ? cleaned[0] : (cleanReleasePortion(fallbackTitle) || fallbackTitle);
+  let sawComparable = false;
+  let matchedAlias = null;
+  for (const t of titles) {
+    const r = titlesMatch(t, target);
+    if (r === true) {
+      return { result: true, matchedAlias: t === titles[0] ? null : t, bilingual: false };
+    }
+    if (r === false) sawComparable = true;
+  }
+  if (raws.length > 0) {
+    const b = matchBilingualSegments(titles, raws[0]);
+    if (b.result === true) return { result: true, matchedAlias: b.matchedAlias, bilingual: true };
+  }
+  // Space-joined bilingual rendering ("Quei Bravi Ragazzi Goodfellas"):
+  // same both-known rule as the dashed form, without requiring a dash.
+  const affixAnchor = matchAffixTitle(titles, target);
+  if (affixAnchor != null) {
+    return { result: true, matchedAlias: affixAnchor === titles[0] ? null : affixAnchor, bilingual: true };
+  }
+  return { result: sawComparable ? false : null, matchedAlias, bilingual: false };
 }
 
 /**
@@ -174,13 +539,23 @@ export function titlesMatch(requestedTitle, parsedTitle) {
  * stripped by callers before invoking. Seasons extract numerically so
  * S01, S1, S01E01, "Season 1" and 1x02 forms all compare correctly.
  */
+/**
+ * Season words recognized in filename scans, beyond scene-English.
+ * Observed in this corpus on real localized releases (counts in the
+ * thousands for temporada/saison, hundreds for sezon/stagione):
+ * Polish "Sezon", French "Saison", Spanish "Temporada", Italian
+ * "Stagione". Gate-side inference only (read-only token scan) — the
+ * parser's stored attributes are untouched.
+ */
+const SEASON_WORDS = 'season|sezon|saison|temporada|stagione';
+
 function filenameSeasons(bare) {
   const norm = String(bare || '').replace(/[.\s_-]+/g, ' ');
   const found = new Set();
   let m;
   const reS = /\bS(\d{1,2})(?![0-9])/gi;
   while ((m = reS.exec(norm)) !== null) found.add(Number(m[1]));
-  const reWord = /\bseason\s*(\d{1,2})\b/gi;
+  const reWord = new RegExp(`\\b(?:${SEASON_WORDS})\\s*(\\d{1,2})\\b`, 'gi');
   while ((m = reWord.exec(norm)) !== null) found.add(Number(m[1]));
   const reX = /\b(\d{1,2})x\d{1,3}\b/gi;
   while ((m = reX.exec(norm)) !== null) found.add(Number(m[1]));
@@ -206,9 +581,12 @@ function stripContainerAndGroup(bare) {
  * Scene convention puts the series title first
  * (Series.SxxExx.EpisodeTitle), so anything after the S/E token may be
  * an EPISODE title that must never satisfy a SERIES-title comparison
- * ("Making of a Mogul" is not "Mogul"). Returns null when uncomputable
- * (no agreeing token, or empty prefix); callers fall back to the full
- * parsed title so this never introduces new false negatives.
+ * ("Making of a Mogul" is not "Mogul"). A bare season token (S01 with no
+ * episode, as in season packs "Show.S01.MULTi") also terminates the
+ * portion: everything after it is pack grammar, never series identity.
+ * Returns null when uncomputable (no agreeing token, or empty prefix);
+ * callers fall back to the full parsed title so this never introduces
+ * new false negatives.
  */
 export function seriesTitleBeforeEpisodeToken(filename, parsedSeason, parsedEpisode) {
   const bare = stripContainerAndGroup(filename);
@@ -220,9 +598,11 @@ export function seriesTitleBeforeEpisodeToken(filename, parsedSeason, parsedEpis
   while ((m = reSE.exec(bare)) !== null) push(m.index, Number(m[1]), Number(m[2]));
   const reX = /\b(\d{1,2})x(\d{1,3})\b/gi;
   while ((m = reX.exec(bare)) !== null) push(m.index, Number(m[1]), Number(m[2]));
-  const reS = /\bseason\s*(\d{1,2})\b/gi;
+  const reBareS = /\bS(\d{1,2})(?![0-9])/gi;
+  while ((m = reBareS.exec(bare)) !== null) push(m.index, Number(m[1]), null);
+  const reS = new RegExp(`\\b(?:${SEASON_WORDS})[.\\s_]*(\\d{1,2})\\b`, 'gi');
   while ((m = reS.exec(bare)) !== null) {
-    const me = /\bepisode\s*(\d{1,3})\b/i.exec(bare.slice(m.index));
+    const me = /\bepisode[.\s_]*(\d{1,3})\b/i.exec(bare.slice(m.index));
     push(m.index, Number(m[1]), me ? Number(me[1]) : null);
   }
   cands.sort((a, b) => a.idx - b.idx);
@@ -236,6 +616,33 @@ export function seriesTitleBeforeEpisodeToken(filename, parsedSeason, parsedEpis
   return null;
 }
 
+/**
+ * Movie-title portion of a release filename: text before the year token
+ * matching the known year (parsed or requested).
+ *
+ * Scene convention puts the movie title first (Title.Year.Rest), so
+ * anything after the year token is release grammar — codec, audio,
+ * source, edition, language tags — that must never participate in a
+ * title comparison ("Oppenheimer 10bit 6CH" is "Oppenheimer", and "The
+ * Matrix MULTI VFI 7 1" is "The Matrix"). This is the movie parallel of
+ * seriesTitleBeforeEpisodeToken: structural isolation instead of a
+ * residue stoplist, so unbounded group/edition coinages cannot leak
+ * into identity. Returns null when uncomputable (no agreeing year
+ * token, or empty prefix); callers fall back to the full parsed title
+ * so this never introduces new false negatives.
+ */
+export function movieTitleBeforeYearToken(filename, year) {
+  const y = Number(year);
+  if (!Number.isSafeInteger(y) || y < 1900 || y > 2100) return null;
+  const bare = stripContainerAndGroup(filename);
+  if (!bare) return null;
+  const m = new RegExp(`\\b${y}\\b`).exec(bare);
+  if (!m) return null;
+  const prefix = bare.slice(0, m.index).replace(/[.\s_\-[\]()]+$/g, '').trim();
+  if (!prefix) return null;
+  return prefix;
+}
+
 /** Lowest explicit non-query season token, or null when none contradicts. */
 function extractOtherSeasonToken(bare, querySeason) {
   const found = filenameSeasons(bare);
@@ -244,8 +651,57 @@ function extractOtherSeasonToken(bare, querySeason) {
   return Math.min(...found);
 }
 
+/**
+ * Clean a structurally isolated title portion for comparison.
+ *
+ * The portion helpers cut at the S/E or year token, but the prefix itself
+ * can carry machine tags that are never title words:
+ * - indexer domain wrappers: "www.UIndex.org - Gladiator", "COMANDO.TO -
+ *   Ted Lasso". Domain-shaped (dot + TLD) with whitespace around the dash
+ *   — never a content word ("Rifftrax- The Matrix" has no dot and no
+ *   pre-dash space, so commentary brands survive as comparable words).
+ * - leading tag groups: "[DK2] The Dark Knight". Stripped only when a
+ *   non-empty remainder survives, so a title that IS "[REC]" is kept.
+ * - source-ID assertions and tag groups anywhere: "{tmdb-634649}",
+ *   "[IMAX]", "(2020)". Consumed separately as corroboration evidence,
+ *   never as title words.
+ *
+ * Cleaning only ever removes tokens, and acceptance requires the wanted
+ * tokens to be present in what remains — so cleaning is fail-closed by
+ * construction (it can only turn acceptance into rejection, never the
+ * reverse, except by removing tag disagreement).
+ */
+export function cleanReleasePortion(portion) {
+  let v = String(portion || '');
+  v = v.replace(/^\s*([A-Za-z0-9-]+\.)+[A-Za-z]{2,}\s+-\s+/, '');
+  const noLead = v.replace(/^\s*(\[[^\[\]]*\]\s*)+/, '');
+  if (noLead.trim()) v = noLead;
+  v = v.replace(/\{[^{}]*\}/g, ' ');
+  v = v.replace(/\[[^\[\]]*\]/g, ' ');
+  v = v.replace(/\([^()]*\)/g, ' ');
+  // Fracture-fallback: year-splits and truncated stored filenames can
+  // leave an unbalanced opener ("...(Coogler" with the closer lost past
+  // the cut). Balanced title parens never reach this rule (consumed
+  // above), so a dangling opener-to-end is fracture, not title — drop it.
+  // ("(500) Days of Summer" stays intact: its parens are balanced.)
+  //
+  // NOTE: no trailing-domain stripping here. A generic dot-word-dot-TLD
+  // rule cannot tell release-group domains ("...2160.pctfenix.com") from
+  // title words ("Despicable.Me", "The.Net", "WALL.E"). Group/site tags
+  // live post-year (excluded by portion isolation) or stay rejecting in
+  // the no-year fallback — fail closed, documented residual.
+  v = v.replace(/\s*[\(\[][^()\[\]]*$/, ' ');
+  return v.replace(/[.\s_\-]+/g, ' ').trim() || null;
+}
+
 export function evaluateIdentityEligibility(hit, queryIntent = {}) {
   const { season: querySeason, episode: queryEpisode, mediaType, mediaTitle: requestedMediaTitle, year: requestedYear } = queryIntent;
+  // Accepted aliases for the wanted identity (original title, localized
+  // titles, explicit aliases). Any comparable alias may satisfy the title
+  // check; contradiction requires every comparable alias to fail.
+  const wantedAliases = Array.isArray(queryIntent.mediaTitleAliases)
+    ? queryIntent.mediaTitleAliases.filter((a) => typeof a === 'string' && a.trim())
+    : [];
   const releaseAttributes = hit.releaseAttributes || {};
   const parsedSeason = releaseAttributes.season ?? null;
   const parsedEpisode = releaseAttributes.episode ?? null;
@@ -256,25 +712,85 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
   const parsedYear = releaseAttributes.year ?? null;
   const filename = releaseAttributes.filename || hit.filename || null;
 
+  // Filename-derived season: the parser does not extract bare SNN season
+  // tokens ("Show.S01.MULTi" stores season NULL), so a season pack can
+  // look season-less to the gate. A single unambiguous season token in
+  // the filename fills in ONLY when the parser left season null, and
+  // multi-season filenames stay ambiguous (no inference). This is
+  // pack-shape evidence, never contradiction on its own: the S/E gate
+  // below still judges coordinate agreement.
+  let effSeason = parsedSeason;
+  if (effSeason == null && filename) {
+    try {
+      const found = filenameSeasons(stripContainerAndGroup(filename));
+      if (found.size === 1) effSeason = [...found][0];
+    } catch {
+      // Filename season scan must never break the gate.
+    }
+  }
+
+  // Altered-content markers (wrong-content slice): third-party
+  // derivations that must never present as the canonical film — fanedits,
+  // fan recuts, "honest trailer" parodies, commentary tracks, redubs.
+  // Scanned on the FULL filename (not the isolated portion): alteration
+  // markers live in exactly the same post-year position as benign
+  // residue, so portion isolation would blind the title comparison to
+  // them ("...1977.READNFO.ALTERNATIVE.CUT..." must not pass as ANH).
+  // First-party edition words ("Director's Cut", "Extended", "Criterion")
+  // are deliberately absent: those are legitimate different
+  // representations of the same media, and EDITION_WORDS already covers
+  // the benign forms. Fires only on phrase markers, never single words.
+  // Title-independent: a fanedit is never the canonical answer.
+  if (hasAlteredContentMarker(filename)) {
+    return {
+      eligible: false,
+      reason: `altered_content: filename carries a third-party alteration marker (${String(filename || '').slice(0, 80)})`,
+      code: 'altered_content',
+    };
+  }
+
   // Title cross-check: if requested title and parsed title both exist,
   // reject candidates from a clearly different show. Runs for BOTH movies
   // and series — it is the only meaningful identity signal for movies
   // (which have no season/episode constraints to fall back on).
-  if (requestedMediaTitle) {
+  // Title cross-check: if requested title and parsed title both exist,
+  // reject candidates from a clearly different show. Runs for BOTH movies
+  // and series — it is the only meaningful identity signal for movies
+  // (which have no season/episode constraints to fall back on).
+  // The wanted identity is the canonical title plus accepted aliases; a
+  // candidate matching ANY of them passes, and only a candidate
+  // contradicting ALL comparable aliases is rejected.
+  if (requestedMediaTitle || wantedAliases.length > 0) {
     if (parsedTitle) {
-      // Compare against the series-title portion when computable: the
+      // Compare against the structurally isolated title portion when
+      // computable, falling back to the full parsed title otherwise.
+      //
+      // TV: the series-title portion before the matching S/E token — the
       // parsed title routinely embeds the episode title after the S/E
       // token, and an episode-title token must never satisfy a series
-      // comparison. Falls back to the full parsed title when the series
-      // portion is uncomputable (movies, packs without S/E tokens), so
-      // this only adds rejections, never new acceptances.
-      const tvShaped = querySeason != null || queryEpisode != null || parsedSeason != null || parsedEpisode != null;
-      const seriesPortion = tvShaped ? seriesTitleBeforeEpisodeToken(filename, parsedSeason, parsedEpisode) : null;
-      const titleResult = titlesMatch(requestedMediaTitle, seriesPortion || parsedTitle);
-      if (titleResult === false) {
+      // comparison.
+      //
+      // Movies: the title portion before the known year token — everything
+      // after the year is release grammar (codec, audio, source, edition,
+      // language tags), never identity. This is why the fallback stays
+      // strict: residue is handled structurally, not via a stoplist whose
+      // blast radius cannot be bounded.
+      //
+      // Either isolation only adds rejections, never new acceptances
+      // (fallback is the previous behavior).
+      const tvShaped = querySeason != null || queryEpisode != null || effSeason != null || parsedEpisode != null;
+      const seriesPortion = tvShaped ? seriesTitleBeforeEpisodeToken(filename, effSeason, parsedEpisode) : null;
+      const moviePortion = !tvShaped
+        ? movieTitleBeforeYearToken(filename, parsedYear ?? requestedYear)
+        : null;
+      const titleResult = matchWantedPortion(
+        { title: requestedMediaTitle, aliases: wantedAliases },
+        seriesPortion, moviePortion, parsedTitle,
+      );
+      if (titleResult.result === false) {
         return {
           eligible: false,
-          reason: `title_mismatch: parsed title "${parsedTitle}" does not match requested "${requestedMediaTitle}"`,
+          reason: `title_mismatch: parsed title "${parsedTitle}" matches neither the requested title nor any accepted alias`,
           code: 'title_mismatch',
         };
       }
@@ -284,7 +800,7 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
       // Reject so the candidate cannot rank above verified results. This
       // deliberately runs ONLY when a mediaTitle is requested and a parsed
       // title exists — it does not affect unfiltered or series queries.
-      if (titleResult === null && isLowInformationParsedTitle(parsedTitle)) {
+      if (titleResult.result === null && isLowInformationParsedTitle(parsedTitle)) {
         return {
           eligible: false,
           reason: `low_information_parsed_title: parsed title "${parsedTitle}" is parser residue with no comparable title evidence`,
@@ -331,10 +847,19 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
 
   // Series with specific season+episode requested
   if (querySeason != null && queryEpisode != null) {
-    // A parser classification of movie is not episode evidence. Do not allow
-    // a title-index movie association to become the bindable winner for an
-    // exact TV episode request.
-    if (parsedMediaType === 'movie') {
+    // A parser classification of movie is not episode evidence — UNLESS
+    // the filename itself carries TV structure agreeing with the query.
+    // The parser labels bare-SNN season packs as movie (no E-token to
+    // key on); a filename S/E token that agrees with the query defeats
+    // that classification. seriesTitleBeforeEpisodeToken succeeding means
+    // exactly such an agreeing token exists. Do not allow a title-index
+    // movie association to become the bindable winner for an exact TV
+    // episode request.
+    const tvProbeShaped = effSeason != null || parsedEpisode != null;
+    const seriesProbe = tvProbeShaped
+      ? seriesTitleBeforeEpisodeToken(filename, effSeason, parsedEpisode)
+      : null;
+    if (parsedMediaType === 'movie' && seriesProbe == null) {
       return {
         eligible: false,
         reason: 'media_type_mismatch: movie candidate for episode request',
@@ -364,7 +889,7 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
         .replace(/\.(mkv|mp4|avi|mov|m4v|mpg|mpeg|wmv|flv|webm|ts|iso|img|torrent)$/i, '')
         .replace(/-[A-Za-z0-9]{1,12}$/, '');
       const hasQuerySeasonToken = seasonTokenPresent(bare, querySeason);
-      const parsedMissing = parsedSeason == null && parsedEpisode == null && episodeRange == null;
+      const parsedMissing = effSeason == null && parsedEpisode == null && episodeRange == null;
       const packShaped = seasonOnly === true || parsedMediaType === 'season'
         || /complete/i.test(bare);
       const otherSeason = extractOtherSeasonToken(bare, querySeason);
@@ -383,11 +908,14 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
         };
       }
     }
-    // Wrong season → ineligible
-    if (parsedSeason != null && parsedSeason !== querySeason) {
+    // Wrong season → ineligible. effSeason is the parser season, or the
+    // single unambiguous filename season when the parser left it null
+    // (bare-SNN packs). A filename-declared season contradicting the
+    // query is proven wrong-season, not missing evidence.
+    if (effSeason != null && effSeason !== querySeason) {
       return {
         eligible: false,
-        reason: `season_mismatch: parsed S${String(parsedSeason).padStart(2, '0')} but requested S${String(querySeason).padStart(2, '0')}`,
+        reason: `season_mismatch: parsed S${String(effSeason).padStart(2, '0')} but requested S${String(querySeason).padStart(2, '0')}`,
         code: 'season_mismatch',
       };
     }
@@ -402,10 +930,10 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
     }
 
     // Season-only pack for different season → ineligible
-    if (seasonOnly === true && parsedMediaType === 'season' && parsedSeason != null && parsedSeason !== querySeason) {
+    if (seasonOnly === true && parsedMediaType === 'season' && effSeason != null && effSeason !== querySeason) {
       return {
         eligible: false,
-        reason: `season_pack_mismatch: parsed season pack S${String(parsedSeason).padStart(2, '0')} but requested S${String(querySeason).padStart(2, '0')}`,
+        reason: `season_pack_mismatch: parsed season pack S${String(effSeason).padStart(2, '0')} but requested S${String(querySeason).padStart(2, '0')}`,
         code: 'season_pack_mismatch',
       };
     }
@@ -415,10 +943,10 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
 
   // Series with season-only constraint (no episode)
   if (querySeason != null && queryEpisode == null) {
-    if (parsedSeason != null && parsedSeason !== querySeason) {
+    if (effSeason != null && effSeason !== querySeason) {
       return {
         eligible: false,
-        reason: `season_mismatch: parsed S${String(parsedSeason).padStart(2, '0')} but requested S${String(querySeason).padStart(2, '0')}`,
+        reason: `season_mismatch: parsed S${String(effSeason).padStart(2, '0')} but requested S${String(querySeason).padStart(2, '0')}`,
         code: 'season_mismatch',
       };
     }
@@ -945,8 +1473,23 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
   const parsedTitle = releaseAttributes.title || null;
   const parsedSeason = releaseAttributes.season ?? null;
   const parsedEpisode = releaseAttributes.episode ?? null;
+  const parsedYear = releaseAttributes.year ?? null;
   const targetMediaId = mediaId || hit.selectedMediaId || null;
   const textRelevance = hit.relevance || 0;
+
+  // Wanted-title link: canonical title plus accepted aliases (original
+  // title, localized titles, explicit aliases). Any comparable alias may
+  // satisfy; contradiction requires every comparable alias to fail.
+  // Bilingual "Foreign - English" constructions are handled through the
+  // raw portion (see matchWantedPortion). Returns
+  // { result: true|false|null, matchedAlias: string|null }.
+  const wantedAliases = Array.isArray(queryIntent?.mediaTitleAliases)
+    ? queryIntent.mediaTitleAliases.filter((a) => typeof a === 'string' && a.trim())
+    : [];
+  const wantedCount = (queryIntent?.mediaTitle ? 1 : 0) + wantedAliases.length;
+  const wantedForLink = { title: queryIntent?.mediaTitle ?? null, aliases: wantedAliases };
+  const wantedLink = (rawSeries, rawMovie, fallbackTitle) =>
+    matchWantedPortion(wantedForLink, rawSeries, rawMovie, fallbackTitle);
 
   // Helper: check if filename/parser provides strong identity evidence
   // Used to distinguish ProviderConfirmed from ProviderScoped for live candidates
@@ -955,6 +1498,17 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
   // IMPORTANT: relevance score is NOT a title match signal. For live candidates
   // relevance is hardcoded and does not reflect actual title similarity.
   // Must use actual title comparison when mediaTitle is available.
+  //
+  // Series-title isolation applies here exactly as in the eligibility gate:
+  // the comparison runs against the title portion before the matching S/E
+  // token so an episode-title suffix can never satisfy a series comparison.
+  // Movies use the title portion before the known year token for the same
+  // reason (post-year release grammar is never identity).
+  // Source-provided IDs (e.g. Prowlarr imdbId corroboration) strengthen but
+  // never substitute: an explicit source-ID agreement is strong evidence,
+  // an explicit disagreement caps the tier at ProviderScoped, and neither
+  // overrides a contradictory title or file coordinate.
+  const sourceIdsOf = (h) => h.sourceIds || h.releaseAttributes?.sourceIds || null;
   const hasStrongIdentityEvidence = (h, intent) => {
     const attrs = h.releaseAttributes || {};
     const title = attrs.title || null;
@@ -963,9 +1517,20 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
 
     // Title comparison: only positive if titles actually match.
     // Returns null if we can't determine (missing title) — not evidence either way.
-    const requestedTitle = intent?.mediaTitle || null;
-    const titleEvidence = titlesMatch(requestedTitle, title);
-    const hasStrongTitle = titleEvidence === true;
+    const tvShaped = (intent?.season ?? null) != null || (intent?.episode ?? null) != null
+      || season != null || episode != null;
+    const filename = h.filename || attrs.filename || null;
+    const seriesPortion = tvShaped ? seriesTitleBeforeEpisodeToken(filename, season, episode) : null;
+    const moviePortion = !tvShaped
+      ? movieTitleBeforeYearToken(filename, attrs.year ?? intent?.year ?? null)
+      : null;
+    // Alias-aware link: the canonical title or any accepted alias may
+    // satisfy, including bilingual "Foreign - English" constructions.
+    const link = matchWantedPortion(
+      { title: intent?.mediaTitle ?? null, aliases: Array.isArray(intent?.mediaTitleAliases) ? intent.mediaTitleAliases : [] },
+      seriesPortion, moviePortion, title,
+    );
+    const hasStrongTitle = link.result === true;
 
     // Parsed season/episode matching query intent
     const querySeason = intent?.season ?? null;
@@ -974,28 +1539,43 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
     const hasMatchingEpisode = queryEpisode != null && episode === queryEpisode;
     const hasMatchingSeasonEpisode = hasMatchingSeason && hasMatchingEpisode;
 
-    // Strong identity evidence: either strong title match OR matching season/episode
+    // Strong identity evidence: either strong title match or matching season/episode
     return hasStrongTitle || hasMatchingSeasonEpisode;
   };
 
   // Live candidates: tier based on provider scope + independent identity evidence
-  // Provider scope is NOT equivalent to confirmed identity
+  // Provider scope is NOT equivalent to confirmed identity.
+  //
+  // Source-provided IDs (Prowlarr imdbId) are source claims requiring
+  // validation, not authoritative identity: agreement strengthens,
+  // disagreement caps at ProviderScoped (never Confirmed on S/E alone),
+  // and neither overrides a contradictory title or file coordinate (those
+  // are enforced by the eligibility gate before selection).
   if (isLive && !isCorpus) {
     if (hit.selectedMediaId && hit.selectedMediaId === mediaId) {
+      const claimed = sourceIdsOf(hit);
+      const claimedImdb = claimed && (claimed.imdbId || claimed.imdb)
+        ? String(claimed.imdbId || claimed.imdb).toLowerCase()
+        : null;
+      const target = targetMediaId ? String(targetMediaId).toLowerCase() : null;
+      const idAgrees = claimedImdb && target ? claimedImdb === target : null;
       // Provider returned this candidate scoped to the requested mediaId
       // Check for independent identity evidence to distinguish ProviderConfirmed vs ProviderScoped
-      if (hasStrongIdentityEvidence(hit, queryIntent)) {
+      const strong = hasStrongIdentityEvidence(hit, queryIntent);
+      const idEvidence = idAgrees === true ? ['source-id-corroborated']
+        : idAgrees === false ? ['source-id-mismatch'] : [];
+      if (strong && idAgrees !== false) {
         return {
           IdentityTier: 'ProviderConfirmed',
-          IdentityConfidence: 0.8,
-          IdentityEvidence: ['provider-scoped-to-media', 'strong-identity-evidence'],
+          IdentityConfidence: idAgrees === true ? 0.85 : 0.8,
+          IdentityEvidence: ['provider-scoped-to-media', 'strong-identity-evidence', ...idEvidence],
           RejectionReason: null,
         };
       }
       return {
         IdentityTier: 'ProviderScoped',
         IdentityConfidence: 0.4,
-        IdentityEvidence: ['provider-scoped-to-media'],
+        IdentityEvidence: ['provider-scoped-to-media', ...idEvidence],
         RejectionReason: null,
       };
     }
@@ -1019,6 +1599,24 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
 
   // Check for strong identity evidence from filename/parser (used for Verified tier)
   const strongIdentityEvidence = hasStrongIdentityEvidence(hit, queryIntent);
+
+  // Pre-compute the canonical title link once, here, so both the
+  // association branch (Verified guard) and the no-association branch
+  // share one definition. Pure and side-effect-free.
+  // (wantedAliases / wantedCount are already declared in the wanted-title
+  // link block above; reuse them — do not redeclare.)
+  const tvShapedForLink = queryIntent.season != null || queryIntent.episode != null
+    || parsedSeason != null || parsedEpisode != null;
+  const seriesPortionForLink = tvShapedForLink
+    ? seriesTitleBeforeEpisodeToken(hit.filename || null, parsedSeason, parsedEpisode)
+    : null;
+  const moviePortionForLink = !tvShapedForLink
+    ? movieTitleBeforeYearToken(hit.filename || null, parsedYear ?? queryIntent.year ?? null)
+    : null;
+  const canonicalTitleLink = wantedLink(seriesPortionForLink, moviePortionForLink, parsedTitle).result;
+
+  // Alias-only authorization guard uses this in the association branch
+  // below; defined here so TDZ is impossible.
 
   // Check explicit media association
   let explicitMatch = false;
@@ -1060,8 +1658,76 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
     };
   }
 
-  // Verified: explicit media association match (confirmed identity)
+  // Verified: explicit media association match (confirmed identity).
+  //
+  // Trust contract (identity-correctness slice, final close): historical
+  // association is supporting evidence only — it may retrieve, rank, and
+  // increase confidence, but it may NEVER by itself authorize a Binding.
+  // It survives only while current independent identity evidence is
+  // ALSO present: a verified title/year or S-E match, a structural
+  // title link, strong parser identity evidence, or an agreeing
+  // source-provided media ID. When none of those exist, the association
+  // alone yields TextOnly (identity_unknown / retryable) — never
+  // Verified — even though the row is still retained for future
+  // evaluation when metadata returns. Association alone is never
+  // authoritative identity.
   if (explicitMatch) {
+    // Current-title veto: when the caller asserted a wanted identity
+    // (canonical title or accepted alias) and the parsed title comparably
+    // contradicts ALL of them, the association loses.
+    if (wantedCount > 0 && parsedTitle) {
+      const tvShapedForVeto = queryIntent.season != null || queryIntent.episode != null
+        || parsedSeason != null || parsedEpisode != null;
+      const seriesPortionForVeto = tvShapedForVeto
+        ? seriesTitleBeforeEpisodeToken(hit.filename || null, parsedSeason, parsedEpisode)
+        : null;
+      const moviePortionForVeto = !tvShapedForVeto
+        ? movieTitleBeforeYearToken(hit.filename || null, parsedYear ?? queryIntent.year ?? null)
+        : null;
+      const veto = wantedLink(seriesPortionForVeto, moviePortionForVeto, parsedTitle);
+      if (veto.result === false) {
+        return {
+          IdentityTier: 'Rejected',
+          IdentityConfidence: 0.1,
+          IdentityEvidence: ['media-association-match', 'title-contradiction'],
+          RejectionReason: `title_mismatch: parsed title "${parsedTitle}" matches neither the requested title nor any accepted alias despite historical association`,
+        };
+      }
+    }
+    // Current-coordinate veto: an association for this media that carries
+    // contradictory S/E for an exact-episode query is not this episode.
+    if (seasonEpisodeMatch === 'wrong_season' || seasonEpisodeMatch === 'wrong_episode') {
+      return {
+        IdentityTier: 'Rejected',
+        IdentityConfidence: 0.1,
+        IdentityEvidence: ['media-association-match', 'coordinate-contradiction'],
+        RejectionReason: `coordinate_mismatch: parsed S${String(parsedSeason ?? 0).padStart(2, '0')}E${String(parsedEpisode ?? 0).padStart(2, '0')} but queried S${String(queryIntent.season).padStart(2, '0')}E${String(queryIntent.episode).padStart(2, '0')} despite historical association`,
+      };
+    }
+
+    // Association-only authorization guard: without current independent
+    // identity evidence, an association cannot authorize anything.
+    // Strong evidence = verified title/year link, strong parser identity,
+    // matching S/E, or an agreeing source-provided media ID. Otherwise
+    // the row is retained (TextOnly, identity_unknown/retryable) for
+    // future re-evaluation when metadata returns.
+    const sourceIds = sourceIdsOf(hit);
+    const sourceIdAgrees = !!(sourceIds && targetMediaId
+      && String(sourceIds.imdbId || sourceIds.imdb || '').toLowerCase() === String(targetMediaId).toLowerCase());
+    const hasIndependentIdentity =
+      canonicalTitleLink === true
+      || strongIdentityEvidence === true
+      || seasonEpisodeMatch === 'match'
+      || sourceIdAgrees;
+    if (!hasIndependentIdentity) {
+      return {
+        IdentityTier: 'TextOnly',
+        IdentityConfidence: 0.2,
+        IdentityEvidence: ['media-association-match', 'association-only-insufficient'],
+        RejectionReason: 'association_only_insufficient: historical association without current independent identity evidence',
+      };
+    }
+
     const evidence = ['media-association-match'];
     let confidence = 0.9;
 
@@ -1070,13 +1736,12 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
       confidence = 1.0;
     } else if (seasonEpisodeMatch === 'unknown_episode') {
       evidence.push('correct-season');
-    } else if (seasonEpisodeMatch === 'wrong_season') {
-      evidence.push('wrong-season');
+    } else if (seasonEpisodeMatch === 'unknown_season') {
+      evidence.push('unknown-season');
       confidence = 0.7;
-    } else if (seasonEpisodeMatch === 'wrong_episode') {
-      evidence.push('wrong-episode');
-      confidence = 0.6;
     }
+    // Source-ID corroboration on an associated row strengthens further.
+    if (sourceIdAgrees) evidence.push('source-id-corroborated');
 
     return {
       IdentityTier: 'Verified',
@@ -1095,37 +1760,41 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
   //   3. Weak/indeterminate text-only evidence → TextOnly
   //
   // A parsed title that the parser produced but that has NO comparable tokens
-  // against the canonical title (titlesMatch returns null — e.g. non-Latin
+  // against the canonical title (matchWantedTitle returns null — e.g. non-Latin
   // characters that normalize to nothing, or a short canonical title with no
   // meaningful tokens) is NOT canonical-identity evidence. It must not be
   // promoted to Probable just because a parse succeeded; that path lets
   // unrelated corpus rows (Покаяние, foreign-language noise, parser junk that
   // happens to be a real non-Latin word) outrank live candidates that are
   // scoped to the canonical IMDb ID.
-  const hasTitleMatch = textRelevance >= 0.6;
   const hasParsedMetadata = parsedTitle || parsedSeason != null || parsedEpisode != null;
 
-  // Canonical title cross-check: when the request carries an explicit
-  // canonical title, the parsed title must actually compare against it. A
-  // null return from titlesMatch means no comparable Latin tokens on either
-  // side (e.g. Cyrillic-only parsed title vs Latin canonical, or short
-  // canonical title with no meaningful tokens) — that's indeterminate, not
-  // confirming, evidence.
-  const canonicalTitle = queryIntent?.mediaTitle || null;
-  let canonicalTitleLink = null; // true | false | null
-  if (canonicalTitle && parsedTitle) {
-    canonicalTitleLink = titlesMatch(canonicalTitle, parsedTitle);
-  }
+  // A null link means no comparable tokens on either side (e.g.
+  // Cyrillic-only parsed title vs Latin canonical, or short canonical
+  // title with no meaningful tokens) — that's indeterminate, not
+  // confirming, evidence. wantedCount is computed once near the top of
+  // this function (canonical title + accepted aliases).
 
-  // Identity-convergence demotion: when the caller asserted a canonical
-  // title and the parsed title has no token link to it (Cyrillic vs
+  // Alias-aware link of the parsed title to the wanted identity. The
+  // structurally isolated portion (series portion for TV, pre-year
+  // portion for movies) is compared when computable so release grammar
+  // can never satisfy or defeat a title comparison here either.
+  // Bilingual "Foreign - English" constructions match when both halves
+  // are known strings (see matchWantedPortion).
+  // Reuse the canonicalTitleLink already computed above (pre-computed
+  // block) instead of recomputing — both branches must agree.
+  const link = { result: canonicalTitleLink, matchedAlias: null };
+  const matchedAlias = link.matchedAlias; // accepted alias that satisfied, if any
+
+  // Identity-convergence demotion: when the caller asserted a wanted
+  // identity and the parsed title has no token link to it (Cyrillic vs
   // Latin, or short canonical title with no comparable tokens), demote to
   // TextOnly. This MUST run BEFORE the hasTitleMatch block below — BM25
   // text relevance is corpus-only and may be high (1.0) for the single
   // corpus row that matched a sparse query even when that row is a
   // completely different show (e.g. Cyrillic "Покаяние" matching against
   // an empty query while user requested "The Lord of the Rings").
-  if (canonicalTitle && canonicalTitleLink === null) {
+  if (wantedCount > 0 && canonicalTitleLink === null) {
     return {
       IdentityTier: 'TextOnly',
       IdentityConfidence: 0.2,
@@ -1134,7 +1803,18 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
     };
   }
 
-  // Probable: strong title match but no media association
+  // Probable: strong title match but no media association.
+  //
+  // Trust contract: BM25 text relevance is corpus-retrieval similarity,
+  // not identity evidence. When the caller asserted a wanted identity,
+  // Probable requires a parsed-title token link to the canonical title
+  // or an accepted alias (canonicalTitleLink === true). A high BM25
+  // score alone — including the hardcoded relevance 1.0 that
+  // association-retrieved corpus rows carry — must never manufacture
+  // Probable. Without an asserted wanted identity there is nothing to
+  // link against, so the legacy BM25 path is preserved.
+  const hasTitleMatch = textRelevance >= 0.6
+    && (wantedCount === 0 || canonicalTitleLink === true);
   if (hasTitleMatch) {
     const evidence = ['strong-title-match'];
     let confidence = 0.6;
@@ -1156,17 +1836,13 @@ export function classifyIdentityTier(hit, queryIntent = {}, mediaId = null) {
     };
   }
 
-  // Probable: parsed title links back to the canonical title.
-  // titlesMatch === true means the parsed title is the same show (token
-  // overlap, substring containment, or exact match). This is the path that
-  // lets a legitimate alternate-language corpus release (whose parsed
-  // title passes through titlesMatch because the parser extracted Latin
-  // tokens) rank as Probable. Crucially: titlesMatch returns true for
-  // titles that share at least 60% of meaningful tokens, including
-  // releases whose filename also carries the English title alongside the
-  // localized one.
+  // Probable: parsed title links back to the wanted identity (canonical
+  // title or an accepted alias). This is the path that lets legitimate
+  // alternate-language/stylized releases rank as Probable through explicit
+  // alias evidence — never through weakened fuzzy containment.
   if (canonicalTitleLink === true) {
     const evidence = ['canonical-title-link'];
+    if (matchedAlias) evidence.push(`alias:${matchedAlias.slice(0, 80)}`);
     let confidence = 0.7;
 
     if (parsedSeason != null) {
@@ -1432,6 +2108,7 @@ export function aggregateIdentityTiers(hits, queryIntent = {}, mediaId = null) {
     SeasonEpisodeFailures: evaluations.filter(e =>
       e.IdentityEvidence && e.IdentityEvidence.some(ev =>
         ev.includes('wrong-season') || ev.includes('wrong-episode')
+        || ev.includes('coordinate-contradiction')
       )
     ).length,
     IdentityMismatches: evaluations.filter(e =>
@@ -1604,6 +2281,7 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
     liveProviderHints = null,
     historicalPrior = 0,
     selectedFileSize = null,
+    sourceIds = null,
   } = hit;
 
   // Compute component scores using semantic confidence functions.
@@ -1750,6 +2428,9 @@ export function rankHit(hit, queryIntent = {}, mediaId = null) {
       Number.isSafeInteger(selectedFileSize) && selectedFileSize > 0
         ? selectedFileSize
         : null,
+    // Source-provided media IDs ride through ranking untouched so tier
+    // classification can consume them as corroboration evidence.
+    ...(sourceIds ? { sourceIds } : {}),
     provenance: hit.provenance || null,
     justification,
   };

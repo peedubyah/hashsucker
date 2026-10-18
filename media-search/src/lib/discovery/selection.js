@@ -13,6 +13,32 @@
  */
 
 import { isPlayableVideoTorrentFile } from '../resolver/tv-episode-resolver.js';
+import { parseFilename } from './parser-adapter.js';
+
+/**
+ * Proven-contradiction check for PATH A TV binds.
+ *
+ * Exact-size binding proves the FILE (unique size within the torrent),
+ * not the EPISODE. A candidate whose release name says S01E02 but whose
+ * sized file is actually E10 (upstream stream mislabel, multi-episode
+ * size collision) must not bind through the fast path. Returns true
+ * ONLY on proven contradiction: the bound path parses to an exact
+ * single season+episode that disagrees with the request. Unparseable
+ * paths and episode ranges preserve today's behavior (release-level
+ * title+S/E already passed) — PATH B still decides those.
+ */
+function boundFileContradictsEpisode(internalPath, season, episode) {
+  if (!internalPath || !Number.isSafeInteger(season) || !Number.isSafeInteger(episode)) return false;
+  let parsed = null;
+  try {
+    parsed = parseFilename(internalPath)?.parsed ?? null;
+  } catch {
+    return false;
+  }
+  if (!parsed || parsed.season == null || parsed.episode == null) return false;
+  if (parsed.episodeRange != null) return false;
+  return parsed.season !== season || parsed.episode !== episode;
+}
 
 function isMediaPayloadForSelection(controlPlaneStore, torrentFileId) {
   if (!controlPlaneStore || typeof controlPlaneStore.getTorrentFile !== 'function') return true;
@@ -364,19 +390,39 @@ export async function selectBindableCandidate(results, options = {}) {
         });
         if (sizeResult?.torrentFileId
           && isMediaPayloadForSelection(controlPlaneStore, sizeResult.torrentFileId)) {
-          selected = formatSelection(candidate);
-          selected._torrentFileId = sizeResult.torrentFileId;
-          selected._binding = {
-            status: 'exact-size',
-            torrentFileId: sizeResult.torrentFileId,
-            placementId: sizeResult.placementId,
-            providerFileId: sizeResult.providerFileId,
-            size: sizeResult.size,
-            selectedFileSize,
-          };
-          reason = 'exact-size bound';
-          if (await acceptBound(candidate)) break;
-          pathARejected = true;
+          // PATH A TV verification (wrong-content slice): the size proved
+          // the file, not the episode. A proven S/E contradiction in the
+          // bound file's own path falls through to PATH B episode
+          // resolution instead of binding the wrong episode.
+          const tvVerify = tvCoordinates && controlPlaneStore
+            && typeof controlPlaneStore.getTorrentFile === 'function'
+            ? controlPlaneStore.getTorrentFile(sizeResult.torrentFileId)
+            : null;
+          if (tvVerify && boundFileContradictsEpisode(tvVerify.internalPath, tvCoordinates.season, tvCoordinates.episode)) {
+            skipped.push({
+              infoHash: candidate.infoHash,
+              rank: candidate.rank,
+              torboxState: candidate.availability?.torbox?.state || 'unknown',
+              reason: `path-a-episode-contradiction: sized file "${tvVerify.internalPath ?? '?'}" is not S${String(tvCoordinates.season).padStart(2, '0')}E${String(tvCoordinates.episode).padStart(2, '0')}`,
+            });
+            // pathARejected stays false so PATH B still runs: it may
+            // resolve the correct episode from another file in the
+            // same torrent. Fall through (no select, no break).
+          } else {
+            selected = formatSelection(candidate);
+            selected._torrentFileId = sizeResult.torrentFileId;
+            selected._binding = {
+              status: 'exact-size',
+              torrentFileId: sizeResult.torrentFileId,
+              placementId: sizeResult.placementId,
+              providerFileId: sizeResult.providerFileId,
+              size: sizeResult.size,
+              selectedFileSize,
+            };
+            reason = 'exact-size bound';
+            if (await acceptBound(candidate)) break;
+            pathARejected = true;
+          }
         }
       } catch (err) {
         // exact-size failed; PATH B below decides whether a retry is worthwhile.

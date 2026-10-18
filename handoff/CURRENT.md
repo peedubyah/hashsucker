@@ -1288,3 +1288,35 @@ daemon), `server/app.js` (GET exposes `cleanupDueAt`/`cleanupDoneAt`),
 due at +60min, expiry → removed, pre-move → converged, stale v1 ACK → 404,
 restart preserves due byte-identical, re-POST → same-row reset. Then one
 coherent feature commit.
+
+## Session work log — identity-trust slice (uncommitted; sequencing per PLANS.md)
+
+Session log, not sequencing authority: active phase/slice/gate lives in
+`PLANS.md`. If this section and `PLANS.md` disagree, `PLANS.md` wins.
+
+Wrong-content selection through weak identity / historical association —
+HARDENED + DEPLOYED (media-search rebuilt, container healthy, full suite
+3389 tests: 3386 pass, 0 fail, 3 skipped; evidence in `docs/BUILD-LOG.md`
+2026-10-18 + `docs/retrospectives/2026-10-18-identity-trust.md`).
+
+Live facts: 141 active Bindings re-audited under the hardened gate —
+129 valid + 11 alias-valid (Empire-VII Italian, Se7en, Il Padrino, NBNW,
+Shawshank, GWTW, SPR, Godfather, Total Recall 2012) + 0 suspicious + 1
+flagged (tt12451788 "Dune (2020)" serves Dune 2021 bytes — catalog-year
+duplicate suspect, content correct, left serving; verify/merge into
+tt1160419 at the library layer). Rogue Cut fanedit bound as canonical ANH
+found by the audit → unpublish/supersede via POST /api/library/unpublish
+→ re-request bound canonical ANH 1977 UHD, VFS present, 206 byte ranges.
+44 poisoned candidate_media pairs quarantined (backup
+`backups/discovery-cache.pre-quarantine-*`; all request-ranked provenance).
+Mogul negative control holds in production (6 poisoned rows Ineligible,
+no bind, retryOwned). Fresh TV proof: Ted Lasso S1E2 rebound via
+forceDiscovery (25/25 eligible/ineligible split, 206 bytes). Idle
+enrichment (live) and the enrichment worker (dormant script) now end
+with the hardened gate. 30-entry curated alias table
+(`lib/discovery/known-aliases.js`) with per-entry provenance.
+Known residuals: catalog-year duplicate; no-year site/group-tagged rows
+fail closed (zero media starving — all 76 titled media have eligible
+rows); bilingual hybrids without full-alias coverage; "8 1 2" fraction
+tokenization; single-token "Girls/Final Girls" shape (year gate
+mitigates); Cinemeta-outage conjunction (documented, narrow).

@@ -616,16 +616,25 @@ async function runLivePipeline(ctx, { titleIndex, titleInputs }) {
     seenLiveKeys: discovery.seenLiveKeys,
   });
 
-  // Ranking → explainable rows.
+  // Ranking → explainable rows. Tier classification uses the resolved
+  // wanted identity (see corpus pipeline) for the same reason.
+  const liveTierAliases = Array.isArray(titleIndex?.wanted?.aliases) ? titleIndex.wanted.aliases : [];
   const { ranked, tierMeta } = rankHitsTiered(
     liveCandidates,
-    { season: ctx.season, episode: ctx.episode, mediaTitle: ctx.mediaTitle },
+    {
+      season: ctx.season,
+      episode: ctx.episode,
+      mediaTitle: titleIndex?.wanted?.title ?? ctx.mediaTitle,
+      ...(liveTierAliases.length > 0 ? { mediaTitleAliases: liveTierAliases } : {}),
+      year: titleIndex?.wanted?.year ?? ctx.canonicalYear ?? null,
+    },
     ctx.mediaId,
     liveEligibilityByHash,
   );
   const total = ranked.length;
   const explainable = shapeRankedResults({
     ranked, ctx, metadataByHash: new Map(), eligibilityByHash: liveEligibilityByHash,
+    wantedIdentity: titleIndex?.wanted ?? null,
   });
 
   // Provider availability for eligible candidates.
@@ -789,13 +798,25 @@ async function runCorpusPipeline(ctx, { titleIndex, titleInputs, candidates }) {
       rankingInputs.push(t);
     }
   }
-  const { ranked, tierMeta } = rankHitsTiered(rankingInputs, { season: ctx.season, episode: ctx.episode, mediaTitle: ctx.mediaTitle }, ctx.mediaId, allEligibilityByHash);
+  // Tier classification must see the same resolved wanted identity the
+  // eligibility gate used — never just the caller-supplied mediaTitle,
+  // which scheduler-driven requests leave null.
+  const tierWantedAliases = Array.isArray(titleIndex?.wanted?.aliases) ? titleIndex.wanted.aliases : [];
+  const tierIntent = {
+    season: ctx.season,
+    episode: ctx.episode,
+    mediaTitle: titleIndex?.wanted?.title ?? ctx.mediaTitle,
+    ...(tierWantedAliases.length > 0 ? { mediaTitleAliases: tierWantedAliases } : {}),
+    year: titleIndex?.wanted?.year ?? ctx.canonicalYear ?? null,
+  };
+  const { ranked, tierMeta } = rankHitsTiered(rankingInputs, tierIntent, ctx.mediaId, allEligibilityByHash);
   const rankingLatencyMs = Date.now() - rankingStartedAt;
 
   // Stage 4/5: Paginate + explainable response rows.
   const total = ranked.length;
   const explainable = shapeRankedResults({
     ranked, ctx, metadataByHash, eligibilityByHash: allEligibilityByHash, liveMetadataByHash,
+    wantedIdentity: titleIndex?.wanted ?? null,
   });
 
   const availabilityStats = ctx.skipAvailability

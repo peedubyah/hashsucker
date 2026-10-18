@@ -89,10 +89,10 @@ test('resolveWantedIdentity prefers caller title, caches metadata', async () => 
   let calls = 0;
   const getMediaFn = async () => { calls++; return { title: 'Psycho', year: 1960 }; };
   const direct = await resolveWantedIdentity({ mediaId: 'tt1', mediaType: 'movie', mediaTitle: 'Psycho', canonicalYear: 1960, getMediaFn });
-  assert.deepEqual(direct, { title: 'Psycho', year: 1960, source: 'caller' });
+  assert.deepEqual(direct, { title: 'Psycho', year: 1960, aliases: [], source: 'caller' });
   assert.equal(calls, 0);
   const viaMeta = await resolveWantedIdentity({ mediaId: 'tt0089769', mediaType: 'movie', getMediaFn });
-  assert.deepEqual(viaMeta, { title: 'Psycho', year: 1960, source: 'cinemeta' });
+  assert.deepEqual(viaMeta, { title: 'Psycho', year: 1960, aliases: [], source: 'cinemeta' });
   assert.equal(calls, 1);
   await resolveWantedIdentity({ mediaId: 'tt0089769', mediaType: 'movie', getMediaFn });
   assert.equal(calls, 1, 'second resolution served from cache');

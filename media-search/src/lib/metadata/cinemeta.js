@@ -13,6 +13,13 @@ async function getJson(pathname, fetchImpl = fetch) {
 }
 
 function publicMeta(meta) {
+  // Alias evidence (identity slice): preserve alternate/original titles
+  // when the upstream catalog provides them so title matching can accept
+  // localized/stylized releases through explicit alias evidence instead of
+  // weakened fuzzy containment. Additive — never fetched separately.
+  const aliases = Array.isArray(meta?.aliases)
+    ? meta.aliases.filter((a) => typeof a === 'string' && a.trim()).slice(0, 12)
+    : [];
   return {
     id: meta.id,
     type: meta.type,
@@ -20,6 +27,7 @@ function publicMeta(meta) {
     posterUrl: meta.poster || null,
     year: meta.year || meta.releaseInfo || null,
     overview: meta.description || null,
+    ...(aliases.length > 0 ? { aliases } : {}),
   };
 }
 

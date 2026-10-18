@@ -164,10 +164,11 @@ export async function collectTitleIndexInputs(ctx) {
   const { cache, mediaId, mediaType, season, episode, mediaTitle, canonicalYear } = ctx;
   const inputs = [];
   const eligibilityByHash = new Map();
-  let wanted = { title: null, year: null, source: 'none' };
+  let wanted = { title: null, year: null, aliases: [], source: 'none' };
   try {
     wanted = await resolveWantedIdentity({ mediaId, mediaType, mediaTitle, canonicalYear });
     if (!wanted.title) return { inputs, eligibilityByHash, wanted };
+    const wantedAliases = Array.isArray(wanted.aliases) ? wanted.aliases : [];
     const rows = lookupCorpusByTitle(cache, {
       title: wanted.title, year: wanted.year, season, episode, mediaType,
     });
@@ -192,7 +193,7 @@ export async function collectTitleIndexInputs(ctx) {
       };
       const eligibility = evaluateIdentityEligibility(
         { releaseAttributes: releaseAttrs, sources: [{ origin: 'corpus-title-index' }], filename: row.filename ?? null },
-        { season, episode, mediaType, mediaTitle: wanted.title, year: wanted.year ?? canonicalYear },
+        { season, episode, mediaType, mediaTitle: wanted.title, mediaTitleAliases: wantedAliases, year: wanted.year ?? canonicalYear },
       );
       eligibilityByHash.set(key, eligibility);
       inputs.push({
@@ -300,10 +301,13 @@ export async function runLiveDiscoveryStage(ctx, { wantedIdentity, withHistorica
       // silently no-ops for every live candidate. Mirrors the year
       // handling on the next line. Missing data still passes (only
       // positive contradictions reject), so this cannot starve
-      // legitimate live results.
+      // legitimate live results. Accepted aliases ride along so
+      // localized/stylized releases match through explicit alias
+      // evidence.
+      const liveWantedAliases = Array.isArray(wantedIdentity?.aliases) ? wantedIdentity.aliases : [];
       const eligibility = evaluateIdentityEligibility(
         { releaseAttributes: releaseAttrs, sources: live.sources ?? null, filename: live.filename ?? live.title ?? null },
-        { season, episode, mediaType, mediaTitle: wantedIdentity?.title ?? mediaTitle ?? null, year: wantedIdentity?.year ?? canonicalYear }
+        { season, episode, mediaType, mediaTitle: wantedIdentity?.title ?? mediaTitle ?? null, mediaTitleAliases: liveWantedAliases, year: wantedIdentity?.year ?? canonicalYear }
       );
 
       liveEligibilityByHash.set(key, eligibility);
@@ -329,6 +333,12 @@ export async function runLiveDiscoveryStage(ctx, { wantedIdentity, withHistorica
         mediaAssociations: [],
         providerObservations: [],
         providerEvidence: [],
+        // Source-provided media IDs (Prowlarr imdbId) ride along as
+        // claims requiring validation — identity tiers consume them as
+        // strengthening/capping evidence only, never authority.
+        ...((live.sourceIds || live.imdbId)
+          ? { sourceIds: live.sourceIds ?? { imdbId: live.imdbId } }
+          : {}),
         sources: live.sources ?? [{ origin: 'live', evidence: [], confidence: live.confidence ?? 0.5 }],
         selectedMediaId: mediaId,
         hasLiveDiscovery: true,
@@ -441,10 +451,12 @@ export function buildCorpusRankingInput({ cache, candidate, ctx, eligibilityByHa
   // and without it the title cross-check silently no-ops for every
   // association-retrieved corpus row. Missing data still passes (only
   // positive contradictions reject), so this cannot starve legitimate
-  // association-backed candidates.
+  // association-backed candidates. Accepted aliases ride along so
+  // localized/stylized releases match through explicit alias evidence.
+  const corpusWantedAliases = Array.isArray(wantedIdentity?.aliases) ? wantedIdentity.aliases : [];
   const eligibility = evaluateIdentityEligibility(
     { releaseAttributes: releaseAttrs, sources: candidate.sources ?? null, filename: candidate.filename ?? null },
-    { season, episode, mediaType, mediaTitle: wantedIdentity?.title ?? mediaTitle ?? null, year: wantedIdentity?.year ?? canonicalYear ?? null }
+    { season, episode, mediaType, mediaTitle: wantedIdentity?.title ?? mediaTitle ?? null, mediaTitleAliases: corpusWantedAliases, year: wantedIdentity?.year ?? canonicalYear ?? null }
   );
   eligibilityByHash.set(key, eligibility);
 
@@ -504,8 +516,16 @@ function availabilityForCandidate(hit) {
  * Rank hits and project them into the persisted/explainable response rows.
  * Both the live and corpus paths use this exact projection.
  */
-export function shapeRankedResults({ ranked, ctx, metadataByHash, eligibilityByHash, liveMetadataByHash = null }) {
+export function shapeRankedResults({ ranked, ctx, metadataByHash, eligibilityByHash, liveMetadataByHash = null, wantedIdentity = null }) {
   const { mediaId, mediaType, season, episode, mediaTitle, offset, limit } = ctx;
+  // Tier classification must see the same resolved wanted identity the
+  // eligibility gate used — not just the caller-supplied mediaTitle,
+  // which scheduler-driven requests leave null. Otherwise a poisoned
+  // association still classifies Verified while eligibility (correctly)
+  // says Ineligible, and operator-facing tiers lie about trust.
+  const wantedTitle = wantedIdentity?.title ?? mediaTitle ?? null;
+  const wantedAliases = Array.isArray(wantedIdentity?.aliases) ? wantedIdentity.aliases : [];
+  const wantedYear = wantedIdentity?.year ?? ctx.canonicalYear ?? null;
   const results = ranked.slice(offset, offset + limit);
 
   return results.map((hit, index) => {
@@ -520,8 +540,10 @@ export function shapeRankedResults({ ranked, ctx, metadataByHash, eligibilityByH
         sources: hit.sources,
         relevance: hit.components?.relevance || 0,
         selectedMediaId: hit.selectedMediaId,
+        filename: hit.filename || null,
+        ...(hit.sourceIds ? { sourceIds: hit.sourceIds } : {}),
       },
-      { season, episode, mediaTitle },
+      { season, episode, mediaTitle: wantedTitle, mediaTitleAliases: wantedAliases, year: wantedYear },
       mediaId
     );
 
@@ -554,6 +576,10 @@ export function shapeRankedResults({ ranked, ctx, metadataByHash, eligibilityByH
         ineligibleCode: eligibility && !eligibility.eligible ? eligibility.code : null,
         expectedMediaScope,
         parsedCandidateScope,
+        // Operator explainability: what the candidate was judged against.
+        wantedTitle: wantedTitle ?? null,
+        wantedAliases: wantedAliases.length > 0 ? wantedAliases.slice(0, 8) : [],
+        ...(hit.sourceIds ? { sourceIds: hit.sourceIds } : {}),
       },
       release: hit.releaseAttributes,
       sources: hit.sources || [],
@@ -656,13 +682,25 @@ export async function selectCandidateForRequest({ explainable, ctx }) {
 }
 
 /**
- * Corpus backfill (corpus productization tranche): record observed
- * request outcomes as candidate→media associations so the corpus can
- * serve future discovery for previously-requested media without any
- * external matching. Only eligible ranked results are recorded, with
- * their identity confidence; ranking rules are untouched. Best-effort:
- * never fails the request. Runs after persistMediaRequest commits.
+ * Corpus backfill (corpus productization tranche): record request outcomes
+ * as candidate→media associations so the corpus can serve future
+ * discovery for previously-requested media without any external matching.
+ *
+ * Trust contract: backfill is supporting evidence, never authoritative
+ * identity. Only rows that BOTH pass the current identity eligibility
+ * gate AND carry current identity evidence (Verified, ProviderConfirmed,
+ * or Probable tier — i.e. an explicit association, provider scope plus
+ * independent evidence, or a wanted-title link) are persisted.
+ * TextOnly/ProviderScoped rows have no current identity evidence and are
+ * skipped: persisting them would let one weak ranking bootstrap future
+ * trust. Request-ranked confidence is capped (0.6) and provenance records
+ * the gate tier, so a future reader can distinguish inference from
+ * explicit source identity. Only eligible ranked results are recorded;
+ * ranking rules are untouched. Best-effort: never fails the request.
  */
+const BACKFILL_TRUSTED_TIERS = new Set(['Verified', 'ProviderConfirmed', 'Probable']);
+const BACKFILL_CONFIDENCE_CAP = 0.6;
+
 export function backfillRequestMediaAssociations(cache, intent, explainable, requestId) {
   if (typeof cache.upsertMediaAssociation !== 'function') return 0;
   if (!intent?.mediaId || !Array.isArray(explainable) || explainable.length === 0) return 0;
@@ -671,10 +709,17 @@ export function backfillRequestMediaAssociations(cache, intent, explainable, req
     try {
       if (!r || !r.infoHash) continue;
       if (r.identity?.eligible === false) continue;
+      // No current identity evidence → do not persist as trusted.
+      // Association must support current evidence, never substitute for it.
+      if (!BACKFILL_TRUSTED_TIERS.has(r.identity?.tier)) continue;
+      const tier = r.identity?.tier ?? 'unknown';
+      const capped = typeof r.identity?.confidence === 'number'
+        ? Math.min(r.identity.confidence, BACKFILL_CONFIDENCE_CAP)
+        : 0.5;
       cache.upsertMediaAssociation(r.infoHash, r.fileIndex ?? null, intent.mediaId, {
         source: 'request-outcome',
-        confidence: typeof r.identity?.confidence === 'number' ? r.identity.confidence : 0.5,
-        evidence: [`request:${requestId}`, `rank:${r.rank ?? '?'}`],
+        confidence: capped,
+        evidence: [`request:${requestId}`, `rank:${r.rank ?? '?'}`, `tier:${tier}`],
         resolutionState: r.identity?.state || 'unresolved',
         matchMethod: 'request-ranked',
       });

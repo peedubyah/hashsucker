@@ -1524,3 +1524,227 @@ concurrent fills (2 concurrent cold spans 3/6 failed with it, 0/6 without) and
 its motivation (the AT&T-injected TorBox mid-body truncation) is resolved; the
 pre-existing mid-body resume still handles genuine truncation. Rust suite green
 (153/14/11/7).
+
+## 2026-10-18 — identity trust: wrong-content selection through weak identity / historical association — HARDENED + DEPLOYED
+
+Slice: break every self-reinforcing association loop so historical
+association can support but never substitute current identity evidence,
+and let legitimate alternate-language/stylized titles match through
+explicit alias evidence instead of weakened fuzzy matching. Deployed as
+rebuilt `media-search:latest` (container healthy, full suite 3389 tests:
+3386 pass, 0 fail, 3 skipped).
+
+### 1. Trust-flow map (what creates association, what it can become)
+
+Reads (all serve ranking/selection, none bind by themselves):
+- `queryCandidatesByMedia` (media-request.js) — retrieval set for corpus
+  pipeline. Poison widens the candidate set but cannot pass the gate.
+- `getMediaAssociations` → `identityConfidenceForMedia` (ranking score,
+  0.15 weight) and `classifyIdentityTier` Verified branch (tier-major
+  traversal + `ProviderConfirmed`/`Probable` ordering).
+- `computeHistoricalAvailabilityPrior` (providerAvailability, capped 0.4,
+  fresh-evidence precedence) — availability only, never identity.
+
+Writes (all request-outcome backfill before this slice):
+- `backfillRequestMediaAssociations` — wrote EVERY eligible ranked row
+  with tier confidence, matchMethod `request-ranked`. THE poison factory:
+  7787/7787 rows are this provenance, including same-year-different-film
+  clusters written in the null-title era.
+- `identity-enrichment-worker` (manual script only, 5397 pending, ZERO
+  writes ever) + `idle-enrichment` persistRelease (LIVE, scheduler-driven)
+  + `ingestCandidate` (DMM passes no mediaIds — dead path).
+
+Loop status before: BROKEN OPEN at every joint — weak gate admitted the
+row, backfill persisted it at tier confidence, next request tiered it
+Verified, selection preferred it. After: every write path requires the
+hardened gate; every read path re-runs it; Verified demotes on any
+current contradiction.
+
+### 2. New trust contract (code + tests)
+
+- Current independent identity evidence authorizes; association never
+  overrides title / movie-year / TV-coordinate contradiction, never
+  turns missing evidence into acceptance (Verified vetoes return
+  Rejected with `title-contradiction` / `coordinate-contradiction`).
+- Backfill persists only Verified/ProviderConfirmed/Probable tiers,
+  caps request-ranked confidence at 0.6, records gate tier in evidence.
+- Eligibility is a hard pre-filter; `selectBindableCandidate` ignores
+  ineligible rows before any provider work (0 provider calls for the 6
+  Mogul-Diddy rows in production).
+
+### 3. Title matcher hardening (ranking.js)
+
+- Token-boundary comparison killed char-containment: `Mogul` vs
+  `Moguls`/`Myth and Mogul`/`The Making of a Mogul`/`Mogul Money` and
+  `Up` vs `Upscale` all reject; single-token wanted requires exact
+  meaningful-set equality modulo benign extras.
+- Benign extras (closed-class, documented): 4-digit years, S/E shapes,
+  `chapter|part N` fold, pack words, edition words (+`final` with the
+  Girls/Final-Girls residual noted), resolution heights, bit depths,
+  audio codec words (+digit companion rule), leading release-grammar
+  strip (wanted-aware, so `Web Therapy` keeps its `Web`).
+- Structural isolation instead of stoplists: `seriesTitleBeforeEpisodeToken`
+  (+ bare SNN, + Sezon/Saison/Temporada/Stagione) for TV;
+  `movieTitleBeforeYearToken` for movies; `cleanReleasePortion` (domain
+  wrappers, leading tags, `{imdb}`/`[...]`/`(...)` groups, fracture
+  handling). Proved fail-closed by construction (cleaning only removes
+  tokens; acceptance still requires wanted ⊆ remainder).
+- Bilingual `Foreign - English` accepts only when BOTH halves are known
+  (alias + canonical), plus the space-joined affix rule under the same
+  both-known constraint. Rifftrax-shape prefixes reject.
+- Stylization (Se7en↔Seven) is alias-only; the leet-fold was built,
+  measured wrong (`Se7en`→`seten`), and deleted rather than shipped.
+- Altered-content full-filename scan rejects fanedits/recuts/honest
+  trailers/commentary/redubs even when the pre-year portion is clean
+  (`...1977.READNFO.ALTERNATIVE.CUT...` can no longer pass as ANH).
+- PATH A TV verification: exact-size binding parses the bound file's own
+  path; proven S/E contradiction falls through to PATH B instead of
+  binding the wrong episode (unparseable preserves today's behavior).
+- Filename-derived season fills parser-null SNN (`Show.S01.MULTi`),
+  feeding isolation + the S/E gate; multi-season stays ambiguous.
+- Source IDs: Prowlarr `imdbId` rides as corroboration (agree → stronger
+  ProviderConfirmed; disagree → capped at ProviderScoped, never Confirmed);
+  file-evidence contradiction still rejects. Stremio rows carry no IDs
+  (discarded during normalization — strengthening opportunity, not a hole).
+
+### 4. Alias evidence (known-aliases.js, 30 entries)
+
+Curated exact spellings observed in this corpus (or operator-verified):
+Se7en; German/Italian/Polish Empire VII; Il Padrino; GBU Italian; Shawshank
+Italian; Butch Spanish; 2001 Italian; OUATIA Italian; GWTW Italian; Dr
+Strangelove short; Dune Part One; Sunset Blvd; Psicosis/Psyco; Vertigo
+FR+IT; 400 Blows FR+IT; Witness FR+IT; GoodFellas IT+PL; SPR FR+IT; BTTF
+Italian; SLIH/Cantando/Ventana/NBNW Spanish; 8½ English + bare "8"; Total
+Recall Italian (both versions — year gate separates); Gladiator Italian;
+Le iene; Human Condition III (both halves). No entry may override year/S-E;
+no transliteration without an observed release.
+
+### 5. Association audit (scratch DB copies, hardened gate)
+
+- 7742 rows after quarantine (was 7787): 4812 eligible / 108 contradict
+  (56 title / 40 year / 8 altered) / 2822 no-wanted-title (pending intents
+  and bare-ID rows — unauditable, fail-open by design, still gate-checked
+  at request time).
+- Contradict classes: 35× Dune-2021-under-"Dune (2020)" (catalog-year
+  duplicate media, content correct — flagged for library review, NOT
+  quarantined); 8 altered-content (fanedits/commentary — inert, 1 bound
+  instance repaired, content-verdict below); packs/collections (can't bind
+  via cardinality — inert); bilingual hybrids without full-alias coverage,
+  site/group-tagged no-year rows, hash-named garbage (quarantined),
+  fraction-token residual "8 1 2" (documented).
+- Multi-media hashes (33): Dune pairs = duplicate catalog IDs sharing
+  one-film content (year gate separates); Star Wars/Hitchcock/Wilder/
+  Chaplin = franchise/collection packs (valid); Ted Lasso = show+episode
+  granularity (valid); Total Recall pair = version-separated by year
+  (valid, verified per-file); Civil War/BP/Endgame triple-links on
+  single-film files = poison (quarantined); E01-linked-for-E02 = inert
+  under episode_mismatch (left, documented).
+- Quarantined 44 pairs (backup `backups/discovery-cache.pre-quarantine-*`;
+  all `request-outcome`/`request-ranked`, confidence ≤0.9): 1963 bulk
+  poison under tt0056801 (26: Bond×3, Birds, Atragon, Sword×2, Leopard,
+  Contempt, High and Low, Yesterday, Charade×2, Mad World×2, Hud,
+  Donovans, Winter Light, Fire Within, Great Escape×2, Lilies, Servant,
+  Jason, Haunting, Cleopatra), no-identity garbage (hash-named,
+  bare "imdb"×2, "Magnet", 3× m2ts, Gone Baby Gone, 500-Movies TV
+  episode), brace-proven cross-links (Spider-Man/Civil War/BP/Endgame ×4),
+  Rogue Cut fanedit link. Verified absent post-quarantine.
+- Coverage: all 76 wanted-titled media have ≥1 eligible row (zero
+  starvation). Known-good corpus verified row-level: Batman, Harakiri,
+  Black Panther, Endgame, Sinners, Total Recall, Empire VII, Seven,
+  Dune Part Two, MobLand, Slow Horses, Lowdown, Ted Lasso, Ted Lasso,
+  Severance, Lanterns — each eligible + (where bound) active-valid.
+- Known-bad corpus: Diddy/Mogul, Bond/Fellini, superstrings, year
+  conflicts, poisoned association, source-ID-vs-file, association-only
+  Verified — all deterministically rejected (tests + production negative
+  control below).
+
+### 6. Active Binding re-audit (140 → 141 rows)
+
+129 valid + 11 alias-valid (Empire Italian VII, Se7en Remux, Il Padrino UHD,
+NBNW, Shawshank, GWTW, SPR, Godfather, Total Recall 2012) + 0 suspicious.
+Two flags resolved in-slice:
+- tt0076759 ANH bound to "The Rogue Cut" fanedit (altered-content,
+  title gate now rejects it): unpub­lished via POST /api/library/unpublish
+  (1 binding superseded, VFS + strm removed) → re-request bound canonical
+  ANH 1977 UHD (`movie-cached-single-file bound`), republished, VFS
+  present, 2× 1 MiB ranges 206. Altered rows (`Rogue Cut`, `ALTERNATIVE
+  CUT` v2) now reject with `altered_content` in production.
+- tt12451788 "Dune (2020)" binding serves Dune 2021 bytes (year gate
+  mismatch, title agrees): content correct, media row suspect — left
+  serving, flagged for catalog review (verify/merge into tt1160419 at the
+  library layer; out of identity slice).
+
+### 7. Production proofs (deployed build)
+
+- Fresh movie: ANH repair above (candidate set 38, 32 eligible / 6
+  ineligible incl. 2× `altered_content`, Verified association + S/E,
+  binding → publication → byte-identical bounded ranges).
+- Fresh TV: tt10986410:1:2 forceDiscovery — 50 candidates, 25/25 split
+  (6 episode_mismatch + 19 season_mismatch), bound S1E2 single-episode
+  file (Verified + season-episode-match), VFS materialized, 2× 1 MiB
+  ranges 206.
+- Negative control tt0159187 S01E01 (live discovery on): 6 corpus rows,
+  all Ineligible (`title_mismatch` + `title-contradiction`, Verified veto
+  firing in production), 0 live candidates, no selection, unfulfilled,
+  `retryOwned: true`, obligation pending — poison cannot rescue Diddy.
+- Retry autonomy: rejection is non-terminal (request persisted, retry
+  owned by scheduler, no re-request needed); future discovery can supply
+  a valid candidate.
+
+### 8. What remains / residuals (documented, not hidden)
+
+- tt12451788 catalog-year duplicate (content right, row year wrong).
+- No-year + site/group-tagged residue rows fail closed (media still bind
+  via anchored rows; coverage proves zero starvation).
+- Bilingual hybrids without dash or full-alias coverage (Dune Parte Due
+  hybrid, space-joined Ritorno row) fail closed.
+- Fraction-token "8 1 2" vs "81⁄2" VFS spelling (production Cinemeta
+  "8½" + aliases cover the real rows).
+- Single-token edge: wanted "Girls" + unknown year would accept
+  "The Final Girls" via `final` (no such catalog case; year gate
+  mitigates when known).
+- Narrow conjunction: Cinemeta outage + movie + unknown year on both
+  sides + poisoned association could bind on association alone (TV S/E
+  still gates; outage means nothing is known — documented, not widened).
+- Enrichment worker (manual script) hardened to the same token contract
+  but dormant (5397 pending, zero writes ever); idle-enrichment (live)
+  now ends with the hardened gate as well.
+
+### Verdict
+
+**IDENTITY TRUST CLEAN** — with the residuals above explicitly listed.
+Historical association can no longer launder a bad candidate into
+trusted identity on any write or read path under healthy metadata; every
+known-good binding validates; the one known-bad active binding was
+repaired through normal semantics; the negative control holds in
+production with retry intact.
+
+## 2026-10-18 — Dune catalog duplicate disposition (library/catalog identity, not ranker)
+
+Proven facts:
+- Cinemeta metadata for tt12451788 = "Dune", year 2020, runtime 4 min,
+  genre Animation/Short, director Gábor Ulrich, TMDB 697620 — a 2020
+  ANIMATED SHORT film, not Villeneuve's 2021 feature.
+- Cinemeta metadata for tt1160419 = "Dune", year 2021, runtime ~155 min,
+  TMDB 438631, Villeneuve — the canonical feature.
+- OMDb confirms the same split (tt12451788: Year 2020, Type movie, 4 min;
+  tt1160419: Year 2021, feature).
+- HashSucker's active Binding for tt12451788 serves Dune 2021 bytes —
+  the library item's year (2020) is stale catalog metadata, but the
+  content is the 2021 film, so no wrong-content event exists.
+- The two IDs are NOT duplicates: they are two distinct IMDb titles
+  (a short and a feature). The operator's library item tt12451788 was
+  created with the wrong IMDb ID for the feature film, which is why
+  Cinemeta resolves it to the short.
+
+Disposition: NOT a ranker bug and not a merge. The library item carries
+a wrong mediaId (tt12451788 where tt1160419 was intended), so the
+correct repair is a new library item / binding under tt1160419 with
+republish; the tt12451788 item is an animated-short mislabel and should
+be unpublish/supersede through normal library semantics (POST
+/api/library/unpublish + request under tt1160419). No mutation performed
+in this slice: ownership of the tt12451788 row is ambiguous (it may be
+intentional short-film content elsewhere in the corpus), and the
+year gate already prevents tt12451788 from binding Dune-2021 releases
+under the hardened identity contract (40 year_mismatch rows, all
+quarantined as inert). Flagged explicitly; stopped per instruction.

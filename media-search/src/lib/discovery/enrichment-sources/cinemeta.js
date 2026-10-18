@@ -17,6 +17,7 @@
 import { searchCatalog } from '../../metadata/cinemeta.js';
 import { getStrongestReleaseAttributes } from '../release-attributes.js';
 import { computeConfidence, titleMatchQuality, yearMatch, seasonEpisodeMatch } from './confidence.js';
+import { titlesMatch } from '../ranking.js';
 
 /**
  * Enrich a candidate with media identity from Cinemeta.
@@ -64,6 +65,15 @@ export async function enrichWithCinemeta(cache, candidate, options = {}) {
 
     // Refuse if title doesn't match at all
     if (titleMtq === 'none') continue;
+
+    // Hard identity gate (identity-correctness slice): the legacy
+    // starts/includes substring ladder would associate superstring
+    // releases with the wrong media ("Myth and Mogul" includes "Mogul")
+    // and a single persisted mis-association bootstraps future trust.
+    // Require whole-token agreement under the same contract the
+    // request-time gate enforces: benign extras (years, S/E residue,
+    // codec/audio tags) pass, extra story words reject.
+    if (titlesMatch(result.title || result.name, parsedTitle) !== true) continue;
 
     const confidence = computeConfidence({
       titleMatch: titleMtq,

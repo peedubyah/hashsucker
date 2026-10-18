@@ -27,6 +27,8 @@ import { runLiveDiscoveryWithCounts } from './live-bridge.js';
 import { storeReleaseAttributes } from './release-attributes.js';
 import { parseFilename } from './parser-adapter.js';
 import { significantTokens, isSubstantialTitle, titleAgrees, referenceTitleForMedia } from './identity-agreement.js';
+import { evaluateIdentityEligibility } from './ranking.js';
+import { knownAliasesFor } from './known-aliases.js';
 import { createQuietGate, measureLoopLag } from './quiet-gate.js';
 
 export const ENRICHMENT_SOURCE = 'idle-enrichment';
@@ -235,6 +237,8 @@ export function createIdleEnrichment({
         return { accept: false, reason: 'wrong-episode' };
       }
       if (confidence < MIN_CONFIDENCE) return { accept: false, reason: 'low-confidence' };
+      const gate = hardGate(target, release, reference);
+      if (gate) return gate;
       return { accept: true, confidence };
     }
     if (release.year != null && target.year != null
@@ -245,7 +249,55 @@ export function createIdleEnrichment({
       return { accept: false, reason: 'low-confidence' };
     }
     if (confidence < MIN_CONFIDENCE) return { accept: false, reason: 'low-confidence' };
+    const gate = hardGate(target, release, reference);
+    if (gate) return gate;
     return { accept: true, confidence };
+  }
+
+  /**
+   * Hardened identity gate as the final idle-write check (identity
+   * slice): the looser titleAgrees/year±1/coordinate checks above are
+   * necessary but not sufficient for persisting a candidate_media row.
+   * The row must also satisfy the exact contract the request-time gate
+   * enforces, so idle enrichment can never write an association the
+   * foreground would reject. Returns a rejection or null (pass).
+   */
+  function hardGate(target, release, reference) {
+    let parsed = null;
+    try {
+      parsed = parseFilename(release?.filename ?? release?.title ?? '')?.parsed ?? null;
+    } catch { parsed = null; }
+    const ev = evaluateIdentityEligibility(
+      {
+        releaseAttributes: {
+          title: parsed?.title ?? release?.title ?? null,
+          year: parsed?.year ?? release?.year ?? null,
+          season: parsed?.season ?? release?.season ?? null,
+          episode: parsed?.episode ?? release?.episode ?? null,
+          episodeRange: parsed?.episodeRange ?? null,
+          seasonOnly: false,
+          mediaType: parsed?.mediaType ?? null,
+        },
+        filename: release?.filename ?? release?.title ?? null,
+        sources: release?.sources ?? [{ origin: 'live' }],
+      },
+      {
+        season: target?.season ?? null,
+        episode: target?.episode ?? null,
+        mediaType: target?.mediaType === 'episode' ? 'series' : (target?.mediaType ?? null),
+        mediaTitle: reference,
+        mediaTitleAliases: knownAliasesFor(target?.mediaId),
+        year: target?.year ?? null,
+      },
+    );
+    if (ev.eligible) return null;
+    // Map gate codes onto the idle rejection vocabulary.
+    if (ev.code === 'year_mismatch') return { accept: false, reason: 'year-mismatch' };
+    if (ev.code === 'season_mismatch' || ev.code === 'episode_mismatch' || ev.code === 'season_pack_mismatch') {
+      return { accept: false, reason: 'wrong-episode' };
+    }
+    if (ev.code === 'altered_content') return { accept: false, reason: 'altered-content' };
+    return { accept: false, reason: 'title-mismatch' };
   }
 
   /** Quiet-appliance gate — shared implementation (one quiet notion). */

@@ -22,6 +22,7 @@
  * requests already carry canonical titles and skip it entirely.
  */
 import { getMedia } from '../metadata/cinemeta.js';
+import { knownAliasesFor } from './known-aliases.js';
 
 export const IDENTITY_TIERS = Object.freeze({
   STRONG: 'strong',
@@ -138,16 +139,32 @@ export function lookupCorpusByTitle(cache, {
 /**
  * Resolve the wanted title/year for a request. Prefers caller-supplied
  * canonical identity (zero calls); otherwise one cached Cinemeta lookup.
- * Returns { title, year } with year possibly null.
+ * Returns { title, year, aliases, source } with year possibly null and
+ * aliases possibly empty. Aliases are accepted alternate/original/
+ * localized titles — explicit match evidence, never fuzzy inference.
+ * The alias set unions (caller-supplied, upstream metadata, curated
+ * known-alias table), deduplicated and bounded.
  */
 export async function resolveWantedIdentity({
   mediaId, mediaType = 'movie', mediaTitle = null, canonicalYear = null, getMediaFn = null,
+  aliases: callerAliases = null,
 } = {}) {
+  const aliasList = (...vs) => {
+    const out = [];
+    for (const v of vs) {
+      if (!Array.isArray(v)) continue;
+      for (const a of v) {
+        if (typeof a === 'string' && a.trim() && !out.includes(a.trim())) out.push(a.trim());
+      }
+    }
+    return out.slice(0, 12);
+  };
+  const curated = knownAliasesFor(mediaId);
   if (mediaTitle && String(mediaTitle).trim()) {
     const year = Number.isSafeInteger(canonicalYear) ? canonicalYear : null;
-    return { title: String(mediaTitle).trim(), year, source: 'caller' };
+    return { title: String(mediaTitle).trim(), year, aliases: aliasList(callerAliases, curated), source: 'caller' };
   }
-  if (!mediaId) return { title: null, year: null, source: 'none' };
+  if (!mediaId) return { title: null, year: null, aliases: [], source: 'none' };
   const cacheKey = `${mediaType}:${mediaId}`;
   const hit = titleCache.get(cacheKey);
   if (hit && hit.expiresAt > Date.now()) return hit.value;
@@ -163,7 +180,7 @@ export async function resolveWantedIdentity({
       const m = rawYear.match(/(\d{4})/);
       if (m) year = parseInt(m[1], 10);
     }
-    const value = { title, year, source: 'cinemeta' };
+    const value = { title, year, aliases: aliasList(meta?.aliases, callerAliases, curated), source: 'cinemeta' };
     titleCache.set(cacheKey, { value, expiresAt: Date.now() + TITLE_CACHE_TTL_MS });
     if (titleCache.size > 5000) {
       const first = titleCache.keys().next().value;
@@ -171,7 +188,7 @@ export async function resolveWantedIdentity({
     }
     return value;
   } catch {
-    return { title: null, year: null, source: 'failed' };
+    return { title: null, year: null, aliases: [], source: 'failed' };
   }
 }
 

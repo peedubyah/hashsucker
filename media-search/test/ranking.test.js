@@ -1203,7 +1203,7 @@ test('classifyIdentityTier: explicit media association match is Verified', () =>
     sources: [{ origin: 'corpus', evidence: [], confidence: 0.9 }],
     mediaAssociations: [{ mediaId: 'tt0364845', confidence: 0.95 }],
   };
-  const result = classifyIdentityTier(hit, { season: 1, episode: 1 }, 'tt0364845');
+  const result = classifyIdentityTier(hit, { season: 1, episode: 1, mediaTitle: 'NCIS' }, 'tt0364845');
   assert.equal(result.IdentityTier, 'Verified');
   assert.ok(result.IdentityConfidence >= 0.9);
   assert.ok(result.IdentityEvidence.includes('media-association-match'));
@@ -1344,7 +1344,11 @@ test('classifyIdentityTier: season/episode match boosts confidence', () => {
   assert.ok(result.IdentityEvidence.includes('season-episode-match'));
 });
 
-test('classifyIdentityTier: wrong season reduces confidence', () => {
+test('classifyIdentityTier: wrong season rejects despite association', () => {
+  // Trust contract: historical association supports current identity
+  // evidence but can never substitute for contradictory coordinates.
+  // An associated row carrying the wrong season for an exact-episode
+  // query is not this episode — Rejected, not Verified-at-lower-score.
   const hit = {
     hash: HASH1,
     filename: 'NCIS.S02E01.mkv',
@@ -1353,9 +1357,8 @@ test('classifyIdentityTier: wrong season reduces confidence', () => {
     mediaAssociations: [{ mediaId: 'tt0364845', confidence: 0.95 }],
   };
   const result = classifyIdentityTier(hit, { season: 1, episode: 1 }, 'tt0364845');
-  assert.equal(result.IdentityTier, 'Verified');
-  assert.ok(result.IdentityConfidence < 0.9);
-  assert.ok(result.IdentityEvidence.includes('wrong-season'));
+  assert.equal(result.IdentityTier, 'Rejected');
+  assert.ok(result.IdentityEvidence.includes('coordinate-contradiction'));
 });
 
 test('evaluateIdentityTiers: returns array of evaluations', () => {

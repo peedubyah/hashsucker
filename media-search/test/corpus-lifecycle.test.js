@@ -226,19 +226,26 @@ test('corpusUpdateIntervalMs defaults and clamps', async () => {
   assert.equal(corpusUpdateIntervalMs({ CORPUS_UPDATE_INTERVAL_HOURS: '0.1' }), 6 * 60 * 60 * 1000);
 });
 
-test('backfill records eligible outcomes only', async () => {
+test('backfill records current-evidence outcomes only', async () => {
   const cache = createDiscoveryCache();
   try {
     const n = backfillRequestMediaAssociations(cache, { mediaId: 'tt1' }, [
-      { infoHash: REC_A.hash, fileIndex: null, rank: 1, identity: { eligible: true, confidence: 0.8, state: 'probable' } },
-      { infoHash: REC_B.hash, fileIndex: null, rank: 2, identity: { eligible: false, confidence: 0.1, state: 'ineligible' } },
+      // Verified: current identity evidence → persisted (confidence capped).
+      { infoHash: REC_A.hash, fileIndex: null, rank: 1, identity: { eligible: true, tier: 'Verified', confidence: 0.8, state: 'probable' } },
+      // Ineligible: never persisted.
+      { infoHash: REC_B.hash, fileIndex: null, rank: 2, identity: { eligible: false, tier: 'Ineligible', confidence: 0.1, state: 'ineligible' } },
+      // Eligible but no current identity evidence (TextOnly): not trusted.
+      { infoHash: REC_A.hash, fileIndex: 7, rank: 3, identity: { eligible: true, tier: 'TextOnly', confidence: 0.2, state: 'unresolved' } },
       null,
     ], 99);
     assert.equal(n, 1);
     const rows = cache.getMediaAssociations(REC_A.hash, null);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].mediaId, 'tt1');
+    assert.ok(rows[0].confidence <= 0.6, 'request-ranked confidence capped');
+    assert.ok(String(rows[0].evidence).includes('tier:Verified'), 'gate tier recorded');
     assert.equal(cache.getMediaAssociations(REC_B.hash, null).length, 0);
+    assert.equal(cache.getMediaAssociations(REC_A.hash, 7).length, 0);
   } finally {
     cache.close();
   }

@@ -152,30 +152,35 @@ export async function searchProwlarr({
     const imdbMatch = wantedImdbId && row.imdbId
       ? row.imdbId.toLowerCase() === String(wantedImdbId).toLowerCase()
       : false;
-    // Dual provenance: the row was returned scoped to the requested media
-    // by live discovery (same tier mechanics as every live row) AND it came
-    // from tracker TPB via Prowlarr (diagnostics + future filtering).
-    out.push({
-      ...createReleaseIdentity(row.infoHash, null),
-      filename: row.filename,
-      title: row.filename,
-      year: parsed?.year ?? null,
-      season: parsed?.season ?? null,
-      episode: parsed?.episode ?? null,
-      episodeRange: parsed?.episodeRange ?? null,
-      seasonOnly: parsed?.seasonOnly ?? false,
-      mediaType: parsed?.mediaType ?? type,
-      resolution: parsed?.resolution ?? null,
-      source: parsed?.source ?? null,
-      codec: parsed?.codec ?? null,
-      hdr: parsed?.hdr === true,
-      audio: parsed?.audio ?? null,
-      releaseGroup: parsed?.releaseGroup ?? null,
-      relevance: 0.7,
-      parserConfidence: 0.6,
-      mediaAssociations: [],
-      providerObservations: [],
-      providerEvidence: [],
+  // Dual provenance: the row was returned scoped to the requested media
+  // by live discovery (same tier mechanics as every live row) AND it came
+  // from tracker TPB via Prowlarr (diagnostics + future filtering).
+  // The tracker's claimed IMDb ID rides along as a source claim requiring
+  // validation (never authoritative identity): identity tiers consume it
+  // as strengthening/capping evidence only.
+  const claimedImdb = row.imdbId || null;
+  out.push({
+    ...createReleaseIdentity(row.infoHash, null),
+    filename: row.filename,
+    title: row.filename,
+    year: parsed?.year ?? null,
+    season: parsed?.season ?? null,
+    episode: parsed?.episode ?? null,
+    episodeRange: parsed?.episodeRange ?? null,
+    seasonOnly: parsed?.seasonOnly ?? false,
+    mediaType: parsed?.mediaType ?? type,
+    resolution: parsed?.resolution ?? null,
+    source: parsed?.source ?? null,
+    codec: parsed?.codec ?? null,
+    hdr: parsed?.hdr === true,
+    audio: parsed?.audio ?? null,
+    releaseGroup: parsed?.releaseGroup ?? null,
+    relevance: 0.7,
+    parserConfidence: 0.6,
+    mediaAssociations: [],
+    providerObservations: [],
+    providerEvidence: [],
+    ...(claimedImdb ? { sourceIds: { imdbId: claimedImdb } } : {}),
       sources: [
         { origin: 'live', evidence: ['prowlarr-tracker-source'], confidence: 0.7 },
         {
