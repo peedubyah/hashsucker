@@ -76,8 +76,11 @@ export function refreshKey({ sectionId, scanPath, collection }) {
   const sid = safeString(sectionId);
   const path = safeString(scanPath);
   const col = safeString(collection);
-  if (!sid || !path) return null;
-  return `${col || '?'}::${sid}::${path}`;
+  if (!sid) return null;
+  if (path) return `${col || '?'}::${sid}::${path}`;
+  // Full-section refresh is keyed by section only so every publication in
+  // that section coalesces into one section scan.
+  return `${col || '?'}::${sid}::section`;
 }
 
 /**
@@ -164,6 +167,7 @@ export function createRefreshCoalescer({
       collection: entry.collection,
       mediaId: entry.latest?.mediaId,
       mediaType: entry.latest?.mediaType,
+      fullSection: entry.latest?.fullSection === true,
       coalescedCount: entry.mediaIds?.size || 0,
     };
     if (typeof dispatch !== 'function') {
@@ -186,6 +190,9 @@ export function createRefreshCoalescer({
     clearTimer(entry.timer);
     entry.timer = null;
     account.actual_refresh_sent += 1;
+    if (entry?.latest?.fullSection === true) {
+      account.full_section_refresh += 1;
+    }
     emitAccount();
     const startedAt = now();
     const finalize = (outcome) => {
@@ -228,7 +235,7 @@ export function createRefreshCoalescer({
    *
    * Returns { coalesced: boolean, key, result: Promise<result> }.
    */
-  function schedule({ sectionId, scanPath, collection, mediaId, mediaType }) {
+  function schedule({ sectionId, scanPath, collection, mediaId, mediaType, fullSection = false }) {
     account.refresh_requested += 1;
     emitAccount();
 
@@ -270,7 +277,7 @@ export function createRefreshCoalescer({
       if (bucket) {
         account.fan_out_bucket_merged += 1;
         emitAccount();
-        bucket.latest = { mediaId: mediaId || bucket.latest?.mediaId, mediaType: mediaType || bucket.latest?.mediaType };
+        bucket.latest = { mediaId: mediaId || bucket.latest?.mediaId, mediaType: mediaType || bucket.latest?.mediaType, fullSection: fullSection || bucket.latest?.fullSection === true };
         if (mediaId) bucket.mediaIds.add(mediaId);
         bucket.callCount += 1;
         return {
@@ -284,7 +291,7 @@ export function createRefreshCoalescer({
         sectionId,
         scanPath,
         collection,
-        latest: { mediaId, mediaType },
+        latest: { mediaId, mediaType, fullSection },
         mediaIds: new Set(mediaId ? [mediaId] : []),
         resolvers: [],
         timer: null,
@@ -302,7 +309,7 @@ export function createRefreshCoalescer({
     if (existing) {
       account.refresh_coalesced += 1;
       emitAccount();
-      existing.latest = { mediaId: mediaId || existing.latest?.mediaId, mediaType: mediaType || existing.latest?.mediaType };
+      existing.latest = { mediaId: mediaId || existing.latest?.mediaId, mediaType: mediaType || existing.latest?.mediaType, fullSection: fullSection || existing.latest?.fullSection === true };
       if (mediaId) existing.mediaIds.add(mediaId);
       return {
         coalesced: true,
@@ -316,7 +323,7 @@ export function createRefreshCoalescer({
       sectionId,
       scanPath,
       collection,
-      latest: { mediaId, mediaType },
+      latest: { mediaId, mediaType, fullSection },
       mediaIds: new Set(mediaId ? [mediaId] : []),
       resolvers: [],
       timer: null,
@@ -465,6 +472,9 @@ export function createRefreshCoalescer({
       coalescedCount: bucket.callCount ?? (bucket.mediaIds?.size || 0),
     };
     account.actual_refresh_sent += 1;
+    if (entry?.latest?.fullSection === true) {
+      account.full_section_refresh += 1;
+    }
     emitAccount();
     const result = {
       ok: false,

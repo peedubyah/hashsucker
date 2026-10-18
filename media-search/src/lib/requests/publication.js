@@ -340,6 +340,7 @@ async function notifyPlexForPublication({ vfsEntry, mediaType, mediaId, season =
     mediaId,
     mediaType,
     canonicalPath: vfsEntry.canonicalPath,
+    fullSection: true,
   }).then((result) => {
     if (result.notified) {
       console.log(`[Plex] Notified via ${result.method}: ${mediaId}`);

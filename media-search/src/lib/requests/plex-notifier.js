@@ -43,7 +43,7 @@ export function isPlexEnabled() {
  * targeted path. The caller MUST surface the error rather than
  * falling back to a full-section scan.
  */
-export function planPlexRefresh({ mediaType, canonicalPath }) {
+export function planPlexRefresh({ mediaType, canonicalPath, fullSection = false }) {
   if (!isPlexEnabled()) {
     return { ok: false, error: 'plex-disabled' };
   }
@@ -59,8 +59,11 @@ export function planPlexRefresh({ mediaType, canonicalPath }) {
     || segments.length < 3) {
     return { ok: false, error: 'invalid-canonical-path' };
   }
+  if (fullSection) {
+    return { ok: true, sectionId, scanPath: null, collection, fullSection: true };
+  }
   const scanPath = path.posix.join(root, ...segments.slice(1, -1));
-  return { ok: true, sectionId, scanPath, collection };
+  return { ok: true, sectionId, scanPath, collection, fullSection: false };
 }
 
 // ── Coalescer wiring ────────────────────────────────────────────────────────
@@ -110,18 +113,27 @@ export function getPlexRefreshAccount() {
 
 // ── Dispatcher ──────────────────────────────────────────────────────────────
 
-async function performPlexRefresh({ sectionId, scanPath, collection, mediaId, mediaType }) {
+async function performPlexRefresh({ sectionId, scanPath, collection, mediaId, mediaType, fullSection = false }) {
   if (!isPlexEnabled()) {
     return { ok: false, error: 'plex-disabled' };
   }
-  if (!sectionId || !scanPath) {
-    // Defensive: the coalescer should never call us without a key,
-    // but if it does, refuse rather than fall back to full-section.
-    return { ok: false, error: 'missing-section-or-path' };
+  if (!sectionId) {
+    return { ok: false, error: 'missing-section' };
+  }
+  if (!fullSection && !scanPath) {
+    // Defensive: a targeted refresh still needs a path. Full-section mode
+    // is the only pathless form and is explicitly requested.
+    return { ok: false, error: 'missing-scan-path' };
   }
   const baseUrl = process.env.PLEX_URL.replace(/\/$/, '');
-  const url = `${baseUrl}/library/sections/${sectionId}/refresh?path=${encodeURIComponent(scanPath)}`;
-  console.log(`[Plex] partial-refresh dispatch section=${sectionId} path=${scanPath} media=${mediaId || '?'} type=${mediaType || '?'}`);
+  const url = fullSection || !scanPath
+    ? `${baseUrl}/library/sections/${sectionId}/refresh`
+    : `${baseUrl}/library/sections/${sectionId}/refresh?path=${encodeURIComponent(scanPath)}`;
+  if (fullSection || !scanPath) {
+    console.log(`[Plex] full-section-refresh dispatch section=${sectionId} media=${mediaId || '?'} type=${mediaType || '?'}`);
+  } else {
+    console.log(`[Plex] partial-refresh dispatch section=${sectionId} path=${scanPath} media=${mediaId || '?'} type=${mediaType || '?'}`);
+  }
   try {
     const response = await fetch(url, {
       method: 'GET',
@@ -150,12 +162,12 @@ async function performPlexRefresh({ sectionId, scanPath, collection, mediaId, me
  * PLAYBACK paths (WebDAV / Part / FUSE / direct play / transcode) MUST
  * NOT call this. Refresh is publication-driven only.
  */
-export async function notifyPlex({ mediaId, mediaType, canonicalPath }) {
+export async function notifyPlex({ mediaId, mediaType, canonicalPath, fullSection = false }) {
   if (!isPlexEnabled()) {
     return { notified: false, method: null, error: null };
   }
 
-  const plan = planPlexRefresh({ mediaType, canonicalPath });
+  const plan = planPlexRefresh({ mediaType, canonicalPath, fullSection });
   if (!plan.ok) {
     // Refuse to silently escalate. Surface the error so the operator
     // can decide whether to request a full-section scan explicitly.
@@ -170,6 +182,7 @@ export async function notifyPlex({ mediaId, mediaType, canonicalPath }) {
     collection: plan.collection,
     mediaId,
     mediaType,
+    fullSection: plan.fullSection === true || fullSection === true,
   });
   const settled = await result;
   if (coalesced) {
