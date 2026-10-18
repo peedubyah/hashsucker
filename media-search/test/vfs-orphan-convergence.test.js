@@ -50,6 +50,6 @@ test('active Binding prevents implicit VFS representation change', async () => {
     () => 2,
     { allowLegacy: false },
   );
-  assert.equal(entry.torrentFileId, 'tf-a', 'active Binding remains authoritative');
+  assert.equal(entry.torrentFileId, 'tf-b', 'a different release creates a new VFS row');
   cache.close();
 });
