@@ -1,0 +1,8 @@
+# Generated research artifacts (not source-controlled)
+*.mkv
+*.mp4
+*.pcm
+*.bin
+xcorr
+corpus/
+realcache/
