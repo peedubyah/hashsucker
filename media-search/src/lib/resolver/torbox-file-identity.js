@@ -30,7 +30,6 @@
 
 import { PROVIDER_CAPABILITIES } from '../providers/capabilities.js';
 import { ProviderOperationError } from '../providers/errors.js';
-import { getServiceability } from '../vfs/byte-health.js';
 
 const INVALID_INPUT = 'INVALID_INPUT';
 const INVENTORY_UNAVAILABLE = 'INVENTORY_UNAVAILABLE';
@@ -115,41 +114,23 @@ export async function ensureTorBoxFileIdentity({
       && typeof controlPlaneStore.listProviderFiles === 'function') {
     try {
       const snapshot = controlPlaneStore.getProviderInventorySnapshot(placement.id);
-      if (snapshot?.authoritative && snapshot?.complete) {
-                const matches = controlPlaneStore.listProviderFiles(placement.id)
+      if (snapshot?.authoritative && snapshot?.complete
+          && Number.isSafeInteger(snapshot.expiresAt) && snapshot.expiresAt > now() + 10_000) {
+        const matches = controlPlaneStore.listProviderFiles(placement.id)
           .filter((f) => f?.present && f?.mappingState === 'mapped'
             && f?.torrentFileId && f?.size === selectedFileSize);
         if (matches.length === 1) {
           const file = matches[0];
-          const snapshotFresh = Number.isSafeInteger(snapshot.expiresAt)
-            && snapshot.expiresAt > now() + 10_000;
-          const health = getServiceability(file.torrentFileId);
-          const refs = (typeof controlPlaneStore.listProviderRefsForTorrentFile === 'function')
-            ? (controlPlaneStore.listProviderRefsForTorrentFile(file.torrentFileId) || [])
-            : [];
-          const presentRefs = refs.filter((r) => r.present);
-          const routeUnique = presentRefs.length === 1
-            && presentRefs[0].placementId === placement.id;
-          const byteHealthPositive = health.state === 'serviceable'
-            && (health.provider == null || health.provider === 'torbox')
-            && routeUnique;
-          // Fast path: a fresh authoritative snapshot, or an expired one
-          // backed by a recent exact-TF byte proof, is enough to avoid a
-          // synchronous mylist. The binding layer still requires the
-          // inventory snapshot to be extended (materialize) before
-          // activation.
-                              if (snapshotFresh || byteHealthPositive) {
-            return {
-              placementId: placement.id,
-              providerFileId: file.providerFileId,
-              torrentFileId: file.torrentFileId,
-              size: file.size,
-            };
-          }
+          return {
+            placementId: placement.id,
+            providerFileId: file.providerFileId,
+            torrentFileId: file.torrentFileId,
+            size: file.size,
+          };
         }
       }
-    } catch (e) {
-            // Local read failed; fall through to the provider flow.
+    } catch {
+      // Local read failed; fall through to the provider flow.
     }
   }
   if (placement && skipSizeMatch
@@ -164,8 +145,8 @@ export async function ensureTorBoxFileIdentity({
           return { placementId: placement.id, torrentFiles };
         }
       }
-    } catch (e) {
-            // Local read failed; fall through to the provider flow.
+    } catch {
+      // Local read failed; fall through to the provider flow.
     }
   }
 
