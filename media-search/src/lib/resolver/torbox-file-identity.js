@@ -115,7 +115,7 @@ export async function ensureTorBoxFileIdentity({
     try {
       const snapshot = controlPlaneStore.getProviderInventorySnapshot(placement.id);
       if (snapshot?.authoritative && snapshot?.complete
-          && Number.isSafeInteger(snapshot.expiresAt) && snapshot.expiresAt > now()) {
+          && Number.isSafeInteger(snapshot.expiresAt) && snapshot.expiresAt > now() + 10_000) {
         const matches = controlPlaneStore.listProviderFiles(placement.id)
           .filter((f) => f?.present && f?.mappingState === 'mapped'
             && f?.torrentFileId && f?.size === selectedFileSize);
@@ -139,7 +139,7 @@ export async function ensureTorBoxFileIdentity({
     try {
       const snapshot = controlPlaneStore.getProviderInventorySnapshot(placement.id);
       if (snapshot?.authoritative && snapshot?.complete
-          && Number.isSafeInteger(snapshot.expiresAt) && snapshot.expiresAt > now()) {
+          && Number.isSafeInteger(snapshot.expiresAt) && snapshot.expiresAt > now() + 10_000) {
         const torrentFiles = controlPlaneStore.listTorrentFilesForRelease(normalizedHash);
         if (Array.isArray(torrentFiles) && torrentFiles.length > 0) {
           return { placementId: placement.id, torrentFiles };
