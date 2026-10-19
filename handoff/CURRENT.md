@@ -7,6 +7,32 @@ Read this file, `../AGENTS.override.md` (operating rules), and
 [`../docs/architecture.md`](../docs/architecture.md) (durable model). Do not
 trust old containers or historical HY4 handoffs.
 
+## Live session state (2026-10-19, post-discovery binding tail slice)
+
+- `main` is AHEAD of `github/main` (28 local commits, unpushed). The
+  header line above is stale on that point only; everything else below
+  still describes the live appliance.
+- Production `media-search` RUNS the local build of `1cc5445`
+  ("read one torrent for file inventory"), rebuilt with
+  `docker compose build media-search` + `docker compose up -d --no-deps
+  media-search`. Container healthy. No release/tag/push performed.
+- `HASHSUCKER_PERF_TRACE` is OFF in the running container. It is a
+  request-path timing trace added by `f671483`; set it to `1` in `.env`
+  (compose exposes it) to re-enable it. OFF is the default and must stay
+  the default in production.
+- Scratch from that slice is removed: no perf worktree, no perf-before
+  image, no scratch DB copies, no `/var/tmp/patrick/hashsucker/perf-*`
+  dirs. Evidence kept in `artifacts/perf-binding-tail/`.
+- Library state after the measurement: the 10 benchmarked movies are
+  published, bound, and byte-verified; two fixtures that a corpus-path
+  probe had re-routed (tt0076759, tt0102926) were restored to their
+  original bindings. Details in `docs/BUILD-LOG.md` 2026-10-19.
+- Known baseline test failures (pre-existing, not caused by this slice):
+  `media-request.test.js:1212` (reuse-episode `< 5000 ms` assertion;
+  load-sensitive, passes in isolation — its wall time contains one
+  UNBOUNDED Cinemeta fetch) and `vfs-collection-resilience.test.js:131`
+  (C1/C2/C3, deterministic). The Cinemeta bound is the next earned slice.
+
 ## Architecture boundaries (frozen)
 
 Non-authoritative session-local summary. Canonical:

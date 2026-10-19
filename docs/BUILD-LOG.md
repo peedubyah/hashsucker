@@ -1748,3 +1748,172 @@ intentional short-film content elsewhere in the corpus), and the
 year gate already prevents tt12451788 from binding Dune-2021 releases
 under the hardened identity contract (40 year_mismatch rows, all
 quarantined as inert). Flagged explicitly; stopped per instruction.
+
+## 2026-10-19 — post-discovery binding tail: the account-wide TorBox inventory download — CLOSED
+
+Slice: explain and reduce the ~5.9 s post-availability → Binding tail on
+the cold request path (worst fixture tt0071562), without weakening any
+identity, serviceability, or Binding rule.
+
+### WHAT CHANGED
+
+`1cc5445 perf(torbox): read one torrent for file inventory, not the whole account`
+
+The TorBox file-inventory capability read the WHOLE account inventory
+(`GET /torrents/mylist`) to learn ONE torrent's file list. It now reads
+only the requested torrent (`GET /torrents/mylist?id=<torrentId>`), unless
+the request already memoized the account snapshot — then it reuses those
+bytes and still makes exactly one provider call per request scope.
+
+Supporting (measurement only, no behavior change): `f671483` adds a
+gated request-path trace (`HASHSUCKER_PERF_TRACE=1`, off by default) and
+`compose.yaml` exposes the flag to the container. `7497770` adds the
+negative control that pins why the create-first verify keeps the
+account-wide read.
+
+### WHAT WAS PROVEN
+
+**1. The slow path, substage by substage (live production path, tt0071562,
+cold request, stale provider inventory):**
+
+| offset | substage | ms |
+|---|---|---|
+| 0 | request.start (live pipeline, 39 corpus candidates) | |
+| 0→298 | corpus/title resolution | 298 |
+| 298→541 | **availability** (4 parallel `checkcached` batches: 288/347/464/521) | 532 |
+| 541→568 | request persist | 26 |
+| 568→6374 | **selection → ensureTorBoxFileIdentity → TorBox `mylist`** | **5806** |
+| | ↳ of which the account-inventory HTTP fetch | **5559** (421 torrents, 5.2 MB) |
+| | ↳ inventory persist (local) | 3 |
+| 6374 | serviceability (byte-health evidence, no provider work) | 0 |
+| 6375→6581 | VFS materialize (Cinemeta 198) + **Binding commit** (`activateBinding` 1 ms) | 205 |
+| 6621 | route done | 6622 |
+
+No bucket ≥100 ms was left unexplained. The same shape on tt0076759:
+8696 ms total, `mylist` 5700 ms. The same request with a FRESH inventory
+snapshot: 337 ms total, zero provider calls — proving the cost is the
+account download, not the fact being established.
+
+**2. Slow vs normal path diff.** The discriminator is not the fixture, it
+is the provider-inventory freshness plus the binding path taken:
+- PATH B (movie, no exact size — e.g. tt0071562): the local shortcut
+  requires a FRESH snapshot → a stale snapshot always forces the remote
+  inventory read.
+- PATH A (exact size — e.g. tt0102926): the local shortcut can also be
+  satisfied by positive byte-health → no remote read at all.
+Call graph identical otherwise; only the account download differs.
+
+**3. Eventual-winner sufficiency.** For the tt0071562 request the winner
+(4da29c17…, `tf_6d24755b`) was identity-sufficient at the availability
+boundary (541 ms): the exact route was already durable
+(`pl_3e7bd6fc`/provider_file 3, size 85975263992) and serviceability was
+already known (`serviceable`, byte-health). The Binding became legal at
+6580 ms — **6039 ms after it was already sufficient**, all of it inside
+one account-wide download.
+
+**4. Intervention (not inference).** `mylist?id=<torrentId>` was probed
+against the live account and proven equivalent:
+- cached torrent (11 files): the targeted entry is byte-identical to the
+  same torrent inside the account list (9552 bytes each, all normalized
+  fields equal);
+- non-cached torrent: byte-identical too (1050 bytes each, `files: null`);
+- absent torrent: HTTP 404 `ITEM_NOT_FOUND` — the same absence the
+  account list proves by omission.
+Latency: 118–338 ms targeted vs 501–5458 ms account-wide (5.2 MB).
+
+**5. 10-fixture E2E, state-matched (same durable placement set on both
+builds; old image = `f671483`, new image = `1cc5445`; live pipeline,
+liveOnly):**
+
+| metric (ms) | before | after |
+|---|---|---|
+| request→Binding min/p50/p95/max | 2433 / 4728 / 6386 / 6386 | **584 / 962 / 1168 / 1168** |
+| request→Part min/p50/p95/max | 2473 / 4768 / 6429 / 6429 | **623 / 1002 / 1206 / 1206** |
+| request→206 min/p50/p95/max | 2523 / 4817 / 6478 / 6478 | **658 / 1052 / 1532 / 1532** |
+
+Every fixture switched from an account-wide `mylist` (1074–5640 ms) to a
+targeted `mylist-torrent` (149–330 ms). No fixture exceeds 1.2 s; the
+previous >500 ms outliers are gone. Raw results:
+`artifacts/perf-binding-tail/`.
+
+### CORRECTNESS
+
+- Same release AND same TorrentFile for all 10 fixtures before/after
+  (`same-release` / `same-tf` on every row).
+- Per fixture: binding.info_hash == torrent_files.info_hash,
+  provider_files.size == torrent_files.size, provider_files.torrent_file_id
+  == binding.torrent_file_id → 10/10 OK.
+- Plex Part present for 10/10 with the exact binding size; `Range`
+  probe returned 206/65536 B for 10/10.
+- .strm present for 10/10 at the canonical presentation paths; no
+  duplicate/stray .strm left behind.
+- Provider file ids stay opaque; `corpusFileIndex` stays null; absence
+  still fails closed (`not-found`); a malformed file list still fails
+  closed (`invalid-response`); the account snapshot is still reused when
+  the request already has one (one provider call per request scope).
+- Focused provider/selection/binding suite: 237/237.
+- Full suite: 3400 tests, 3395 pass, 2 fail, 3 skipped (exit 1). Both
+  failures are the PRE-EXISTING baseline ones, reproduced before any
+  change of this slice: `media-request.test.js:1212` (reuse-episode
+  `< 5000 ms` assertion, load-sensitive; passes in isolation) and
+  `vfs-collection-resilience.test.js:131` (C1/C2/C3, deterministic).
+
+### WHAT REMAINS UNPROVEN
+
+- The FIRST-acquisition path (a release TorBox has cached but HashSucker
+  has not placed yet) still reads the account-wide list: the create-first
+  verify must prove the created placement is unambiguous, and the
+  provider's only hash index is the account list. Proven floor for that
+  path (the targeted read cannot observe a second account resource with
+  the same hash — negative control in `7497770`), and it is a once-per-
+  release cost, not a steady-state binding cost. Measured 2/10 fixtures
+  hit it in the first A/B pass (createtorrent 464/601 ms + account
+  `mylist` 6083/3724 ms).
+- Whether the 5-minute inventory TTL should be longer or event-driven
+  was NOT changed here; the read is now cheap enough that the TTL is no
+  longer the binding-latency driver.
+
+### WHAT WAS LEARNED
+
+- The tail was never "the provider is slow": it was "we downloaded the
+  provider's whole account to read one torrent". Payload size, not
+  provider latency, was the cost.
+- A latency tail must be attributed per OPERATION, not per STAGE. The
+  post-availability bucket looked like one thing and contained one
+  5.5 s download that the stage boundaries hid.
+- Freshness gates are per-STATE, not per-fixture: the same fixture is
+  337 ms with a fresh inventory and 6.6 s with a stale one. Any
+  "this fixture is slow" claim must be checked against the TTL state.
+
+### DEFECTS FOUND (recorded, not fixed in this slice)
+
+- `media-search/src/lib/metadata/cinemeta.js` `getJson()` has NO timeout
+  and no AbortSignal. The Cinemeta title lookup sits on the publication
+  path (VFS presentation identity + .strm title). Observed live: a
+  `fetch failed` after 534 ms made tt0071562's .strm land on a
+  filename-derived path instead of the canonical title path, and it is
+  the cause of the load-sensitive `media-request.test.js:1212` failure
+  (the reuse path's wall time is that one unbounded call). Unbounded
+  external latency on the request path is a real defect; fixing it is the
+  next slice, not a footnote here.
+
+### PRODUCTION STATE DELTA (disclosed)
+
+Measurement churn, all reverted or explained:
+- tt0076759 was re-selected once to a different ANH 1977 encode by a
+  corpus-path probe; the final live run restored the original binding
+  (`7999eb3a…` / `tf_f6525590…` / `pl_82b867bf…` / provider_file 0).
+- tt0102926 acquired an RD placement for the same release and was bound
+  to it by a corpus-path probe; restored to the original TorBox route
+  (`tf_3410bb3d…` / `pl_31f3f13e…` / provider_file 0).
+- No Release, TorrentFile, ProviderPlacement, ProviderFile, Binding,
+  VFS row, .strm, or Plex Part was left inconsistent (checked 10/10).
+- `HASHSUCKER_PERF_TRACE` was enabled only for the measurement window
+  and is OFF in the running container again.
+
+### NEXT SMALLEST EARNED SLICE
+
+Bound the Cinemeta lookup (timeout + fail-closed) so an external
+metadata outage cannot move a presentation path or hold a request open;
+that also removes the load-sensitive failure in
+`media-request.test.js:1212`.

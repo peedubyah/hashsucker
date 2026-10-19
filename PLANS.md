@@ -14,6 +14,28 @@ rotation against deployed `57bbfe1`; immediate replay/restart churn is bounded
 by the narrow suppression. Long-run reproduction remains observational debt,
 not a current blocker.
 
+Completed product slice: **post-discovery binding tail** — **CLOSED**
+(`1cc5445`, evidence in `docs/BUILD-LOG.md` 2026-10-19). The cold-request
+tail after availability was ONE operation, not a stage: the TorBox
+file-inventory capability downloaded the provider's whole account (421
+torrents, 5.2 MB, 1.1–5.6 s) to read one torrent's file list. It now
+reads only the requested torrent (`mylist?id=`, proven byte-identical
+against the live account for cached, non-cached, and absent torrents),
+reusing the account snapshot when the request already has one. State-matched
+10-fixture E2E: request→Binding 2433/4728/6386/6386 ms → 584/962/1168/1168
+ms, request→Part 2473/4768/6429/6429 → 623/1002/1206/1206, request→206
+2523/4817/6478/6478 → 658/1052/1532/1532; same release and same
+TorrentFile on every fixture. Remaining known cost: the create-first
+verify still needs the account-wide read (the provider's only hash index —
+a proven floor, once per release), pinned by a negative control.
+
+Next earned slice: **bound the Cinemeta metadata lookup**. `getJson()` in
+`media-search/src/lib/metadata/cinemeta.js` has no timeout and no abort
+signal; the call sits on the publication path and a live `fetch failed`
+moved a `.strm` to a filename-derived path. It is also the cause of the
+load-sensitive `media-request.test.js:1212` failure. Unbounded external
+latency on the request path is a defect, not a footnote.
+
 Completed product slice: **exact durable-truth republication** — **CLOSED**.
 E01 VFS publication was genuinely removed, then recreated through
 `POST /api/library/republish` with the same Binding, TorrentFile, placement,
