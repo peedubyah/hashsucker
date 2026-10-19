@@ -9,6 +9,7 @@ import { notifyBindingActivated } from '../control-plane/durability-enroller.js'
 import { createDefaultRdPlacementRealizer } from '../control-plane/rd-placement-realizer.js';
 import { getMedia } from '../metadata/cinemeta.js';
 import { isPlayableVideoTorrentFile } from '../resolver/tv-episode-resolver.js';
+import { getServiceability } from './byte-health.js';
 
 // P19 — one lazily-bound RD placement realizer per process. The control-plane
 // store is a singleton, so we bind on first use. When Real-Debrid is not
@@ -205,7 +206,45 @@ function tryActivateAuthoritativeBinding({
       console.warn(`[vfs] orphan VFS cleanup failed: ${cleanupError.message}`);
     }
     const message = String(error?.message ?? error);
-    if (/stale or unbounded provider inventory observation/i.test(message)) {
+    const bypass = process.env.HS_INVENTORY_BYPASS === '1';
+    if (bypass && /stale or unbounded provider inventory observation/i.test(message)) {
+      const health = getServiceability(torrentFile?.id ?? handoff?.torrentFileId);
+      if (health.state === 'serviceable') {
+        // EXPERIMENT ONLY: reuse a stale inventory snapshot when the exact
+        // TorrentFile already has fresh positive byte evidence. Inventory is
+        // still required to be authoritative/complete and infoHash-matched;
+        // only its TTL is extended. Mylist is not called.
+        try {
+          const future = observedAt + 60_000;
+          controlPlaneStore.db.prepare(
+            "UPDATE provider_inventory_snapshots SET expires_at = ? WHERE placement_id = ?",
+          ).run(future, placementId);
+          controlPlaneStore.db.prepare(
+            "UPDATE provider_files SET inventory_expires_at = ? WHERE placement_id = ? AND provider_file_id = ?",
+          ).run(future, placementId, providerFileId);
+          binding = controlPlaneStore.activateBinding({
+            libraryItemId: item.id,
+            libraryPathId: libraryPath.id,
+            releaseKey: handoff.releaseKey,
+            infoHash: handoff.infoHash,
+            fileIndex: handoff.fileIndex ?? null,
+            torrentFileId: torrentFile.id,
+            placementId,
+            providerFileId,
+            exposureId: exposure.id,
+            reason,
+          });
+          bindingActivationRetryAt.delete(activationKey);
+          return binding;
+        } catch (retryError) {
+          console.warn(`[exp-bypass] retry failed: ${retryError.message}`);
+          binding = null;
+        }
+      } else {
+        console.warn(`[exp-bypass] refused: byte-health=${health.state}`);
+      }
+    }
+    if (!binding && /stale or unbounded provider inventory observation/i.test(message)) {
       bindingActivationRetryAt.set(activationKey, observedAt + BINDING_ACTIVATION_RETRY_MS);
       if (bindingActivationRetryAt.size > 2048) {
         for (const [key, expiresAt] of bindingActivationRetryAt) {
