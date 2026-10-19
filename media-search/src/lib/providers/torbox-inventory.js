@@ -4,7 +4,7 @@ import { createPlacementObservation, createProviderFileInventory } from './resou
 
 const API_BASE = 'https://api.torbox.app/v1/api';
 const REQUEST_TIMEOUT_MS = 5_000;
-const DEFAULT_OBSERVATION_TTL_MS = 60_000;
+const DEFAULT_OBSERVATION_TTL_MS = 300_000;
 
 /**
  * TorBox account-inventory adapter backed by the repository-verified `mylist`
