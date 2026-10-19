@@ -327,6 +327,36 @@ test('TorBox ensure preserves duplicate-hash conflict through verify', async () 
   store.close();
 });
 
+test('TorBox targeted read cannot see a second account resource with the same hash', async () => {
+  // The create-first verify must keep using the account-wide list: the
+  // provider's only hash index. A targeted read by resource id proves one
+  // torrent exists, but it CANNOT observe that the account holds a second
+  // resource with the same infoHash — so it must not be used to decide
+  // that a placement is unambiguous. This is the negative control for
+  // replacing the verify with a targeted read.
+  const DUP_HASH = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+  const accountWide = [
+    { id: 61, hash: DUP_HASH, name: 'A.mkv', download_state: 'cached', files: [] },
+    { id: 62, hash: DUP_HASH, name: 'B.mkv', download_state: 'cached', files: [] },
+  ];
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async (url) => mylistAny(url, accountWide),
+  });
+  // A targeted read of resource 61 succeeds and carries no hint of 62.
+  const targeted = await adapter.require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
+    .getFileInventory({ providerResourceId: '61' });
+  assert.equal(targeted.providerResourceId, '61');
+  assert.equal(targeted.authoritative, true);
+  // The account-wide read is what surfaces the ambiguity.
+  await assert.rejects(
+    () => adapter.require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
+      .lookupPlacement({ infoHash: DUP_HASH }),
+    (error) => error instanceof ProviderOperationError && error.category === 'conflict',
+    'the hash index is the only read that can prove the placement is ambiguous',
+  );
+});
+
 test('TorBox ensure falls back to passive lookup when creation is unavailable', async () => {
   const { ensureTorBoxFileIdentity } = await import('../src/lib/resolver/torbox-file-identity.js');
   const { createControlPlaneStore } = await import('../src/lib/control-plane/store.js');

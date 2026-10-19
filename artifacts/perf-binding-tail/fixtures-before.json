@@ -1,0 +1,1463 @@
+[
+  {
+    "mediaId": "tt0071562",
+    "requestToBindingMs": 4607,
+    "requestToPartMs": 4649,
+    "requestTo206Ms": 4679,
+    "probe": {
+      "status": 206,
+      "bytes": 65536
+    },
+    "selected": "4da29c1712d494db85f2f7c4dc071101da180694",
+    "torrentFileId": "tf_6d24755b-0d5b-4586-a770-4c98466445bc",
+    "providerFileId": "3",
+    "bindingStatus": "movie-cached-single-file",
+    "selectionReason": "movie-cached-single-file bound",
+    "serviceability": {
+      "state": "serviceable",
+      "source": "probe"
+    },
+    "published": true,
+    "partFile": "/mnt/hashsucker-vfs/Movies/The Godfather Part II/The Godfather Part II.mkv",
+    "rid": "r-mvfrj3q4-1h77b5",
+    "stages": [
+      {
+        "rid": "r-mvfrj3q4-1h77b5",
+        "mediaId": "tt0071562",
+        "n": "stage.live_discovery",
+        "t": 1792445096752,
+        "ms": 658,
+        "rawCount": 679,
+        "liveEligibleCount": 679,
+        "sources": [
+          {
+            "id": "torrentio-torbox",
+            "disposition": "queried_success",
+            "rawCount": 178,
+            "parsedCount": 178,
+            "latencyMs": 405,
+            "error": null
+          },
+          {
+            "id": "torrentio-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 126,
+            "parsedCount": 126,
+            "latencyMs": 420,
+            "error": null
+          },
+          {
+            "id": "comet-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 476,
+            "parsedCount": 476,
+            "latencyMs": 583,
+            "error": null
+          },
+          {
+            "id": "comet-torbox",
+            "disposition": "queried_success",
+            "rawCount": 950,
+            "parsedCount": 950,
+            "latencyMs": 626,
+            "error": null
+          },
+          {
+            "id": "prowlarr",
+            "disposition": "skipped_fast_sufficient",
+            "rawCount": 0,
+            "parsedCount": 0,
+            "latencyMs": null,
+            "error": null
+          }
+        ]
+      },
+      {
+        "rid": "r-mvfrj3q4-1h77b5",
+        "mediaId": "tt0071562",
+        "n": "stage.availability",
+        "t": 1792445097245,
+        "ms": 481,
+        "eligibleHashes": 50,
+        "checked": 50,
+        "cached": 16,
+        "uncached": 19,
+        "unknown": 0
+      },
+      {
+        "rid": "r-mvfrj3q4-1h77b5",
+        "mediaId": "tt0071562",
+        "n": "stage.selection",
+        "t": 1792445100597,
+        "ms": 3352,
+        "selected": true,
+        "reason": "movie-cached-single-file bound",
+        "hash": "4da29c1712d494db85f2f7c4dc071101da180694",
+        "torrentFileId": "tf_6d24755b-0d5b-4586-a770-4c98466445bc",
+        "skipped": 0,
+        "serviceability": {
+          "state": "serviceable",
+          "source": "probe"
+        }
+      },
+      {
+        "rid": "r-mvfrj3q4-1h77b5",
+        "mediaId": "tt0071562",
+        "n": "stage.handoff_build",
+        "t": 1792445100605,
+        "ms": 1,
+        "torrentFileId": "tf_6d24755b-0d5b-4586-a770-4c98466445bc",
+        "infoHash": "4da29c1712d494db85f2f7c4dc071101da180694",
+        "bindingStatus": "movie-cached-single-file"
+      }
+    ],
+    "providerHttp": [
+      {
+        "endpoint": "checkcached",
+        "ms": 289,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 300,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 431,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 474,
+        "status": 200
+      },
+      {
+        "endpoint": "mylist",
+        "ms": 3341,
+        "status": 200
+      }
+    ]
+  },
+  {
+    "mediaId": "tt0102926",
+    "requestToBindingMs": 4232,
+    "requestToPartMs": 4270,
+    "requestTo206Ms": 4320,
+    "probe": {
+      "status": 206,
+      "bytes": 65536
+    },
+    "selected": "2fc1245e841c1e1cc4077ee848795ccb5b04450c",
+    "torrentFileId": "tf_3410bb3d-38ab-4bf1-b654-716cf0f448ed",
+    "providerFileId": "0",
+    "bindingStatus": "exact-size",
+    "selectionReason": "exact-size bound",
+    "serviceability": null,
+    "published": false,
+    "partFile": "/mnt/hashsucker-vfs/Movies/The Silence of the Lambs/The Silence of the Lambs.mp4",
+    "rid": "r-mvfrj7bt-0w9530",
+    "stages": [
+      {
+        "rid": "r-mvfrj7bt-0w9530",
+        "mediaId": "tt0102926",
+        "n": "stage.live_discovery",
+        "t": 1792445101393,
+        "ms": 632,
+        "rawCount": 784,
+        "liveEligibleCount": 782,
+        "sources": [
+          {
+            "id": "torrentio-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 105,
+            "parsedCount": 105,
+            "latencyMs": 130,
+            "error": null
+          },
+          {
+            "id": "comet-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 591,
+            "parsedCount": 591,
+            "latencyMs": 443,
+            "error": null
+          },
+          {
+            "id": "comet-torbox",
+            "disposition": "queried_success",
+            "rawCount": 1180,
+            "parsedCount": 1180,
+            "latencyMs": 577,
+            "error": null
+          },
+          {
+            "id": "torrentio-torbox",
+            "disposition": "queried_success",
+            "rawCount": 160,
+            "parsedCount": 160,
+            "latencyMs": 613,
+            "error": null
+          },
+          {
+            "id": "prowlarr",
+            "disposition": "skipped_fast_sufficient",
+            "rawCount": 0,
+            "parsedCount": 0,
+            "latencyMs": null,
+            "error": null
+          }
+        ]
+      },
+      {
+        "rid": "r-mvfrj7bt-0w9530",
+        "mediaId": "tt0102926",
+        "n": "stage.availability",
+        "t": 1792445102016,
+        "ms": 613,
+        "eligibleHashes": 50,
+        "checked": 50,
+        "cached": 9,
+        "uncached": 28,
+        "unknown": 0
+      },
+      {
+        "rid": "r-mvfrj7bt-0w9530",
+        "mediaId": "tt0102926",
+        "n": "stage.selection",
+        "t": 1792445104966,
+        "ms": 2950,
+        "selected": true,
+        "reason": "exact-size bound",
+        "hash": "2fc1245e841c1e1cc4077ee848795ccb5b04450c",
+        "torrentFileId": "tf_3410bb3d-38ab-4bf1-b654-716cf0f448ed",
+        "skipped": 2,
+        "serviceability": {
+          "state": "serviceable",
+          "source": "probe"
+        }
+      },
+      {
+        "rid": "r-mvfrj7bt-0w9530",
+        "mediaId": "tt0102926",
+        "n": "stage.handoff_build",
+        "t": 1792445104973,
+        "ms": 1,
+        "torrentFileId": "tf_3410bb3d-38ab-4bf1-b654-716cf0f448ed",
+        "infoHash": "2fc1245e841c1e1cc4077ee848795ccb5b04450c",
+        "bindingStatus": "exact-size"
+      },
+      {
+        "rid": "r-mvfrj7bt-0w9530",
+        "mediaId": "tt0102926",
+        "n": "binding.activate",
+        "t": 1792445104976,
+        "ms": 0,
+        "infoHash": "2fc1245e841c1e1cc4077ee848795ccb5b04450c",
+        "torrentFileId": "tf_a7c907d9-f925-40f2-bce2-d103c97f86c4",
+        "placementId": "pl_31f3f13e-c275-4866-bb31-fecf8d2a9f75",
+        "providerFileId": "0",
+        "reason": "vfs-movie-idempotent"
+      }
+    ],
+    "providerHttp": [
+      {
+        "endpoint": "checkcached",
+        "ms": 286,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 562,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 586,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 593,
+        "status": 200
+      },
+      {
+        "endpoint": "mylist",
+        "ms": 2943,
+        "status": 200
+      }
+    ]
+  },
+  {
+    "mediaId": "tt0076759",
+    "requestToBindingMs": 6386,
+    "requestToPartMs": 6429,
+    "requestTo206Ms": 6478,
+    "probe": {
+      "status": 206,
+      "bytes": 65536
+    },
+    "selected": "7999eb3ae370f5f22a9c8ac21afd1d1d6d9b7072",
+    "torrentFileId": "tf_f6525590-6625-4b09-a7a9-ab0d24670ae7",
+    "providerFileId": "0",
+    "bindingStatus": "exact-size",
+    "selectionReason": "exact-size bound",
+    "serviceability": {
+      "state": "serviceable",
+      "source": "probe"
+    },
+    "published": true,
+    "partFile": "/mnt/hashsucker-vfs/Movies/Star Wars Episode IV - A New Hope/Star Wars Episode IV - A New Hope.mkv",
+    "rid": "r-mvfrjaob-fby5vj",
+    "stages": [
+      {
+        "rid": "r-mvfrjaob-fby5vj",
+        "mediaId": "tt0076759",
+        "n": "stage.live_discovery",
+        "t": 1792445105487,
+        "ms": 388,
+        "rawCount": 998,
+        "liveEligibleCount": 985,
+        "sources": [
+          {
+            "id": "torrentio-torbox",
+            "disposition": "queried_success",
+            "rawCount": 253,
+            "parsedCount": 253,
+            "latencyMs": 144,
+            "error": null
+          },
+          {
+            "id": "comet-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 682,
+            "parsedCount": 682,
+            "latencyMs": 176,
+            "error": null
+          },
+          {
+            "id": "comet-torbox",
+            "disposition": "queried_success",
+            "rawCount": 1362,
+            "parsedCount": 1362,
+            "latencyMs": 293,
+            "error": null
+          },
+          {
+            "id": "torrentio-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 211,
+            "parsedCount": 211,
+            "latencyMs": 361,
+            "error": null
+          },
+          {
+            "id": "prowlarr",
+            "disposition": "skipped_fast_sufficient",
+            "rawCount": 0,
+            "parsedCount": 0,
+            "latencyMs": null,
+            "error": null
+          }
+        ]
+      },
+      {
+        "rid": "r-mvfrjaob-fby5vj",
+        "mediaId": "tt0076759",
+        "n": "stage.availability",
+        "t": 1792445105736,
+        "ms": 233,
+        "eligibleHashes": 50,
+        "checked": 50,
+        "cached": 17,
+        "uncached": 20,
+        "unknown": 0
+      },
+      {
+        "rid": "r-mvfrjaob-fby5vj",
+        "mediaId": "tt0076759",
+        "n": "stage.selection",
+        "t": 1792445111384,
+        "ms": 5648,
+        "selected": true,
+        "reason": "exact-size bound",
+        "hash": "7999eb3ae370f5f22a9c8ac21afd1d1d6d9b7072",
+        "torrentFileId": "tf_f6525590-6625-4b09-a7a9-ab0d24670ae7",
+        "skipped": 1,
+        "serviceability": {
+          "state": "serviceable",
+          "source": "probe"
+        }
+      },
+      {
+        "rid": "r-mvfrjaob-fby5vj",
+        "mediaId": "tt0076759",
+        "n": "stage.handoff_build",
+        "t": 1792445111391,
+        "ms": 1,
+        "torrentFileId": "tf_f6525590-6625-4b09-a7a9-ab0d24670ae7",
+        "infoHash": "7999eb3ae370f5f22a9c8ac21afd1d1d6d9b7072",
+        "bindingStatus": "exact-size"
+      }
+    ],
+    "providerHttp": [
+      {
+        "endpoint": "checkcached",
+        "ms": 182,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 201,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 210,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 225,
+        "status": 200
+      },
+      {
+        "endpoint": "mylist",
+        "ms": 5640,
+        "status": 200
+      }
+    ]
+  },
+  {
+    "mediaId": "tt0055233",
+    "requestToBindingMs": 5108,
+    "requestToPartMs": 5147,
+    "requestTo206Ms": 5196,
+    "probe": {
+      "status": 206,
+      "bytes": 65536
+    },
+    "selected": "0459af8cd508b6959f9fac1223d7a4454413aca8",
+    "torrentFileId": "tf_8226d1d8-bfca-4cd8-b3eb-d5f562c52fe0",
+    "providerFileId": "1",
+    "bindingStatus": "exact-size",
+    "selectionReason": "exact-size bound",
+    "serviceability": {
+      "state": "serviceable",
+      "source": "probe"
+    },
+    "published": true,
+    "partFile": "/mnt/hashsucker-vfs/Movies/The Human Condition III A Soldier's Prayer/The Human Condition III A Soldier's Prayer.mkv",
+    "rid": "r-mvfrjfor-29xdg9",
+    "stages": [
+      {
+        "rid": "r-mvfrjfor-29xdg9",
+        "mediaId": "tt0055233",
+        "n": "stage.live_discovery",
+        "t": 1792445112226,
+        "ms": 631,
+        "rawCount": 29,
+        "liveEligibleCount": 29,
+        "sources": [
+          {
+            "id": "torrentio-torbox",
+            "disposition": "queried_success",
+            "rawCount": 16,
+            "parsedCount": 16,
+            "latencyMs": 370,
+            "error": null
+          },
+          {
+            "id": "torrentio-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 6,
+            "parsedCount": 6,
+            "latencyMs": 620,
+            "error": null
+          },
+          {
+            "id": "comet-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 14,
+            "parsedCount": 14,
+            "latencyMs": 620,
+            "error": null
+          },
+          {
+            "id": "comet-torbox",
+            "disposition": "queried_success",
+            "rawCount": 26,
+            "parsedCount": 26,
+            "latencyMs": 629,
+            "error": null
+          },
+          {
+            "id": "prowlarr",
+            "disposition": "skipped_fast_sufficient",
+            "rawCount": 0,
+            "parsedCount": 0,
+            "latencyMs": null,
+            "error": null
+          }
+        ]
+      },
+      {
+        "rid": "r-mvfrjfor-29xdg9",
+        "mediaId": "tt0055233",
+        "n": "stage.availability",
+        "t": 1792445112555,
+        "ms": 328,
+        "eligibleHashes": 29,
+        "checked": 29,
+        "cached": 11,
+        "uncached": 10,
+        "unknown": 0
+      },
+      {
+        "rid": "r-mvfrjfor-29xdg9",
+        "mediaId": "tt0055233",
+        "n": "stage.selection",
+        "t": 1792445116651,
+        "ms": 4096,
+        "selected": true,
+        "reason": "exact-size bound",
+        "hash": "0459af8cd508b6959f9fac1223d7a4454413aca8",
+        "torrentFileId": "tf_8226d1d8-bfca-4cd8-b3eb-d5f562c52fe0",
+        "skipped": 0,
+        "serviceability": {
+          "state": "serviceable",
+          "source": "probe"
+        }
+      },
+      {
+        "rid": "r-mvfrjfor-29xdg9",
+        "mediaId": "tt0055233",
+        "n": "stage.handoff_build",
+        "t": 1792445116662,
+        "ms": 1,
+        "torrentFileId": "tf_8226d1d8-bfca-4cd8-b3eb-d5f562c52fe0",
+        "infoHash": "0459af8cd508b6959f9fac1223d7a4454413aca8",
+        "bindingStatus": "exact-size"
+      }
+    ],
+    "providerHttp": [
+      {
+        "endpoint": "checkcached",
+        "ms": 239,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 306,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 316,
+        "status": 200
+      },
+      {
+        "endpoint": "mylist",
+        "ms": 4088,
+        "status": 200
+      }
+    ]
+  },
+  {
+    "mediaId": "tt0056058",
+    "requestToBindingMs": 4728,
+    "requestToPartMs": 4768,
+    "requestTo206Ms": 4817,
+    "probe": {
+      "status": 206,
+      "bytes": 65536
+    },
+    "selected": "d4cacb51d949ca6aa3ccb7b03850989e1de8f218",
+    "torrentFileId": "tf_f2218197-880d-48c4-85df-eb2ee698bc77",
+    "providerFileId": "0",
+    "bindingStatus": "exact-size",
+    "selectionReason": "exact-size bound",
+    "serviceability": null,
+    "published": false,
+    "partFile": "/mnt/hashsucker-vfs/Movies/Harakiri/Harakiri.mkv",
+    "rid": "r-mvfrjjph-n7bd68",
+    "stages": [
+      {
+        "rid": "r-mvfrjjph-n7bd68",
+        "mediaId": "tt0056058",
+        "n": "stage.live_discovery",
+        "t": 1792445117224,
+        "ms": 419,
+        "rawCount": 213,
+        "liveEligibleCount": 213,
+        "sources": [
+          {
+            "id": "torrentio-torbox",
+            "disposition": "queried_success",
+            "rawCount": 32,
+            "parsedCount": 32,
+            "latencyMs": 122,
+            "error": null
+          },
+          {
+            "id": "torrentio-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 23,
+            "parsedCount": 23,
+            "latencyMs": 366,
+            "error": null
+          },
+          {
+            "id": "comet-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 173,
+            "parsedCount": 173,
+            "latencyMs": 399,
+            "error": null
+          },
+          {
+            "id": "comet-torbox",
+            "disposition": "queried_success",
+            "rawCount": 344,
+            "parsedCount": 344,
+            "latencyMs": 413,
+            "error": null
+          },
+          {
+            "id": "prowlarr",
+            "disposition": "skipped_fast_sufficient",
+            "rawCount": 0,
+            "parsedCount": 0,
+            "latencyMs": null,
+            "error": null
+          }
+        ]
+      },
+      {
+        "rid": "r-mvfrjjph-n7bd68",
+        "mediaId": "tt0056058",
+        "n": "stage.availability",
+        "t": 1792445117538,
+        "ms": 312,
+        "eligibleHashes": 50,
+        "checked": 50,
+        "cached": 11,
+        "uncached": 28,
+        "unknown": 0
+      },
+      {
+        "rid": "r-mvfrjjph-n7bd68",
+        "mediaId": "tt0056058",
+        "n": "stage.selection",
+        "t": 1792445121514,
+        "ms": 3976,
+        "selected": true,
+        "reason": "exact-size bound",
+        "hash": "d4cacb51d949ca6aa3ccb7b03850989e1de8f218",
+        "torrentFileId": "tf_f2218197-880d-48c4-85df-eb2ee698bc77",
+        "skipped": 4,
+        "serviceability": {
+          "state": "serviceable",
+          "source": "probe"
+        }
+      },
+      {
+        "rid": "r-mvfrjjph-n7bd68",
+        "mediaId": "tt0056058",
+        "n": "stage.handoff_build",
+        "t": 1792445121519,
+        "ms": 1,
+        "torrentFileId": "tf_f2218197-880d-48c4-85df-eb2ee698bc77",
+        "infoHash": "d4cacb51d949ca6aa3ccb7b03850989e1de8f218",
+        "bindingStatus": "exact-size"
+      },
+      {
+        "rid": "r-mvfrjjph-n7bd68",
+        "mediaId": "tt0056058",
+        "n": "binding.activate",
+        "t": 1792445121523,
+        "ms": 0,
+        "infoHash": "d4cacb51d949ca6aa3ccb7b03850989e1de8f218",
+        "torrentFileId": "tf_2e5ac783-adbc-485a-bbd8-9c33d29762dd",
+        "placementId": "pl_f77c0d23-bcc7-4c48-9fa5-79185a1c703e",
+        "providerFileId": "0",
+        "reason": "vfs-movie-idempotent"
+      }
+    ],
+    "providerHttp": [
+      {
+        "endpoint": "checkcached",
+        "ms": 224,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 273,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 291,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 302,
+        "status": 200
+      },
+      {
+        "endpoint": "mylist",
+        "ms": 3969,
+        "status": 200
+      }
+    ]
+  },
+  {
+    "mediaId": "tt0114369",
+    "requestToBindingMs": 6144,
+    "requestToPartMs": 6182,
+    "requestTo206Ms": 6232,
+    "probe": {
+      "status": 206,
+      "bytes": 65536
+    },
+    "selected": "09c5fca40a44ff8df7394250a0a7c709e82aa412",
+    "torrentFileId": "tf_aa585b34-39b9-47c0-8aa4-2b1ed7a6803d",
+    "providerFileId": "0",
+    "bindingStatus": "exact-size",
+    "selectionReason": "exact-size bound",
+    "serviceability": {
+      "state": "serviceable",
+      "source": "probe"
+    },
+    "published": true,
+    "partFile": "/mnt/hashsucker-vfs/Movies/Seven/Seven.mkv",
+    "rid": "r-mvfrjnfo-4lb9rc",
+    "stages": [
+      {
+        "rid": "r-mvfrjnfo-4lb9rc",
+        "mediaId": "tt0114369",
+        "n": "stage.live_discovery",
+        "t": 1792445122203,
+        "ms": 567,
+        "rawCount": 991,
+        "liveEligibleCount": 989,
+        "sources": [
+          {
+            "id": "torrentio-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 101,
+            "parsedCount": 101,
+            "latencyMs": 357,
+            "error": null
+          },
+          {
+            "id": "torrentio-torbox",
+            "disposition": "queried_success",
+            "rawCount": 165,
+            "parsedCount": 165,
+            "latencyMs": 371,
+            "error": null
+          },
+          {
+            "id": "comet-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 782,
+            "parsedCount": 782,
+            "latencyMs": 485,
+            "error": null
+          },
+          {
+            "id": "comet-torbox",
+            "disposition": "queried_success",
+            "rawCount": 1562,
+            "parsedCount": 1562,
+            "latencyMs": 538,
+            "error": null
+          },
+          {
+            "id": "prowlarr",
+            "disposition": "skipped_fast_sufficient",
+            "rawCount": 0,
+            "parsedCount": 0,
+            "latencyMs": null,
+            "error": null
+          }
+        ]
+      },
+      {
+        "rid": "r-mvfrjnfo-4lb9rc",
+        "mediaId": "tt0114369",
+        "n": "stage.availability",
+        "t": 1792445122641,
+        "ms": 424,
+        "eligibleHashes": 50,
+        "checked": 50,
+        "cached": 15,
+        "uncached": 22,
+        "unknown": 0
+      },
+      {
+        "rid": "r-mvfrjnfo-4lb9rc",
+        "mediaId": "tt0114369",
+        "n": "stage.selection",
+        "t": 1792445127678,
+        "ms": 5037,
+        "selected": true,
+        "reason": "exact-size bound",
+        "hash": "09c5fca40a44ff8df7394250a0a7c709e82aa412",
+        "torrentFileId": "tf_aa585b34-39b9-47c0-8aa4-2b1ed7a6803d",
+        "skipped": 0,
+        "serviceability": {
+          "state": "serviceable",
+          "source": "probe"
+        }
+      },
+      {
+        "rid": "r-mvfrjnfo-4lb9rc",
+        "mediaId": "tt0114369",
+        "n": "stage.handoff_build",
+        "t": 1792445127690,
+        "ms": 2,
+        "torrentFileId": "tf_aa585b34-39b9-47c0-8aa4-2b1ed7a6803d",
+        "infoHash": "09c5fca40a44ff8df7394250a0a7c709e82aa412",
+        "bindingStatus": "exact-size"
+      }
+    ],
+    "providerHttp": [
+      {
+        "endpoint": "checkcached",
+        "ms": 176,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 224,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 277,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 413,
+        "status": 200
+      },
+      {
+        "endpoint": "mylist",
+        "ms": 5026,
+        "status": 200
+      }
+    ]
+  },
+  {
+    "mediaId": "tt0120338",
+    "requestToBindingMs": 6176,
+    "requestToPartMs": 6215,
+    "requestTo206Ms": 6265,
+    "probe": {
+      "status": 206,
+      "bytes": 65536
+    },
+    "selected": "a4759e5caee2474fee8db3da8e070a5aadf3730b",
+    "torrentFileId": "tf_b933fc9e-7c38-4e14-b460-1b4627ffebe9",
+    "providerFileId": "0",
+    "bindingStatus": "exact-size",
+    "selectionReason": "exact-size bound",
+    "serviceability": {
+      "state": "serviceable",
+      "source": "probe"
+    },
+    "published": true,
+    "partFile": "/mnt/hashsucker-vfs/Movies/Titanic (1997)/Titanic (1997).mkv",
+    "rid": "r-mvfrjs96-s19sxm",
+    "stages": [
+      {
+        "rid": "r-mvfrjs96-s19sxm",
+        "mediaId": "tt0120338",
+        "n": "stage.live_discovery",
+        "t": 1792445128480,
+        "ms": 598,
+        "rawCount": 1390,
+        "liveEligibleCount": 1378,
+        "sources": [
+          {
+            "id": "comet-torbox",
+            "disposition": "queried_success",
+            "rawCount": 2198,
+            "parsedCount": 2198,
+            "latencyMs": 257,
+            "error": null
+          },
+          {
+            "id": "torrentio-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 145,
+            "parsedCount": 145,
+            "latencyMs": 434,
+            "error": null
+          },
+          {
+            "id": "torrentio-torbox",
+            "disposition": "queried_success",
+            "rawCount": 212,
+            "parsedCount": 212,
+            "latencyMs": 494,
+            "error": null
+          },
+          {
+            "id": "comet-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 1101,
+            "parsedCount": 1101,
+            "latencyMs": 559,
+            "error": null
+          },
+          {
+            "id": "prowlarr",
+            "disposition": "skipped_fast_sufficient",
+            "rawCount": 0,
+            "parsedCount": 0,
+            "latencyMs": null,
+            "error": null
+          }
+        ]
+      },
+      {
+        "rid": "r-mvfrjs96-s19sxm",
+        "mediaId": "tt0120338",
+        "n": "stage.availability",
+        "t": 1792445129068,
+        "ms": 566,
+        "eligibleHashes": 50,
+        "checked": 50,
+        "cached": 15,
+        "uncached": 22,
+        "unknown": 0
+      },
+      {
+        "rid": "r-mvfrjs96-s19sxm",
+        "mediaId": "tt0120338",
+        "n": "stage.selection",
+        "t": 1792445133971,
+        "ms": 4903,
+        "selected": true,
+        "reason": "exact-size bound",
+        "hash": "a4759e5caee2474fee8db3da8e070a5aadf3730b",
+        "torrentFileId": "tf_b933fc9e-7c38-4e14-b460-1b4627ffebe9",
+        "skipped": 2,
+        "serviceability": {
+          "state": "serviceable",
+          "source": "probe"
+        }
+      },
+      {
+        "rid": "r-mvfrjs96-s19sxm",
+        "mediaId": "tt0120338",
+        "n": "stage.handoff_build",
+        "t": 1792445133977,
+        "ms": 1,
+        "torrentFileId": "tf_b933fc9e-7c38-4e14-b460-1b4627ffebe9",
+        "infoHash": "a4759e5caee2474fee8db3da8e070a5aadf3730b",
+        "bindingStatus": "exact-size"
+      },
+      {
+        "rid": "r-mvfrjs96-s19sxm",
+        "mediaId": "tt0120338",
+        "n": "binding.activate",
+        "t": 1792445133981,
+        "ms": 1,
+        "infoHash": "a4759e5caee2474fee8db3da8e070a5aadf3730b",
+        "torrentFileId": "tf_b933fc9e-7c38-4e14-b460-1b4627ffebe9",
+        "placementId": "pl_a8c3199f-39a5-49e5-a088-d97c29b6c1a4",
+        "providerFileId": "0",
+        "reason": "vfs-movie-idempotent"
+      }
+    ],
+    "providerHttp": [
+      {
+        "endpoint": "checkcached",
+        "ms": 184,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 264,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 398,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 556,
+        "status": 200
+      },
+      {
+        "endpoint": "mylist",
+        "ms": 4897,
+        "status": 200
+      }
+    ]
+  },
+  {
+    "mediaId": "tt0120737",
+    "requestToBindingMs": 2539,
+    "requestToPartMs": 2577,
+    "requestTo206Ms": 2625,
+    "probe": {
+      "status": 206,
+      "bytes": 65536
+    },
+    "selected": "045357ec6e99772842fc364a7ba36e2374d27b8d",
+    "torrentFileId": "tf_2cbb44cb-dbaa-4c91-b7ba-e1a860f0fc2a",
+    "providerFileId": "0",
+    "bindingStatus": "exact-size",
+    "selectionReason": "exact-size bound",
+    "serviceability": {
+      "state": "serviceable",
+      "source": "probe"
+    },
+    "published": true,
+    "partFile": "/mnt/hashsucker-vfs/Movies/The Lord of the Rings The Fellowship of the Ring/The Lord of the Rings The Fellowship of the Ring.mkv",
+    "rid": "r-mvfrjx3l-04auo1",
+    "stages": [
+      {
+        "rid": "r-mvfrjx3l-04auo1",
+        "mediaId": "tt0120737",
+        "n": "stage.live_discovery",
+        "t": 1792445135114,
+        "ms": 953,
+        "rawCount": 1390,
+        "liveEligibleCount": 1386,
+        "sources": [
+          {
+            "id": "torrentio-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 209,
+            "parsedCount": 209,
+            "latencyMs": 178,
+            "error": null
+          },
+          {
+            "id": "torrentio-torbox",
+            "disposition": "queried_success",
+            "rawCount": 301,
+            "parsedCount": 301,
+            "latencyMs": 374,
+            "error": null
+          },
+          {
+            "id": "comet-torbox",
+            "disposition": "queried_success",
+            "rawCount": 1896,
+            "parsedCount": 1896,
+            "latencyMs": 754,
+            "error": null
+          },
+          {
+            "id": "comet-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 1896,
+            "parsedCount": 1896,
+            "latencyMs": 913,
+            "error": null
+          },
+          {
+            "id": "prowlarr",
+            "disposition": "skipped_fast_sufficient",
+            "rawCount": 0,
+            "parsedCount": 0,
+            "latencyMs": null,
+            "error": null
+          }
+        ]
+      },
+      {
+        "rid": "r-mvfrjx3l-04auo1",
+        "mediaId": "tt0120737",
+        "n": "stage.availability",
+        "t": 1792445135520,
+        "ms": 387,
+        "eligibleHashes": 50,
+        "checked": 50,
+        "cached": 16,
+        "uncached": 20,
+        "unknown": 0
+      },
+      {
+        "rid": "r-mvfrjx3l-04auo1",
+        "mediaId": "tt0120737",
+        "n": "stage.selection",
+        "t": 1792445136600,
+        "ms": 1080,
+        "selected": true,
+        "reason": "exact-size bound",
+        "hash": "045357ec6e99772842fc364a7ba36e2374d27b8d",
+        "torrentFileId": "tf_2cbb44cb-dbaa-4c91-b7ba-e1a860f0fc2a",
+        "skipped": 7,
+        "serviceability": {
+          "state": "serviceable",
+          "source": "probe"
+        }
+      },
+      {
+        "rid": "r-mvfrjx3l-04auo1",
+        "mediaId": "tt0120737",
+        "n": "stage.handoff_build",
+        "t": 1792445136607,
+        "ms": 1,
+        "torrentFileId": "tf_2cbb44cb-dbaa-4c91-b7ba-e1a860f0fc2a",
+        "infoHash": "045357ec6e99772842fc364a7ba36e2374d27b8d",
+        "bindingStatus": "exact-size"
+      },
+      {
+        "rid": "r-mvfrjx3l-04auo1",
+        "mediaId": "tt0120737",
+        "n": "binding.activate",
+        "t": 1792445136612,
+        "ms": 1,
+        "infoHash": "045357ec6e99772842fc364a7ba36e2374d27b8d",
+        "torrentFileId": "tf_2cbb44cb-dbaa-4c91-b7ba-e1a860f0fc2a",
+        "placementId": "pl_978ab335-ddb9-4660-98bc-e3b7a79f0f47",
+        "providerFileId": "0",
+        "reason": "vfs-movie-idempotent"
+      }
+    ],
+    "providerHttp": [
+      {
+        "endpoint": "checkcached",
+        "ms": 185,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 254,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 269,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 377,
+        "status": 200
+      },
+      {
+        "endpoint": "mylist",
+        "ms": 1074,
+        "status": 200
+      }
+    ]
+  },
+  {
+    "mediaId": "tt0169547",
+    "requestToBindingMs": 2433,
+    "requestToPartMs": 2473,
+    "requestTo206Ms": 2523,
+    "probe": {
+      "status": 206,
+      "bytes": 65536
+    },
+    "selected": "57308789218ed6dc295b30301e0fb5994514d5a6",
+    "torrentFileId": "tf_3306d0d4-2693-45ec-9385-9a57cce02efc",
+    "providerFileId": "0",
+    "bindingStatus": "exact-size",
+    "selectionReason": "exact-size bound",
+    "serviceability": {
+      "state": "serviceable",
+      "source": "probe"
+    },
+    "published": true,
+    "partFile": "/mnt/hashsucker-vfs/Movies/American Beauty/American Beauty.mkv",
+    "rid": "r-mvfrjz4x-5rrn34",
+    "stages": [
+      {
+        "rid": "r-mvfrjz4x-5rrn34",
+        "mediaId": "tt0169547",
+        "n": "stage.live_discovery",
+        "t": 1792445137014,
+        "ms": 212,
+        "rawCount": 484,
+        "liveEligibleCount": 481,
+        "sources": [
+          {
+            "id": "torrentio-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 59,
+            "parsedCount": 59,
+            "latencyMs": 51,
+            "error": null
+          },
+          {
+            "id": "torrentio-torbox",
+            "disposition": "queried_success",
+            "rawCount": 82,
+            "parsedCount": 82,
+            "latencyMs": 141,
+            "error": null
+          },
+          {
+            "id": "comet-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 376,
+            "parsedCount": 376,
+            "latencyMs": 176,
+            "error": null
+          },
+          {
+            "id": "comet-torbox",
+            "disposition": "queried_success",
+            "rawCount": 750,
+            "parsedCount": 750,
+            "latencyMs": 200,
+            "error": null
+          },
+          {
+            "id": "prowlarr",
+            "disposition": "skipped_fast_sufficient",
+            "rawCount": 0,
+            "parsedCount": 0,
+            "latencyMs": null,
+            "error": null
+          }
+        ]
+      },
+      {
+        "rid": "r-mvfrjz4x-5rrn34",
+        "mediaId": "tt0169547",
+        "n": "stage.availability",
+        "t": 1792445137235,
+        "ms": 217,
+        "eligibleHashes": 50,
+        "checked": 50,
+        "cached": 13,
+        "uncached": 22,
+        "unknown": 0
+      },
+      {
+        "rid": "r-mvfrjz4x-5rrn34",
+        "mediaId": "tt0169547",
+        "n": "stage.selection",
+        "t": 1792445139123,
+        "ms": 1888,
+        "selected": true,
+        "reason": "exact-size bound",
+        "hash": "57308789218ed6dc295b30301e0fb5994514d5a6",
+        "torrentFileId": "tf_3306d0d4-2693-45ec-9385-9a57cce02efc",
+        "skipped": 1,
+        "serviceability": {
+          "state": "serviceable",
+          "source": "probe"
+        }
+      },
+      {
+        "rid": "r-mvfrjz4x-5rrn34",
+        "mediaId": "tt0169547",
+        "n": "stage.handoff_build",
+        "t": 1792445139130,
+        "ms": 1,
+        "torrentFileId": "tf_3306d0d4-2693-45ec-9385-9a57cce02efc",
+        "infoHash": "57308789218ed6dc295b30301e0fb5994514d5a6",
+        "bindingStatus": "exact-size"
+      },
+      {
+        "rid": "r-mvfrjz4x-5rrn34",
+        "mediaId": "tt0169547",
+        "n": "binding.activate",
+        "t": 1792445139136,
+        "ms": 1,
+        "infoHash": "57308789218ed6dc295b30301e0fb5994514d5a6",
+        "torrentFileId": "tf_3306d0d4-2693-45ec-9385-9a57cce02efc",
+        "placementId": "pl_1580abad-0a90-40ac-ba2c-6af06748be7b",
+        "providerFileId": "0",
+        "reason": "vfs-movie-idempotent"
+      }
+    ],
+    "providerHttp": [
+      {
+        "endpoint": "checkcached",
+        "ms": 167,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 189,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 198,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 209,
+        "status": 200
+      },
+      {
+        "endpoint": "mylist",
+        "ms": 1882,
+        "status": 200
+      }
+    ]
+  },
+  {
+    "mediaId": "tt0172495",
+    "requestToBindingMs": 3217,
+    "requestToPartMs": 3257,
+    "requestTo206Ms": 3307,
+    "probe": {
+      "status": 206,
+      "bytes": 65536
+    },
+    "selected": "7177287a891261d51b045adf41cbce81d6a38d90",
+    "torrentFileId": "tf_9acda458-b130-4b45-a6f7-4519e2f1e97a",
+    "providerFileId": "0",
+    "bindingStatus": "exact-size",
+    "selectionReason": "exact-size bound",
+    "serviceability": {
+      "state": "serviceable",
+      "source": "probe"
+    },
+    "published": true,
+    "partFile": "/mnt/hashsucker-vfs/Movies/Gladiator (2000)/Gladiator (2000).mp4",
+    "rid": "r-mvfrk13g-681mhw",
+    "stages": [
+      {
+        "rid": "r-mvfrk13g-681mhw",
+        "mediaId": "tt0172495",
+        "n": "stage.live_discovery",
+        "t": 1792445140362,
+        "ms": 1022,
+        "rawCount": 1355,
+        "liveEligibleCount": 1355,
+        "sources": [
+          {
+            "id": "torrentio-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 167,
+            "parsedCount": 167,
+            "latencyMs": 108,
+            "error": null
+          },
+          {
+            "id": "torrentio-torbox",
+            "disposition": "queried_success",
+            "rawCount": 223,
+            "parsedCount": 223,
+            "latencyMs": 148,
+            "error": null
+          },
+          {
+            "id": "comet-torbox",
+            "disposition": "queried_success",
+            "rawCount": 2090,
+            "parsedCount": 2090,
+            "latencyMs": 406,
+            "error": null
+          },
+          {
+            "id": "comet-realdebrid",
+            "disposition": "queried_success",
+            "rawCount": 1046,
+            "parsedCount": 1046,
+            "latencyMs": 994,
+            "error": null
+          },
+          {
+            "id": "prowlarr",
+            "disposition": "skipped_fast_sufficient",
+            "rawCount": 0,
+            "parsedCount": 0,
+            "latencyMs": null,
+            "error": null
+          }
+        ]
+      },
+      {
+        "rid": "r-mvfrk13g-681mhw",
+        "mediaId": "tt0172495",
+        "n": "stage.availability",
+        "t": 1792445140653,
+        "ms": 271,
+        "eligibleHashes": 50,
+        "checked": 50,
+        "cached": 11,
+        "uncached": 24,
+        "unknown": 0
+      },
+      {
+        "rid": "r-mvfrk13g-681mhw",
+        "mediaId": "tt0172495",
+        "n": "stage.selection",
+        "t": 1792445142465,
+        "ms": 1812,
+        "selected": true,
+        "reason": "exact-size bound",
+        "hash": "7177287a891261d51b045adf41cbce81d6a38d90",
+        "torrentFileId": "tf_9acda458-b130-4b45-a6f7-4519e2f1e97a",
+        "skipped": 3,
+        "serviceability": {
+          "state": "serviceable",
+          "source": "probe"
+        }
+      },
+      {
+        "rid": "r-mvfrk13g-681mhw",
+        "mediaId": "tt0172495",
+        "n": "stage.handoff_build",
+        "t": 1792445142470,
+        "ms": 1,
+        "torrentFileId": "tf_9acda458-b130-4b45-a6f7-4519e2f1e97a",
+        "infoHash": "7177287a891261d51b045adf41cbce81d6a38d90",
+        "bindingStatus": "exact-size"
+      },
+      {
+        "rid": "r-mvfrk13g-681mhw",
+        "mediaId": "tt0172495",
+        "n": "binding.activate",
+        "t": 1792445142474,
+        "ms": 1,
+        "infoHash": "7177287a891261d51b045adf41cbce81d6a38d90",
+        "torrentFileId": "tf_9acda458-b130-4b45-a6f7-4519e2f1e97a",
+        "placementId": "pl_b1838116-dfbe-4916-9c42-eb4dafdea4ce",
+        "providerFileId": "0",
+        "reason": "vfs-movie-idempotent"
+      }
+    ],
+    "providerHttp": [
+      {
+        "endpoint": "checkcached",
+        "ms": 157,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 167,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 231,
+        "status": 200
+      },
+      {
+        "endpoint": "checkcached",
+        "ms": 262,
+        "status": 200
+      },
+      {
+        "endpoint": "mylist",
+        "ms": 1803,
+        "status": 200
+      }
+    ]
+  }
+]
