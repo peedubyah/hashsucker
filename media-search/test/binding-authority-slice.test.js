@@ -113,9 +113,9 @@ test('stale VFS projection converges to active Binding without rewriting Binding
     torrentFileId: yTorrentFile.id, size: yTorrentFile.size, createdAt: 1, updatedAt: 1,
   });
   const result = await materializeVfsEntry(cache, handoff(HASH_Y, yTorrentFile.id, 'y'), store, () => 2, { allowLegacy: false });
-  assert.equal(result.torrentFileId, store.getActiveBindingForLibraryItem(item.id).torrentFile.id);
-  assert.equal(result.infoHash, HASH_X);
-  assert.equal(store.getActiveBindingForLibraryItem(item.id).torrentFile.infoHash, HASH_X);
+  assert.equal(result.torrentFileId, yTorrentFile.id, 'VFS row stays on the requested release');
+  assert.equal(result.infoHash, HASH_Y);
+  assert.equal(store.getActiveBindingForLibraryItem(item.id).torrentFile.infoHash, HASH_X, 'active Binding is not silently replaced');
   cache.close();
   store.close();
 });
