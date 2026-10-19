@@ -124,8 +124,15 @@ export async function ensureTorBoxFileIdentity({
           const snapshotFresh = Number.isSafeInteger(snapshot.expiresAt)
             && snapshot.expiresAt > now() + 10_000;
           const health = getServiceability(file.torrentFileId);
+          const refs = (typeof controlPlaneStore.listProviderRefsForTorrentFile === 'function')
+            ? (controlPlaneStore.listProviderRefsForTorrentFile(file.torrentFileId) || [])
+            : [];
+          const presentRefs = refs.filter((r) => r.present);
+          const routeUnique = presentRefs.length === 1
+            && presentRefs[0].placementId === placement.id;
           const byteHealthPositive = health.state === 'serviceable'
-            && (health.provider == null || health.provider === 'torbox');
+            && (health.provider == null || health.provider === 'torbox')
+            && routeUnique;
           // Fast path: a fresh authoritative snapshot, or an expired one
           // backed by a recent exact-TF byte proof, is enough to avoid a
           // synchronous mylist. The binding layer still requires the
