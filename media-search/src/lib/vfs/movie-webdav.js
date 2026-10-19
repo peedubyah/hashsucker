@@ -249,7 +249,11 @@ async function cancelBody(response) {
 function metadataFromState(state) {
   return {
     size: state.entry.size,
-    modifiedAt: state.handoff.selectedAt,
+    // Use the VFS row's updatedAt so a republished/re-materialized file
+    // gets a fresh mtime even when the underlying selection timestamp is
+    // unchanged. Plex uses file mtime to decide whether a directory entry
+    // is new.
+    modifiedAt: state.entry.updatedAt ?? state.handoff.selectedAt,
     etag: `"${state.entry.releaseKey}-${state.entry.size}"`,
   };
 }
@@ -1312,11 +1316,19 @@ export function createMovieWebDav({
         }
         const entries = getEntries(tree, pathname, depth);
         if (!entries) throw new VfsError('WebDAV path not found', 404, 'PATH_NOT_FOUND');
+        // PMS skips a directory when its mtime is unchanged since the
+        // last scan. Use the current wall clock so every materialized
+        // publication produces a visibly new directory mtime even when
+        // the underlying file mtime is unchanged.
         const collectionModifiedAt = Math.max(
           0,
           ...Array.from(tree.entries.values())
-            .filter((entry) => entry.type === 'file')
-            .map((entry) => entry.state.handoff.selectedAt),
+            .filter((entry) => entry.type === 'file'
+              && (entry.path === pathname || entry.path.startsWith(pathname.endsWith('/') ? pathname : pathname + '/')))
+            .map((entry) => Math.max(
+              entry.state.handoff.selectedAt ?? 0,
+              entry.state.entry.updatedAt ?? 0,
+            )),
         );
         await sendDavXml(response, entries, (entry) => entry.type === 'file'
           ? getDurableMetadata(entry.state)
