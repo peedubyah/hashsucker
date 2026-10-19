@@ -114,19 +114,31 @@ export async function ensureTorBoxFileIdentity({
       && typeof controlPlaneStore.listProviderFiles === 'function') {
     try {
       const snapshot = controlPlaneStore.getProviderInventorySnapshot(placement.id);
-      if (snapshot?.authoritative && snapshot?.complete
-          && Number.isSafeInteger(snapshot.expiresAt) && snapshot.expiresAt > now() + 10_000) {
+      if (snapshot?.authoritative && snapshot?.complete) {
         const matches = controlPlaneStore.listProviderFiles(placement.id)
           .filter((f) => f?.present && f?.mappingState === 'mapped'
             && f?.torrentFileId && f?.size === selectedFileSize);
         if (matches.length === 1) {
           const file = matches[0];
-          return {
-            placementId: placement.id,
-            providerFileId: file.providerFileId,
-            torrentFileId: file.torrentFileId,
-            size: file.size,
-          };
+          const snapshotFresh = Number.isSafeInteger(snapshot.expiresAt)
+            && snapshot.expiresAt > now() + 10_000;
+          const health = getServiceability(file.torrentFileId);
+          const byteHealthPositive = health.state === 'serviceable'
+            && (health.provider == null || health.provider === 'torbox');
+          // Fast path: a fresh authoritative snapshot, or an expired one
+          // backed by a recent exact-TF byte proof, is enough to avoid a
+          // synchronous mylist. The binding layer still requires the
+          // inventory snapshot to be extended (materialize) before
+          // activation.
+          console.log(`[inv-fast] hash=${normalizedHash} snapshotFresh=${snapshotFresh} byteHealth=${byteHealthPositive} decision=${snapshotFresh || byteHealthPositive ? 'FAST' : 'REMOTE'}`);
+          if (snapshotFresh || byteHealthPositive) {
+            return {
+              placementId: placement.id,
+              providerFileId: file.providerFileId,
+              torrentFileId: file.torrentFileId,
+              size: file.size,
+            };
+          }
         }
       }
     } catch {
