@@ -31,6 +31,7 @@
 import { PROVIDER_CAPABILITIES } from '../providers/capabilities.js';
 import { ProviderOperationError } from '../providers/errors.js';
 import { getServiceability } from '../vfs/byte-health.js';
+import { perfTrace, perfTraceSync } from '../perf-trace.js';
 
 const INVALID_INPUT = 'INVALID_INPUT';
 const INVENTORY_UNAVAILABLE = 'INVENTORY_UNAVAILABLE';
@@ -101,7 +102,9 @@ export async function ensureTorBoxFileIdentity({
   }
 
   // B. Find or passively recover the current TorBox placement.
-  let placement = controlPlaneStore.findPlacementByInfoHash('torbox', normalizedHash);
+  let placement = perfTraceSync('local.placement_lookup', { hash: normalizedHash },
+    () => controlPlaneStore.findPlacementByInfoHash('torbox', normalizedHash));
+  perfTrace('local.placement_lookup.result', { hash: normalizedHash, found: !!placement });
 
   // B.0: local-fresh shortcut. When a placement already exists with an
   // authoritative, complete, unexpired inventory snapshot, the mapped
@@ -114,18 +117,22 @@ export async function ensureTorBoxFileIdentity({
       && typeof controlPlaneStore.getProviderInventorySnapshot === 'function'
       && typeof controlPlaneStore.listProviderFiles === 'function') {
     try {
-      const snapshot = controlPlaneStore.getProviderInventorySnapshot(placement.id);
+      const snapshot = perfTraceSync('local.inventory_snapshot', { placementId: placement.id },
+        () => controlPlaneStore.getProviderInventorySnapshot(placement.id));
       if (snapshot?.authoritative && snapshot?.complete) {
-                const matches = controlPlaneStore.listProviderFiles(placement.id)
+        const matches = perfTraceSync('local.provider_file_list', { placementId: placement.id },
+          () => controlPlaneStore.listProviderFiles(placement.id))
           .filter((f) => f?.present && f?.mappingState === 'mapped'
             && f?.torrentFileId && f?.size === selectedFileSize);
         if (matches.length === 1) {
           const file = matches[0];
           const snapshotFresh = Number.isSafeInteger(snapshot.expiresAt)
             && snapshot.expiresAt > now() + 10_000;
-          const health = getServiceability(file.torrentFileId);
+          const health = perfTraceSync('local.byte_health_read', { torrentFileId: file.torrentFileId },
+            () => getServiceability(file.torrentFileId));
           const refs = (typeof controlPlaneStore.listProviderRefsForTorrentFile === 'function')
-            ? (controlPlaneStore.listProviderRefsForTorrentFile(file.torrentFileId) || [])
+            ? perfTraceSync('local.provider_refs_list', { torrentFileId: file.torrentFileId },
+              () => controlPlaneStore.listProviderRefsForTorrentFile(file.torrentFileId) || [])
             : [];
           const presentRefs = refs.filter((r) => r.present);
           const routeUnique = presentRefs.length === 1
@@ -133,6 +140,15 @@ export async function ensureTorBoxFileIdentity({
           const byteHealthPositive = health.state === 'serviceable'
             && (health.provider == null || health.provider === 'torbox')
             && routeUnique;
+          perfTrace('identity.local_shortcut', {
+            hash: normalizedHash,
+            placementId: placement.id,
+            snapshotFresh,
+            byteHealthPositive,
+            routeUnique,
+            healthState: health.state,
+            inventoryExpiresAt: snapshot.expiresAt,
+          });
           // Fast path: a fresh authoritative snapshot, or an expired one
           // backed by a recent exact-TF byte proof, is enough to avoid a
           // synchronous mylist. The binding layer still requires the
@@ -156,11 +172,21 @@ export async function ensureTorBoxFileIdentity({
       && typeof controlPlaneStore.getProviderInventorySnapshot === 'function'
       && typeof controlPlaneStore.listTorrentFilesForRelease === 'function') {
     try {
-      const snapshot = controlPlaneStore.getProviderInventorySnapshot(placement.id);
+      const snapshot = perfTraceSync('local.inventory_snapshot', { placementId: placement.id, mode: 'skip-size-match' },
+        () => controlPlaneStore.getProviderInventorySnapshot(placement.id));
       if (snapshot?.authoritative && snapshot?.complete
           && Number.isSafeInteger(snapshot.expiresAt) && snapshot.expiresAt > now() + 10_000) {
-        const torrentFiles = controlPlaneStore.listTorrentFilesForRelease(normalizedHash);
+        const torrentFiles = perfTraceSync('local.torrent_file_list', { hash: normalizedHash },
+          () => controlPlaneStore.listTorrentFilesForRelease(normalizedHash));
         if (Array.isArray(torrentFiles) && torrentFiles.length > 0) {
+          perfTrace('identity.local_shortcut', {
+            hash: normalizedHash,
+            placementId: placement.id,
+            snapshotFresh: true,
+            byteHealthPositive: false,
+            mode: 'skip-size-match',
+            torrentFileCount: torrentFiles.length,
+          });
           return { placementId: placement.id, torrentFiles };
         }
       }
@@ -184,6 +210,11 @@ export async function ensureTorBoxFileIdentity({
       const observedPlacement = await torBoxInventoryProvider
         .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
         .lookupPlacement({ infoHash: normalizedHash }, { signal: lookupSignal });
+      perfTrace('provider.remote', {
+        provider: 'torbox', endpoint: 'mylist', action: 'placement-lookup',
+        origin: 'remote', hash: normalizedHash,
+        found: !!observedPlacement?.providerResourceId,
+      });
       if (observedPlacement && observedPlacement.providerResourceId) {
         placement = controlPlaneStore.findPlacement(
           'torbox',
@@ -242,6 +273,11 @@ export async function ensureTorBoxFileIdentity({
         { magnet, addOnlyIfCached: true },
         { signal: createSignal },
       );
+      perfTrace('provider.remote', {
+        provider: 'torbox', endpoint: 'createtorrent', action: 'placement-create',
+        origin: 'remote', hash: normalizedHash, addOnlyIfCached: true,
+        created: !!placementResult?.providerResourceId,
+      });
       if (placementResult && placementResult.providerResourceId) {
         placement = controlPlaneStore.recordPlacement({
           provider: 'torbox',
@@ -321,6 +357,10 @@ export async function ensureTorBoxFileIdentity({
         verified = null;
       }
     }
+    perfTrace('provider.remote', {
+      provider: 'torbox', endpoint: 'mylist', action: 'placement-verify',
+      origin: 'remote', hash: normalizedHash, verified: !!verified,
+    });
     if (!verified) {
       throw new TorBoxFileIdentityError(
         `Created placement for ${normalizedHash} is absent from inventory`,
@@ -360,7 +400,19 @@ export async function ensureTorBoxFileIdentity({
     inventory = await torBoxInventoryProvider
       .require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
       .getFileInventory(placement, { signal: inventorySignal });
+    perfTrace('provider.remote', {
+      provider: 'torbox', endpoint: 'mylist', action: 'file-inventory',
+      origin: 'remote', hash: normalizedHash, placementId: placement.id,
+      fileCount: Array.isArray(inventory?.files) ? inventory.files.length : null,
+      authoritative: inventory?.authoritative ?? null,
+      complete: inventory?.complete ?? null,
+    });
   } catch (inventoryError) {
+    perfTrace('provider.remote', {
+      provider: 'torbox', endpoint: 'mylist', action: 'file-inventory',
+      origin: 'remote', hash: normalizedHash, placementId: placement.id,
+      err: String(inventoryError?.message ?? inventoryError),
+    });
     throw new TorBoxFileIdentityError(
       `TorBox inventory fetch failed: ${inventoryError.message}`,
       INVENTORY_ERROR,
@@ -371,17 +423,18 @@ export async function ensureTorBoxFileIdentity({
   // D. Persist inventory; replaceProviderFileInventory creates torrent_files
   //    rows and provider_files.torrent_file_id mappings.
   const observedAt = inventory.observedAt ?? now();
-  const files = controlPlaneStore.replaceProviderFileInventory(
-    placement.id,
-    inventory.files,
-    {
-      observedAt,
-      expiresAt: inventory.expiresAt,
-      authoritative: inventory.authoritative,
-      complete: inventory.complete,
-      evidence: inventory.evidence,
-    },
-  );
+  const files = perfTraceSync('local.inventory_persist', { placementId: placement.id },
+    () => controlPlaneStore.replaceProviderFileInventory(
+      placement.id,
+      inventory.files,
+      {
+        observedAt,
+        expiresAt: inventory.expiresAt,
+        authoritative: inventory.authoritative,
+        complete: inventory.complete,
+        evidence: inventory.evidence,
+      },
+    ));
 
   // E. Find present provider_files with exact size match.
   // F. Enforce cardinality: 0 → NO_FILE_SIZE_MATCH, >1 → AMBIGUOUS_FILE_SIZE.

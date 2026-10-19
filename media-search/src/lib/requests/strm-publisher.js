@@ -21,6 +21,7 @@ import path from 'node:path';
 
 import { getMedia } from '../metadata/cinemeta.js';
 import { sanitizePathSegment as sanitizePresentationTitle } from '../control-plane/canonical-path.js';
+import { perfTrace } from '../perf-trace.js';
 
 // Resolved per call (not at module load) so tests and operators can point
 // output elsewhere via env without reimporting. Production default unchanged.
@@ -67,16 +68,28 @@ function legacySanitizeFilename(title) {
  */
 async function resolveMediaTitle({ mediaId, mediaType, selection, handoff }) {
   // Priority 1: Cinemeta lookup for clean canonical name
+  const cinemetaStartedAt = Date.now();
   try {
     const type = mediaType === 'series' ? 'series' : 'movie';
     const media = await getMedia(type, mediaId);
+    perfTrace('provider.cinemeta', {
+      provider: 'cinemeta', endpoint: 'meta', action: 'title',
+      origin: 'remote', stage: 'strm-title', ok: true,
+      ms: Date.now() - cinemetaStartedAt,
+    });
     if (media?.title) {
       return {
         title: media.title,
         year: media.year ? String(media.year) : null,
       };
     }
-  } catch {
+  } catch (error) {
+    perfTrace('provider.cinemeta', {
+      provider: 'cinemeta', endpoint: 'meta', action: 'title',
+      origin: 'remote', stage: 'strm-title', ok: false,
+      ms: Date.now() - cinemetaStartedAt,
+      err: String(error?.message ?? error),
+    });
     // Cinemeta unavailable — fall through
   }
 

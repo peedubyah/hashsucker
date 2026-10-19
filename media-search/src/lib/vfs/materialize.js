@@ -10,6 +10,7 @@ import { createDefaultRdPlacementRealizer } from '../control-plane/rd-placement-
 import { getMedia } from '../metadata/cinemeta.js';
 import { isPlayableVideoTorrentFile } from '../resolver/tv-episode-resolver.js';
 import { getServiceability } from './byte-health.js';
+import { perfTrace } from '../perf-trace.js';
 
 // P19 — one lazily-bound RD placement realizer per process. The control-plane
 // store is a singleton, so we bind on first use. When Real-Debrid is not
@@ -337,9 +338,15 @@ async function resolvePresentationIdentity(handoff) {
   }
 
   // Priority 2: Cinemeta lookup (the same source strm-publisher uses)
+  const cinemetaStartedAt = Date.now();
   try {
     const type = handoff.mediaType === 'series' ? 'series' : 'movie';
     const meta = await getMedia(type, handoff.mediaId);
+    perfTrace('provider.cinemeta', {
+      provider: 'cinemeta', endpoint: 'meta', action: 'title',
+      origin: 'remote', stage: 'vfs-presentation-identity',
+      ms: Date.now() - cinemetaStartedAt, ok: true,
+    });
     if (meta?.title) {
       return {
         title: meta.title,
@@ -347,7 +354,13 @@ async function resolvePresentationIdentity(handoff) {
         extension: movieIdentity(handoff.filename, handoff.mediaId).extension,
       };
     }
-  } catch {
+  } catch (error) {
+    perfTrace('provider.cinemeta', {
+      provider: 'cinemeta', endpoint: 'meta', action: 'title',
+      origin: 'remote', stage: 'vfs-presentation-identity',
+      ms: Date.now() - cinemetaStartedAt, ok: false,
+      err: String(error?.message ?? error),
+    });
     // Cinemeta unavailable — fall through to priority 3
   }
 
@@ -588,6 +601,27 @@ export function isUnpublishedHandoff(controlPlaneStore, handoff) {
 }
 
 export async function materializeVfsEntry(
+  searchCache,
+  handoff,
+  controlPlaneStore = null,
+  now = () => Date.now(),
+  { allowLegacy = true } = {},
+) {
+  const materializeStartedAt = Date.now();
+  try {
+    return await materializeVfsEntryInner(searchCache, handoff, controlPlaneStore, now, { allowLegacy });
+  } finally {
+    perfTrace('vfs.materialize', {
+      ms: Date.now() - materializeStartedAt,
+      mediaId: handoff?.mediaId ?? null,
+      mediaType: handoff?.mediaType ?? null,
+      infoHash: handoff?.infoHash ?? null,
+      torrentFileId: handoff?.torrentFileId ?? null,
+    });
+  }
+}
+
+async function materializeVfsEntryInner(
   searchCache,
   handoff,
   controlPlaneStore = null,

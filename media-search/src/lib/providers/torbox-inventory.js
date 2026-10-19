@@ -1,6 +1,7 @@
 import { PROVIDER_CAPABILITIES, createProviderAdapter } from './capabilities.js';
 import { classifyProviderError, ProviderOperationError } from './errors.js';
 import { createPlacementObservation, createProviderFileInventory } from './resources.js';
+import { perfTrace } from '../perf-trace.js';
 
 const API_BASE = 'https://api.torbox.app/v1/api';
 const REQUEST_TIMEOUT_MS = 5_000;
@@ -63,24 +64,47 @@ export function createTorBoxInventoryProvider(options = {}) {
   }
 
   async function directMylistFetch(signal, baseOverride = apiBase, keyOverride = apiKey) {
-    const response = await fetchFn(`${baseOverride}/torrents/mylist?bypass_cache=true`, {
-      headers: {
-        Authorization: `Bearer ${keyOverride}`,
-        Accept: 'application/json',
-        'User-Agent': 'media-search/0.0.1',
-      },
-      signal: signal ?? AbortSignal.timeout(timeoutMs),
-    });
-    if (!response.ok) {
-      const err = new Error(`TorBox mylist failed: HTTP ${response.status}`);
-      err.status = response.status;
-      throw err;
+    const startedAt = Date.now();
+    try {
+      const response = await fetchFn(`${baseOverride}/torrents/mylist?bypass_cache=true`, {
+        headers: {
+          Authorization: `Bearer ${keyOverride}`,
+          Accept: 'application/json',
+          'User-Agent': 'media-search/0.0.1',
+        },
+        signal: signal ?? AbortSignal.timeout(timeoutMs),
+      });
+      if (!response.ok) {
+        const err = new Error(`TorBox mylist failed: HTTP ${response.status}`);
+        err.status = response.status;
+        throw err;
+      }
+      const payload = await response.json();
+      if (payload?.success !== true || !Array.isArray(payload.data)) {
+        throw invalidResponse('TorBox mylist must return success with a data array', 'mylist');
+      }
+      perfTrace('provider.http', {
+        provider: 'torbox',
+        endpoint: 'mylist',
+        action: 'list',
+        origin: 'remote',
+        ms: Date.now() - startedAt,
+        status: 200,
+        resources: payload.data.length,
+      });
+      return { observedAt: now(), resources: payload.data };
+    } catch (error) {
+      perfTrace('provider.http', {
+        provider: 'torbox',
+        endpoint: 'mylist',
+        action: 'list',
+        origin: 'remote',
+        ms: Date.now() - startedAt,
+        status: error?.status ?? null,
+        err: String(error?.message ?? error),
+      });
+      throw error;
     }
-    const payload = await response.json();
-    if (payload?.success !== true || !Array.isArray(payload.data)) {
-      throw invalidResponse('TorBox mylist must return success with a data array', 'mylist');
-    }
-    return { observedAt: now(), resources: payload.data };
   }
 
   /**

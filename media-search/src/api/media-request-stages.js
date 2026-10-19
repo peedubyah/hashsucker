@@ -34,6 +34,7 @@ import { computeHistoricalAvailabilityPrior } from '../lib/discovery/confidence-
 import { resolveTvTorrentFile } from '../lib/resolver/tv-episode-resolver.js';
 import { buildPlaybackHandoff } from '../lib/discovery/playback-handoff.js';
 import { DEMAND_PRIORITY } from '../lib/discovery/cache.js';
+import { perfTrace } from '../lib/perf-trace.js';
 
 /** Minimum eligible corpus candidates before live discovery is triggered. */
 export const DEFAULT_LIVE_DISCOVERY_THRESHOLD = 1;
@@ -260,6 +261,7 @@ export async function runLiveDiscoveryStage(ctx, { wantedIdentity, withHistorica
   // dispositions (queried_empty / skipped_fast_sufficient / upstream_error
   // / not_configured). Normalize both so a miss reads the same either way.
   let sourceReports = [];
+  const discoveryStartedAt = Date.now();
   try {
     const liveResult = await discoverLive(mediaId, {
       season,
@@ -364,6 +366,19 @@ export async function runLiveDiscoveryStage(ctx, { wantedIdentity, withHistorica
     error = liveError;
     console.error(`Live discovery failed for ${mediaId}: ${liveError.message}`);
   }
+  perfTrace('stage.live_discovery', {
+    ms: Date.now() - discoveryStartedAt,
+    rawCount,
+    liveEligibleCount,
+    sources: sourceReports.map((s) => ({
+      id: s.id ?? null,
+      disposition: s.disposition ?? null,
+      rawCount: s.rawCount ?? null,
+      parsedCount: s.parsedCount ?? null,
+      latencyMs: s.latencyMs ?? null,
+      error: s.error ?? null,
+    })),
+  });
 
   return {
     liveCandidates, liveEligibilityByHash, liveMetadataByHash,
@@ -626,6 +641,7 @@ export async function applyTorboxAvailability({ explainable, cache }) {
     .filter(r => r.identity?.eligible !== false && r.infoHash)
     .map(r => r.infoHash);
 
+  const availabilityStartedAt = Date.now();
   if (eligibleHashes.length > 0) {
     try {
       const checker = createAvailabilityChecker(cache);
@@ -651,6 +667,14 @@ export async function applyTorboxAvailability({ explainable, cache }) {
       console.error(`Availability check failed: ${error.message}`);
     }
   }
+  perfTrace('stage.availability', {
+    ms: Date.now() - availabilityStartedAt,
+    eligibleHashes: eligibleHashes.length,
+    checked: availabilityStats.checked,
+    cached: availabilityStats.cached,
+    uncached: availabilityStats.uncached,
+    unknown: availabilityStats.unknown,
+  });
   return availabilityStats;
 }
 
@@ -675,7 +699,8 @@ export async function selectCandidateForRequest({ explainable, ctx }) {
   const tvCoordinates = (ctx.intent.scope === 'episode' || ctx.mediaType === 'episode' || hasExplicitEpisode)
     ? { season: ctx.season, episode: ctx.episode }
     : null;
-  return selectBindableCandidate(explainable, {
+  const selectionStartedAt = Date.now();
+  const selection = await selectBindableCandidate(explainable, {
     ensureTorBoxFileIdentityFn: ctx.ensureTorBoxFileIdentityFn,
     ensureRealDebridFileIdentityFn: ctx.ensureRealDebridFileIdentityFn,
     resolveTvTorrentFileFn: resolveTvTorrentFile,
@@ -685,6 +710,16 @@ export async function selectCandidateForRequest({ explainable, ctx }) {
     serviceabilityProbeFn: ctx.serviceabilityProbeFn,
     maxServiceabilityAlternates: ctx.maxServiceabilityAlternates,
   });
+  perfTrace('stage.selection', {
+    ms: Date.now() - selectionStartedAt,
+    selected: !!selection.selected,
+    reason: selection.reason,
+    hash: selection.selected?.infoHash ?? null,
+    torrentFileId: selection.selected?._torrentFileId ?? null,
+    skipped: selection.skipped?.length ?? 0,
+    serviceability: selection.serviceability ?? null,
+  });
+  return selection;
 }
 
 /**
@@ -749,6 +784,7 @@ export function backfillRequestMediaAssociations(cache, intent, explainable, req
 export function persistRequestAndBackfill({ cache, ctx, explainable, selection, status }) {
   let requestId = null;
   if (!ctx.persist) return requestId;
+  const persistStartedAt = Date.now();
   requestId = cache.persistMediaRequest(
     {
       mediaId: ctx.intent.mediaId,
@@ -776,6 +812,7 @@ export function persistRequestAndBackfill({ cache, ctx, explainable, selection, 
   } catch {
     // Association bookkeeping must never fail fulfillment.
   }
+  perfTrace('stage.request_persist', { ms: Date.now() - persistStartedAt, requestId });
   return requestId;
 }
 
@@ -807,6 +844,7 @@ export function buildHandoffForSelection({ cache, ctx, requestId, selection, exp
     // bindable candidate exists (all candidates unbindable).
     ...(selection.selected._torrentFileId ? { torrentFileId: selection.selected._torrentFileId } : {}),
   };
+  const handoffStartedAt = Date.now();
   const handoff = buildPlaybackHandoff(selection, handoffRequest);
   if (selection.selected && cache.appendEvidenceObservation) {
     cache.appendEvidenceObservation({
@@ -827,6 +865,12 @@ export function buildHandoffForSelection({ cache, ctx, requestId, selection, exp
       },
     });
   }
+  perfTrace('stage.handoff_build', {
+    ms: Date.now() - handoffStartedAt,
+    torrentFileId: handoff?.torrentFileId ?? null,
+    infoHash: handoff?.infoHash ?? null,
+    bindingStatus: binding?.status ?? null,
+  });
   if (handoff && binding) {
     handoff.torrentFileIdentity = {
       status: binding.status,

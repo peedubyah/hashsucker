@@ -135,6 +135,7 @@ import { createSecondPlacementEnsurer } from '../lib/control-plane/second-placem
 import { createRouteProviderSurfaces } from '../lib/control-plane/route-providers.js';
 import { createPrewarmCaller } from '../lib/control-plane/prewarm.js';
 import { createPlaybackRedundancy, isPlaybackRedundancyEnabled } from '../lib/control-plane/playback-redundancy.js';
+import { PERF_TRACE_ENABLED, perfTrace, runPerfTrace } from '../lib/perf-trace.js';
 
 // S-1 wire schema version for the Rust data-plane control contract.
 //
@@ -514,7 +515,80 @@ export function createApp(dependencies = {}) {
   return http.createServer(createRequestHandler(dependencies));
 }
 
+/**
+ * Diagnostic-only outbound HTTP tracer.
+ *
+ * Installed ONCE at server start when HASHSUCKER_PERF_TRACE=1, before any
+ * provider adapter captures `fetch`. Every outbound call is timed and
+ * attributed to the in-flight request through the perf-trace context
+ * (AsyncLocalStorage), so a request's provider fan-out can be reconstructed
+ * from one container log without touching product behavior.
+ */
+function installPerfTraceFetch() {
+  if (!PERF_TRACE_ENABLED) return;
+  const realFetch = globalThis.fetch;
+  if (typeof realFetch !== 'function' || realFetch.__perfTraced) return;
+  const attempts = new Map();
+  const traced = async (input, init) => {
+    const href = (typeof input === 'string' ? input : (input?.url ?? String(input)));
+    const startedAt = Date.now();
+    let parsed = null;
+    try { parsed = new URL(href); } catch { /* relative or opaque URL */ }
+    const host = parsed?.hostname ?? 'unknown';
+    const key = `${host}${parsed?.pathname ?? ''}`;
+    const attempt = (attempts.get(key) ?? 0) + 1;
+    attempts.set(key, attempt);
+    try {
+      const response = await realFetch(input, init);
+      perfTrace('http', {
+        provider: classifyPerfHost(host),
+        endpoint: parsed?.pathname ?? null,
+        origin: classifyPerfOrigin(host),
+        ms: Date.now() - startedAt,
+        status: response.status,
+        attempt,
+      });
+      return response;
+    } catch (error) {
+      perfTrace('http', {
+        provider: classifyPerfHost(host),
+        endpoint: parsed?.pathname ?? null,
+        origin: classifyPerfOrigin(host),
+        ms: Date.now() - startedAt,
+        status: null,
+        attempt,
+        err: String(error?.message ?? error),
+      });
+      throw error;
+    }
+  };
+  traced.__perfTraced = true;
+  globalThis.fetch = traced;
+}
+
+const PERF_LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', 'data-plane', 'media-search', 'host.docker.internal']);
+const PERF_LAN_HOSTS = new Set(['plex']);
+
+function classifyPerfHost(host) {
+  if (host.includes('torbox')) return 'torbox';
+  if (host.includes('cinemeta')) return 'cinemeta';
+  if (host.includes('strem.io')) return 'discovery';
+  if (host.includes('prowlarr')) return 'prowlarr';
+  if (host.includes('realdebrid')) return 'realdebrid';
+  if (host.includes('plex')) return 'plex';
+  if (host.includes('jellyfin')) return 'jellyfin';
+  if (host === 'data-plane') return 'data-plane';
+  return host || 'unknown';
+}
+
+function classifyPerfOrigin(host) {
+  if (PERF_LOCAL_HOSTS.has(host)) return 'local';
+  if (PERF_LAN_HOSTS.has(host)) return 'lan';
+  return 'remote';
+}
+
 export function createRequestHandler(dependencies = {}) {
+  installPerfTraceFetch();
   const importer = dependencies.importer || new QueueImporterClient();
   const operatorRoot = dependencies.operatorRoot || process.env.REQUESTS_ROOT || '/requests';
   const catalogSearch = dependencies.searchCatalog || searchCatalog;
@@ -3015,15 +3089,21 @@ export function createRequestHandler(dependencies = {}) {
               }
             } catch {}
           }
-          const result = await searchByMedia(searchCache, {
-            ...body,
-            maxTier,
-            hydrateVfs: hydrateVfsForRequest,
-            controlPlaneStore,
-            serviceabilityProbe: serviceabilityProbeForRequest,
-            ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
-            ...rdEnsureForRequest({ rdClient, controlPlaneStore, clock }),
-          });
+          const perfRid = PERF_TRACE_ENABLED
+            ? `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+            : null;
+          const result = await runPerfTrace(
+            { rid: perfRid, mediaId: body?.mediaId ?? null },
+            () => searchByMedia(searchCache, {
+              ...body,
+              maxTier,
+              hydrateVfs: hydrateVfsForRequest,
+              controlPlaneStore,
+              serviceabilityProbe: serviceabilityProbeForRequest,
+              ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
+              ...rdEnsureForRequest({ rdClient, controlPlaneStore, clock }),
+            }),
+          );
           //
           // Dual-provider coverage (enrichment tranche): a freshly
           // published single-provider TF gets one cheap second-placement
@@ -3094,10 +3174,18 @@ export function createRequestHandler(dependencies = {}) {
               console.warn(`media-search: failed to seed released follow-up: ${followUpError.message}`);
             }
           }
+          const routeTotalMs = Math.round(performance.now() - startedAt);
+          perfTrace('request.route_done', {
+            totalMs: routeTotalMs,
+            selected: !!result?.selection?.selected,
+            reason: result?.selection?.reason ?? null,
+            torrentFileId: result?.selection?.selected?._torrentFileId ?? null,
+            serviceability: result?.serviceability ?? null,
+          });
           return sendJson(response, 200, {
             ...result,
             intent: requestIntent,
-            timings: { totalMs: Math.round(performance.now() - startedAt) },
+            timings: { totalMs: routeTotalMs },
           });
         } catch (err) {
           return sendJson(response, 400, { error: err.message });

@@ -45,6 +45,7 @@ import {
 } from './media-request-stages.js';
 import { rankHitsTiered } from '../lib/discovery/ranking.js';
 import { backfillRequestMediaAssociations } from './media-request-stages.js';
+import { perfTrace } from '../lib/perf-trace.js';
 
 // Backfill moved into the stages module (it is a pipeline stage); re-exported
 // here because existing callers and tests import it from this module.
@@ -494,6 +495,15 @@ async function tryReuseHealthyPublication({
  */
 export async function searchByMedia(cache, request) {
   const ctx = buildRequestContext(cache, request);
+  perfTrace('request.start', {
+    mediaId: ctx.mediaId,
+    mediaType: ctx.mediaType,
+    season: ctx.season,
+    episode: ctx.episode,
+    liveOnly: ctx.liveOnly,
+    prepareOnly: ctx.prepareOnly,
+    source: ctx.source ?? null,
+  });
 
   // Stage 1a: preparation mode never publishes and never discovers when
   // durable truth already proves the item prepared.
@@ -707,6 +717,11 @@ async function runLivePipeline(ctx, { titleIndex, titleInputs }) {
     }
   }
 
+  perfTrace('request.live_pipeline_end', {
+    ms: Date.now() - ctx.startedAt,
+    selected: !!selection.selected,
+    reason: selection.reason,
+  });
   return publishedOrPendingResponse({ ctx, base, handoff, selection, explainable });
 }
 
@@ -902,6 +917,11 @@ async function runCorpusPipeline(ctx, { titleIndex, titleInputs, candidates }) {
 
   // Stage 9: Demand-driven queue promotion.
   const promotion = promoteDemandForRequest({ cache: ctx.cache, ctx, explainable, selection });
+  perfTrace('request.corpus_pipeline_end', {
+    ms: Date.now() - ctx.startedAt,
+    selected: !!selection.selected,
+    reason: selection.reason,
+  });
 
   ctx.cache.recordEvidenceQuery?.({
     queryKey: `media:${ctx.mediaId}:${ctx.season ?? ''}:${ctx.episode ?? ''}`, observer: 'hashsucker', sourceClass: ctx.source || 'request', disposition: 'ranked_request', observedAt: Date.now(), latencyMs: Date.now() - ctx.startedAt, candidateCount: rankingInputs.length, selectedCount: selection.selected ? 1 : 0,

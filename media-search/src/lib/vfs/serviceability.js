@@ -16,6 +16,7 @@
 
 import { getServiceability, recordServiceable, recordUnserviceable } from './byte-health.js';
 import { probeByteReady } from '../anticipation/prewarm.js';
+import { perfTrace } from '../perf-trace.js';
 
 export function createServiceabilityProbe({
   dataPlaneBaseUrl,
@@ -29,19 +30,32 @@ export function createServiceabilityProbe({
     // 1. Recent runtime evidence (no provider work).
     const health = getServiceability(torrentFileId);
     if (health.state === 'serviceable') {
+      perfTrace('serviceability.evidence', {
+        torrentFileId, provider, source: 'health', state: health.state,
+        reason: null, ms: 0,
+      });
       return { serviceable: true, source: 'health' };
     }
     if (health.state === 'unserviceable' && health.retryInMs > 0) {
+      perfTrace('serviceability.evidence', {
+        torrentFileId, provider, source: 'health', state: health.state,
+        reason: health.reason ?? 'unserviceable', ms: 0,
+      });
       return { serviceable: false, source: 'health', reason: health.reason ?? 'unserviceable' };
     }
 
     // 2. Bounded real byte probe (half-open when the health window expired).
     let ok = false;
+    const probeStartedAt = Date.now();
     try {
       ok = await probeFn({ dataPlaneBaseUrl, torrentFileId, timeoutMs });
     } catch {
       ok = false;
     }
+    perfTrace('serviceability.byte_probe', {
+      torrentFileId, provider, source: 'probe', serviceable: ok,
+      ms: Date.now() - probeStartedAt,
+    });
     if (ok) {
       recordServiceable(torrentFileId, { provider });
       return { serviceable: true, source: 'probe' };

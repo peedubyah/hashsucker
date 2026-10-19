@@ -14,6 +14,7 @@
 
 import { isPlayableVideoTorrentFile } from '../resolver/tv-episode-resolver.js';
 import { parseFilename } from './parser-adapter.js';
+import { perfTrace } from '../perf-trace.js';
 
 /**
  * Proven-contradiction check for PATH A TV binds.
@@ -282,6 +283,7 @@ export async function selectBindableCandidate(results, options = {}) {
     const binding = selected?._binding ?? null;
     const provider = binding?.provider ?? 'torbox';
     let probe;
+    const probeStartedAt = Date.now();
     try {
       probe = await probeServiceability(selected._torrentFileId, {
         provider, infoHash: candidate.infoHash, rank: candidate.rank,
@@ -289,6 +291,15 @@ export async function selectBindableCandidate(results, options = {}) {
     } catch (err) {
       probe = { serviceable: false, reason: `probe-error:${String(err?.message || err).slice(0, 60)}` };
     }
+    perfTrace('selection.serviceability_probe', {
+      torrentFileId: selected._torrentFileId,
+      provider,
+      rank: candidate.rank,
+      ms: Date.now() - probeStartedAt,
+      serviceable: probe?.serviceable === true,
+      source: probe?.source ?? null,
+      reason: probe?.reason ?? null,
+    });
     if (probe?.serviceable) {
       serviceability = { state: 'serviceable', source: probe.source ?? 'probe' };
       return true;
@@ -344,6 +355,17 @@ export async function selectBindableCandidate(results, options = {}) {
     .map(([c]) => c);
 
   for (const candidate of ordered) {
+    const candidateStartedAt = Date.now();
+    perfTrace('selection.candidate_attempt', {
+      rank: candidate.rank,
+      hash: candidate.infoHash,
+      tier: candidate.identity?.tier ?? null,
+      torboxState: candidate.availability?.torbox?.state ?? 'unknown',
+      fileSize: Number.isSafeInteger(candidate.exactFileSize) && candidate.exactFileSize > 0
+        ? candidate.exactFileSize
+        : (Number.isSafeInteger(candidate.selectedFileSize) && candidate.selectedFileSize > 0
+          ? candidate.selectedFileSize : null),
+    });
     // Alternate-search budget: once a bind has been rejected as unserviceable,
     // inspect at most `maxAlternates` further candidates, then publish the
     // best-ranked unserviceable bind with a precise blocker. Bounds provider
@@ -382,11 +404,22 @@ export async function selectBindableCandidate(results, options = {}) {
     // can still bind via single-file/episode rules).
     let pathAFailureCode = null;
     if (selectedFileSize != null && typeof ensureTorBoxFileIdentityFn === 'function') {
+      const ensureStartedAt = Date.now();
       try {
         const sizeResult = await ensureTorBoxFileIdentityFn({
           infoHash: candidate.infoHash,
           selectedFileSize,
           releaseKey: candidate.release?.key || null,
+        });
+        perfTrace('selection.ensure', {
+          path: 'A-exact-size',
+          rank: candidate.rank,
+          hash: candidate.infoHash,
+          selectedFileSize,
+          ms: Date.now() - ensureStartedAt,
+          bound: !!sizeResult?.torrentFileId,
+          torrentFileId: sizeResult?.torrentFileId ?? null,
+          placementId: sizeResult?.placementId ?? null,
         });
         if (sizeResult?.torrentFileId
           && isMediaPayloadForSelection(controlPlaneStore, sizeResult.torrentFileId)) {
@@ -425,6 +458,16 @@ export async function selectBindableCandidate(results, options = {}) {
           }
         }
       } catch (err) {
+        perfTrace('selection.ensure', {
+          path: 'A-exact-size',
+          rank: candidate.rank,
+          hash: candidate.infoHash,
+          selectedFileSize,
+          ms: Date.now() - ensureStartedAt,
+          bound: false,
+          code: err?.code ?? null,
+          err: String(err?.message ?? err),
+        });
         // exact-size failed; PATH B below decides whether a retry is worthwhile.
         pathAFailureCode = err?.code ?? null;
       }
@@ -465,11 +508,20 @@ export async function selectBindableCandidate(results, options = {}) {
       // the remainder of this block, which assumes a usable inventory.
       // Without an RD seam, any failure moves to the next candidate.
       let moviePathBFailed = false;
+      const movieEnsureStartedAt = Date.now();
       try {
         const result = await ensureTorBoxFileIdentityFn({
           infoHash: candidate.infoHash,
           controlPlaneStore,
           skipSizeMatch: true,
+        });
+        perfTrace('selection.ensure', {
+          path: 'B-movie-cached-single-file',
+          rank: candidate.rank,
+          hash: candidate.infoHash,
+          ms: Date.now() - movieEnsureStartedAt,
+          bound: true,
+          placementId: result?.placementId ?? null,
         });
         placementId = result?.placementId ?? null;
         // Prefer the inventory returned by the helper, but fall back to a
@@ -480,6 +532,15 @@ export async function selectBindableCandidate(results, options = {}) {
         placementTorrentFiles = result?.torrentFiles
           ?? controlPlaneStore.listTorrentFilesForRelease(candidate.infoHash);
       } catch (err) {
+        perfTrace('selection.ensure', {
+          path: 'B-movie-cached-single-file',
+          rank: candidate.rank,
+          hash: candidate.infoHash,
+          ms: Date.now() - movieEnsureStartedAt,
+          bound: false,
+          code: err?.code ?? null,
+          err: String(err?.message ?? err),
+        });
         // Placement create refused (release not cached) or inventory fetch
         // failed. Either way, this candidate cannot be bound authoritatively;
         // continue to the next already-ranked candidate.
@@ -570,15 +631,33 @@ export async function selectBindableCandidate(results, options = {}) {
         let placementTorrentFiles;
         let placementId = null;
         let placementFailed = false;
+        const tvEnsureStartedAt = Date.now();
         try {
           const result = await ensureTorBoxFileIdentityFn({
             infoHash: candidate.infoHash,
             controlPlaneStore,
             skipSizeMatch: true,
           });
+          perfTrace('selection.ensure', {
+            path: 'B-tv-episode',
+            rank: candidate.rank,
+            hash: candidate.infoHash,
+            ms: Date.now() - tvEnsureStartedAt,
+            bound: true,
+            placementId: result?.placementId ?? null,
+          });
           placementId = result?.placementId ?? null;
           placementTorrentFiles = result?.torrentFiles ?? controlPlaneStore.listTorrentFilesForRelease(candidate.infoHash);
         } catch (err) {
+          perfTrace('selection.ensure', {
+            path: 'B-tv-episode',
+            rank: candidate.rank,
+            hash: candidate.infoHash,
+            ms: Date.now() - tvEnsureStartedAt,
+            bound: false,
+            code: err?.code ?? null,
+            err: String(err?.message ?? err),
+          });
           console.error(`[PATH B] ensureTorBox FAILED hash=${candidate.infoHash} err=${err?.message ?? err}`);
           skipped.push({
             infoHash: candidate.infoHash,

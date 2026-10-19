@@ -11,6 +11,7 @@ import {
   stableLibraryItemId,
 } from './canonical-path.js';
 import { createLifecycleEvent, projectLifecycle } from './lifecycle.js';
+import { perfTrace } from '../perf-trace.js';
 
 const CONTROL_PLANE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS library_items (
@@ -1447,6 +1448,22 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   }
 
   function activateBinding(input) {
+    const activateStartedAt = Date.now();
+    try {
+      return activateBindingInner(input);
+    } finally {
+      perfTrace('binding.activate', {
+        ms: Date.now() - activateStartedAt,
+        infoHash: input?.infoHash ?? null,
+        torrentFileId: input?.torrentFileId ?? null,
+        placementId: input?.placementId ?? null,
+        providerFileId: input?.providerFileId ?? null,
+        reason: input?.reason ?? null,
+      });
+    }
+  }
+
+  function activateBindingInner(input) {
     const identity = validateReleaseIdentity(input);
     const item = requireLibraryItem(input.libraryItemId);
     const libraryPath = db.prepare(

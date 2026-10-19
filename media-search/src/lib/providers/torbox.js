@@ -31,6 +31,7 @@ import { PROVIDER_CAPABILITIES, createProviderAdapter } from './capabilities.js'
 import { classifyProviderError, ProviderOperationError } from './errors.js';
 import { createCacheObservation } from './observations.js';
 import { createPlacementResult } from './resources.js';
+import { perfTrace } from '../perf-trace.js';
 
 const PLACEMENT_CREATE_TIMEOUT_MS = 5_000;
 
@@ -131,6 +132,15 @@ export async function checkTorBoxCached(hashes, options = {}) {
       for (const hash of batch) {
         latencyMs.set(hash, elapsed);
       }
+      perfTrace('provider.http', {
+        provider: 'torbox',
+        endpoint: 'checkcached',
+        action: 'availability',
+        origin: 'remote',
+        ms: elapsed,
+        status: 200,
+        batchSize: batch.length,
+      });
     } catch (error) {
       // Authentication is global, not a per-batch cache miss.
       if (
@@ -151,6 +161,16 @@ export async function checkTorBoxCached(hashes, options = {}) {
       console.error(
         `TorBox cache batch unavailable (${batch.length} hashes): ${error.message}`
       );
+      perfTrace('provider.http', {
+        provider: 'torbox',
+        endpoint: 'checkcached',
+        action: 'availability',
+        origin: 'remote',
+        ms: Date.now() - batchStart,
+        status: error?.status ?? null,
+        batchSize: batch.length,
+        err: String(error?.message ?? error),
+      });
     }
   }
 
@@ -196,6 +216,7 @@ export function createTorBoxProvider(options = {}) {
     }
     body.append('add_only_if_cached', input.addOnlyIfCached ? 'true' : 'false');
 
+    const startedAt = Date.now();
     try {
       const response = await fetchFn(`${API_BASE}/torrents/createtorrent`, {
         method: 'POST',
@@ -234,6 +255,16 @@ export function createTorBoxProvider(options = {}) {
         );
       }
 
+      perfTrace('provider.http', {
+        provider: 'torbox',
+        endpoint: 'createtorrent',
+        action: 'create-placement',
+        origin: 'remote',
+        ms: Date.now() - startedAt,
+        status: 200,
+        addOnlyIfCached: input.addOnlyIfCached === true,
+      });
+
       return createPlacementResult({
         provider: 'torbox',
         accountScope,
@@ -242,6 +273,16 @@ export function createTorBoxProvider(options = {}) {
         evidence: { torrentId: data.torrent_id, filename: data.filename ?? null },
       });
     } catch (error) {
+      perfTrace('provider.http', {
+        provider: 'torbox',
+        endpoint: 'createtorrent',
+        action: 'create-placement',
+        origin: 'remote',
+        ms: Date.now() - startedAt,
+        status: error?.status ?? null,
+        addOnlyIfCached: input.addOnlyIfCached === true,
+        err: String(error?.message ?? error),
+      });
       if (error instanceof ProviderOperationError) throw error;
       throw classifyProviderError(error, {
         provider: 'torbox',
