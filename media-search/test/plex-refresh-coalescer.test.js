@@ -286,7 +286,7 @@ test('coalescer: refreshKey produces distinct keys for distinct inputs', () => {
     refreshKey({ sectionId: '3', scanPath: '/a', collection: 'Movies' }),
   );
   assert.equal(refreshKey({ sectionId: '', scanPath: '/a' }), null);
-  assert.equal(refreshKey({ sectionId: '3', scanPath: '' }), null);
+  assert.equal(refreshKey({ sectionId: '3', scanPath: '' }), '?::3::section');
 });
 
 test('coalescer: account snapshot mirrors changes for metrics sink', () => {
