@@ -701,8 +701,7 @@ export async function materializeVfsEntry(
       assertExistingIdentity(existing, handoff, torrentFile);
       const pmsVisibleChanged = existing.torrentFileId !== (torrentFile?.id ?? null)
         || String(existing.infoHash || '').toLowerCase() !== String(torrentFile?.infoHash ?? handoff.infoHash).toLowerCase()
-        || existing.size !== (torrentFile?.size ?? null)
-        || existing.canonicalPath !== canonicalPath;
+        || existing.size !== (torrentFile?.size ?? null);
       if (pmsVisibleChanged) {
         const previousGeneration = searchCache.db.prepare(
           'SELECT MAX(updated_at) AS max_updated_at FROM vfs_movie_entries',
