@@ -472,7 +472,7 @@ export function createRefreshCoalescer({
       coalescedCount: bucket.callCount ?? (bucket.mediaIds?.size || 0),
     };
     account.actual_refresh_sent += 1;
-    if (entry?.latest?.fullSection === true) {
+    if (bucket?.latest?.fullSection === true) {
       account.full_section_refresh += 1;
     }
     emitAccount();
