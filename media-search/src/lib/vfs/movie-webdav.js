@@ -935,10 +935,32 @@ export function createMovieWebDav({
     if (typeof releaseKey !== 'string' || !releaseKey) {
       throw new VfsError('Release key is required for VFS hydration', 400, 'HYDRATE_INVALID');
     }
-    // Build the catalog so the state map is populated without depending on
-    // a prior WebDAV request.
-    await getCatalog();
-    const state = states.get(releaseKey);
+    // Build the catalog only when this release is not already in the
+    // in-memory state map; getCatalog() is a full collection sweep and
+    // dominates hydration latency on warm paths.
+    let state = states.get(releaseKey);
+    if (!state || state.entry.size == null) {
+      // Avoid a full collection sweep when the requested release is already
+      // a durable VFS row. Resolve just that entry instead.
+      const entries = searchCache.listVfsMovieEntries();
+      const entry = entries.find((e) => e.releaseKey === releaseKey);
+      if (entry) {
+        const resolved = resolveVfsStateForEntry({
+          searchCache,
+          controlPlaneStore,
+          entry: { ...entry, mediaType: 'movie' },
+          log: () => {},
+        });
+        if (resolved.state) {
+          state = resolved.state;
+          if (!states.has(releaseKey)) states.set(releaseKey, state);
+        }
+      }
+    }
+    if (!state || state.entry.size == null) {
+      await getCatalog();
+      state = states.get(releaseKey);
+    }
     if (!state) {
       throw new VfsError(`VFS movie state not found for ${releaseKey}`, 503, 'VFS_STATE_MISSING');
     }
