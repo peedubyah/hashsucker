@@ -136,6 +136,26 @@ export function createRdPlacementRealizer({
   // must issue exactly one realization.
   const inFlight = new Map();
 
+  // Negative memory: an infoHash that the RD account does not hold. The
+  // account list is the ONLY hash index Real-Debrid offers, so a miss
+  // costs a full account download. Without this memory every
+  // materialization of the same release re-downloads the account — and
+  // materialization happens on the READ path too (the WebDAV catalog
+  // sweep converges every handoff), so the account was being re-downloaded
+  // roughly once per sweep, forever, for every release that is not in the
+  // RD account. Measured on 2026-10-19: 219 account-list calls in 152 s
+  // (~110/min) sustained, against ~140 catalog materializations in the
+  // same window.
+  //
+  // The window bounds how long a genuinely new RD resource can stay
+  // unnoticed; it is an enrichment, never authority, so a late realization
+  // is harmless.
+  const absentMemory = new Map();
+  const ABSENT_MEMORY_MS = (() => {
+    const raw = Number(process.env.RD_REALIZE_ABSENT_MEMORY_MS ?? 900_000);
+    return Number.isSafeInteger(raw) && raw >= 0 ? raw : 900_000;
+  })();
+
   const isEnabled = () => rd != null;
 
   /**
@@ -269,6 +289,18 @@ export function createRdPlacementRealizer({
     let apiCalls = 0;
 
     if (!rdId) {
+      const remembered = absentMemory.get(infoHash);
+      if (remembered && remembered.until > observedAt) {
+        // Known-absent for this window: the account list would answer the
+        // same way. Do not download the account again to learn that.
+        return {
+          status: remembered.status,
+          infoHash,
+          apiCalls: 0,
+          ids: remembered.ids ?? null,
+          reason: 'remembered-absent',
+        };
+      }
       let discovery;
       try {
         apiCalls += 1;
@@ -279,7 +311,17 @@ export function createRdPlacementRealizer({
       }
       if (discovery.status !== 'found') {
         // No row is written. An absent/ambiguous RD torrent is a fact, not
-        // a synthetic placement.
+        // a synthetic placement. Remember it so the next materialization
+        // of the same release does not re-download the account.
+        absentMemory.set(infoHash, {
+          status: discovery.status,
+          ids: discovery.ids ?? null,
+          until: observedAt + ABSENT_MEMORY_MS,
+        });
+        if (absentMemory.size > 4096) {
+          const oldest = absentMemory.keys().next().value;
+          absentMemory.delete(oldest);
+        }
         return { status: discovery.status, infoHash, apiCalls, ids: discovery.ids ?? null };
       }
       rdId = discovery.id;
