@@ -173,6 +173,37 @@ function tryActivateAuthoritativeBinding({
   const retryAt = bindingActivationRetryAt.get(activationKey) ?? 0;
   if (retryAt > observedAt) return null;
 
+  // An ALREADY-AUTHORIZED binding is not re-authorized. The store's
+  // activation guard proves the ROUTE OBSERVATION is fresh before it will
+  // authorize anything, and the provider inventory observation expires on
+  // its own TTL — so a binding that is already active and names the exact
+  // same TorrentFile/release/route would be re-checked against an expired
+  // observation and reported as a failure, forever.
+  //
+  // That failure is not harmless: the WebDAV catalog sweep converges every
+  // handoff on the READ path, so every sweep re-attempted the activation
+  // of every published item whose inventory observation had expired.
+  // Measured on 2026-10-19: 330 "activateBinding failed: Cannot bind
+  // through a stale or unbounded provider inventory observation" warnings
+  // in 30 minutes, and — when the stale-inventory fast path did apply —
+  // a NEW binding VERSION for an unchanged identity, i.e. version churn
+  // caused by read traffic.
+  //
+  // The binding is already the authority for this exact identity, so the
+  // re-authorization proves nothing and can only fail. The exposure above
+  // is still refreshed on every pass, so route evidence does not age out.
+  const active = typeof controlPlaneStore.getActiveBindingForLibraryItem === 'function'
+    ? controlPlaneStore.getActiveBindingForLibraryItem(item.id)
+    : null;
+  if (active
+    && active.torrentFile?.id === torrentFile.id
+    && active.binding?.infoHash === handoff.infoHash
+    && active.binding?.releaseKey === handoff.releaseKey
+    && active.binding?.placementId === placementId
+    && active.binding?.providerFileId === providerFileId) {
+    return active.binding;
+  }
+
   let binding;
   try {
     console.log(`[vfs-debug] activateBinding placementId=${placementId} providerFileId=${providerFileId} torrentFileId=${torrentFile?.id} infoHash=${handoff?.infoHash}`);
