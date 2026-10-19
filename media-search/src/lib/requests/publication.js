@@ -336,11 +336,12 @@ async function confirmIngestForPublication({ vfsEntry, mediaType, mediaId, seaso
  */
 async function notifyPlexForPublication({ vfsEntry, mediaType, mediaId, season = null, episode = null, isEpisode, mode }) {
   if (!vfsEntry?.canonicalPath) return;
+  console.log(`[e2e] plex_notify_start media=${mediaId} ts=${Date.now()}`);
   const notify = () => notifyPlex({
     mediaId,
     mediaType,
     canonicalPath: vfsEntry.canonicalPath,
-    fullSection: true,
+    fullSection: false,
   }).then((result) => {
     if (result.notified) {
       console.log(`[Plex] Notified via ${result.method}: ${mediaId}`);
@@ -376,15 +377,20 @@ export async function publishSelectedHandoff({
   cache, controlPlaneStore, handoff, selection,
   mediaId, mediaType, season = null, episode = null, isEpisode = false, hydrateVfs = null,
 }) {
+  console.log(`[e2e] publication_start media=${mediaId} ts=${Date.now()}`);
   const vfsEntry = await materializeHandoff({ cache, controlPlaneStore, handoff });
+  console.log(`[e2e] vfs_materialized media=${mediaId} ts=${Date.now()}`);
   assertVfsEntry({ handoff, vfsEntry });
   const strm = await publishStrmConverged({ handoff, selection, vfsEntry });
   if (strm.path) handoff.strmPath = strm.path;
+  console.log(`[e2e] strm_written media=${mediaId} ts=${Date.now()} path=${strm.path}`);
   notifyJellyfinBestEffort({ strmPath: strm.path, handoff });
   const hydratedEntry = await hydrateVfsMetadata({ vfsEntry, mediaType, mediaId, season, episode, hydrateVfs });
+  console.log(`[e2e] vfs_hydrated media=${mediaId} ts=${Date.now()}`);
   await notifyPlexForPublication({
     vfsEntry: hydratedEntry, mediaType, mediaId, season, episode, isEpisode, mode: 'request',
   });
+  console.log(`[e2e] publication_end media=${mediaId} ts=${Date.now()}`);
   return { vfsEntry, strmPath: strm.path };
 }
 
