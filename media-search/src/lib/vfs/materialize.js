@@ -174,6 +174,7 @@ function tryActivateAuthoritativeBinding({
 
   let binding;
   try {
+    console.log(`[vfs-debug] activateBinding placementId=${placementId} providerFileId=${providerFileId} torrentFileId=${torrentFile?.id} infoHash=${handoff?.infoHash}`);
     binding = controlPlaneStore.activateBinding({
       libraryItemId: item.id,
       libraryPathId: libraryPath.id,
@@ -698,6 +699,25 @@ export async function materializeVfsEntry(
         );
       }
       assertExistingIdentity(existing, handoff, torrentFile);
+      const pmsVisibleChanged = existing.torrentFileId !== (torrentFile?.id ?? null)
+        || String(existing.infoHash || '').toLowerCase() !== String(torrentFile?.infoHash ?? handoff.infoHash).toLowerCase()
+        || existing.size !== (torrentFile?.size ?? null)
+        || existing.canonicalPath !== canonicalPath;
+      if (pmsVisibleChanged) {
+        const previousGeneration = searchCache.db.prepare(
+          'SELECT MAX(updated_at) AS max_updated_at FROM vfs_movie_entries',
+        ).get()?.max_updated_at ?? 0;
+        const materializedAt = Math.max(now(), previousGeneration + 1000);
+        try {
+          searchCache.db.prepare(
+            'UPDATE vfs_movie_entries SET updated_at = ? WHERE media_id = ? AND release_key = ?',
+          ).run(materializedAt, existing.mediaId, existing.releaseKey);
+          existing.updatedAt = materializedAt;
+        } catch {
+          // Best-effort: the VFS row remains valid; only the invalidation
+          // signal is lost.
+        }
+      }
       return finalize(existing, 'vfs-movie-idempotent');
     }
     if (handoff.releaseKey !== releaseKeyFor(handoff)) {
@@ -725,7 +745,10 @@ export async function materializeVfsEntry(
         torrentFile?.id ?? handoff.releaseKey,
       );
     }
-    const timestamp = now();
+    const previousGeneration = searchCache.db.prepare(
+      'SELECT MAX(updated_at) AS max_updated_at FROM vfs_movie_entries',
+    ).get()?.max_updated_at ?? 0;
+    const timestamp = Math.max(now(), previousGeneration + 1000);
     let created;
     try {
       created = searchCache.createVfsMovieEntry({
@@ -849,7 +872,10 @@ export async function materializeVfsEntry(
       torrentFile?.id ?? handoff.releaseKey,
     );
   }
-  const timestamp = now();
+  const previousGeneration = searchCache.db.prepare(
+    'SELECT MAX(updated_at) AS max_updated_at FROM vfs_tv_entries',
+  ).get()?.max_updated_at ?? 0;
+  const timestamp = Math.max(now(), previousGeneration + 1000);
   let created;
   try {
     created = searchCache.createVfsTvEntry({
