@@ -12,6 +12,18 @@ function response(payload, status = 200) {
   return { ok: status >= 200 && status < 300, status, async json() { return payload; } };
 }
 function mylist(data) { return response({ success: true, data }); }
+// The provider reads the account list for placement lookup and reads ONE
+// torrent for file inventory; both shapes come from the same endpoint.
+function mylistAny(url, resources = [resource()]) {
+  const href = String(url);
+  if (!/mylist\?id=/.test(href)) return mylist(resources);
+  const id = new URL(href).searchParams.get('id');
+  const match = resources.find((r) => String(r.id) === id);
+  if (!match) {
+    return { ok: false, status: 404, async json() { return { success: true, error: 'ITEM_NOT_FOUND', data: {} }; } };
+  }
+  return response({ success: true, data: match });
+}
 function resource(overrides = {}) {
   return {
     id: 77,
@@ -88,7 +100,7 @@ test('TorBox readiness verifies provider ID and hash independently', async () =>
 
 test('TorBox file inventory preserves opaque file IDs and never guesses corpus indexes', async () => {
   const adapter = createTorBoxInventoryProvider({
-    apiKey: 'token', now: () => 10_000, fetchFn: async () => mylist([resource()]),
+    apiKey: 'token', now: () => 10_000, fetchFn: async (url) => mylistAny(url),
   });
   const inventory = await adapter.require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
     .getFileInventory({ providerResourceId: '77' });
@@ -322,7 +334,7 @@ test('TorBox ensure falls back to passive lookup when creation is unavailable', 
   let fetches = 0;
   const adapter = createTorBoxInventoryProvider({
     apiKey: 'token',
-    fetchFn: async () => { fetches += 1; return mylist([resource()]); },
+    fetchFn: async (url) => { fetches += 1; return mylistAny(url); },
   });
   const torBoxProvider = { supports: () => false, require: () => { throw new Error('no create'); } };
   const result = await ensureTorBoxFileIdentity({
@@ -464,4 +476,135 @@ test('TorBox ensure binds from a real fresh snapshot with zero provider calls', 
   const tf = store.getTorrentFile(result.torrentFileId);
   assert.equal(tf.infoHash, PHASH);
   store.close();
+});
+
+// =============================================================================
+// Targeted single-torrent inventory read
+//
+// The account-wide `mylist` response carries every torrent in the account
+// (megabytes). The file inventory needs exactly ONE torrent's file list.
+// These tests pin that the provider reads only the requested torrent, that
+// the bytes it yields are the same facts the account list yields, and that
+// absence still fails closed.
+// =============================================================================
+
+function torrentResponse(torrent, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async json() { return { success: true, data: torrent }; },
+  };
+}
+
+test('TorBox file inventory reads only the requested torrent when no account snapshot exists', async () => {
+  const urls = [];
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token', now: () => 10_000,
+    fetchFn: async (url) => { urls.push(String(url)); return torrentResponse(resource()); },
+  });
+  const inventory = await adapter.require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
+    .getFileInventory({ providerResourceId: '77' });
+
+  assert.equal(urls.length, 1);
+  assert.match(urls[0], /\/torrents\/mylist\?id=77/);
+  assert.doesNotMatch(urls[0], /mylist\?bypass_cache/);
+  assert.deepEqual(inventory.files.map((file) => file.providerFileId), ['900', '901']);
+  assert.equal(inventory.authoritative, true);
+  assert.equal(inventory.complete, true);
+  assert.equal(inventory.observedAt, 10_000);
+});
+
+test('TorBox targeted inventory yields the same files as the account-wide list', async () => {
+  const { TorBoxCallCoordinator } = await import('../src/lib/providers/torbox-call-coordinator.js');
+  // Account-wide read: a placement lookup first memoizes the account list,
+  // and the inventory read then reuses that snapshot.
+  const accountWide = createTorBoxInventoryProvider({
+    apiKey: 'token', now: () => 10_000,
+    fetchFn: async (url) => mylistAny(url),
+    coordinator: new TorBoxCallCoordinator({ scope: 'test-account' }),
+  });
+  await accountWide.require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
+    .lookupPlacement({ infoHash: HASH });
+  const fromAccount = await accountWide.require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
+    .getFileInventory({ providerResourceId: '77' });
+  // Targeted read: no account snapshot exists, so only that torrent is read.
+  const targeted = createTorBoxInventoryProvider({
+    apiKey: 'token', now: () => 10_000,
+    fetchFn: async (url) => mylistAny(url),
+  });
+  const fromTorrent = await targeted.require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
+    .getFileInventory({ providerResourceId: '77' });
+
+  assert.deepEqual(fromTorrent.files, fromAccount.files);
+  assert.equal(fromTorrent.authoritative, fromAccount.authoritative);
+  assert.equal(fromTorrent.complete, fromAccount.complete);
+  assert.equal(fromTorrent.observedAt, fromAccount.observedAt);
+  assert.deepEqual(fromTorrent.evidence, fromAccount.evidence);
+});
+
+test('TorBox file inventory reuses the memoized account snapshot instead of a second read', async () => {
+  const { TorBoxCallCoordinator } = await import('../src/lib/providers/torbox-call-coordinator.js');
+  const urls = [];
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async (url) => { urls.push(String(url)); return mylist([resource()]); },
+    coordinator: new TorBoxCallCoordinator({ scope: 'test-request' }),
+  });
+  await adapter.require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP)
+    .lookupPlacement({ infoHash: HASH });
+  await adapter.require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
+    .getFileInventory({ providerResourceId: '77' });
+
+  assert.equal(urls.length, 1, 'account snapshot is reused for the inventory read');
+  assert.match(urls[0], /mylist\?bypass_cache/);
+});
+
+test('TorBox targeted inventory proves absence for a torrent outside the account', async () => {
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async () => ({
+      ok: false, status: 404,
+      async json() { return { success: true, error: 'ITEM_NOT_FOUND', data: {} }; },
+    }),
+  });
+  await assert.rejects(
+    () => adapter.require(PROVIDER_CAPABILITIES.FILE_INVENTORY).getFileInventory({ providerResourceId: '404' }),
+    (error) => error instanceof ProviderOperationError && error.category === 'not-found',
+  );
+});
+
+test('TorBox targeted inventory keeps a malformed file list fail-closed', async () => {
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async () => torrentResponse({ ...resource(), files: null }),
+  });
+  await assert.rejects(
+    () => adapter.require(PROVIDER_CAPABILITIES.FILE_INVENTORY).getFileInventory({ providerResourceId: '77' }),
+    (error) => error instanceof ProviderOperationError && error.category === 'invalid-response',
+  );
+});
+
+test('TorBox targeted inventory is memoized per torrent and never shared across torrents', async () => {
+  const { TorBoxCallCoordinator } = await import('../src/lib/providers/torbox-call-coordinator.js');
+  const urls = [];
+  const adapter = createTorBoxInventoryProvider({
+    apiKey: 'token',
+    fetchFn: async (url) => {
+      const href = String(url);
+      urls.push(href);
+      const id = new URL(href).searchParams.get('id');
+      return torrentResponse(resource({ id: Number(id), hash: id === '77' ? HASH : OTHER_HASH }));
+    },
+    coordinator: new TorBoxCallCoordinator({ scope: 'test-targeted' }),
+  });
+  const first = await adapter.require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
+    .getFileInventory({ providerResourceId: '77' });
+  const again = await adapter.require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
+    .getFileInventory({ providerResourceId: '77' });
+  const other = await adapter.require(PROVIDER_CAPABILITIES.FILE_INVENTORY)
+    .getFileInventory({ providerResourceId: '78' });
+
+  assert.equal(urls.length, 2, 'same torrent is read once, a different torrent is a separate read');
+  assert.deepEqual(first.files.map((f) => f.providerFileId), again.files.map((f) => f.providerFileId));
+  assert.deepEqual(other.files.map((f) => f.providerFileId), first.files.map((f) => f.providerFileId));
 });

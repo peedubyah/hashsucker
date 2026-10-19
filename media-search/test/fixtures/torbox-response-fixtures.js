@@ -119,6 +119,40 @@ export function mylistMalformed() {
   return { success: true };
 }
 
+/**
+ * Answer BOTH shapes of the mylist endpoint from one fixture set:
+ * the account-wide list (`mylist?bypass_cache`) and the single torrent
+ * (`mylist?id=<torrentId>`). The provider reads the account list for
+ * placement lookup and one torrent for file inventory; a torrent that is
+ * not in the account answers 404 (ITEM_NOT_FOUND), which is the same
+ * absence the account list proves by omission.
+ */
+export function mylistEndpointResponder(resources = [mylistResource()]) {
+  return (url) => {
+    const href = String(url);
+    if (!/mylist\?id=/.test(href)) {
+      return {
+        ok: true, status: 200,
+        async json() { return { success: true, data: resources }; },
+      };
+    }
+    const id = new URL(href).searchParams.get('id');
+    const match = resources.find((r) => String(r.id) === id);
+    if (!match) {
+      return {
+        ok: false, status: 404,
+        async json() {
+          return { success: true, error: 'ITEM_NOT_FOUND', detail: 'No torrents found for this user.', data: {} };
+        },
+      };
+    }
+    return {
+      ok: true, status: 200,
+      async json() { return { success: true, data: match }; },
+    };
+  };
+}
+
 // ---------------------------------------------------------------------------
 // createtorrent — placement creation endpoint
 // ---------------------------------------------------------------------------

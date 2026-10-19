@@ -364,11 +364,13 @@ test('delivery lifecycle: cached-only → 1 placement-create, mylist used for lo
     }
     if (url.includes('/torrents/mylist')) {
       mylistCalls += 1;
-      return makeOkResponse(makeMylistPayload([
-        makeMylistResource({
-          files: [makeFile({ name: 'episode.mkv' })],
-        }),
-      ]));
+      const torrent = makeMylistResource({
+        files: [makeFile({ name: 'episode.mkv' })],
+      });
+      // The account list and the single-torrent read are the same
+      // endpoint with two response shapes.
+      if (url.includes('id=')) return makeOkResponse({ success: true, data: torrent });
+      return makeOkResponse(makeMylistPayload([torrent]));
     }
     throw new Error(`Unexpected URL in fakeFetch: ${url}`);
   };
@@ -439,9 +441,10 @@ test('delivery lifecycle: mylist hit short-circuits second inventory read', asyn
   // produce two mylist fetches. The first populates the coordinator;
   // the second is served from memoization.
   const fakeFetch = makeFakeFetch([
-    makeOkResponse(makeMylistPayload([
-      makeMylistResource({ files: [makeFile({ name: 'movie.mkv' })] }),
-    ])),
+    makeOkResponse({
+      success: true,
+      data: makeMylistResource({ files: [makeFile({ name: 'movie.mkv' })] }),
+    }),
   ]);
 
   const { coordinator, budget } = buildCoordinator({

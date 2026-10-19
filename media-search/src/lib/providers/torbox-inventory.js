@@ -63,6 +63,30 @@ export function createTorBoxInventoryProvider(options = {}) {
     return activeCoordinator.run('mylist', args, (base, key, sig) => directMylistFetch(sig, base, key));
   }
 
+  /**
+   * Fetch exactly ONE torrent of the account inventory.
+   *
+   * The account-wide `mylist` response carries every torrent in the
+   * account (hundreds of entries; megabytes) and its cost is dominated by
+   * that payload, not by the fact the caller needs: the file list of ONE
+   * torrent. The provider supports `mylist?id=<torrentId>`, which returns
+   * that single torrent with an identical payload.
+   *
+   * Absence is explicit: a torrent that is not in the account answers HTTP
+   * 404 (ITEM_NOT_FOUND), which is the same fact the account-wide list
+   * proves by omission.
+   */
+  async function fetchTorrentSnapshot(torrentId, { signal } = {}) {
+    const fetchOne = (base, key, sig) => directTorrentFetch(torrentId, sig, base, key);
+    if (!useCoordinator) {
+      return fetchOne(apiBase, apiKey, signal);
+    }
+    const args = [apiBase, apiKey, signal];
+    // One cache slot per torrent: two different torrents must never share
+    // a memoized result.
+    return activeCoordinator.run('mylist', args, fetchOne, `torrent:${torrentId}`);
+  }
+
   async function directMylistFetch(signal, baseOverride = apiBase, keyOverride = apiKey) {
     const startedAt = Date.now();
     try {
@@ -122,6 +146,69 @@ export function createTorBoxInventoryProvider(options = {}) {
     }
   }
 
+  async function directTorrentFetch(torrentId, signal, baseOverride = apiBase, keyOverride = apiKey) {
+    const startedAt = Date.now();
+    const url = `${baseOverride}/torrents/mylist?id=${encodeURIComponent(torrentId)}&bypass_cache=true`;
+    const response = await fetchFn(url, {
+      headers: {
+        Authorization: `Bearer ${keyOverride}`,
+        Accept: 'application/json',
+        'User-Agent': 'media-search/0.0.1',
+      },
+      signal: signal ?? AbortSignal.timeout(timeoutMs),
+    });
+    if (response.status === 404) {
+      // The account does not contain this torrent: absence is proven.
+      perfTrace('provider.http', {
+        provider: 'torbox',
+        endpoint: 'mylist-torrent',
+        action: 'file-inventory',
+        origin: 'remote',
+        ms: Date.now() - startedAt,
+        status: 404,
+        absent: true,
+      });
+      return null;
+    }
+    if (!response.ok) {
+      const err = new Error(`TorBox mylist failed: HTTP ${response.status}`);
+      err.status = response.status;
+      perfTrace('provider.http', {
+        provider: 'torbox',
+        endpoint: 'mylist-torrent',
+        action: 'file-inventory',
+        origin: 'remote',
+        ms: Date.now() - startedAt,
+        status: response.status,
+      });
+      throw err;
+    }
+    const payload = await response.json();
+    if (payload?.success !== true
+      || !payload.data || typeof payload.data !== 'object' || Array.isArray(payload.data)) {
+      perfTrace('provider.http', {
+        provider: 'torbox',
+        endpoint: 'mylist-torrent',
+        action: 'file-inventory',
+        origin: 'remote',
+        ms: Date.now() - startedAt,
+        status: response.status,
+        err: 'invalid-response',
+      });
+      throw invalidResponse('TorBox mylist must return success with a torrent object', 'file-inventory');
+    }
+    perfTrace('provider.http', {
+      provider: 'torbox',
+      endpoint: 'mylist-torrent',
+      action: 'file-inventory',
+      origin: 'remote',
+      ms: Date.now() - startedAt,
+      status: response.status,
+      files: Array.isArray(payload.data.files) ? payload.data.files.length : null,
+    });
+    return { observedAt: now(), torrent: payload.data };
+  }
+
   /**
    * Drop the memoized mylist snapshot so the next read re-fetches. Called
    * after a request-scoped write (placement-create) whose new torrent is
@@ -177,14 +264,29 @@ export function createTorBoxInventoryProvider(options = {}) {
       [PROVIDER_CAPABILITIES.FILE_INVENTORY]: {
         async getFileInventory(resource, context = {}) {
           const providerResourceId = requireProviderId(resource?.providerResourceId, 'providerResourceId');
-          const snapshot = await getSnapshot(context.signal);
-          const match = snapshot.resources.find((item) => String(item?.id) === providerResourceId);
+          // Prefer the account snapshot when THIS request already has one
+          // memoized: same bytes, no extra provider call. Otherwise read
+          // only the requested torrent — the account-wide list is
+          // megabytes and the fact needed here is one torrent's files.
+          const memoizedAccount = useCoordinator
+            ? activeCoordinator.peek('mylist', [apiBase, apiKey, context.signal])
+            : undefined;
+          let match;
+          let observedAt;
+          if (memoizedAccount) {
+            match = memoizedAccount.resources.find((item) => String(item?.id) === providerResourceId);
+            observedAt = memoizedAccount.observedAt;
+          } else {
+            const targeted = await fetchTorrentSnapshot(providerResourceId, { signal: context.signal });
+            match = targeted?.torrent ?? null;
+            observedAt = targeted?.observedAt ?? now();
+          }
           if (!match) throw notFoundError(`TorBox resource ${providerResourceId} is absent`, 'file-inventory');
           if (!Array.isArray(match.files)) throw invalidResponse('TorBox mylist resource files must be an array', 'file-inventory');
           return createProviderFileInventory({
             provider: 'torbox', accountScope, providerResourceId,
             authoritative: true, complete: true,
-            observedAt: snapshot.observedAt, ttlMs: observationTtlMs,
+            observedAt, ttlMs: observationTtlMs,
             files: match.files.map(normalizeFile),
             evidence: { source: 'torbox-mylist-v1' },
           });

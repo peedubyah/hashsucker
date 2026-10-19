@@ -14,6 +14,7 @@ import {
   checkcachedServiceError,
   mylistResource,
   mylistEmpty,
+  mylistEndpointResponder,
 } from './fixtures/torbox-response-fixtures.js';
 
 const NOW = 20_000;
@@ -161,7 +162,7 @@ test('mylist resource → inventory observation with opaque file IDs', async () 
     accountScope: 'primary',
     now: () => NOW,
     observationTtlMs: 5_000,
-    fetchFn: async () => response({ success: true, data: [mylistResource()] }),
+    fetchFn: mylistEndpointResponder([mylistResource()]),
   });
 
   const inventory = await adapter
@@ -182,7 +183,7 @@ test('mylist empty → not-found for unknown providerResourceId', async () => {
   const adapter = createTorBoxInventoryProvider({
     apiKey: 'token',
     now: () => NOW,
-    fetchFn: async () => response(mylistEmpty()),
+    fetchFn: mylistEndpointResponder([]),
   });
 
   await assert.rejects(
@@ -196,7 +197,7 @@ test('inventory never maps TorBox file IDs to corpus fileIndex', async () => {
   const adapter = createTorBoxInventoryProvider({
     apiKey: 'token',
     now: () => NOW,
-    fetchFn: async () => response({ success: true, data: [mylistResource()] }),
+    fetchFn: mylistEndpointResponder([mylistResource()]),
   });
 
   const inventory = await adapter
@@ -213,7 +214,7 @@ test('inventory is not a cache observation — no scope/state leakage', async ()
   const adapter = createTorBoxInventoryProvider({
     apiKey: 'token',
     now: () => NOW,
-    fetchFn: async () => response({ success: true, data: [mylistResource()] }),
+    fetchFn: mylistEndpointResponder([mylistResource()]),
   });
 
   const inventory = await adapter

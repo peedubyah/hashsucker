@@ -122,11 +122,14 @@ export class TorBoxCallCoordinator {
    * @param {() => Promise<T>} fetchFn  the actual fetcher
    * @returns {Promise<T>}
    */
-  async run(op, args, fetchFn) {
+  async run(op, args, fetchFn, cacheKeyOverride = null) {
     if (typeof fetchFn !== 'function') {
       throw new TypeError('run() requires a fetchFn function');
     }
-    const key = this._cacheKey(args, this._maxRetries);
+    // A caller may supply its own cache key when the same operation has
+    // several logically distinct results (e.g. one targeted read per
+    // provider resource). The default key derives from the call args.
+    const key = cacheKeyOverride ?? this._cacheKey(args, this._maxRetries);
     const slotKey = `${op}::${key}`;
 
     const existing = this._inflight.get(slotKey);
@@ -202,6 +205,30 @@ export class TorBoxCallCoordinator {
         throw normalizeError(error);
       }
     }
+  }
+
+  /**
+   * Read a memoized value for an operation WITHOUT issuing a fetch.
+   *
+   * Returns `undefined` when nothing is memoized for that slot. Callers
+   * use this to prefer an already-fetched snapshot over a narrower read
+   * of the same fact: the memoized bytes are the same bytes, and using
+   * them keeps one request down to one provider fetch.
+   *
+   * @param {string} op
+   * @param {any[]} args - the same args the matching run() call used
+   * @param {string|null} [cacheKeyOverride]
+   * @returns {any|undefined}
+   */
+  peek(op, args, cacheKeyOverride = null) {
+    const key = cacheKeyOverride ?? this._cacheKey(args, this._maxRetries);
+    const memoized = this._memo.get(`${op}::${key}`);
+    if (!memoized) return undefined;
+    // A peek that finds a memoized value IS a cache hit served without a
+    // network fetch: the budget ledger must show it, exactly as a
+    // single-flight reuse would.
+    this._budget.recordHit(op);
+    return memoized.value;
   }
 
   /**
