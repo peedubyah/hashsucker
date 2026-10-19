@@ -206,42 +206,40 @@ function tryActivateAuthoritativeBinding({
       console.warn(`[vfs] orphan VFS cleanup failed: ${cleanupError.message}`);
     }
     const message = String(error?.message ?? error);
-    const bypass = process.env.HS_INVENTORY_BYPASS === '1';
-    if (bypass && /stale or unbounded provider inventory observation/i.test(message)) {
-      const health = getServiceability(torrentFile?.id ?? handoff?.torrentFileId);
-      if (health.state === 'serviceable') {
-        // EXPERIMENT ONLY: reuse a stale inventory snapshot when the exact
-        // TorrentFile already has fresh positive byte evidence. Inventory is
-        // still required to be authoritative/complete and infoHash-matched;
-        // only its TTL is extended. Mylist is not called.
-        try {
-          const future = observedAt + 60_000;
-          controlPlaneStore.db.prepare(
-            "UPDATE provider_inventory_snapshots SET expires_at = ? WHERE placement_id = ?",
-          ).run(future, placementId);
-          controlPlaneStore.db.prepare(
-            "UPDATE provider_files SET inventory_expires_at = ? WHERE placement_id = ? AND provider_file_id = ?",
-          ).run(future, placementId, providerFileId);
-          binding = controlPlaneStore.activateBinding({
-            libraryItemId: item.id,
-            libraryPathId: libraryPath.id,
-            releaseKey: handoff.releaseKey,
-            infoHash: handoff.infoHash,
-            fileIndex: handoff.fileIndex ?? null,
-            torrentFileId: torrentFile.id,
-            placementId,
-            providerFileId,
-            exposureId: exposure.id,
-            reason,
-          });
-          bindingActivationRetryAt.delete(activationKey);
-          return binding;
-        } catch (retryError) {
-          console.warn(`[exp-bypass] retry failed: ${retryError.message}`);
-          binding = null;
-        }
-      } else {
-        console.warn(`[exp-bypass] refused: byte-health=${health.state}`);
+    const health = getServiceability(torrentFile?.id ?? handoff?.torrentFileId);
+    const providerMatches = health.provider == null || health.provider === (handoff.provider === 'realdebrid' ? 'realdebrid' : 'torbox');
+    // Production fast path: a stale inventory observation may be extended
+    // only when the exact durable placement/file/TF already satisfies every
+    // identity invariant and the exact same TorrentFile has fresh positive
+    // byte evidence. Inventory is still required to be authoritative/complete
+    // and infoHash-matched; only its TTL is extended. Mylist is not called.
+    if (/stale or unbounded provider inventory observation/i.test(message)
+        && health.state === 'serviceable' && providerMatches) {
+      try {
+        const future = observedAt + 60_000;
+        controlPlaneStore.db.prepare(
+          "UPDATE provider_inventory_snapshots SET expires_at = ? WHERE placement_id = ?",
+        ).run(future, placementId);
+        controlPlaneStore.db.prepare(
+          "UPDATE provider_files SET inventory_expires_at = ? WHERE placement_id = ? AND provider_file_id = ?",
+        ).run(future, placementId, providerFileId);
+        binding = controlPlaneStore.activateBinding({
+          libraryItemId: item.id,
+          libraryPathId: libraryPath.id,
+          releaseKey: handoff.releaseKey,
+          infoHash: handoff.infoHash,
+          fileIndex: handoff.fileIndex ?? null,
+          torrentFileId: torrentFile.id,
+          placementId,
+          providerFileId,
+          exposureId: exposure.id,
+          reason,
+        });
+        bindingActivationRetryAt.delete(activationKey);
+        return binding;
+      } catch (retryError) {
+        console.warn(`[vfs] stale-inventory fast path failed: ${retryError.message}`);
+        binding = null;
       }
     }
     if (!binding && /stale or unbounded provider inventory observation/i.test(message)) {
