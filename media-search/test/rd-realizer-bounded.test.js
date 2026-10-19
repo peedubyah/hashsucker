@@ -89,6 +89,41 @@ test('one catalog pass over many releases downloads the RD account once', async 
   }
 });
 
+test('concurrent catalog kicks share one account download', async () => {
+  const previousMemory = process.env.RD_REALIZE_ABSENT_MEMORY_MS;
+  const previousSnapshot = process.env.RD_REALIZE_SNAPSHOT_MS;
+  process.env.RD_REALIZE_ABSENT_MEMORY_MS = '0';
+  process.env.RD_REALIZE_SNAPSHOT_MS = '60000';
+  try {
+    let listCalls = 0;
+    const client = {
+      async listTorrents() {
+        listCalls += 1;
+        await new Promise((r) => setTimeout(r, 10));
+        return [];
+      },
+      async getTorrentInfo() { throw new Error('not expected'); },
+    };
+    const realizer = createRdPlacementRealizer({
+      store: storeStub(), client, now: () => 1_000, logger: () => {},
+    });
+    // The sweep kicks every realization concurrently and does not await
+    // them, so the account download must be single-flighted.
+    await Promise.all(Array.from({ length: 25 }, (_, i) => realizer.ensureRealization({
+      id: `tf-c${i}`,
+      infoHash: '0'.repeat(36) + i.toString(16).padStart(4, '0'),
+      internalPath: `Movie/movie-${i}.mkv`,
+      size: 1000,
+    })));
+    assert.equal(listCalls, 1, 'concurrent kicks must share one account download');
+  } finally {
+    if (previousMemory === undefined) delete process.env.RD_REALIZE_ABSENT_MEMORY_MS;
+    else process.env.RD_REALIZE_ABSENT_MEMORY_MS = previousMemory;
+    if (previousSnapshot === undefined) delete process.env.RD_REALIZE_SNAPSHOT_MS;
+    else process.env.RD_REALIZE_SNAPSHOT_MS = previousSnapshot;
+  }
+});
+
 test('a remembered absence expires, so a release that later appears is still realized', async () => {
   const previous = process.env.RD_REALIZE_ABSENT_MEMORY_MS;
   const previousSnapshot = process.env.RD_REALIZE_SNAPSHOT_MS;

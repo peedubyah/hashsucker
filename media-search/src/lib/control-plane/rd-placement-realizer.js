@@ -166,6 +166,11 @@ export function createRdPlacementRealizer({
     return Number.isSafeInteger(raw) && raw >= 0 ? raw : 60_000;
   })();
   let accountSnapshot = null;
+  // Single-flight for the account list: the catalog sweep kicks every
+  // realization concurrently, so a snapshot alone is not enough — without
+  // a shared in-flight promise each concurrent kick would see an empty
+  // cache and download the account again.
+  let accountFetch = null;
 
   const isEnabled = () => rd != null;
 
@@ -190,12 +195,20 @@ export function createRdPlacementRealizer({
     if (accountSnapshot && (at - accountSnapshot.at) < ACCOUNT_SNAPSHOT_MS) {
       return accountSnapshot.entries;
     }
-    const list = await rd.listTorrents({ limit: boundedLimit });
-    accountSnapshot = {
-      at: now(),
-      entries: Array.isArray(list) ? list : [],
-    };
-    return accountSnapshot.entries;
+    if (accountFetch) return accountFetch;
+    accountFetch = (async () => {
+      try {
+        const list = await rd.listTorrents({ limit: boundedLimit });
+        accountSnapshot = {
+          at: now(),
+          entries: Array.isArray(list) ? list : [],
+        };
+        return accountSnapshot.entries;
+      } finally {
+        accountFetch = null;
+      }
+    })();
+    return accountFetch;
   }
 
   async function discoverResourceId(infoHash) {
