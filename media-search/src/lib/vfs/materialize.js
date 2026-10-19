@@ -613,8 +613,10 @@ export async function materializeVfsEntry(
     // being silently rewritten onto the old one (which would mismatch the
     // provider placement and fail activation).
     if (active && active.binding?.infoHash === handoff.infoHash
-        && active.torrentFile.id !== torrentFile.id && !explicitRepresentationDecision) {
-      torrentFile = active.torrentFile;
+        && !explicitRepresentationDecision) {
+      if (active.torrentFile.id !== torrentFile.id) {
+        torrentFile = active.torrentFile;
+      }
       handoff = {
         ...handoff,
         releaseKey: active.binding.releaseKey,
@@ -699,6 +701,16 @@ export async function materializeVfsEntry(
         );
       }
       assertExistingIdentity(existing, handoff, torrentFile);
+      if (existing.releaseKey !== handoff.releaseKey) {
+        try {
+          searchCache.db.prepare(
+            'UPDATE vfs_movie_entries SET release_key = ? WHERE media_id = ? AND release_key = ?',
+          ).run(handoff.releaseKey, existing.mediaId, existing.releaseKey);
+          existing.releaseKey = handoff.releaseKey;
+        } catch {
+          // Best-effort normalization; publication can still proceed.
+        }
+      }
       const pmsVisibleChanged = existing.torrentFileId !== (torrentFile?.id ?? null)
         || String(existing.infoHash || '').toLowerCase() !== String(torrentFile?.infoHash ?? handoff.infoHash).toLowerCase()
         || existing.size !== (torrentFile?.size ?? null);
