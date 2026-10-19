@@ -156,6 +156,17 @@ export function createRdPlacementRealizer({
     return Number.isSafeInteger(raw) && raw >= 0 ? raw : 900_000;
   })();
 
+  // Shared account snapshot. The catalog sweep materializes every handoff
+  // in one pass, so without a shared snapshot the first pass after a
+  // process start would download the account ONCE PER RELEASE (the account
+  // list is the only hash index). The snapshot is a point-in-time view of
+  // the account; for an enrichment lookup a short window is enough.
+  const ACCOUNT_SNAPSHOT_MS = (() => {
+    const raw = Number(process.env.RD_REALIZE_SNAPSHOT_MS ?? 60_000);
+    return Number.isSafeInteger(raw) && raw >= 0 ? raw : 60_000;
+  })();
+  let accountSnapshot = null;
+
   const isEnabled = () => rd != null;
 
   /**
@@ -174,8 +185,21 @@ export function createRdPlacementRealizer({
    * Bounded discovery. ONE request, no offset, no pagination loop.
    * Returns { status, id?, ids? }.
    */
-  async function discoverResourceId(infoHash) {
+  async function listAccount() {
+    const at = now();
+    if (accountSnapshot && (at - accountSnapshot.at) < ACCOUNT_SNAPSHOT_MS) {
+      return accountSnapshot.entries;
+    }
     const list = await rd.listTorrents({ limit: boundedLimit });
+    accountSnapshot = {
+      at: now(),
+      entries: Array.isArray(list) ? list : [],
+    };
+    return accountSnapshot.entries;
+  }
+
+  async function discoverResourceId(infoHash) {
+    const list = await listAccount();
     if (!Array.isArray(list)) return { status: 'absent' };
     const matches = list.filter(
       (entry) => String(entry?.hash ?? '').trim().toLowerCase() === infoHash,
