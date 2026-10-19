@@ -30,6 +30,7 @@
 
 import { PROVIDER_CAPABILITIES } from '../providers/capabilities.js';
 import { ProviderOperationError } from '../providers/errors.js';
+import { getServiceability } from '../vfs/byte-health.js';
 
 const INVALID_INPUT = 'INVALID_INPUT';
 const INVENTORY_UNAVAILABLE = 'INVENTORY_UNAVAILABLE';
@@ -115,7 +116,7 @@ export async function ensureTorBoxFileIdentity({
     try {
       const snapshot = controlPlaneStore.getProviderInventorySnapshot(placement.id);
       if (snapshot?.authoritative && snapshot?.complete) {
-        const matches = controlPlaneStore.listProviderFiles(placement.id)
+                const matches = controlPlaneStore.listProviderFiles(placement.id)
           .filter((f) => f?.present && f?.mappingState === 'mapped'
             && f?.torrentFileId && f?.size === selectedFileSize);
         if (matches.length === 1) {
@@ -130,8 +131,7 @@ export async function ensureTorBoxFileIdentity({
           // synchronous mylist. The binding layer still requires the
           // inventory snapshot to be extended (materialize) before
           // activation.
-          console.log(`[inv-fast] hash=${normalizedHash} snapshotFresh=${snapshotFresh} byteHealth=${byteHealthPositive} decision=${snapshotFresh || byteHealthPositive ? 'FAST' : 'REMOTE'}`);
-          if (snapshotFresh || byteHealthPositive) {
+                              if (snapshotFresh || byteHealthPositive) {
             return {
               placementId: placement.id,
               providerFileId: file.providerFileId,
@@ -141,8 +141,8 @@ export async function ensureTorBoxFileIdentity({
           }
         }
       }
-    } catch {
-      // Local read failed; fall through to the provider flow.
+    } catch (e) {
+            // Local read failed; fall through to the provider flow.
     }
   }
   if (placement && skipSizeMatch
@@ -157,8 +157,8 @@ export async function ensureTorBoxFileIdentity({
           return { placementId: placement.id, torrentFiles };
         }
       }
-    } catch {
-      // Local read failed; fall through to the provider flow.
+    } catch (e) {
+            // Local read failed; fall through to the provider flow.
     }
   }
 
