@@ -162,6 +162,12 @@ function isUnreleased(dateRaw) {
  */
 export async function collectTitleIndexInputs(ctx) {
   const { cache, mediaId, mediaType, season, episode, mediaTitle, canonicalYear } = ctx;
+  // Live-only requests do not need corpus title-index rows (titleInputs is
+  // discarded) and live discovery is keyed on mediaId. Skip the Cinemeta
+  // title lookup on that path; it is the dominant cold-request tax.
+  if (ctx.liveOnly) {
+    return { inputs: [], eligibilityByHash: new Map(), wanted: { title: null, year: null, aliases: [], source: 'live-only' } };
+  }
   const inputs = [];
   const eligibilityByHash = new Map();
   let wanted = { title: null, year: null, aliases: [], source: 'none' };
