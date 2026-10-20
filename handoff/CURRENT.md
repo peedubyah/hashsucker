@@ -48,6 +48,23 @@ Plex disclosed an unauthenticated RCE chain on 2026-10-16
 (CVE-2026-96652/54/55/56). Nothing out there changes the sealed architecture;
 no moonshot is selected.
 
+**Round two (the pivot hunt) supersedes round one's "no fundamental
+shift".** `docs/recon/2026-10-recon-round-two-the-pivot.md`. Verdict:
+**PIVOT FOUND — in the product surface and in who owns the durable
+per-item identity; NOT in the authority architecture.** The unit is moving
+from "a library of files" to "an intent resolved to a source, played by a
+client the user owns" (Hound, Debrify, VortX, SkyStream, MovieBox-TUI,
+Slate, K7, Fathom — all 2025-08→2026-07). What that demotes: the
+publication surface into Plex/Jellyfin, the provider abstraction (ElfHosted's
+Debridge sells it as a SKU now), and the corpus-ingestion strategy (a file
+tree is a commodity `.torrent` input). What it promotes: the resolver
+contract, the exact-file identity, the representation authority, the
+autonomous repair, and the durable presentation identity — made queryable by
+any client instead of materialized inside one consumer's library. The
+uncomfortable commercial fact: nobody is observed paying for a library, a
+scanner, an identity layer, an exact-file identity, or autonomous repair.
+No slice is selected; the three falsifiers are recorded in `PLANS.md`.
+
 One recovery note: a `git stash -u` during the merge was dropped with the
 pre-existing untracked user files inside it
 (`artifacts/ab-baseline-off.jsonl`, `artifacts/ab-off-vs-on.json`,

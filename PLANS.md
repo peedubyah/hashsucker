@@ -56,6 +56,52 @@ The open question the recon cannot answer is commercial, not technical: the
 authority chain is unclaimed and validated, but the users who feel the pain
 (duplicate versions, dead routes) are served for free by incumbents.
 
+**Adversarial recon, round two (2026-10-20) — PIVOT FOUND.**
+`docs/recon/2026-10-recon-round-two-the-pivot.md` re-ran the search by user
+behavior instead of project category and broke round one's "no fundamental
+shift" conclusion. The verdict: the pivot is **not** in the authority
+architecture and **is** in the product surface and in who owns the durable
+per-item identity.
+
+- **The pivot (found).** The unit is moving from "a library of files" to
+  "an intent resolved to a source, played by a client the user owns". The
+  2026 entrants are clients and hubs, not servers: Hound (a tracker
+  repurposed into a hybrid server, whose author states the thesis plainly —
+  "it still can't beat finding something, pressing play, and watching
+  immediately"), Debrify (620★: one hub over cloud/WebDAV/IPTV/Stremio,
+  cross-source resume), VortX (native Apple TV/Android, sideloaded),
+  SkyStream (extension-driven), MovieBox-TUI (2552★ in three months), Slate
+  (a watchlist with no server), K7 (federated, family-scale), Fathom
+  (mpv-native client owning the workflow).
+- **What the pivot demotes.** The publication surface (a library entry
+  published into Plex/Jellyfin) ✓; the provider abstraction (ElfHosted's
+  Debridge, 2026-06-12, now sells "one key, every provider, one mega-cache"
+  ✓); the corpus-ingestion strategy (a file tree is a commodity `.torrent`
+  input ✓).
+- **What the pivot promotes.** The resolver contract (intent → playable
+  source, callable by any client) ✓; the exact-file identity ✓; the
+  representation authority ✓; the autonomous repair ✓; the durable
+  presentation identity — but made queryable by any client, not materialized
+  inside one consumer's library ✓.
+- **The commercial fact that matters.** Nobody is observed paying for a media
+  library, a scanner, an identity layer, an exact-file identity, or
+  autonomous repair. People pay for the player (Infuse: $1.99/mo …
+  $99.99 lifetime), the wiring (ElfHosted: $9/app/mo, storage
+  bring-your-own), the provider union (Debridge ✓) and the instant stream ✓.
+- **The strongest counterevidence.** ElfHosted's bundle sales (player +
+  *arr + debrid) show the library-server stack still sells ✓; the ecosystem
+  answered the RD filter-gate by *hiding* broken streams, so "repair" may be
+  a nice-to-have nobody buys ✓; and round one's duplicate-version evidence
+  is largely historical (2015–2022 ✓), which demotes the presentation
+  identity's pain case ✓.
+
+**No slice is selected.** The pivot would be fake if (1) the library-server
+bundle keeps growing while client-first apps stall, (2) a client-first hub
+adds a representation/repair concept of its own, or (3) somebody ships an
+exact, identity-stable, self-repairing resolver. None has happened; the
+cheapest way to learn which is falsified is a product test on the resolver
+surface, not more architecture.
+
 
 Completed final slice: **bound stale-inventory binding retry churn** —
 **CLOSED**. The host-only canary passed clean E01 plus the full E01/E05/MobLand

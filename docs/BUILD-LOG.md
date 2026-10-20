@@ -3985,3 +3985,121 @@ the smallest one it already named: give the corpus a per-file path from a
 source that has one (a bitmagnet sidecar or a hash2torrent fetch), which
 would let the size-only selection disappear. Its precondition is now a
 source, not an invention.
+
+## 2026-10-20 — RECON ROUND TWO: THE PIVOT WE MISSED — CLOSED
+
+Slice: reconnaissance only, run adversarially. Round one had concluded "no
+fundamental shift"; that conclusion was treated as a hypothesis to break,
+with searches run by user behavior instead of by project category, and every
+HashSucker assumption searched for its contradiction. No code, no seam
+selection, no moonshot selection.
+
+### WHAT CHANGED
+
+- `docs/recon/2026-10-recon-round-two-the-pivot.md` — the round-two report.
+- `docs/recon/2026-10-ecosystem-recon.md` — demotion note: two of its
+  readings are superseded (the duplicate-version pain is largely historical;
+  the "no fundamental shift" reading was drawn from a taxonomy of projects,
+  not from behavior).
+- `PLANS.md`, `handoff/CURRENT.md` — the verdict, what it demotes, what it
+  promotes, the counterevidence, and the three falsifiers.
+
+### WHAT WAS PROVEN
+
+Everything below is source-backed with a URL and a date, and was read in the
+source (project docs, changelogs, pricing pages, forum search APIs, the
+public GitHub API, Hacker News' Algolia API), never inferred from a summary.
+
+- **The pivot (surface + identity ownership).** The 2026 entrants are
+  clients and hubs, not libraries: Hound (476★, a tracker repurposed into a
+  hybrid server), Debrify (620★, one hub over cloud/WebDAV/IPTV/Stremio
+  with cross-source resume), VortX (238★, native Apple TV/Android, tvOS via
+  sideloading, resolves raw magnets), SkyStream (637★, extension-driven,
+  no sources by default), MovieBox-TUI (2552★ in three months), Slate
+  (2026-04, a watchlist with no server and AI intent search), K7 (333★,
+  federated, family-scale), Fathom (116★, mpv-native client that owns the
+  workflow). Hound's author states the behavioral thesis explicitly:
+  "it still can't beat finding something, pressing play, and watching
+  immediately, in seconds"; "someone requests a full show, watches the
+  first episode, and loses interest in 10 minutes"; the family "still
+  preferred Netflix anyway" after the whole suite was deployed.
+- **The provider layer became a SKU.** ElfHosted's Debridge (2026-06-12):
+  "one key, every provider, one mega-cache" — the multi-provider doctrine
+  HashSucker encodes is now purchasable.
+- **The file tree became a commodity input.** The tree is a `.torrent`
+  file; indexers serve it; side-cars serve it (bitmagnet's GraphQL,
+  torrust's hash2torrent); `brotherguns/torbox-cache-checker` takes a
+  `.torrent` and asks a provider whether it is cached.
+- **The intent layer consolidated and the *arr decayed.** Overseerr and
+  Jellyseerr merged into Seerr (2026-02-17); Readarr is retired; Sonarr v3
+  is end-of-life.
+- **The consumer got worse and cheaper at once.** Plex's free tier is now
+  ad-supported, Plex Pass is $2.99/mo, and the 2026-10-16 unauthenticated
+  RCE is being exploited (Ars Technica, 2026-10-20). Infuse Pro: $1.99/mo,
+  $16.99/yr, $99.99 lifetime. ElfHosted: $9/mo per app, bundles cheaper,
+  storage explicitly bring-your-own.
+- **Freshness, not organization, is the live pain.** RD's filename filter
+  (May 2026, tightening through June) hits brand-new WEB-DL/WEBRip releases
+  hardest; TorBox's DDoS weekends took the API offline for users with a
+  single provider.
+
+### WHAT REMAINS UNPROVEN
+
+- Demand. Every entrant above is a project, not a business; Hound is 476★
+  and in beta.
+- Whether "repair" is a product at all: the ecosystem answered the RD
+  filter-gate by hiding broken streams, and users accepted that.
+- The presentation identity's pain case is weaker than round one claimed
+  (the duplicate-version threads are 2015–2022).
+- Nothing here was implemented or measured; no product state was touched.
+
+### WHAT WAS LEARNED
+
+- **A category can die without its users noticing, because the money moves
+  first.** Nobody pays for a media library, a scanner, an identity layer, an
+  exact-file identity, or autonomous repair. They pay for the player, the
+  wiring, the provider union and the instant stream.
+- **Round one's method was the weakness.** Taxonomizing projects by category
+  hides a shift that is visible only in behavior and in what people pay for.
+  The same corpus, re-read adversarially, produced a different conclusion.
+- **A pivot can raise the value of the architecture and still invalidate the
+  product.** The sealed chain is what a client-first hub needs and nobody
+  has; the published Plex/Jellyfin library entry is the surface the market
+  is leaving.
+- **The strongest counterevidence to a pivot is a business that keeps
+  selling the old shape.** ElfHosted's bundles (player + *arr + debrid,
+  storage not included in the price) are the reason the surface pivot is
+  "possible" rather than "certain".
+
+### WHAT ASSUMPTIONS CHANGED
+
+- "No fundamental shift" → **PIVOT FOUND** (surface + identity ownership),
+  architecture unaffected.
+- "A persistent media library is what the product protects" → the durable
+  artifact is per-title state and a queryable identity; the library is a
+  view.
+- "The provider abstraction is our architecture" → it is purchasable.
+- "The corpus is ours to ingest" → the file tree is an input to query, not a
+  corpus to own.
+- "The presentation identity's pain is the duplicate-version complaint" →
+  that complaint is largely historical; the live pains are freshness,
+  availability and metadata correctness.
+
+### WHAT SHOULD BE UPDATED
+
+- `docs/recon/2026-10-recon-round-two-the-pivot.md` (new),
+  `docs/recon/2026-10-ecosystem-recon.md` (demotion note),
+  `PLANS.md`, `handoff/CURRENT.md` — done in this slice.
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing was deleted from the code. This slice changed no source file.
+- One claim was demoted rather than deleted: the duplicate-version evidence
+  in round one is marked historical in place.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The three falsifiers recorded in
+`PLANS.md` are the honest next step, and each is answered by a product test
+on the resolver surface (intent → playable source, callable by any client),
+not by more architecture.

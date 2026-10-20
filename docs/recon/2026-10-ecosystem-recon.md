@@ -2,6 +2,18 @@
 
 Status: reconnaissance only. No code, no seam selection, no implementation, no
 moonshot selection.
+
+> **Partly superseded by round two**
+> (`docs/recon/2026-10-recon-round-two-the-pivot.md`). Two readings in this
+> document did not survive the adversarial round: (a) the "duplicate /
+> multiple versions of the same item" pain is **largely historical** — the
+> Plex forums' duplicate-version threads are from 2015–2022 and Plex's
+> editions/collections absorbed them, so that pain is weaker evidence for a
+> durable item identity than §12 and §14 imply; (b) the "no fundamental
+> shift" reading was drawn from a taxonomy of *projects*; the shift is in
+> *behavior and surface*. Every source-backed fact here — the provider
+> findings, the RD filter-gate, the Plex security event, the metadata-source
+> verdict — stands.
 Purpose: look outward at the real ecosystem HashSucker lives in — debrid media
 systems, VFS layers, players, Plex, Jellyfin, Stremio, discovery/indexers,
 torrent metadata, source equivalence, playback failover — and decide whether
