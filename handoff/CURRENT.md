@@ -269,6 +269,40 @@ trust old containers or historical HY4 handoffs.
 - Evidence: `docs/BUILD-LOG.md` 2026-10-20; retrospective
   `docs/retrospectives/2026-10-20-exact-file-everywhere.md`.
 
+## Live session state (2026-10-20, the corpus knows the file)
+
+- Production `media-search` RUNS the local build of `a05410a` (container
+  healthy; the data plane untouched). No release/tag/push performed.
+- The corpus's per-file record can now carry `file_path` and `file_size`
+  (nullable, additive, never fabricated from a release name). The audit
+  measured the current coverage honestly: 1 593 141 corpus rows, NONE
+  with a file-level path — the corpus is a release-level filename parser,
+  and the only per-file fact in the chain is the stream's exact byte
+  count.
+- Every candidate states its identity strength explicitly
+  (`exact-file` / `size-corroborated` / `release-only`); a weaker
+  candidate never masquerades as an exact one.
+- The TorBox file-identity helper consumes the exact path when the
+  candidate has one; without it the size match stands and a SHARED size
+  fails closed — 424 of 4099 mapped provider files (10.3 %) share their
+  byte count with another file of the same resource.
+- Audit scripts: `node src/scripts/size-ambiguity-audit.mjs` (the size
+  ambiguity), `node src/scripts/provider-file-audit.mjs` (the durable
+  mapping), `node src/scripts/byte-authority-audit.mjs` (the Binding↔VFS
+  identity).
+- Evidence: `docs/BUILD-LOG.md` 2026-10-20.
+
+## Online recon tooling (this session)
+
+- Configured in `~/.config/opencode/opencode.jsonc` (outside the
+  repository): `playwright` (browser, 26 tools) and `firecrawl`
+  (crawler, 26 tools). The REA entry is preserved and stays disabled.
+- Proven: the browser navigated a public page, read the DOM snapshot,
+  reported the network requests, and followed a link to a new document;
+  the crawler scraped a public page to markdown. The recursive crawl/map
+  need `FIRECRAWL_API_KEY` (user action: export it in the shell that
+  runs OpenCode).
+
 ## Architecture boundaries (frozen)
 
 Non-authoritative session-local summary. Canonical:
