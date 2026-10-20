@@ -2120,6 +2120,12 @@ Proven from the code and from production state:
   route failure re-deciding representation authority, with the consumer
   projection moving with it. It had never fired in production (0 handoffs
   carry an alternate selection reason) but the coupling was real.
+- THE ACCURATE INVARIANT, stated without overclaiming: an ORDINARY route
+  failure and route resurrection preserve the Binding; TOTAL same-TorrentFile
+  route exhaustion may still fall through to the persisted-candidate
+  fallback and therefore to representation reselection. "Route failure
+  never changes the Binding" is NOT true of the system as it stands — that
+  sentence is the next slice's job, not this one's achievement.
 
 ### PHASE 1 — THE AUTHORITY GRAPH (from code)
 

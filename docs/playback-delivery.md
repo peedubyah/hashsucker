@@ -188,9 +188,17 @@ Rules the byte path obeys:
   different representation (`createRouteResurrector`, using the existing cache-only
   second-placement machinery, bounded per TorrentFile by a cooldown). A new ProviderFile mapped
   to the same TorrentFile is ROUTE REPAIR, not media reselection.
-- A route failure NEVER changes the Binding. The Binding changes only when a representation-level
-  reason does: an operator unpublish, an explicit upgrade policy choosing better bytes, a proven
-  identity contradiction, or a re-point of the same TorrentFile's route.
+- An ORDINARY route failure does not change the Binding: a route that dies is repaired, and the
+  repair re-points the SAME TorrentFile's route. The Binding changes only when a
+  representation-level reason does: an operator unpublish, an explicit upgrade policy choosing
+  better bytes, a proven identity contradiction, or a re-point of the same TorrentFile's route.
+- TOTAL same-TorrentFile route exhaustion is the exception, and it is still a delivery-driven
+  representation switch today: the byte path falls through to the persisted-candidate fallback,
+  which can select a different TorrentFile. So the accurate invariant is: *ordinary route failure and
+  route resurrection preserve the Binding; total same-TorrentFile route exhaustion may still fall
+  through to representation reselection.* That fallback has never fired in production (0 handoffs
+  carry an alternate selection reason), and it is the open item of the durable-route-failure slice:
+  the byte path is a READ and must not be the owner of a representation change.
 - What the player experiences, stated precisely: a next request recovers, a seek recovers, and the
   SAME HTTP Range request recovers when the failure happened before the 206 was committed. A
   mid-body truncation ends the response: the decoder session does NOT survive it, and the player

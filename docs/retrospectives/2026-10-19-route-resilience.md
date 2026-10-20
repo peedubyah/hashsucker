@@ -34,9 +34,16 @@ REPRESENTATION.
 
 ## Disproved assumptions
 
-- "A dead route must destroy or replace the representation." False: the
-  design intends the opposite, the byte path implements it, and production
-  demonstrates it (0 degraded Bindings with 174 expired observations).
+- "A dead route must destroy or replace the representation." False as a
+  statement about the ordinary case: the design intends the opposite, the
+  byte path implements it, and production demonstrates it (0 degraded
+  Bindings with 174 expired observations). But the total-exhaustion
+  fallback still replaces the representation, so the honest invariant is
+  narrower: ordinary route failure preserves the Binding; total
+  same-TorrentFile route exhaustion may still reselect the representation.
+  My first draft of the headline claimed the stronger theorem; the caveat
+  in my own "what remains" section contradicted it. Narrow the claim, do
+  not round it up.
 - "The alternate fallback is the recovery mechanism." It is not a recovery
   mechanism at all — it is a representation change triggered by a delivery
   failure, which is a different thing wearing recovery's name.
