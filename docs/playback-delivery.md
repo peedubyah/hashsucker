@@ -161,6 +161,46 @@ Range support is not optional. Players require `Accept-Ranges: bytes` and `206` 
 seeking becomes impossible, and Plex in particular fires many small `Range: bytes=N-` probes for
 container metadata, seeking, and resume.
 
+## 5a. Representation authority vs. route health
+
+The VFS byte path serves ONE authoritative representation and reaches it through ZERO OR MORE
+routes. These are separate facts with separate lifetimes, and the byte path keeps them apart.
+
+| | fact | lives in | lifetime |
+|---|---|---|---|
+| representation authority | "this exact TorrentFile is the representation for this media intent" | the active Binding | until a representation-level reason replaces it |
+| route inventory | "these provider placements/files can reach those bytes" | `provider_placements`, `provider_files` | until the provider or the observation changes |
+| route evidence | "this route was recently observed to exist/work" | inventory snapshots, readiness observations, delivery evidence | minutes to hours |
+| current serviceability | "did the last byte read succeed" | the in-process byte-health registry | one process |
+| delivery capability | "this signed URL works right now" | Rust, runtime only | seconds |
+
+Rules the byte path obeys:
+
+- The route set belongs to the **TorrentFile**, not to the Binding. `listDataPlaneCoordinates`
+  returns every present+mapped provider file for that TorrentFile, across providers. A Binding
+  records the route it AUTHORIZED; it is not the only route.
+- A route failure is a DELIVERY event. The Rust manager builds one slot per
+  (provider, accountScope, providerResourceId) and fails over between the slots of the SAME
+  TorrentFile inside the acquire, skipping open breakers. Only when every slot fails does it
+  answer `PROVIDER_EXHAUSTED` (class D) — and it does so BEFORE any 206 is committed, so a
+  re-forward is still possible.
+- On class D, Node looks for another route to the SAME TorrentFile before it considers any
+  different representation (`createRouteResurrector`, using the existing cache-only
+  second-placement machinery, bounded per TorrentFile by a cooldown). A new ProviderFile mapped
+  to the same TorrentFile is ROUTE REPAIR, not media reselection.
+- A route failure NEVER changes the Binding. The Binding changes only when a representation-level
+  reason does: an operator unpublish, an explicit upgrade policy choosing better bytes, a proven
+  identity contradiction, or a re-point of the same TorrentFile's route.
+- What the player experiences, stated precisely: a next request recovers, a seek recovers, and the
+  SAME HTTP Range request recovers when the failure happened before the 206 was committed. A
+  mid-body truncation ends the response: the decoder session does NOT survive it, and the player
+  must re-request. The consumer projection (LibraryItem, Binding, TorrentFile, VFS path, Plex
+  ratingKey/Part) does not move when bytes move providers.
+
+The delivery state has ONE vocabulary everywhere it is reported:
+`serviceable` / `unserviceable` / `unknown` (unknown = nobody has read from that TorrentFile
+yet). It is reported next to — never merged into — the representation authority.
+
 ## 6. Physical acquisition
 
 The secondary policy: download the bytes locally and let the Arr apps import them.

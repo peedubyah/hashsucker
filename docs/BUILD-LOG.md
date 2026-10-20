@@ -2082,3 +2082,226 @@ presentation identity. Today they use two different resolvers with
 different year handling (the VFS path drops a string year, the `.strm`
 path keeps it), so a published item can present two different paths to
 Plex and Jellyfin, and a catalog outage can move one of them.
+
+## 2026-10-19 — WHAT IS DEAD MAY NEVER DIE: route resilience — CLOSED
+
+Slice: prove whether HashSucker can keep representation authority
+independent of route/serviceability evidence, and make it so where the
+evidence justifies it.
+
+### THE QUESTION, ANSWERED FROM CODE
+
+Can an active Binding remain authoritative until a REPRESENTATION-level
+reason invalidates it, with provider-route loss affecting only
+deliverability?
+
+**Mostly yes — with one leak, now closed.**
+
+Proven from the code and from production state:
+
+- The Binding names the authoritative representation (one TorrentFile). The
+  route set is a property of the TorrentFile, not of the Binding:
+  `listDataPlaneCoordinates(torrentFileId)` returns every present+mapped
+  provider file for that TorrentFile, across providers.
+- The byte path already fails over between routes of the SAME TorrentFile:
+  the Rust manager builds one slot per (provider, scope, resource) and
+  `acquire_for_read` walks the slots, skipping open breakers and failing
+  over on a rate limit or an error. Only when EVERY slot fails does it
+  return `AllSameTfFailed` → `PROVIDER_EXHAUSTED` (class D) — emitted
+  BEFORE any 206 is committed.
+- A route failure therefore never had to touch the representation. In
+  production: 218 TorrentFiles carry routes on both providers and 13 of
+  the 174 active Bindings have a second route for the same TorrentFile.
+- The durable route evidence expires on its own TTL and the Binding
+  survives it: production today has 174 active Bindings whose route
+  observation has expired, and 0 Bindings in a degraded state.
+- The leak: on class D the VFS answered by picking a DIFFERENT persisted
+  candidate and re-pointing the Binding at a different TorrentFile — a
+  route failure re-deciding representation authority, with the consumer
+  projection moving with it. It had never fired in production (0 handoffs
+  carry an alternate selection reason) but the coupling was real.
+
+### PHASE 1 — THE AUTHORITY GRAPH (from code)
+
+| path | trigger | facts examined | durable state changed | representation fact | route fact | owner |
+|---|---|---|---|---|---|---|
+| `store.activateBinding` | publication / materialization / reconcile plan | library path, placement hash+state+readiness, inventory snapshot (authoritative+complete+FRESH), exact file mapping, exposure (visible+read_only+FRESH) | binding row (version) | Release, TorrentFile, releaseKey | placement, provider file, exposure, inventory freshness | publication path |
+| `materializeVfsEntry` → `tryActivateAuthoritativeBinding` | every VFS materialization (incl. the READ-path catalog sweep) | the above | binding row | — | — | publication path (now skips an unchanged active Binding) |
+| `executeReconciliation` 'bind'/'rebind' | a reconcile plan | — | binding row | — | — | **INERT** (no runtime caller; shadow mode only) |
+| `executeReconciliation` 'mark-degraded' | a reconcile plan | route facts (inventory exhausted, provider file missing, exposure not visible) | binding status → degraded | — | **route facts used as representation facts** | INERT |
+| `unpublishLibraryItem` | operator unpublish | — | desired_state=absent, binding superseded | operator intent | — | operator |
+| `alternateFallback.promoteAlternate` → `materializeVfsEntry` | class-D byte exhaustion | the alternate candidate's bytes | NEW binding version on a different TorrentFile | **changed by a route failure** | — | VFS byte path (the leak; now preceded by route resurrection) |
+| `upgrade-watch` | hourly sensing | the market | a new handoff + binding | **changed by policy** (better bytes) | — | upgrade-watch |
+| `route-reconciler` | 6 h | provider probes | route rows (placements/files) | unchanged | route repair | route reconciler |
+| `resolveVfsStateForEntry` | every VFS read | handoff + active binding | — | — | — | VFS read path (an entry with neither is not served) |
+
+Explicitly located couplings, and their status now:
+- inventory freshness gates Binding AUTHORITY — it gates AUTHORIZATION (a new
+  binding), which is correct; it no longer re-derives an existing one.
+- ProviderPlacement presence gates Binding authority — same: required for a
+  new authorization, irrelevant to an existing one.
+- serviceability / byte-health change Binding state — they do NOT. They are
+  runtime delivery facts; the reconciler planner would use route facts to
+  degrade a Binding, but that planner is inert.
+- publication/VFS reads re-authorize media identity — the catalog sweep
+  did; removed in the previous slice, and the identity-scoped skip now
+  makes an unchanged active Binding a no-op.
+
+### PHASE 2 — REPRESENTATION-LEVEL INVALIDATION (the smallest supported set)
+
+Supported by current product behavior:
+1. explicit operator unpublish (the user removed it);
+2. an explicit representation upgrade policy choosing materially better
+   bytes (the upgrade-watch);
+3. a TorrentFile whose identity is itself proven invalid (an exact
+   mapping/identity contradiction);
+4. a change of the authoritative route for the SAME TorrentFile (the
+   Binding records the route it authorized — a provider-file churn re-points
+   it, which is route repair, not representation change).
+
+NOT representation-level: provider expiry, stale inventory, 404, provider
+outage, negative byte-health, a placement disappearing, a rate limit.
+
+### PHASE 3 — DELIVERY STATE (no new enum)
+
+The distinction is already expressible in durable truth, without a new
+state machine:
+- representation authority → `bindings` (status/version) + the lifecycle
+  milestones 'bound'/'cataloged' (orthogonal by design);
+- route inventory → `provider_placements` (state/ownership) and
+  `provider_files` (present/mapping);
+- route evidence freshness → `provider_inventory_snapshots`,
+  `provider_readiness_observations`, `provider_delivery_evidence`
+  (usable/temporary/terminal, keyed on the capability tuple);
+- current serviceability → the in-process byte-health registry
+  (serviceable/unserviceable/unknown);
+- delivery capability → Rust, runtime only.
+
+The gap was not the model but the REPORTING: two surfaces used two
+vocabularies for the same fact, and the reuse path reported no delivery
+state at all. Fixed (`64b2914`).
+
+### PHASE 4 — THE HASH → RESOURCE INDEX (no new table)
+
+`provider_placements` already IS the index: (provider, account_scope,
+provider_resource_id) → info_hash, plus `provider_files` mapping a
+provider file to a TorrentFile. 413 indexed entries in production, and one
+hash legitimately maps to several resources (up to 3 observed). The
+lookups that need a resource id the index does not have (a new provider
+resource for a known release) still need the provider's account list —
+that is a DISCOVERY read, not an identity read, and it is now bounded,
+cached and single-flighted (`c707e12`, `500c3b5`, `33e6e09`).
+
+### PHASE 5–7 — ROUTE RESURRECTION, PLAYBACK RECOVERY, PUBLICATION STABILITY
+
+The recovery order on a class-D byte failure is now:
+1. another route to the SAME TorrentFile, through the EXISTING cache-only
+   second-placement machinery (the same mechanism the 6-hourly route
+   reconciler uses — one recovery mechanism, two triggers);
+2. only if no route can be found, the existing persisted-candidate
+   fallback remains as the delivery-driven last resort.
+
+A new ProviderFile mapped to the same TorrentFile is route repair, not
+media reselection. The attempt is bounded per TorrentFile (5 min cooldown)
+so a client retry storm cannot storm the provider.
+
+Playback recovery, stated precisely (not as one claim):
+- NEXT REQUEST recovers — yes: the dead slot's breaker opens and the next
+  request takes another route.
+- SEEK recovers — yes: a seek is a new Range request.
+- THE SAME HTTP RANGE REQUEST recovers — yes, when the failure happens at
+  acquire/validation time (the class-D contract emits the 502 before any
+  206 is committed, and the slot walk happens inside the acquire). NO when
+  the route fails mid-body: the 206 is already committed, the body is
+  truncated, and the client must re-request.
+- AN UNINTERRUPTED DECODER SESSION SURVIVES — no. A mid-body truncation
+  ends the response; only the player's re-request restores playback.
+
+Publication stability: the consumer projection does not move when bytes
+move. Measured in production: a live request re-selected a different
+encode of Joker (2019) (a different TorrentFile, 23.4 GB → 53 GB) and
+the VFS path and the Plex item were UNCHANGED (ratingKey 937, the same
+`Movies/Joker (2019)/Joker (2019).mkv` path), and the Part served
+206/65536 B.
+
+### PHASE 8 — FAILURE MATRIX (`d44be2f`, 9 cases)
+
+TorBox route dies with an RD route present; RD route dies with a TorBox
+route present; the resource id vanishes but another resource with the same
+hash remains; a stale inventory observation; a provider file no longer
+present; a size-mismatched route; 404/410/429/network timeout; no provider
+available; a different TorrentFile. In every case the representation is
+unchanged and delivery either survives on another route or fails closed. A
+route whose size does not match the authoritative TorrentFile is never
+offered for it; a different TorrentFile never satisfies the authoritative
+one. A route in the 'error' state is still offered to the data plane WITH
+its state — execution decides, Node does not hide routes.
+
+### PHASE 9 — RESTART DURABILITY (`5e0e675` + production)
+
+Durable truth is the control-plane database; the runtime byte-health
+registry is process-local and can never revoke an authority. Pinned: the
+active Binding, its TorrentFile, its route set and the durable route
+failure evidence are identical after a store reopen; the hash → resource
+index reconstructs exactly; a route proven dead is still known dead after
+the restart while an unknown route is never promoted to dead; a degraded
+representation still has an owner.
+
+Production: 341 binding rows, byte-identical (id, item, release,
+TorrentFile, placement, provider file, version, status) across a
+media-search container restart.
+
+### PHASE 10 — RECOVERY OWNERSHIP
+
+| degraded state | detects | records | retries | wakes | loop guard | survives restart |
+|---|---|---|---|---|---|---|
+| a route is dead | the byte path (Rust breaker) + the VFS class-D handler | byte-health (runtime) + `provider_delivery_evidence` (durable, on the legacy path) | the route reconciler (6 h) + the on-demand route resurrection (5 min cooldown) | a byte read / the class-D handler | per-TF cooldown; the Rust breaker (3 failures / 30 s) | the durable evidence + the placement rows |
+| the TF has no route at all | the class-D handler | — | the route reconciler + the resurrection | the next byte read | the same | the placement rows |
+| the representation is undeliverable and no route exists | the class-D handler | the typed 502 to the client | the upgrade-watch (hourly) may pick a better representation | the hourly tick | the upgrade budget | the handoff + binding history |
+| the consumer is invisible | the Plex notify | the `.strm` + the VFS row | the Plex coalescer (60 s) | the next publication | the coalescer | yes |
+
+### COMMITS
+
+| commit | change |
+|---|---|
+| `be6e663` | feat(vfs): resurrect a route before re-deciding the representation |
+| `d44be2f` | test(binding): pin the route-failure matrix against representation authority |
+| `5e0e675` | test(binding): pin restart durability of the authority/recovery model |
+| `64b2914` | fix(operator): one vocabulary for delivery state, reported beside authority |
+
+### PERFORMANCE IMPACT
+
+The change is on a failure path, so the normal path is unchanged: the
+10-fixture cohort (real Plex Part + Range) after the change:
+request→Binding 376–9234 ms (min 376, p50 ~1848, max 9234 — the spread
+is live-discovery latency, not the binding path), request→Part +37–49 ms,
+request→206 +51–86 ms. The binding stage itself stayed 150–260 ms with the
+targeted inventory read at 143–250 ms. Provider account reads were not
+reintroduced: the resurrection asks the same cache-only, single-flighted
+mechanism the reconciler already uses.
+
+### PRODUCTION EVIDENCE
+
+- The 10-fixture cohort: all published, all served 206/65536 B, the same
+  release and the same TorrentFile as before the change on every fixture.
+- A dual-route item (the same TorrentFile on TorBox and Real-Debrid):
+  the request bound, the serviceability probe answered 'serviceable', and
+  the Part served 206.
+- The reuse path now reports the delivery state next to the authority:
+  `{"state":"unknown", ...}` on a freshly restarted process (honest: nobody
+  has read from it), and 'unserviceable' with the route reason after a
+  failed read.
+
+### WHAT REMAINS
+
+- The delivery-driven representation switch (the persisted-candidate
+  fallback) still exists as the last resort when NO route can be found for
+  the authoritative TorrentFile. It is the product's "keep it playable"
+  policy; it has never fired in production. Turning it off entirely would
+  leave an item undeliverable until the upgrade policy acts, so it is
+  recorded here rather than removed.
+- The durable route-failure record (`provider_delivery_evidence`) is
+  written by the legacy Node provider path, not by the authoritative
+  Rust path. The authoritative path's failure evidence is runtime-only
+  (Rust's breaker + the byte-health registry), so a restart forgets which
+  route died until the reconciler re-probes it.

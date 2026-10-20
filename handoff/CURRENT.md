@@ -34,6 +34,24 @@ trust old containers or historical HY4 handoffs.
   `vfs-collection-resilience.test.js:131` (C1/C2/C3, deterministic) and,
   under load, `media-request.test.js:1212` (reuse-episode `< 5000 ms`).
 
+## Live session state (2026-10-19, route resilience slice)
+
+- Production `media-search` RUNS the local build of `64b2914` ("one
+  vocabulary for delivery state"), which includes the route-resurrection
+  change (`be6e663`). Container healthy. No release/tag/push performed.
+- The authority model: a Binding names the authoritative REPRESENTATION
+  (one TorrentFile); the ROUTES to those bytes belong to the TorrentFile
+  (`listDataPlaneCoordinates`), and the byte path fails over between them
+  inside the Rust acquire, before any 206 is committed. A class-D failure
+  now tries a route to the SAME TorrentFile before anything re-decides the
+  representation.
+- Operator truth: the delivery state has ONE vocabulary
+  (`serviceable` / `unserviceable` / `unknown`) and is reported next to
+  the authority on the request, the operator media-requests list and the
+  reuse path. `published: true` never hides an unserviceable route.
+- Evidence: `docs/BUILD-LOG.md` 2026-10-19; retrospective
+  `docs/retrospectives/2026-10-19-route-resilience.md`.
+
 ## Architecture boundaries (frozen)
 
 Non-authoritative session-local summary. Canonical:

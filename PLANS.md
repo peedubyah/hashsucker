@@ -43,6 +43,20 @@ warnings / 30 min → 16 / 5 min). A live Cinemeta stall was caught during
 the measurement and now aborts at the 3 s budget with the publication
 completing.
 
+Completed product slice: **what is dead may never die (route
+resilience)** — **CLOSED** (`be6e663`, `d44be2f`, `5e0e675`, `64b2914`;
+evidence in `docs/BUILD-LOG.md` 2026-10-19). The authority model was
+mostly already right: the byte path fails over between the ROUTES of one
+TorrentFile and the class-D 502 is emitted before any 206, and production
+shows 174 active Bindings with 174 expired route observations and 0
+degraded Bindings. The one leak was Node's class-D fallback, which
+answered a dead ROUTE by choosing a different REPRESENTATION; it now
+resurrects a route to the SAME TorrentFile first (through the existing
+cache-only second-placement machinery, bounded per TorrentFile), so a
+delivery failure no longer re-decides representation authority. The
+delivery state also got ONE vocabulary and is now reported next to the
+authority on the reuse path.
+
 Next earned slice: **one presentation identity for the `.strm` and the
 VFS path**. They are two resolvers with different year handling, so a
 published item can present two different paths to Plex and to Jellyfin,
