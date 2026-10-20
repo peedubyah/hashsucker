@@ -3031,9 +3031,9 @@ mutation, and never a whole-section scan.
 | observation | value |
 |---|---|
 | intents audited | 190 |
-| aligned | **170** |
+| aligned | **171** (170 before the repair below, 171 after it) |
 | no byte path (the VFS row is gone; the identity keeps the `.strm` path) | 13 |
-| **missing** (the consumer holds nothing for our intent) | 6 |
+| **missing** (the consumer holds nothing for our intent) | 5 (6 before the repair below) |
 | stale size | 1 |
 | conflicted | 0 (the one earlier conflict was a guid artefact — a DIFFERENT film with the same title) |
 
@@ -3069,9 +3069,9 @@ re-ranking, no re-binding.
 
 ### THE FULL SUITE
 
-3492 tests, 3488 pass, 1 fail, 3 skipped (exit 1). The one failure is the
+3501 tests, 3497 pass, 1 fail, 3 skipped (exit 1). The one failure is the
 pre-existing baseline `vfs-collection-resilience` C1/C2/C3. The focused
-projection/consumer suites: 22/22.
+projection/consumer suites: 31/31.
 
 ### COMMITS
 
