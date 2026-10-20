@@ -211,12 +211,31 @@ representation changes came from the publication path and ZERO from the
 route reconciler — the leak was latent, and it is now closed
 structurally rather than by observation.
 
-Next earned slice: **the route's identity is the exact file, everywhere**.
-The second-placement ensurer still discovers "another resource for the
-same release" through the provider's hash index and accepts a
-release-level match. Making the route's identity the exact file (path +
-size) everywhere would close the last place where a release can be
-mistaken for a representation.
+Completed product slice: **exact file everywhere: provider route
+identity** — **CLOSED** (`cb05670`, `7899eb8`; evidence in
+`docs/BUILD-LOG.md` 2026-10-20). The representation authority was
+closed, but one identity leak remained below it: a provider route could
+be authorized by a Release-level fact. The Real-Debrid classification
+answered "the only playable video in this resource" — and the route
+authorization never checked that the file it picked was the size the
+discovery selected, so the bytes an item served were not necessarily the
+bytes the ranking chose. The route contract is now one function: the
+provider's path AND its exact size must be the TorrentFile's, with the
+provider-specific framing (TorBox's file name carries the torrent root;
+Real-Debrid's file path is relative to it) and a minimal normalization
+(no case folding, no interior collapsing, no basename). The provider
+file index is execution metadata; the provider's NATIVE file id is the
+identity Rust binds its capability to. The production audit: 4120 of 4120
+durable provider-file mappings are exact (the release + path + size all
+agree), 50 are unmapped extras, zero mismatches — so nothing needed
+repair and nothing was rewritten.
+
+Next earned slice: **give the corpus the per-file PATH it lacks**. A
+multi-file release's filename is the PACK's name, so the only per-file
+fact the discovery can state today is the byte count — a weaker identity
+than a path. Carrying the corpus's per-file path would let the provider
+match on path AND size everywhere, make the release-level classification
+dispensable, and remove the remaining size-only selections.
 
 Completed product slice: **exact durable-truth republication** — **CLOSED**.
 E01 VFS publication was genuinely removed, then recreated through

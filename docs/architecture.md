@@ -147,6 +147,24 @@ same exact TorrentFile and may never choose a representation. The rule is
 enforced where a Binding is written (`activateBinding`), and the reason is
 recorded on the binding so "why did this Binding change?" has an answer.
 
+**Provider file identity** — what may carry a route:
+
+```text
+A provider file may carry a route to a TorrentFile A only when
+  the provider resource's release == A.infoHash
+  and the provider file's canonical path == A.canonicalInternalPath
+  and the provider file's exact size == A.size
+```
+
+Release identity DISCOVERS provider resources (a hash finds the account
+torrent); TorrentFile identity AUTHORIZES provider files and routes. A
+provider file id is an identity; a file INDEX is a position in one
+listing and decides nothing. The two providers frame a path differently
+(TorBox's file name is the whole torrent-relative path; Real-Debrid's
+file path is relative to the torrent root), so the comparison and its
+minimal normalization are provider-specific
+(`providers/exact-file-identity.js`).
+
 **Byte authority** — the TorrentFile a media intent's bytes come from:
 
 ```text

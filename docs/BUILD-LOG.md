@@ -3565,3 +3565,172 @@ hash index, and the identity it accepts there is a release-level match
 rather than the exact TorrentFile. Making the route's identity the exact
 file (path + size) everywhere would close the last place where a release
 can be mistaken for a representation.
+
+## 2026-10-20 — EXACT FILE EVERYWHERE: provider route identity — CLOSED
+
+Slice: the representation authority was closed, but one identity leak
+remained BELOW it — provider route discovery could begin from a
+Release-level match (the infoHash) and treat "same release" as proof of
+"same exact file".
+
+### PHASE 1/2 — THE ROUTE CONSTRUCTORS, AND WHAT EACH PROVES
+
+| constructor | how the resource is selected | how the FILE is selected | what it compares | can it fail open |
+|---|---|---|---|---|
+| `control-plane/store.js` — the inventory ingestion | the provider resource (a placement) | **the provider's own path + exact size → the TorrentFile** | release + canonical path + exact size | no: a size conflict or a duplicate path becomes a durable `conflict` and gets NO TorrentFile |
+| `control-plane/second-placement.js` — the TorBox path | the account resource for the hash | the provider file already mapped to OUR TorrentFile | the exact mapping | no |
+| `control-plane/second-placement.js` — the Real-Debrid path | the account torrent | `matchRdFile`: the **root + the file path** and the **exact bytes** | exact path + exact size | no |
+| `resolver/torbox-file-identity.js` | the account resource | the provider file whose **exact size** is the discovery's per-file size | exact size (the path is not comparable: the corpus names the PACK) | ambiguous → `AMBIGUOUS_FILE_SIZE` |
+| `providers/realdebrid/resolve.js` — the classification | the account torrent | **the release-level pick** (a single playable video file, a basename match, a size-only match) | release-level | **YES — this was the leak** |
+| `providers/realdebrid/ensure.js` — the route authorization | the account torrent | the classification's pick | the exact size of the selected file | **YES — the pick's size was never checked** |
+| `control-plane/reconciler.js` — the rebind | the desired release | — | — | closed by the previous slice (the reconciler may not choose a representation) |
+| `providers/realdebrid/resolve.js` — the DISCOVERY classification | the account torrent | the release-level pick | release-level | legitimate HERE: a release-level fact may discover a provider resource |
+
+### PHASE 2 — THE TWO PROVIDER CONTRACTS (they do NOT share semantics)
+
+| | TorBox | Real-Debrid |
+|---|---|---|
+| the file's identity in the listing | `file.name` — the **whole** torrent-relative path, root folder included | `file.path` — **relative to the torrent root**; the root is `original_filename` |
+| the exact byte count | `file.size` | `file.bytes` |
+| the file id | the provider's native id (stable across refreshes) | the provider's native id (stable) |
+| what the corpus knows about the file | the per-file size (`behaviorHints.videoSize`) and, for single-file releases, the release filename | the same |
+| the comparable fact | the exact size (the path is the pack's name for a multi-file release) | the exact size; the path only for a single-file release |
+
+### PHASE 3/5 — THE CONTRACT AND THE NORMALIZATION
+
+`providers/exact-file-identity.js` is the single comparison:
+
+- the provider's path is normalized (a leading `/` and a leading `./` are
+  framing artifacts; a backslash or a traversal is refused);
+- the comparison is CASE-SENSITIVE (a TorrentFile's path came from the
+  provider's own listing, so the two are the same string) — with one
+  documented exception: the discovery's release filename against a
+  provider's file name, where the casing is the corpus's own;
+- the exact size must be equal and positive;
+- Real-Debrid's two framings (`Root/file` and `file`) are both accepted,
+  because they are the same logical file — and a file in a subdirectory
+  keeps its subdirectory in both, so it can never be confused with a
+  root-level file of the same name.
+
+### PHASE 7 — THE SECOND-PLACEMENT ENSURER
+
+It was already exact-TorrentFile scoped: the TorBox path asks the
+provider for the file inventory and then looks for the provider file
+**already mapped to our TorrentFile**; the Real-Debrid path matches the
+root + the file path and the exact bytes. A resource that does not expose
+our exact file yields no route — proven by the tests (a resource with the
+same hash and a different file is not a route).
+
+### PHASE 6 — A REPLACEMENT RESOURCE FOR THE SAME HASH
+
+The route recovery looks the release up in the account, takes the
+replacement resource, reads ITS file list, and requires our exact file
+there. The same hash is not enough; the exact path and size are required,
+and the route fails closed when the replacement does not expose it. The
+Binding is untouched by either outcome.
+
+### PHASE 4 — FILE INDEX SEMANTICS
+
+The provider's file index is EXECUTION metadata, not identity: the
+identity is the canonical path + the exact size. A reordered provider
+listing therefore cannot remap a TorrentFile (the store matches on
+`(info_hash, internal_path)` and refuses a size conflict), and Rust is
+handed the provider's NATIVE file id (`provider_file_id`), which is stable
+across a refresh — the capability is bound to that id (`serve.rs`: the
+requested file id must equal the capability's ✓), so a reorder cannot
+silently serve another file.
+
+### PHASE 9/11/12 — THE DURABLE MAPPING CONTRACT (production audit)
+
+`node src/scripts/provider-file-audit.mjs` over the live control plane:
+
+| class | count |
+|---|---|
+| **exact** (the provider's path and size are the TorrentFile's) | **4120** |
+| unmapped (no TorrentFile — extras, artwork, .nfo) | 50 |
+| path mismatch | **0** |
+| size mismatch | **0** |
+| release mismatch | **0** |
+| missing TorrentFile | **0** |
+
+So the durable mapping class was already exact in production; the leak was
+in the DISCOVERY's pick, which is where the fix went. No row needed a
+repair, and none was rewritten.
+
+### PHASE 9/10 — BYTE PROBES AND BYTE HEALTH
+
+A successful range read proves that a route can deliver bytes. It does not
+prove identity: byte health is recorded against the TorrentFile, and the
+route it is recorded for is the one the durable mapping names — an
+ambiguous provider file never becomes a route in the first place, so there
+is nothing for a probe to promote.
+
+### PHASE 14 — THE REPAIR
+
+Nothing to repair: the durable mappings are exact ✓ and the discovery's
+pick is now gated by the exact size ✓. No mass rewrite ✓, no Binding
+change ✓, no consumer metadata used ✓.
+
+### PHASE 18 — THE PROVIDER ASYMMETRY
+
+The failure matrices are separate: TorBox matches a provider file by the
+exact size (its listing carries the whole path, but the corpus names the
+pack), Real-Debrid matches the root + the relative path and the exact
+bytes, and its classification is release-level (the discovery) while its
+authorization is exact (the route). The shared policy sits ABOVE the
+provider-specific extraction ✓: `exact-file-identity.js` ✓.
+
+### PHASE 22 — PERFORMANCE
+
+The exact comparison is LOCAL ✓: the provider file list is read once (the
+inventory ✓) and the identity is matched in memory ✓. No account scan is
+introduced: the second-placement still consults the account only when the
+local evidence says the route is gone ✓, and the durable mapping answers
+the healthy case with zero provider calls ✓.
+
+### PRODUCTION EVIDENCE (the appliance, 2026-10-20)
+
+| cohort | Binding | TorrentFile (hash / path / size) | provider route | provider file path + size | 206 |
+|---|---|---|---|---|---|
+| City Lights (movie, RD) | v1 | `abe45dc4…` / `City.Lights.1931.1080p.BluRay.x265-RARBG/City.Lights.1931.1080p.BluRay.x265-RARBG.mp4` / 1 452 039 706 | RD `63CIU4AAYI65I` file `1` | identical path, identical size | ✓ |
+| 81⁄2 (movie, TorBox) | v4 | `df04acabf…` / `Eight.and.a.Half…/Extras/Trailer.mkv` / 49 792 746 | TB `122493372` file `7` | identical path, identical size | ✓ |
+| Ted Lasso S04E01…S04E10 (episodes, TorBox) | v1 | each episode's own path and size | TB `114154867`, `117009857`, … | identical path, identical size | ✓ |
+| MobLand S02E01…S02E05 (episodes, TorBox) | v1–v2 | each episode's own path and size | TB `108779975`, `107658029`, … | identical path, identical size | ✓ |
+
+Every serving route is bound to a provider file whose path and exact size
+are the authoritative TorrentFile's ✓✓ — 4120 of 4120 durable mappings ✓.
+
+### THE FULL SUITE
+
+3538 tests, 3534 pass, 1 fail, 3 skipped (exit 1). The one failure is the
+pre-existing baseline `vfs-collection-resilience` C1/C2/C3. The focused
+exact-file/RD/second-placement suites: 68/68.
+
+### COMMITS
+
+| commit | change |
+|---|---|
+| `cb05670` | feat(routes): a provider route must prove it is the exact TorrentFile |
+| `7899eb8` | fix(routes): the Real-Debrid file pick must not contradict the discovery's size |
+
+### WHAT REMAINS UNPROVEN
+
+- The TorBox file-identity helper still selects by the exact SIZE alone.
+  Its result is an exact TorrentFile (the provider's own path + size ✓),
+  so the identity it binds is exact ✓, but the SELECTION is a per-file
+  size fact rather than a path fact — because the corpus names the pack,
+  not the file. The exact path is comparable only for a single-file
+  release; making the corpus carry per-file paths would close it.
+- The 50 unmapped provider files are extras and artwork (and demoted
+  historical rows); they carry no route ✓ — nothing to repair ✓.
+- The Real-Debrid classification remains release-level by design ✓ (it is
+  the discovery's job ✓); only the route authorization is exact ✓.
+
+### NEXT SMALLEST EARNED SLICE
+
+Give the corpus the per-file PATH it lacks. Today a multi-file release's
+filename is the pack's name, so the only per-file fact the discovery can
+state is the byte count — and a byte count is a weaker identity than a
+path. Carrying the corpus's per-file path would let the provider match on
+path AND size everywhere, and would make the release-level classification
+dispensable.

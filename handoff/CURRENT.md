@@ -249,6 +249,26 @@ trust old containers or historical HY4 handoffs.
   `media-search/test/representation-failure-matrix.test.js` and the
   boundary is `media-search/test/representation-authority.test.js`.
 
+## Live session state (2026-10-20, exact file everywhere)
+
+- Production `media-search` RUNS the local build of `7899eb8` (container
+  healthy; the data plane untouched). No release/tag/push performed.
+- A provider file may carry a route to a TorrentFile only when the
+  provider's path AND its exact size are the TorrentFile's
+  (`providers/exact-file-identity.js`). Release identity discovers
+  provider resources; TorrentFile identity authorizes routes. The
+  provider's NATIVE file id is the identity (Rust binds the capability
+  to it); the file index is execution metadata and decides nothing.
+- The Real-Debrid discovery classification may no longer pick "the only
+  playable video" when its byte count contradicts the discovery's — that
+  was the leak that let an item serve bytes the ranking did not choose.
+- Production audit (`node src/scripts/provider-file-audit.mjs`): 4120 of
+  4120 durable provider-file mappings are exact (release + path + size),
+  50 are unmapped extras, zero path/size/release mismatches. Nothing
+  needed repair and nothing was rewritten.
+- Evidence: `docs/BUILD-LOG.md` 2026-10-20; retrospective
+  `docs/retrospectives/2026-10-20-exact-file-everywhere.md`.
+
 ## Architecture boundaries (frozen)
 
 Non-authoritative session-local summary. Canonical:
