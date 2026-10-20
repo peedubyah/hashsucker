@@ -68,6 +68,12 @@ const RD_POLL_DELAY_MS = 2000;
 
 const PROVIDERS = Object.freeze(['torbox', 'realdebrid']);
 
+import {
+  classifyRoutesForTorrentFile,
+  providersNeedingRoute,
+  ROUTE_STATES,
+} from './route-classification.js';
+
 /** RD status -> provider_placements.state. Mirrors rd-placement-realizer. */
 export const RD_STATE_MAP = Object.freeze({
   downloaded: 'ready',
@@ -143,27 +149,48 @@ export function createSecondPlacementEnsurer({
   // share one execution (prevents duplicate account-side torrents).
   const inFlight = new Map();
 
-  // Provider presence from existing readers: one live (non-removed)
-  // placement per provider plus a present+mapped provider_files row
-  // binding it to this exact TorrentFile. `lookupLimit` is accepted for
+  // Provider presence from the SHARED route view: a provider is present
+  // when it has a route to this exact TorrentFile that is not proven dead.
+  //
+  // The previous predicate asked "does a ProviderPlacement row exist for
+  // this provider and hash" — which counts a TERMINALLY DEAD route as
+  // healthy redundancy and then looks for a SECOND provider instead of the
+  // provider that actually lost the route. `lookupLimit` is accepted for
   // interface parity with the proven helper and is unused here.
   void lookupLimit;
+  /**
+   * The provider resource ids whose routes are proven DEAD.
+   *
+   * A dead route is not a repair candidate: reusing it would report a
+   * repair that did not happen. It is also not a candidate when the
+   * provider is asked for a replacement — that is a different resource id
+   * for the same release, which is a NEW route.
+   */
+  function deadResourceIdsFor(view, provider) {
+    const providerView = view?.byProvider?.[provider];
+    if (!providerView) return new Set();
+    return new Set(providerView.routes
+      .filter((route) => route.state === ROUTE_STATES.DEAD)
+      .map((route) => route.providerResourceId));
+  }
+
   function presentProviders(torrentFileId, infoHash) {
-    const refs = typeof store.listProviderRefsForTorrentFile === 'function'
-      ? store.listProviderRefsForTorrentFile(torrentFileId) ?? []
-      : [];
+    const view = classifyRoutesForTorrentFile(store, {
+      torrentFileId,
+      infoHash,
+      now: now(),
+    });
     const present = new Set();
     for (const provider of PROVIDERS) {
-      const placement = typeof store.findPlacementByInfoHash === 'function'
-        ? store.findPlacementByInfoHash(provider, infoHash)
-        : null;
-      if (!placement) continue;
-      const bound = refs.find((r) => r.placementId === placement.id
-        && r.present !== false && r.mappingState === 'mapped');
-      if (!bound) continue;
-      present.add(String(provider).toLowerCase());
+      const providerView = view.byProvider[provider];
+      if (!providerView) continue;
+      // A route that is merely unknown or temporarily unavailable still
+      // counts as present: it may work, and the next read tries it. Only a
+      // route proven dead does not.
+      if (providerView.state === ROUTE_STATES.DEAD) continue;
+      present.add(provider);
     }
-    return { present };
+    return { present, view };
   }
 
   function observeLookup({ provider, infoHash, state, placementId, observedAt, expiresAt, source }) {
@@ -202,14 +229,24 @@ export function createSecondPlacementEnsurer({
   }
 
   // ---- TorBox ensure (cached-only creation) ----
-  async function ensureTorBox(torrentFile, infoHash) {
+  async function ensureTorBox(torrentFile, infoHash, { deadResourceIds = new Set() } = {}) {
     let apiCalls = 0;
     const observedAt = now();
     const expiresAt = observedAt + ttlMs;
     const magnet = `magnet:?xt=urn:btih:${infoHash}`;
 
-    // Durable-first: reuse what we already recorded.
-    let placement = store.findPlacementByInfoHash('torbox', infoHash);
+    // Durable-first: reuse what we already recorded — but NEVER a route
+    // that is proven dead. Reusing it would report a repair that did not
+    // happen: the same resource, still gone.
+    //
+    // EVERY recorded placement for the hash is considered, not just one:
+    // a provider that re-created the release under a new resource id has
+    // two routes, and the singular lookup would hide the replacement
+    // behind the dead one.
+    const durable = typeof store.listPlacementsByInfoHash === 'function'
+      ? store.listPlacementsByInfoHash('torbox', infoHash)
+      : [store.findPlacementByInfoHash('torbox', infoHash)].filter(Boolean);
+    let placement = durable.find((p) => !deadResourceIds.has(p.providerResourceId)) ?? null;
     if (placement) {
       try {
         apiCalls += 1;
@@ -229,7 +266,8 @@ export function createSecondPlacementEnsurer({
       return { status: 'failed', reason: 'no-exact-match', apiCalls, placementId: placement.id };
     }
 
-    // Passive recovery: an account placement we never recorded.
+    // Passive recovery: an account placement we never recorded, or a
+    // REPLACEMENT resource for a route that died.
     try {
       apiCalls += 1;
       const observed = await torbox.lookupPlacement({ infoHash });
@@ -276,7 +314,9 @@ export function createSecondPlacementEnsurer({
     }
     if (!cached) {
       observeLookup({ provider: 'torbox', infoHash, state: 'missing', placementId: null, observedAt, expiresAt, source: 'second-placement' });
-      return { status: 'unavailable', reason: 'not-cached', apiCalls };
+      // A genuine negative: the provider was asked about THIS release
+      // and answered that it does not have it cached.
+      return { status: 'unavailable', reason: 'not-cached', negative: true, apiCalls };
     }
 
     // Create (cached → instant, ready, no download) with one ambiguous-
@@ -394,12 +434,16 @@ export function createSecondPlacementEnsurer({
     const expiresAt = observedAt + ttlMs;
     const magnet = `magnet:?xt=urn:btih:${infoHash}`;
 
-    // Durable-first: reuse the recorded RD torrent id (no list call).
+    // Durable-first: reuse the recorded RD torrent id (no list call) — but
+    // never a route that is proven dead, and never only the FIRST row: a
+    // provider that re-created the release under a new id has two routes.
     let known = null;
-    if (typeof store.findPlacementByInfoHash === 'function') {
-      const p = store.findPlacementByInfoHash('realdebrid', infoHash);
-      const id = p?.providerResourceId;
-      if (typeof id === 'string' && id.trim() !== '') known = id.trim();
+    const durableRd = typeof store.listPlacementsByInfoHash === 'function'
+      ? store.listPlacementsByInfoHash('realdebrid', infoHash)
+      : [store.findPlacementByInfoHash('realdebrid', infoHash)].filter(Boolean);
+    const usableRd = durableRd.find((p) => !deadResourceIds.has(p.providerResourceId));
+    if (usableRd && typeof usableRd.providerResourceId === 'string') {
+      known = usableRd.providerResourceId.trim();
     }
 
     // Bounded discovery: one list call, exact-hash filter. Anything for
@@ -417,11 +461,23 @@ export function createSecondPlacementEnsurer({
       const matches = (Array.isArray(list) ? list : []).filter(
         (entry) => String(entry?.hash ?? '').trim().toLowerCase() === infoHash,
       );
-      const ids = [...new Set(matches.map((m) => String(m?.id ?? '').trim()).filter(Boolean))];
+      // A route that died and was re-created appears here as a SECOND id
+      // for the same hash. The dead id is not a candidate (it is gone);
+      // the remaining id is a REPLACEMENT route, not an ambiguity.
+      const allIds = [...new Set(matches.map((m) => String(m?.id ?? '').trim()).filter(Boolean))];
+      const ids = allIds.filter((id) => !deadResourceIds.has(id));
+      if (allIds.length > 0 && ids.length === 0) {
+        // Every id we know for this hash is proven dead: the account does
+        // not hold a usable copy. That is a negative, not an ambiguity.
+        return { status: 'unavailable', reason: 'not-cached', negative: true, apiCalls, ids: allIds };
+      }
       if (ids.length === 0) {
         rdId = null;
       } else if (ids.length !== 1) {
-        return { status: 'unavailable', reason: 'ambiguous-account-torrents', apiCalls, ids };
+        // NOT a negative: the account may well hold this release, we just
+        // cannot tell which torrent is it. Treating this as "not cached"
+        // would let a representation switch happen on a false negative.
+        return { status: 'failed', reason: 'ambiguous-account-torrents', apiCalls, ids };
       } else {
         rdId = ids[0];
         idSource = 'discovered';
@@ -442,7 +498,9 @@ export function createSecondPlacementEnsurer({
       }
       const match = matchRdFile(verified.info, torrentFile);
       if (match.status !== 'matched') {
-        return { status: match.status === 'ambiguous' ? 'unavailable' : 'failed', reason: match.status, rdId, apiCalls };
+        // 'ambiguous' is NOT a negative either: the file exists, we just
+        // cannot bind it to one provider file id.
+        return { status: 'failed', reason: match.status, rdId, apiCalls };
       }
       const placement = persistRdPlacement({
         rdId, rdStatus: verified.info.status, owned: false,
@@ -462,7 +520,10 @@ export function createSecondPlacementEnsurer({
     // Discover-only callers (background enrichment) stop here instead:
     // manufacturing an uncached download is never automatic.
     if (discoverOnly) {
-      return { status: 'unavailable', reason: 'discover-only', apiCalls };
+      // The account was searched (the list call above) and does not hold
+      // this release: a genuine negative. The reason it was not acquired is
+      // the cache-only policy, not a provider failure.
+      return { status: 'unavailable', reason: 'discover-only', negative: true, apiCalls };
     }
     let addedId;
     try {
@@ -588,36 +649,97 @@ export function createSecondPlacementEnsurer({
       // No provider mutation of any kind on this path.
       return { status: 'already_ready', torrentFileId: torrentFile.id, infoHash, providers, apiCalls: 0 };
     }
-    const missing = PROVIDERS.filter((p) => !before.present.has(p));
+    // The providers that still NEED a route: the ones with no route at
+    // all, and the ones whose every route is proven DEAD. A provider whose
+    // route is unknown or temporarily unavailable is not a target — the
+    // route may still work and the next read tries it.
+    const missing = providersNeedingRoute(before.view);
     const target = preferred !== null && missing.includes(preferred) ? preferred : missing[0];
+    if (!target) {
+      // Every provider has a route that is not proven dead: nothing to do.
+      return { status: 'already_ready', torrentFileId: torrentFile.id, infoHash, providers, apiCalls: 0 };
+    }
 
     const clients = { torbox, realdebrid: realdebrid };
-    if (target === 'torbox' && !clients.torbox) {
-      return { status: 'unavailable', reason: 'torbox-client-unconfigured', torrentFileId, infoHash, providers, targetProvider: target, apiCalls: 0 };
-    }
-    if (target === 'realdebrid' && !clients.realdebrid) {
-      return { status: 'unavailable', reason: 'realdebrid-client-unconfigured', torrentFileId, infoHash, providers, targetProvider: target, apiCalls: 0 };
-    }
-
-    let outcome;
-    try {
-      outcome = target === 'torbox'
-        ? await ensureTorBox(torrentFile, infoHash)
-        : await ensureRealDebrid(torrentFile, infoHash, { discoverOnly });
-    } catch (error) {
-      log(`[second-placement] unexpected failure for ${torrentFile.id}: ${error.message}`);
-      return { status: 'error', reason: error.message, torrentFileId, infoHash, providers, targetProvider: target, apiCalls: 0 };
+    // The candidates are the providers that need a route. The FIRST one is
+    // the target (the provider that lost its route); the others are the
+    // providers that have no route at all for this release.
+    //
+    // Why the others are consulted too: "this release has no cached copy"
+    // is a claim about EVERY candidate account, not about the one we
+    // happened to ask first. A negative that covers one provider only is
+    // not the completeness proof the representation policy needs — it could
+    // authorize replacing an authoritative representation while a working
+    // route exists in the other account.
+    const candidates = missing;
+    const consulted = [];
+    const negatives = [];
+    let apiCalls = 0;
+    let outcome = null;
+    for (const candidate of candidates) {
+      if (candidate === 'torbox' && !clients.torbox) {
+        // Not a negative: nobody was asked. Keep going — another account
+        // may still hold the release.
+        consulted.push({ provider: candidate, status: 'skipped', reason: 'client-unconfigured' });
+        continue;
+      }
+      if (candidate === 'realdebrid' && !clients.realdebrid) {
+        consulted.push({ provider: candidate, status: 'skipped', reason: 'client-unconfigured' });
+        continue;
+      }
+      let providerOutcome;
+      try {
+        providerOutcome = candidate === 'torbox'
+          ? await ensureTorBox(torrentFile, infoHash, { deadResourceIds: deadResourceIdsFor(before.view, candidate) })
+          : await ensureRealDebrid(torrentFile, infoHash, {
+            discoverOnly, deadResourceIds: deadResourceIdsFor(before.view, candidate),
+          });
+      } catch (error) {
+        log(`[second-placement] unexpected failure for ${torrentFile.id}: ${error.message}`);
+        providerOutcome = { status: 'error', reason: error.message, apiCalls: 0 };
+      }
+      apiCalls += providerOutcome.apiCalls ?? 0;
+      consulted.push({ provider: candidate, status: providerOutcome.status, reason: providerOutcome.reason ?? null });
+      if (providerOutcome.status === 'created') {
+        outcome = providerOutcome;
+        break;
+      }
+      if (providerOutcome.negative === true) {
+        negatives.push({ provider: candidate, reason: providerOutcome.reason ?? 'not-cached' });
+        continue;
+      }
+      // Inconclusive: the provider could not answer. The negative is NOT
+      // complete, so it may not be used as a completeness proof.
+      outcome = providerOutcome;
+      break;
     }
     const after = presentProviders(torrentFile.id, infoHash);
+    if (!outcome) {
+      // Every candidate that could be consulted answered "not cached".
+      const complete = negatives.length > 0 && negatives.length === candidates.length;
+      const last = negatives[negatives.length - 1];
+      outcome = {
+        status: 'unavailable',
+        reason: !complete
+          ? 'no-candidate-account-available'
+          : (candidates.length === 1 ? last.reason : 'not-cached-in-any-candidate-account'),
+        negative: complete,
+        apiCalls: 0,
+      };
+    }
     return {
       status: outcome.status,
       torrentFileId: torrentFile.id,
       infoHash,
       providers: [...after.present].sort(),
       targetProvider: target,
+      providersConsulted: consulted,
+      // The completeness proof: every candidate account was searched for
+      // this exact release and none of them has it cached.
+      negativeComplete: outcome.negative === true,
       placementId: outcome.placementId ?? null,
       providerFileId: outcome.providerFileId ?? null,
-      apiCalls: outcome.apiCalls ?? 0,
+      apiCalls,
       ...(outcome.idSource ? { idSource: outcome.idSource } : {}),
       ...(outcome.reason ? { reason: outcome.reason } : {}),
       ...(outcome.operation ? { operation: outcome.operation } : {}),

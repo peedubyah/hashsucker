@@ -80,10 +80,15 @@ export function createRouteResurrector({
     // (a placement + provider file mapped to that exact TorrentFile). That
     // is route repair, not media reselection.
     const recovered = status === 'created';
-    // The provider was actually consulted: the account was searched for this
-    // exact release. That is the ROUTE-SET COMPLETENESS proof — without it
-    // "every known route is dead" is not "no same-TorrentFile route exists".
-    const discoveryCompleted = status !== 'unknown' && status !== 'invalid-input';
+    // The ROUTE-SET COMPLETENESS proof: every candidate account was
+    // actually searched for this exact release.
+    //
+    // A negative is only complete when the ensurer consulted EVERY
+    // candidate account and each of them answered "not cached"
+    // (`negativeComplete`). A negative that covers one account is not a
+    // proof that no same-TorrentFile route exists, and it must not be able
+    // to authorize replacing an authoritative representation.
+    const discoveryCompleted = status === 'created' || outcome?.negativeComplete === true;
     log(`[route-resurrection] tf=${torrentFileId} status=${status} recovered=${recovered} discoveryCompleted=${discoveryCompleted}`);
     return { status, recovered, discoveryCompleted, outcome: outcome ?? null };
   }
