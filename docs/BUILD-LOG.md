@@ -3104,3 +3104,196 @@ MISSING. What is STALE still splits between "the consumer is behind" and
 copies of the byte identity, and only one of them is the authority. Making
 the VFS row a projection of the binding (rather than a second copy of the
 byte identity) would collapse the class.
+
+## 2026-10-20 — ONE BYTE IDENTITY: the Binding/VFS authority — CLOSED
+
+Slice: the durable truth held TWO copies of the byte identity — the
+active Binding's TorrentFile (the authority) and the VFS row's
+TorrentFile (what the byte path serves). They were written by different
+code in different databases, and nothing reconciled them.
+
+### PHASE 1 — EVERY DIVERGENCE PATH
+
+| path | what it writes | can the row's TorrentFile diverge? |
+|---|---|---|
+| `vfs/materialize.js` — create (movie/TV) | the row with the HANDOFF's TorrentFile | yes: the row is written before the Binding settles |
+| `vfs/materialize.js` — rejection/legacy supersede | the row's physical identity replaced (the path kept) | yes: same window |
+| `vfs/materialize.js` — orphan convergence | the row's TorrentFile = the handoff's (only when there is NO active Binding) | no (there is no authority to contradict) |
+| `vfs/materialize.js` — idempotent replay | nothing (only the generation) | it PRESERVED a drift |
+| `control-plane/reconciler.js` — bind/rebind | a NEW Binding version | yes — and it changed the REPRESENTATION on a route-level decision |
+| `lifecycle/upgrade-watch.js` — adoptNew | a new Binding + a new handoff | the materializer then moved the row; the Binding activation could fail |
+| `resolver/alternate-fallback.js` — promoteAlternate | a new Binding (the representation decision) | through the materializer |
+| `library/unpublish.js` | the row deleted | no |
+| `discovery/cache.js` — the row helpers | the row's TorrentFile + size | — |
+
+The decisive window: **the VFS row is written first, the Binding is
+activated afterwards, in a different database.** When the activation
+failed — the measured cause being "Cannot bind through a stale or
+unbounded provider inventory observation" — the row had already moved to
+a new TorrentFile and the two disagreed.
+
+### PHASE 2 — THE PRODUCTION DRIFT (audited, nothing mutated)
+
+`node src/scripts/byte-authority-audit.mjs` over the live control plane
+and discovery cache:
+
+| state | count | meaning |
+|---|---|---|
+| aligned | 175 | the row names exactly the Binding's TorrentFile, size and release |
+| **drifted** | **0** | the row names a TorrentFile the Binding does not name |
+| no-row | 13 | a published intent with no VFS row (the `.strm` exists; the byte path has no entry) |
+| no-binding | 2 | legacy library items (`episode:tt7137906:default`, the pre-coordinate identity key) with no Binding |
+| legacy | 0 | a row with no TorrentFile id |
+
+The drift class is CLOSED at the moment of the audit — because the routine
+reconciler had already rebinding the intent on 2026-10-20 08:37 (a
+ROUTE-level decision that changed the REPRESENTATION — a leak in its own
+right, recorded below).
+
+### PHASE 3 — THE FIRST DIVERGENT TRANSITION (the production specimen)
+
+`episode:tt31510819:default:2:1` (MobLand S02E01):
+
+| when | what | binding | VFS row |
+|---|---|---|---|
+| 2026-10-02 | published | v1 → `1fda0fb9…` (the UIndex REPACK, 9 385 232 547 B) | the same TorrentFile |
+| **2026-10-18** | a representation change moved the VFS row | **v1 (unchanged)** | **the row moved to `b231c01e…` (the dAv release, 9 573 001 343 B)** |
+| 2026-10-20 08:37 | a ROUTE-level reconciler rebind | v2 → the row's release | the same |
+
+So for **two days** the byte path served the dAv release's bytes while
+the authority named the REPACK, and Plex's Part reported the row's size.
+The activation had failed on 2026-10-18 (the stale-inventory case); the
+retry state was process-local and died with the container, and nothing
+else ever reconciled the two.
+
+### PHASE 4 — THE WRITE-AUTHORITY RULE
+
+> **A VFS row's byte identity (`torrent_file_id`, `info_hash`, `size`) is
+> a PROJECTION of the active Binding's TorrentFile.**
+
+| candidate authority | verdict |
+|---|---|
+| the active Binding | **the authority** — it is the representation decision |
+| a handoff | execution material only; it may carry a candidate, never the byte identity of a published intent |
+| the existing VFS row | a projection, never an authority: a stale row is repaired FROM the Binding |
+| the release key | an index, not an identity (the same release can have several TorrentFiles) |
+| a ProviderPlacement / ProviderFile | a ROUTE, never media identity |
+| a consumer Part | an observation, never an authority |
+| the filename / path | a presentation artifact, never a byte identity |
+
+### PHASE 5 — ATOMICITY
+
+The two facts live in two SQLite databases (the control plane and the
+discovery cache), so no transaction can cover them. The mechanism chosen
+is therefore the smallest one that guarantees eventual convergence:
+
+1. **the Binding settles first** — the materializer activates the Binding
+   and the row is then PROJECTED onto it, so the row cannot keep naming
+   a TorrentFile the authority does not name;
+2. **the orphan cleanup stays** — a row whose Binding never settled is
+   removed (the existing contract, unchanged);
+3. **a deterministic reconciliation** converges any surviving drift: at
+   startup (30 s) and every 5 minutes, reading the control plane and the
+   discovery cache and writing the VFS row. It performs **no discovery,
+   no ranking, no provider call, no metadata lookup and no consumer
+   call** — measured at milliseconds.
+
+### PHASE 6 — BINDING REPLACEMENT
+
+Binding TF A → B: the Binding version changes first, the VFS row is
+projected onto it in the same publication, the presentation path does not
+move, and the generation advances only when the projected bytes actually
+changed. A crash between the two leaves the row BEHIND the authority —
+never ahead — and the reconciliation converges it at startup.
+
+### PHASE 7 — ROUTE REPAIR (the negative control)
+
+The same TorrentFile, a changed route: the Binding is unchanged, the VFS
+row's TorrentFile is unchanged, the presentation path is unchanged. Only
+the route state moves. A route recovery can no longer project a different
+representation — and the routine reconciler's rebind (which changed the
+RELEASE on a route-level decision, the specimen above) is now bounded by
+the same invariant: the row follows the Binding.
+
+### PHASE 8 — HANDOFF AUTHORITY
+
+A handoff may carry execution material (a candidate, a route, a
+presentation identity) and, for a cold publication with no Binding yet, it
+establishes the row AND the Binding from the same TorrentFile. For an
+intent that already has an active Binding, the handoff is projected onto
+the Binding before the row is written, so a stale handoff cannot name the
+row's bytes.
+
+### PHASE 9 — HYDRATION AND RESTART
+
+The VFS is reconstructible from the control plane alone: the active
+Binding + its TorrentFile name the row's bytes, and the committed
+presentation identity names its path. The reconciliation performs no
+provider call and no consumer call, and a restart converges the row
+without a reselection.
+
+### PHASE 10 — BYTE SERVING TRUTH
+
+A modern VFS entry carries a TorrentFile id, and Rust is invoked with
+exactly that id (`/files/:tfId`), so the bytes served are the projected
+bytes by construction. The projection keeps the exact size and release of
+the Binding's TorrentFile, so a wrong path, a wrong size or a different
+TorrentFile is a mismatch the audit reports rather than something the
+byte path can serve silently.
+
+### PHASE 11 — THE STALE-SIZE CLASS, RECLASSIFIED
+
+| class | count | meaning | repair |
+|---|---|---|---|
+| A. the consumer is stale, our truth agrees | 1 | Plex's Part size is from an older analysis of an unchanged file | advance the generation (the file's mtime) + a targeted refresh |
+| B. **our VFS row is stale, the Binding is newer** | **0** | the row names an older TorrentFile than the authority | the projection (this slice) |
+| C. the Binding itself is wrong | 0 | — | an operator decision |
+
+The specimen was class B until the routine reconciler moved the Binding
+to the row's release; it is class A today. The projection makes class B
+impossible going forward.
+
+### PRODUCTION EVIDENCE (the appliance, 2026-10-20)
+
+| cohort | Binding | VFS row | presentation | Plex | bytes |
+|---|---|---|---|---|---|
+| City Lights (movie) | v1 `bd_7726d088…`, TF `tf_c0656148…`, 1 452 039 706 B | the SAME TF, the same size | `Movies/City Lights/City Lights.mp4` | ratingKey 423, Part.file = the committed path, Part.size = 1 452 039 706 B | 206, `bytes 0-65535/1452039706` |
+| Ted Lasso S04E01 (episode) | v1 `bd_d2ceab69…`, TF `tf_1d637ab4…`, 6 645 443 137 B | the SAME TF, the same size | `TV/Ted Lasso/Season 04/Ted Lasso - S04E01.mkv` | ratingKey 527, Part.file = the committed path, Part.size = 6 645 443 137 B | 206 |
+| publication replay (Ted Lasso S04E01) | unchanged (v1) | unchanged | unchanged (same commit time) | — | — |
+| byte-authority audit | 175 aligned, 0 drifted, 13 no-row, 2 no-binding | | | | |
+
+### THE FULL SUITE
+
+3510 tests, 3506 pass, 1 fail, 3 skipped (exit 1). The one failure is the
+pre-existing baseline `vfs-collection-resilience` C1/C2/C3. The focused
+byte-authority/VFS/publication suites: 47/47.
+
+### COMMITS
+
+| commit | change |
+|---|---|
+| `f75e51b` | feat(bytes): one byte identity — the VFS projects the active Binding |
+| `e611137` | fix(bytes): the projection follows the Binding, and a stale consumer view gets the signal |
+
+### WHAT REMAINS UNPROVEN
+
+- The **routine reconciler's rebind** can change the RELEASE (not just the
+  route) of an active intent — the specimen's Binding v2 was created that
+  way. It is now bounded by the invariant (the row follows the Binding),
+  but a route-level decision should not be able to choose a
+  representation at all. Not fixed here.
+- The **13 no-row intents** have a committed `.strm` and no VFS row: they
+  are playable through Jellyfin but are not projected into Plex, and
+  materializing them is a media-side action.
+- The **2 no-binding intents** are legacy library items (the
+  pre-coordinate identity key) with no Binding; they are historical, and
+  the reconciliation leaves them alone by design (there is no authority
+  to project).
+
+### NEXT SMALLEST EARNED SLICE
+
+The byte identity is one fact now. The next copy is the ROUTE: a route
+change (a rebind) still moves the representation, because the routine
+reconciler treats the provider's current file as the intent's
+representation. Making a route change update the ROUTE and never the
+REPRESENTATION would close the last place where a route can rename bytes.

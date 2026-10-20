@@ -174,12 +174,29 @@ durable truth was unchanged ✓). The proof also found that our own truth
 has TWO copies of the byte identity ✓ (the VFS row and the binding can
 name different TorrentFiles ✓) — the next earned slice.
 
-Next earned slice: **one byte identity, two projections**. The VFS row
-and the active binding can name different TorrentFiles for one media
-intent, and the byte path serves the row's while the authority is the
-binding's. Making the VFS row a projection of the binding — rather than a
-second copy of the byte identity — collapses the stale-size class and
-makes "what is served" and "what is authoritative" the same fact.
+Completed product slice: **one byte identity** — **CLOSED** (`f75e51b`,
+`e611137`; evidence in `docs/BUILD-LOG.md` 2026-10-20). The durable truth
+held TWO copies of the byte identity — the active Binding's TorrentFile
+(the authority) and the VFS row's TorrentFile (what the byte path
+serves) — written by different code in different databases, with nothing
+reconciling them. The production specimen had been diverged for two days:
+the byte path served one release while the Binding named another, and
+Plex reported a third size. The window was the write order: the VFS row
+was written first, the Binding activated afterwards, and when the
+activation failed (a stale provider inventory observation, with a
+process-local retry that died with the container) the row had already
+moved. The rule is now explicit: a VFS row's byte identity is a
+PROJECTION of the active Binding's TorrentFile — the Binding settles
+first, the row follows, the path never moves, and a local
+reconciliation (startup + every 5 min, no provider/metadata/discovery
+work) converges any surviving drift. The route-repair negative control
+holds: a route change moves the route, never the bytes.
+
+Next earned slice: **a route change must not move the representation**.
+The routine reconciler still rebinds an intent to whatever the provider's
+current file is — and that changed the RELEASE (not merely the route) of
+the specimen's intent. The byte identity is now consistent, but a
+route-level decision should have no representation authority at all.
 
 Completed product slice: **exact durable-truth republication** — **CLOSED**.
 E01 VFS publication was genuinely removed, then recreated through

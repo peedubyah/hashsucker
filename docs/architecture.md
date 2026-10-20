@@ -129,6 +129,21 @@ churn without changing TorrentFile identity. `candidate_file_mappings` separatel
 discovery `releaseKey` to a provider file. Never assume a placement is per-file or equate a
 discovery file index with a provider file ID.
 
+**Byte authority** — the TorrentFile a media intent's bytes come from:
+
+```text
+active Binding.torrent_file_id == the TorrentFile a modern VFS entry names
+```
+
+The Binding is the authority: it is the representation decision. A VFS
+row's byte identity (`torrent_file_id`, `info_hash`, `size`) is a
+PROJECTION of the Binding's TorrentFile, written by the projection and
+repairable from the authority alone (a local reconciliation, no provider
+call and no metadata lookup). A handoff carries execution material and
+may establish the row only for a cold publication with no Binding yet; it
+never decides the byte identity of a published intent. A route change
+updates the route, never the representation.
+
 **Consumer projection** — what a consumer library should hold for a media
 intent:
 

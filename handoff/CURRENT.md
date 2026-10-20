@@ -199,6 +199,31 @@ trust old containers or historical HY4 handoffs.
 - Evidence: `docs/BUILD-LOG.md` 2026-10-20; retrospective
   `docs/retrospectives/2026-10-20-consumer-projection-from-first-principles.md`.
 
+## Live session state (2026-10-20, one byte identity)
+
+- Production `media-search` RUNS the local build of `e611137` (container
+  healthy; the data plane is untouched). No release/tag/push performed.
+- A VFS row's byte identity (`torrent_file_id`, `info_hash`, `size`) is
+  a PROJECTION of the active Binding's TorrentFile. The Binding settles
+  first; the row follows; the presentation path never moves. A handoff
+  may establish the row only for a cold publication with no Binding.
+- The projection is repaired by a local reconciliation
+  (`src/lib/vfs/byte-projection.js`): startup (30 s) and every 5 minutes
+  (`BYTE_AUTHORITY_RECONCILE_INTERVAL_SEC`), reading the control plane
+  and the discovery cache and writing the VFS row. No discovery, no
+  ranking, no provider call, no metadata lookup, no consumer call.
+- Operator surfaces: `GET /api/operator/byte-authority` (the audit) and
+  `POST /api/operator/byte-authority/reconcile` (the projection, with a
+  dry run by default); `node src/scripts/byte-authority-audit.mjs
+  [--repair]` for the same audit from a shell.
+- Production audit: 190 intents, **175 aligned, 0 drifted**, 13 without a
+  VFS row, 2 legacy library items without a Binding. The drift class was
+  closed by the routine reconciler rebinding the specimen on 2026-10-20
+  08:37 — a ROUTE-level decision that changed the RELEASE, which is the
+  last known way for a route to move bytes.
+- Evidence: `docs/BUILD-LOG.md` 2026-10-20; retrospective
+  `docs/retrospectives/2026-10-20-one-byte-identity.md`.
+
 ## Architecture boundaries (frozen)
 
 Non-authoritative session-local summary. Canonical:
