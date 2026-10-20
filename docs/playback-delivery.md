@@ -226,13 +226,35 @@ exists" — and it is budgeted (at most one switch per media intent per window),
 so a transient exhaustion leaves the representation authoritative and the
 delivery degraded, and a flapping route cannot churn the representation.
 
+A ROUTE is one exact capability tuple (provider, account scope, placement,
+provider resource, provider file), and its state has exactly ONE definition
+(`route-classification.js`): the placement says which route identities we
+know, the provider file says which provider-side file maps to this
+TorrentFile, and the delivery evidence says what was observed about that
+route's ability to deliver. A route is SERVICEABLE (it delivered bytes, or
+the provider still lists it), RETRYABLE (nobody observed it, or the provider
+said "wait"), or DEAD (a fresh terminal observation). A provider's view is
+the best of its routes; "this provider needs a route" means it has no route
+at all, or only dead ones. UNKNOWN IS NOT DEAD, and a throttle is not a
+death. Every route decision — which provider to repair, whether a repair is
+due, which routes the byte path is offered, whether the representation may
+change — consumes that one definition. A dead route is not offered to the
+byte path, and its placement row is kept: it is history, not a licence to
+serve. A different resource id for the same release is a NEW route.
+
 RECOVERY follows the EVIDENCE, not a timer. The durable delivery evidence is
 the work item: a TorrentFile whose every recorded route is proven dead has a
 repair DUE, and the pass that looks for it is local until work is due (it can
-run every minute at zero provider cost). The provider is asked only what the
-evidence cannot answer — "is there another resource for this exact
-TorrentFile?" — and a route that is merely throttled is never repaired and
-never retired, because throttling is not death.
+run every minute at zero provider cost). This is an EVIDENCE-DRIVEN BOUNDED
+POLL, not an event-driven wake: nothing wakes the process when a route dies,
+so the latency is the poll interval. The provider is asked only what the
+evidence cannot answer, in this order: re-observe the dead route (the
+cheapest proof of whether the resource is really gone — a fresh observation
+SUPERSEDES the terminal verdict), then look for a replacement resource for
+the same exact TorrentFile, and only then report a negative. A negative is
+COMPLETE only when every candidate account was searched; an ambiguous
+account listing is not a negative at all. A route that is merely throttled is
+never repaired and never retired, because throttling is not death.
 
 ## 6. Physical acquisition
 

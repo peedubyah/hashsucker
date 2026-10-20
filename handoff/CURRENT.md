@@ -70,7 +70,7 @@ trust old containers or historical HY4 handoffs.
 - Evidence: `docs/BUILD-LOG.md` 2026-10-19; retrospective
   `docs/retrospectives/2026-10-19-durable-route-failure.md`.
 
-## Live session state (2026-10-19, event-driven route recovery)
+## Live session state (2026-10-19, evidence-driven bounded-poll route recovery)
 
 - Production `media-search` RUNS the local build of `de25fff` (both
   services healthy). The route reconciler is now EVIDENCE-driven: the
@@ -82,7 +82,44 @@ trust old containers or historical HY4 handoffs.
   `ROUTE_RECONCILE_INTERVAL_MIN` (default 360) = the discovery sweep for
   TorrentFiles with no recorded route at all.
 - Evidence: `docs/BUILD-LOG.md` 2026-10-19; retrospective
-  `docs/retrospectives/2026-10-19-event-driven-route-recovery.md`.
+  `docs/retrospectives/2026-10-19-evidence-driven-route-recovery.md`.
+- Terminology correction (2026-10-20): the recovery is a bounded poll of
+  the durable evidence, not an event-driven wake. The 2026-10-19 slice
+  was named "event-driven" in several places; the wording is corrected.
+
+## Live session state (2026-10-20, one truth for routes)
+
+- Production `media-search` RUNS the local build of `12c5ed9` (container
+  healthy; the data plane is untouched at `c3be499`). No release/tag/push
+  performed.
+- A ROUTE is one exact capability tuple, and its state has ONE definition
+  (`media-search/src/lib/control-plane/route-classification.js`):
+  serviceable / retryable / dead, derived from the placement + the
+  provider file + `provider_delivery_evidence`. Every route decision
+  consumes it: which provider needs a route, whether a repair is due,
+  which routes the byte path is offered (`listDataPlaneCoordinates` now
+  excludes a route with a fresh terminal verdict), and whether the
+  representation may change.
+- The repair targets the provider that LOST its route, re-observes the
+  dead route first (a fresh provider inventory supersedes the terminal
+  verdict: `superseded-by-fresh-provider-inventory`), never reuses a
+  proven-dead route, and can see a replacement resource (the store's new
+  `listPlacementsByInfoHash`; the singular lookup hid replaced ids).
+- A negative discovery is complete only when EVERY candidate account was
+  searched (`negativeComplete`); an ambiguous account listing is NOT a
+  negative. The representation fallback's completeness gate rests on that
+  flag.
+- Two new production knobs: `ROUTE_REPAIR_ATTEMPT_COOLDOWN_MS` (default
+  5 min — a stuck work item must not re-read a 5.5 MB account every
+  minute) and `ROUTE_REPAIR_ACCOUNT_READ_TIMEOUT_MS` (default 20 s — the
+  TorBox account listing is 5.48 MB and took 0.42–5.75 s, so the 5 s
+  request budget was too tight and the repair timed out in production).
+- The class-D path had a live defect: `evidenceSummary` was declared
+  inside the class-D block and read outside it, so every class-D failure
+  answered 500 `INTERNAL_ERROR` instead of the typed provider failure.
+  Fixed (`12c5ed9`); the regression test fails without the fix.
+- Evidence: `docs/BUILD-LOG.md` 2026-10-20; retrospective
+  `docs/retrospectives/2026-10-20-one-truth-for-routes.md`.
 
 ## Architecture boundaries (frozen)
 

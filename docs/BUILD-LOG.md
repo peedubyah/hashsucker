@@ -2421,7 +2421,12 @@ with the typed provider failure.
   resource id to the placement id on every write. The mapping is exact
   (the durable index), but it is a mapping.
 
-## 2026-10-19 — THE DEAD SPEAK: event-driven route recovery — CLOSED
+## 2026-10-19 — THE DEAD SPEAK: evidence-driven bounded-poll route recovery — CLOSED
+
+> Terminology correction (2026-10-20): this slice was described as
+> "event-driven route recovery". It is not event-driven. Nothing wakes the
+> process when a route dies; the recovery is a local read of the durable
+> evidence every 60 s, so the latency is the poll interval.
 
 Slice: the durable route-failure evidence existed but the reconciler
 still re-derived route failure by probing the providers on a six-hour timer.
@@ -2561,3 +2566,188 @@ route/recovery/VFS suites: 159/159.
 - The recovery is triggered by a poll of the durable evidence (a local
   read every minute), not by a push. The latency is therefore the poll
   interval, not the failure.
+
+## 2026-10-20 — ONE TRUTH FOR ROUTES — CLOSED
+
+Slice: the route facts were spread over three tables and three predicates,
+and each consumer picked a different one. A route that was proven dead
+counted as redundancy in one decision and as a live route in another. Make
+one classification of a route, make every route decision consume it, and
+prove on the appliance that a dead route is repaired on the SAME
+TorrentFile with the identity unchanged.
+
+### PHASE 1 — THE PREDICATES, ENUMERATED
+
+| predicate | where | what it believed |
+|---|---|---|
+| "the provider is present" | `second-placement.js` `presentProviders` | a `provider_placements` row exists for the hash → **a terminally dead route counted as redundancy** |
+| "there is a route" | `route-reconciler.js` `usablePlacementCount` | present + mapped + placement ≠ removed → **a dead route counted as a live route** |
+| "the routes to offer" | `store.js` `listDataPlaneCoordinates` (the S-1) | present + mapped + placement ≠ removed → **the byte path was offered proven-dead routes** |
+| "which placement is it" | `store.js` `findPlacementByInfoHash` | ONE placement per provider → **a replaced resource id was invisible** |
+| "is the release missing" | `second-placement.js` | the ONE target provider answered no → **a negative that proved one account, not all** |
+
+Five predicates, three meanings of "route". The provider adapter's
+`lookupPlacement` was the sixth: it THROWS when two resources match one
+hash — which is exactly what a re-created release looks like.
+
+### PHASE 2 — ONE CLASSIFICATION
+
+`media-search/src/lib/control-plane/route-classification.js` is now the
+only definition of a route's state. A route is an exact capability tuple
+(provider, account scope, placement, provider resource, provider file) and
+its state is derived from the three durable facts that answer three
+different questions:
+
+| question | fact | table |
+|---|---|---|
+| which route identities do we know? | the placement | `provider_placements` |
+| which provider-side file maps to this TorrentFile? | the provider file | `provider_files` |
+| what was observed about that route's ability to deliver? | the delivery evidence | `provider_delivery_evidence` |
+
+| route state | meaning | source |
+|---|---|---|
+| `serviceable` | it delivered bytes (or the provider still lists it) | a fresh `usable` evidence row |
+| `retryable` | nobody observed it, or the provider said "wait" | no evidence row, or a fresh `temporary` row |
+| `dead` | the provider answered "gone" | a fresh `terminal` evidence row |
+
+A provider's view is the BEST of its routes. "The provider needs a route"
+is: no route at all, or every route dead. **Unknown is not dead**, and a
+throttle is not a death.
+
+### PHASE 3 — EVERY DECISION CONSUMES IT
+
+| decision | before | after |
+|---|---|---|
+| which provider needs a route (the ensurer) | "which provider has no second placement" | "which provider has no route, or only dead ones" — the provider that LOST its route is the target |
+| the repair work item (the recovery pass) | the evidence, read by its own SQL | the shared classification |
+| the routes offered to the byte path (the S-1) | every present+mapped route | every present+mapped route that is not proven dead |
+| the representation fallback's completeness gate | "the provider was consulted" | "EVERY candidate account was searched, and each answered no" |
+
+The dead route's placement row is KEPT: it is history, and a different
+resource id for the same release is a NEW route, not a revival.
+
+### PHASE 4 — RE-OBSERVATION SUPERSEDES A VERDICT
+
+A fresh provider inventory that still lists a file supersedes that route's
+terminal verdict (`superseded-by-fresh-provider-inventory`): the newer
+observation wins, and the older record is superseded rather than erased.
+The repair therefore RE-OBSERVES the dead route first (the cheapest proof
+of whether the resource is really gone) before looking for a replacement.
+
+### PHASE 5 — THE REPAIR, ON THE FACILITY
+
+Observed in production before the change: the repair pass asked the
+provider for a SECOND placement, so a dead route was never repaired and
+the healthy provider was disturbed instead; the account listing (5.48 MB)
+exceeded its 5 s budget and timed out, and the pass retried every 60 s.
+
+| | before | after |
+|---|---|---|
+| the target of a repair | the provider that lacked a second placement | the provider whose route died |
+| a dead route | reused as if it were a repair | re-observed; a live resource supersedes the verdict, a gone one is skipped |
+| the account read | 5 s budget, timed out (0.42–5.75 s observed) | 20 s budget, and only where the provider's hash index is needed |
+| a route that stays dead | re-asked every 60 s | re-checked on a 5-minute cooldown |
+| a negative | one account answered no | every candidate account answered no, or the negative is not complete |
+| an ambiguous account listing | counted as "not cached" | NOT a negative at all (the release may be there) |
+
+### PHASE 6 — A REAL DEFECT FOUND BY THE PROOF
+
+The production proof surfaced a 500 `INTERNAL_ERROR` on the class-D path:
+`evidenceSummary is not defined`. The evidence summary and the discovery
+outcome were declared INSIDE the class-D block, but the policy decision
+that reads them lives OUTSIDE it — so every class-D failure with a
+representation policy configured died with a 500 where the caller must
+see the typed provider failure. The suite never saw it: the only test
+that configured a policy asserted the side effects, not the response.
+
+### PRODUCTION EVIDENCE (the appliance, 2026-10-20)
+
+`media-search` rebuilt and recreated from the local build; container
+healthy; the control-plane database is the live one.
+
+**Case A — a dead route with a live sibling (City Lights, tt0021749).**
+A terminal delivery verdict was injected for the TorBox route (the
+simulated provider answer "gone" — the resource itself is still cached in
+the account).
+
+| observation | result |
+|---|---|
+| the S-1 route set | the TorBox route is not offered; the Real-Debrid route is |
+| the read | 206, `Content-Range: bytes 0-65535/1452039706` (the exact binding size) |
+| the bytes | sha256 `ae83cd8c…` — byte-identical to the pre-injection baseline |
+| the dead redundant route | retired on EVIDENCE alone, no provider call, within the 60 s pass |
+| the identity | Binding `bd_7726d088…` active, the same TorrentFile, the same VFS path, the same Plex ratingKey 423 |
+
+**Case B — a dead route with no sibling (81⁄2, tt0056801).**
+
+| observation | result |
+|---|---|
+| the read after the verdict | HTTP 502 with a typed body (`S1_FETCH_FAILED`) — the read fails closed, it never serves another representation |
+| the repair pass | `route recovery scanned=1 repaired=1 unavailable=0 failed=0`, `route-reconcile repaired … provider=torbox source=re-observed apiCalls=1` — ONE provider call, the targeted re-observation |
+| the verdict | superseded: the evidence became `usable` / `superseded-by-fresh-provider-inventory` |
+| the read after the repair | 206, `Content-Range: bytes 0-65535/49792746` (the exact binding size) |
+| the bytes | sha256 `96a6cb6c…` — byte-identical to the pre-injection baseline |
+| the identity | Binding `bd_206135da…` active, the same TorrentFile, the same placement, the same provider file, the same VFS path |
+
+The injected evidence was removed afterwards and the production state
+restored (the placement state back to `ready`).
+
+### MEASUREMENTS (production, same appliance)
+
+| metric | value |
+|---|---|
+| an idle recovery pass | no work due → no provider call (the pass is local until work is due) |
+| a repair that re-observes a live route | 1 provider call (the targeted read) |
+| the account listing | 5.48 MB, 0.42–5.75 s over 3 samples → a 5 s budget is too tight; the repair read now has 20 s |
+| a route that stays dead | re-checked every 5 min, not every 60 s |
+
+### FULL SUITE
+
+3465 tests, 3461 pass, 1 fail, 3 skipped (exit 1). The one failure is the
+pre-existing baseline `vfs-collection-resilience` C1/C2/C3. The focused
+route/recovery/VFS suites: 118/118.
+
+### COMMITS
+
+| commit | change |
+|---|---|
+| `88c5260` | feat(routes): one classification of routes, from inventory and evidence |
+| `0b85b59` | feat(ensurer): repair the route that died, and prove the negative |
+| `16865c6` | fix(routes): repair the route that died, on evidence, without a hot loop |
+| `12c5ed9` | fix(vfs): the class-D failure must surface the typed failure, not a 500 |
+
+### WHAT REMAINS UNPROVEN
+
+- The Real-Debrid account-wide completeness proof was exercised by the
+  PREVIOUS slice, not by this one: the production repair here was a
+  TorBox re-observation. The RD path's new "a dead id is not a
+  replacement" and "an ambiguous listing is not a negative" rules are
+  proven by tests only.
+- The "a replacement resource id becomes a new route" repair is proven by
+  tests only: the production account holds one resource per hash, so no
+  replacement case could be produced without inventing provider state.
+- The representation switch on a COMPLETE negative was never exercised in
+  production: the route recovered before the negative could authorize it.
+- The class-D route list (which route died) is no longer reported when
+  the dead route is already excluded from the S-1: the read sees "no
+  coordinates" (a typed 502) instead of "route X died". The evidence
+  that drives the repair is already durable, but the caller's error
+  detail is coarser than it was.
+
+### TERMINOLOGY CORRECTION
+
+The 2026-10-19 slice is described in several places as "event-driven route
+recovery". It is not: the recovery is an EVIDENCE-DRIVEN BOUNDED POLL — a
+local read of the durable evidence every 60 s. Nothing wakes the process
+when a route dies; the latency is the poll interval. The wording is
+corrected in this entry, in `PLANS.md`, in `handoff/CURRENT.md`, in
+`docs/playback-delivery.md` and in the retrospective that used the wrong
+word.
+
+### NEXT SMALLEST EARNED SLICE
+
+The route view is one truth now; the remaining route question is what the
+CALLER is told when a route is gone. The class-D body carries the failed
+routes, but a route excluded from the S-1 is invisible to it. Reporting
+"this route is dead, that is why there is nothing to offer" would keep the
+typed detail while excluding the dead route from the byte path.

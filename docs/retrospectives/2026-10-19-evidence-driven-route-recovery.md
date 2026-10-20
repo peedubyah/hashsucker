@@ -1,4 +1,10 @@
-# Retrospective: the dead speak (event-driven route recovery)
+# Retrospective: the dead speak (evidence-driven bounded-poll route recovery)
+
+> Terminology correction (2026-10-20): this slice was described as
+> "event-driven route recovery". It is not event-driven. Nothing wakes the
+> process when a route dies; the recovery is a local read of the durable
+> evidence every 60 s, so the latency is the poll interval. The word
+> "event-driven" in this document was wrong and is corrected below.
 
 ## Expected vs actual
 
@@ -33,8 +39,8 @@ and instead re-asked the providers the same question every six hours.
 
 - "Recovery needs a new scheduler." False: the existing periodic worker
   was doing the right job on the wrong input at the wrong cadence. The
-  same code, fed by the evidence, at a minute cadence, is the event-driven
-  model.
+  same code, fed by the evidence, at a minute cadence, is the
+  evidence-driven bounded poll.
 - "A terminal fact must be re-verified to be trusted." False: the
   evidence IS the provider's answer, with a timestamp and a TTL. Asking
   again is how the system kept paying for the same question.
@@ -46,7 +52,7 @@ and instead re-asked the providers the same question every six hours.
 
 ## Wasted effort / cause
 
-- Started by writing the event-driven machinery before reading the
+- Started by writing the evidence-driven machinery before reading the
   reconciler end to end. The first useful fact — the candidate set was a
   re-derivation of a table we already wrote — was visible in the first
   twenty lines of the file.

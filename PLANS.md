@@ -71,8 +71,8 @@ decision (durable terminal evidence for EVERY failed route, plus a
 one-switch-per-window budget) instead of a side effect of a read. The
 inert reconciler no longer plans 'mark-degraded' for route facts.
 
-Completed product slice: **the dead speak — event-driven route
-recovery** — **CLOSED** (`de25fff`; evidence in `docs/BUILD-LOG.md`
+Completed product slice: **the dead speak — evidence-driven bounded-poll
+route recovery** — **CLOSED** (`de25fff`; evidence in `docs/BUILD-LOG.md`
 2026-10-19). The route reconciler re-derived route failure by probing the
 providers every six hours (an account-wide TorBox cache check plus a 5 MB
 Real-Debrid account list) even though the durable delivery evidence
@@ -87,6 +87,34 @@ waits 10/60min → 0, failure→repair ≤6 h → ≤60 s, and a restart resumes
 recovery without waiting for the sweep. The periodic sweep keeps one
 narrow job: a TorrentFile with no recorded route at all, whose release may
 have appeared in an account since we last looked.
+
+Completed product slice: **one truth for routes** — **CLOSED**
+(`88c5260`, `0b85b59`, `16865c6`, `12c5ed9`; evidence in
+`docs/BUILD-LOG.md` 2026-10-20). Route availability had FIVE definitions:
+a placement row existed, a provider file was mapped, a delivery
+observation was fresh — and each consumer picked one. A route proven dead
+therefore counted as redundancy when the ensurer chose a provider, as a
+live route when the recovery picked its work, and as a servable route
+when the byte path's route set was built. There is now ONE definition of
+a route's state (`route-classification.js`: serviceable / retryable /
+dead, per capability tuple, from the placement + the provider file + the
+durable evidence), and every route decision consumes it. The repair now
+targets the provider that LOST its route, re-observes the dead route
+first (a fresh observation supersedes the terminal verdict), never
+reuses a proven-dead route, and sees a replacement resource that the
+singular placement lookup hid. A negative discovery is complete only when
+EVERY candidate account was searched; an ambiguous account listing is not
+a negative. A proven-dead route is not offered to the byte path, and the
+repair attempt is throttled (a stuck work item no longer re-reads a 5.5 MB
+account every minute). Proven on the appliance: a dead route with a live
+sibling kept serving byte-identical bytes and was retired on evidence
+alone; a dead route with no sibling failed closed (a typed 502, never
+another representation) and was repaired within the 60 s pass with ONE
+provider call, the same TorrentFile, the same Binding, the same VFS path
+and the same Plex ratingKey. The proof also found a live defect: the
+class-D path answered 500 `evidenceSummary is not defined` instead of the
+typed provider failure — fixed, with a regression test that fails without
+the fix.
 
 Next earned slice: **one presentation identity for the `.strm` and the
 VFS path**. They are two resolvers with different year handling, so a
