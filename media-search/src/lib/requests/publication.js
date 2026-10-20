@@ -457,7 +457,10 @@ async function confirmIngestForPublication({ vfsEntry, mediaType, mediaId, seaso
         });
         if (!plex?.visible || !plex.mediaPart?.file) return null;
         return {
-          partId: String(plex.mediaPart.id),
+          // The Part id as the consumer reports it. `String(null)` would be
+          // the truthy string "null", which would defeat the consumer's
+          // own "this item has no Part id yet" check.
+          partId: plex.mediaPart.id == null ? null : String(plex.mediaPart.id),
           file: plex.mediaPart.file,
           size: plex.mediaPart.size,
           ratingKey: plex.ratingKey,

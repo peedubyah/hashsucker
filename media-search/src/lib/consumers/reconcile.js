@@ -45,6 +45,16 @@ function matchKey(mediaId, season, episode) {
 /**
  * @returns {Promise<Object>} pass summary (counts + per-item outcomes)
  */
+/**
+ * How long a consumer absence must persist before it schedules durable
+ * republication work. A single missed observation is a lagging library,
+ * not a broken projection.
+ */
+const ABSENCE_GRACE_MS = (() => {
+  const raw = Number(process.env.CONSUMER_ABSENCE_GRACE_MS ?? 15 * 60 * 1000);
+  return Number.isSafeInteger(raw) && raw >= 0 ? raw : 15 * 60 * 1000;
+})();
+
 export async function runReconcile({
   cache,
   controlPlaneStore,
@@ -97,16 +107,29 @@ export async function runReconcile({
         };
         controlPlaneStore.recordConsumerObservation(record);
         if (adapter.name === 'plex' && record.present === 0 && item.desired_state !== 'absent') {
-          try {
-            createFutureIntentStore({ db: cache.db }).ensureReleasedFollowUp({
-              mediaId: item.mediaId,
-              season: item.season,
-              episode: item.episode,
-              source: 'plex-absence-reconcile',
-              deferReason: 'plex-publication-pending',
-            });
-          } catch {
-            // Observation remains durable even if follow-up seeding fails.
+          // A consumer absence creates durable HashSucker work, so it must
+          // be an absence that PERSISTED. A consumer library that is a
+          // moment behind, or that answered a truncated list, would
+          // otherwise schedule a republication for every item it did not
+          // happen to show.
+          const observed = controlPlaneStore.listConsumerObservations?.({
+            mediaType: record.mediaType, mediaId: record.mediaId,
+          })?.find((o) => o.consumer === 'plex'
+            && (o.season ?? null) === (record.season ?? null)
+            && (o.episode ?? null) === (record.episode ?? null));
+          const absentSince = observed?.lastSeenPresentAt ?? observed?.firstCheckedAt ?? now;
+          if (now - absentSince >= ABSENCE_GRACE_MS) {
+            try {
+              createFutureIntentStore({ db: cache.db }).ensureReleasedFollowUp({
+                mediaId: item.mediaId,
+                season: item.season,
+                episode: item.episode,
+                source: 'plex-absence-reconcile',
+                deferReason: 'plex-publication-pending',
+              });
+            } catch {
+              // Observation remains durable even if follow-up seeding fails.
+            }
           }
         }
         observations.push({ ...record, lastCheckedAt: now });

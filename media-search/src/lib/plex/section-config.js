@@ -49,3 +49,13 @@ export function sectionPartFileFor(mediaType, canonicalPath, env = process.env) 
   if (segments.length < 2) return null;
   return `${root}/${segments.slice(1).join('/')}`;
 }
+
+/**
+ * The expected Part file for a canonical path, derived ONCE.
+ *
+ * The two historical derivations — the section root and the mount point —
+ * agreed only because the deployment happens to configure the roots that
+ * way. A consumer Part comparison must not depend on that coincidence, so
+ * both surfaces now read the same function.
+ */
+export { vfsPartFile as partFileForCanonicalPath } from './vfs-path.js';

@@ -13,32 +13,9 @@
  * observations.
  */
 
-const FETCH_TIMEOUT_MS = 60_000;
-
-function baseUrl() {
-  const raw = String(process.env.PLEX_URL || '').replace(/\/$/, '');
-  if (!raw) throw new Error('plex-unconfigured: PLEX_URL is not set');
-  return raw;
-}
-
-function token() {
-  const t = String(process.env.PLEX_TOKEN || '');
-  if (!t) throw new Error('plex-unconfigured: PLEX_TOKEN is not set');
-  return t;
-}
-
-async function getJson(pathname, params = {}) {
-  const url = new URL(baseUrl() + pathname);
-  for (const [k, v] of Object.entries(params)) {
-    if (v != null) url.searchParams.set(k, String(v));
-  }
-  const response = await fetch(url.toString(), {
-    headers: { accept: 'application/json', 'X-Plex-Token': token() },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!response.ok) throw new Error(`plex-http-${response.status}`);
-  return response.json();
-}
+// The transport lives in its own module so the consumer adapter and the
+// projection observer share one way of talking to Plex.
+import { getJson } from './plex-transport.js';
 
 function imdbFromGuid(guid) {
   if (typeof guid !== 'string') return null;
@@ -119,10 +96,14 @@ export async function confirmPlexEpisode({ mediaId, season, episode, expectedPar
   const sectionId = process.env.PLEX_TV_SECTION_ID;
   if (!sectionId) return { visible: false, ratingKey: null, mediaPart: null };
   const all = await getJson(`/library/sections/${sectionId}/all`, { includeGuids: 1 });
+  // The IMDb guid ONLY. A consumer title is never an identity fallback:
+  // the consumer's title is a projection of metadata HashSucker does not
+  // own, and matching on it would let a consumer rename decide which of
+  // our items this is.
   const show = (all?.MediaContainer?.Metadata ?? []).find((candidate) => {
     if (candidate.type !== 'show') return false;
     const ids = (candidate.Guid ?? []).map((g) => imdbFromGuid(g.id));
-    return ids.includes(mediaId) || candidate.title === mediaId;
+    return ids.includes(mediaId);
   });
   if (!show) return { visible: false, ratingKey: null, mediaPart: null };
   const seasons = (await getJson(show.key.endsWith('/children') ? show.key : `${show.key}/children`))?.MediaContainer?.Metadata ?? [];

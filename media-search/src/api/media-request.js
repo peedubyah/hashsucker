@@ -24,6 +24,7 @@ import {
 } from '../lib/control-plane/canonical-path.js';
 import { notifyJellyfin } from '../lib/requests/jellyfin-notifier.js';
 import { confirmPlexEpisode } from '../lib/consumers/plex.js';
+import { vfsPartFile } from '../lib/plex/vfs-path.js';
 import {
   PublicationError,
   verifyPublishedStrm,
@@ -345,7 +346,19 @@ async function tryReuseHealthyPublication({
     const confirmReuseFulfillment = async () => {
       if (!isEpisode || !controlPlaneStore) return { fulfilled: false, retryOwned: true, unfulfilled: true, published: true, vfsPublished: true, plex: null };
       try {
-        const plex = await confirmPlex({ mediaId, season, episode });
+        // The expected Part file comes from OUR durable canonical path, so
+        // the check is "is OUR projection visible" — not "does the consumer
+        // hold SOME Part for this episode".
+        const itemKey = createLibraryIdentityKey({
+          mediaType: isEpisode ? 'episode' : 'movie',
+          mediaId,
+          season: isEpisode ? season : null,
+          episode: isEpisode ? episode : null,
+        });
+        const item = controlPlaneStore.getLibraryItemByIdentityKey?.(itemKey) ?? null;
+        const canonical = item ? controlPlaneStore.getActiveCanonicalPath?.(item.id) : null;
+        const expectedPartFile = vfsPartFile(canonical?.canonicalPath ?? null);
+        const plex = await confirmPlex({ mediaId, season, episode, expectedPartFile });
         const fulfilled = plex?.visible === true && plex?.mediaPart?.file;
         return {
           fulfilled: !!fulfilled,
@@ -1027,7 +1040,15 @@ async function confirmAuthoritativePublication({ ctx, base, handoff, selection =
   if ((ctx.mediaType === 'series' || ctx.mediaType === 'tv' || ctx.mediaType === 'episode')
     && ctx.season != null && ctx.episode != null) {
     const confirmPlex = ctx.confirmPlexFn ?? confirmPlexEpisode;
-    try { plex = await confirmPlex({ mediaId: ctx.mediaId, season: ctx.season, episode: ctx.episode }); } catch { plex = null; }
+    // The expected Part file is derived from OUR durable canonical path:
+    // the confirmation asks whether OUR projection is visible, not whether
+    // the consumer happens to hold a Part.
+    const expectedPartFile = vfsPartFile(libraryPath.canonicalPath);
+    try {
+      plex = await confirmPlex({
+        mediaId: ctx.mediaId, season: ctx.season, episode: ctx.episode, expectedPartFile,
+      });
+    } catch { plex = null; }
   }
   if (plex?.visible && plex.mediaPart?.file) {
     return {

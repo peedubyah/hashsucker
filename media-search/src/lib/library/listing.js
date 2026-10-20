@@ -90,6 +90,25 @@ export function listLibrary({ cache, controlPlaneStore, promotionStore = null, l
     throw new Error('cache and controlPlaneStore are required');
   }
   let items = controlPlaneStore.listAllLibraryItems({ limit: 500 });
+  // The consumer projection facts, per media intent. They are PROJECTION
+  // state: they say whether the consumer holds our artifact, never whether
+  // the media exists.
+  const consumerObservations = new Map();
+  for (const obs of controlPlaneStore.listConsumerObservations?.() ?? []) {
+    const key = `${obs.mediaType}|${obs.mediaId}|${obs.season ?? ''}|${obs.episode ?? ''}`;
+    consumerObservations.set(`${obs.consumer}|${key}`, obs);
+  }
+  const projectionFor = (mediaType, mediaId, season, episode) => {
+    const key = `${mediaType}|${mediaId}|${season ?? ''}|${episode ?? ''}`;
+    const read = (consumer) => {
+      const obs = consumerObservations.get(`${consumer}|${key}`);
+      if (!obs) return 'not-observed';
+      if (obs.present === 1) return 'present';
+      if (obs.present === 0) return 'absent';
+      return 'unknown';
+    };
+    return { plex: read('plex'), jellyfin: read('jellyfin') };
+  };
   if (mediaType === 'movie' || mediaType === 'episode') {
     const wantEpisode = mediaType === 'episode';
     items = items.filter((it) => (it.season != null && it.episode != null) === wantEpisode);
@@ -158,6 +177,15 @@ export function listLibrary({ cache, controlPlaneStore, promotionStore = null, l
       size: tf?.size ?? null,
       hasServingCoordinates: hasCoords(controlPlaneStore, tfId),
       hasActiveBinding: activeBinding != null,
+      // The consumer projection state, reported SEPARATELY from the media
+      // state: "published" means HashSucker holds the publication, and
+      // "plex: absent" means the CONSUMER does not hold it yet. They are
+      // different facts and collapsing them is how a missing consumer
+      // item used to look like a missing media item.
+      projection: {
+        presentationCommitted: presentation != null,
+        ...projectionFor(episodeScoped ? 'episode' : 'movie', item.mediaId, item.season, item.episode),
+      },
       ...storage,
     };
   });

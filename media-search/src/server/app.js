@@ -3294,6 +3294,50 @@ export function createRequestHandler(dependencies = {}) {
           claimCalibration: searchCache.listEvidenceClaimCalibration?.({ from, to }) ?? [],
         });
       }
+      // CONSUMER PROJECTION: what SHOULD exist in Plex and Jellyfin for
+      // every published media intent, derived from HashSucker's durable
+      // truth, and what each consumer ACTUALLY holds.
+      //
+      // This is the surface that makes "the consumer is missing our
+      // projection" a different statement from "the media is missing".
+      if (request.method === 'GET' && url.pathname === '/api/operator/projection') {
+        const { auditProjections } = await import('../lib/control-plane/projection-audit.js');
+        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') ?? 500)));
+        const report = await auditProjections({
+          store: controlPlaneStore, cache: searchCache, env: process.env, limit,
+        });
+        return sendJson(response, 200, report);
+      }
+      // PROJECTION REPAIR: make one consumer hold what our durable truth
+      // says it should. Bounded and narrow: a targeted refresh of the
+      // exact directory, then a fresh observation. No media reselection,
+      // no provider acquisition, no rename, no Binding mutation.
+      if (request.method === 'POST' && url.pathname === '/api/operator/projection/repair') {
+        const body = await readBody(request);
+        const mediaId = body?.mediaId;
+        const mediaType = body?.mediaType === 'episode' ? 'episode' : 'movie';
+        if (!mediaId) return sendJson(response, 400, { error: 'mediaId is required' });
+        const { createLibraryIdentityKey } = await import('../lib/control-plane/canonical-path.js');
+        const { desiredProjectionForItem } = await import('../lib/control-plane/projection-audit.js');
+        const { repairConsumerProjection } = await import('../lib/requests/projection-repair.js');
+        const itemKey = createLibraryIdentityKey({
+          mediaType,
+          mediaId,
+          season: mediaType === 'episode' ? body?.season : undefined,
+          episode: mediaType === 'episode' ? body?.episode : undefined,
+        });
+        const item = controlPlaneStore.getLibraryItemByIdentityKey?.(itemKey) ?? null;
+        if (!item) return sendJson(response, 404, { error: 'no such media intent' });
+        const desired = desiredProjectionForItem({
+          store: controlPlaneStore, cache: searchCache, item,
+        });
+        const result = await repairConsumerProjection({
+          desired,
+          consumer: body?.consumer ?? 'plex',
+          log: (msg) => console.log(`[projection] ${msg}`),
+        });
+        return sendJson(response, 200, { desired, result });
+      }
       // PRESENTATION IDENTITY: the committed consumer-visible name and the
       // paths it is reached through, per media intent. Read-only: it
       // reports what is committed and what the consumer trees actually

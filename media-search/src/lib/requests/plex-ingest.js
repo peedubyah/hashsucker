@@ -438,6 +438,15 @@ export async function requestLibraryIngest({
 /** Maps a resulting item to a failure class, or null when it is correct. */
 export function classifyResultingItem(found, verify) {
   if (!verify) return null;
+  if (!verify.expectedPartFile) {
+    // Without the expected Part file there is nothing to verify against:
+    // the consumer's own Part ordering would be the arbiter, and a
+    // consumer-chosen Part is not evidence that OUR projection landed.
+    return {
+      code: INGEST_ERRORS.NOT_PLAYBACK_READY,
+      message: 'No expected Part file: the projection cannot be verified',
+    };
+  }
   if (verify.expectedPartFile && found.file !== verify.expectedPartFile) {
     return {
       code: INGEST_ERRORS.WRONG_PART_PATH,

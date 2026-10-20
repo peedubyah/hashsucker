@@ -60,6 +60,21 @@ export async function listJellyfinLibrary() {
       Recursive: true, IncludeItemTypes: 'Episode', Fields: 'ProviderIds', Limit: 5000,
     }),
   ]);
+  // A list that hit its cap is TRUNCATED: the items beyond the cap were
+  // not observed, and an unobserved item is not an absent one. Reporting a
+  // truncated list as a complete one turns "Jellyfin has more than 2000
+  // movies" into "every movie we did not see is missing" — which feeds the
+  // retirement gate and the publication follow-up.
+  const truncated = [
+    movies?.Items?.length >= 2000 ? 'movies' : null,
+    series?.Items?.length >= 2000 ? 'series' : null,
+    episodes?.Items?.length >= 5000 ? 'episodes' : null,
+  ].filter(Boolean);
+  if (truncated.length > 0) {
+    const error = new Error(`jellyfin-list-truncated:${truncated.join(',')}`);
+    error.truncated = true;
+    throw error;
+  }
   const out = [];
   for (const m of movies?.Items ?? []) {
     const imdb = imdbOf(m);
