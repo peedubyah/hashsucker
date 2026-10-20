@@ -24,6 +24,13 @@ import {
   resolveAuthoritativeByteRoute,
   ByteRouteError,
 } from './bytes-route.js';
+import { servePlaybackObject, PlaybackObjectError } from './playback-route.js';
+import {
+  mintPlaybackToken,
+  playbackObjectPath,
+  readPlaybackSecret,
+  readPlaybackTtlSeconds,
+} from '../lib/resolver/playback-object.js';
 import { getControlPlaneHealth } from '../lib/control-plane/health.js';
 import { planReconciliation } from '../lib/control-plane/reconciler.js';
 import {
@@ -1326,12 +1333,15 @@ export function createRequestHandler(dependencies = {}) {
             // already breaks Plex's VFS path for them). `provider` keeps the
             // historical redirect. The chosen route is always instrumented
             // via `x-hashsucker-byte-route` and the counters below.
-            const byteRoutePolicy = (env.STREAM_BYTE_ROUTE ?? 'provider').trim().toLowerCase() === 'cached'
-              ? 'cached'
-              : 'provider';
+            const byteRoutePolicy = (() => {
+              const raw = String(env.STREAM_BYTE_ROUTE ?? 'provider').trim().toLowerCase();
+              if (raw === 'cached' || raw === 'playback') return raw;
+              return 'provider';
+            })();
             if (byteRoutePolicy === 'cached') inc('byte_route_policy_cached_total');
+            else if (byteRoutePolicy === 'playback') inc('byte_route_policy_playback_total');
             else inc('byte_route_policy_provider_total');
-            const byteRoute = byteRoutePolicy === 'cached'
+            const byteRoute = byteRoutePolicy !== 'provider'
               ? await resolveAuthoritativeByteRoute({
                 controlPlaneStore,
                 mediaType,
@@ -1341,6 +1351,58 @@ export function createRequestHandler(dependencies = {}) {
               })
               : null;
             if (byteRoute?.torrentFileId) {
+              if (byteRoutePolicy === 'playback') {
+                // RESOLVER-FIRST SURFACE. The client is handed ONE
+                // HashSucker-owned URL that names the authoritative
+                // TorrentFile and nothing else — no provider, no placement,
+                // no route, no consumer item. The bytes are proxied through
+                // the Rust data plane, which owns the cache, the coalescing
+                // and the reactive same-TorrentFile route failover. A route
+                // change underneath that TorrentFile is therefore invisible
+                // to the client, and the provider URL (a credential) never
+                // leaves HashSucker.
+                const playbackSecret = readPlaybackSecret(env);
+                if (!playbackSecret) {
+                  recordTelemetry(RESOLVER_OUTCOME.FAILED, 'PLAYBACK_OBJECT_UNAVAILABLE', null, {
+                    infoHash: existingSelection.selectedHash,
+                    releaseKey: existingSelection.releaseKey,
+                    provider: existingSelection.provider,
+                  });
+                  return sendJson(response, 503, {
+                    error: 'Playback objects are unavailable: no usable signing secret is configured',
+                    code: 'PLAYBACK_OBJECT_UNAVAILABLE',
+                    mediaId: rawId,
+                    mediaType,
+                  });
+                }
+                const { token } = mintPlaybackToken({
+                  torrentFileId: byteRoute.torrentFileId,
+                  secret: playbackSecret,
+                  ttlSeconds: readPlaybackTtlSeconds(env),
+                  now: clock(),
+                });
+                inc('byte_route_playback_object_total');
+                recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
+                  infoHash: existingSelection.selectedHash,
+                  releaseKey: existingSelection.releaseKey,
+                  provider: existingSelection.provider,
+                  availabilitySource: 'authoritative-binding',
+                  providerCheckOccurred: false,
+                });
+                profiler.mark('playback-object-redirect');
+                profiler.mark('307-returned');
+                response.writeHead(307, {
+                  location: playbackObjectPath(token),
+                  'cache-control': 'no-store',
+                  'x-hashsucker-byte-route': 'playback-object',
+                  'x-torrent-id': byteRoute.torrentFileId,
+                  'x-availability-source': 'authoritative-binding',
+                  'x-provider-check-occurred': 'false',
+                  'x-resolver-profile': JSON.stringify(profiler.summary()),
+                });
+                response.end();
+                return;
+              }
               inc('byte_route_data_plane_total');
               recordTelemetry(RESOLVER_OUTCOME.REDIRECTED, null, 307, {
                 infoHash: existingSelection.selectedHash,
@@ -1362,6 +1424,25 @@ export function createRequestHandler(dependencies = {}) {
               });
               response.end();
               return;
+            }
+
+            // The playback policy never falls back to a provider redirect.
+            // Without an authoritative Binding there are no authoritative
+            // bytes to serve, so fail loudly HERE — before the provider
+            // ladders — rather than touching a provider API and then handing
+            // the client a provider credential.
+            if (byteRoutePolicy === 'playback') {
+              recordTelemetry(RESOLVER_OUTCOME.FAILED, 'NO_AUTHORITATIVE_BINDING', null, {
+                infoHash: existingSelection.selectedHash,
+                releaseKey: existingSelection.releaseKey,
+                provider: existingSelection.provider,
+              });
+              return sendJson(response, 409, {
+                error: 'Playback object requested but no authoritative Binding exists for this media',
+                code: 'NO_AUTHORITATIVE_BINDING',
+                mediaId: rawId,
+                mediaType,
+              });
             }
 
             // 1b. Selected candidate must be resolvable for redirect.
@@ -2831,6 +2912,41 @@ export function createRequestHandler(dependencies = {}) {
           request, response, controlPlaneStore, env,
         });
         if (handled) return;
+      }
+      // The playback object — one stable HashSucker-owned URL bound to one
+      // authoritative TorrentFile. The client never receives a provider URL
+      // and never holds a provider credential; Rust owns the bytes and owns
+      // the same-TorrentFile route failover underneath this URL.
+      const playMatch = (request.method === 'GET' || request.method === 'HEAD')
+        && url.pathname.match(/^\/play\/([^/]+)$/);
+      if (playMatch) {
+        const playbackSecret = readPlaybackSecret(env);
+        try {
+          await servePlaybackObject({
+            request,
+            response,
+            token: decodeURIComponent(playMatch[1]),
+            secret: playbackSecret,
+            dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://data-plane:3001',
+            fetchFn,
+            now: clock(),
+          });
+          return;
+        } catch (error) {
+          if (error instanceof PlaybackObjectError) {
+            return sendJson(response, error.status, {
+              error: error.message,
+              code: error.code,
+            });
+          }
+          if (error instanceof ByteRouteError) {
+            return sendJson(response, error.status, {
+              error: error.message,
+              code: error.code,
+            });
+          }
+          throw error;
+        }
       }
       // Authoritative cached bytes for external consumers (Jellyfin's STRM
       // URL lands here after /stream resolves the Binding). Node owns the
