@@ -18,6 +18,7 @@ import {
 import {
   reconcileEvidenceDueRoutes,
   retireVerifiedDeadRedundantRoutes,
+  ROUTE_REPAIR_ATTEMPT_COOLDOWN_MS,
 } from '../src/lib/control-plane/route-reconciler.js';
 import { createRepresentationPolicy, REPRESENTATION_POLICY_REASONS } from '../src/lib/vfs/representation-policy.js';
 
@@ -334,6 +335,45 @@ test('matrix: a restart between the evidence write and the recovery loses nothin
     assert.equal(repaired, tfId);
     store.close();
   }
+});
+
+// ── 11. the repair attempt is throttled, not repeated every minute ────────
+test('matrix: a route that stays dead is re-checked on a cooldown, not every minute', async (t) => {
+  const store = createControlPlaneStore({ dbPath: tempDbPath(t), now: () => NOW });
+  const { tf } = seedBound(store, { routes: [{ provider: 'torbox', resourceId: 'tb-1' }] });
+  const torbox = store.findPlacementByInfoHash('torbox', HASH);
+  recordEvidence(store, { placement: torbox, providerFileId: '0', provider: 'torbox', state: 'terminal' });
+
+  const calls = [];
+  const ensurer = {
+    async ensureSecondPlacementCoalesced({ torrentFileId }) {
+      calls.push(torrentFileId);
+      return { status: 'unavailable', targetProvider: 'torbox', reason: 'not-cached', apiCalls: 2 };
+    },
+  };
+  const lastAttemptAt = new Map();
+
+  const first = await reconcileEvidenceDueRoutes({
+    store, secondPlacement: ensurer, limit: 10, now: NOW, lastAttemptAt,
+  });
+  assert.equal(first.scanned, 1, 'the first attempt is prompt');
+  assert.equal(calls.length, 1);
+
+  const second = await reconcileEvidenceDueRoutes({
+    store, secondPlacement: ensurer, limit: 10, now: NOW, lastAttemptAt,
+  });
+  assert.equal(second.scanned, 0, 'a repeat inside the cooldown is not attempted');
+  assert.equal(calls.length, 1, 'the provider is not asked again');
+
+  // The cooldown elapses: the route is checked again (it may have come
+  // back, or a replacement may have appeared).
+  lastAttemptAt.set(tf.id, Date.now() - ROUTE_REPAIR_ATTEMPT_COOLDOWN_MS - 1);
+  const third = await reconcileEvidenceDueRoutes({
+    store, secondPlacement: ensurer, limit: 10, now: NOW, lastAttemptAt,
+  });
+  assert.equal(third.scanned, 1, 'after the cooldown the route is checked again');
+  assert.equal(calls.length, 2);
+  store.close();
 });
 
 // ── 10. a stale placement is not a usable route ───────────────────────────

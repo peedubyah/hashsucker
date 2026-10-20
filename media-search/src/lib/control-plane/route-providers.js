@@ -47,6 +47,22 @@ export function createRouteProviderSurfaces({
         : checkTorBoxCached(hashes, { apiKey: env.TORBOX_API_KEY })),
       lookupPlacement: (input, ctx) => torBoxInventoryProvider
         .require(PROVIDER_CAPABILITIES.PLACEMENT_LOOKUP).lookupPlacement(input, ctx),
+      // EVERY account resource for one hash. The singular lookup cannot
+      // answer "is there a REPLACEMENT resource for this release?", because
+      // two resources for one hash are a conflict there and a replacement
+      // here.
+      listPlacements: async (input, ctx) => {
+        const snapshot = await torBoxInventoryProvider
+          .require(PROVIDER_CAPABILITIES.MYLIST_SNAPSHOT).getMylistSnapshot(ctx);
+        const hash = String(input?.infoHash ?? '').trim().toLowerCase();
+        return (snapshot?.resources ?? [])
+          .filter((resource) => String(resource?.infoHash ?? '').trim().toLowerCase() === hash)
+          .map((resource) => ({
+            providerResourceId: resource.providerResourceId,
+            state: resource.downloadState ?? 'unknown',
+            name: resource.name ?? null,
+          }));
+      },
       getFileInventory: (resource, ctx) => torBoxInventoryProvider
         .require(PROVIDER_CAPABILITIES.FILE_INVENTORY).getFileInventory(resource, ctx),
     }

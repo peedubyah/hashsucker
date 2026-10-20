@@ -723,6 +723,9 @@ function arrSyncIntervalMs() {
  */
 function createRouteReconcileRunner({ store, dependencies, env = process.env }) {
   let inFlight = null;
+  // The repair attempt throttle, per TorrentFile: a route that stays dead
+  // is re-checked on a cooldown, not every minute.
+  const repairAttempts = new Map();
   /**
    * Not `async`: returning the shared promise object is the point. An async
    * wrapper would hand each caller a DIFFERENT promise for the same pass, so
@@ -761,6 +764,9 @@ function createRouteReconcileRunner({ store, dependencies, env = process.env }) 
         limit: batch,
         now: Date.now(),
         log: (msg) => console.log(`media-search: ${msg}`),
+        // The repair attempt throttle: a route that stays dead must not
+        // spend an account-sized provider read every minute.
+        lastAttemptAt: repairAttempts,
       });
       const stale = evidenceOnly
         ? { scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [] }

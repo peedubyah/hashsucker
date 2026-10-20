@@ -39,6 +39,21 @@ import {
   findEvidenceRepairDueTorrentFiles,
 } from './route-recovery.js';
 
+/**
+ * The minimum interval between two REPAIR attempts for the same
+ * TorrentFile.
+ *
+ * A repair attempt may cost an account-sized read (the provider's only
+ * hash index). Repeating that every minute for a route that stays dead
+ * would spend the provider's rate limit on a title that cannot be
+ * repaired yet. The first attempt after a failure is still prompt (the
+ * next pass); a repeat waits.
+ */
+export const ROUTE_REPAIR_ATTEMPT_COOLDOWN_MS = (() => {
+  const raw = Number(process.env.ROUTE_REPAIR_ATTEMPT_COOLDOWN_MS ?? 5 * 60 * 1000);
+  return Number.isSafeInteger(raw) && raw >= 0 ? raw : 5 * 60 * 1000;
+})();
+
 export function usablePlacementCount(store, torrentFileId) {
   if (!store || typeof store.db?.prepare !== 'function') return 0;
   const row = store.db.prepare(`
@@ -154,7 +169,7 @@ export async function retireVerifiedDeadRedundantRoutes({
  * @param {Function} [params.log]
  * @returns {Promise<{scanned:number, repaired:number, unavailable:number, failed:number, ids:string[]}>}
  */
-async function repairCandidates({ store, secondPlacement, candidates, limit, log }) {
+async function repairCandidates({ store, secondPlacement, candidates, limit, log, lastAttemptAt = null }) {
   const result = { scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [] };
   if (!store || !secondPlacement) return result;
   const ensure = typeof secondPlacement.ensureSecondPlacementCoalesced === 'function'
@@ -165,6 +180,18 @@ async function repairCandidates({ store, secondPlacement, candidates, limit, log
   if (!ensure) return result;
   for (const torrentFileId of candidates) {
     if (result.scanned >= limit) break;
+    // The attempt is throttled per TorrentFile: the provider is asked
+    // about a route that is already dead only once per cooldown, so a
+    // title that cannot be repaired yet does not spend the provider's
+    // account-read budget every minute.
+    if (lastAttemptAt) {
+      const last = lastAttemptAt.get(torrentFileId);
+      if (last !== undefined && Date.now() - last < ROUTE_REPAIR_ATTEMPT_COOLDOWN_MS) {
+        result.deferred = (result.deferred ?? 0) + 1;
+        continue;
+      }
+      lastAttemptAt.set(torrentFileId, Date.now());
+    }
     result.scanned += 1;
     let outcome;
     try {
@@ -209,13 +236,14 @@ export async function reconcileEvidenceDueRoutes({
   limit = 25,
   now = null,
   log = () => {},
+  lastAttemptAt = null,
 } = {}) {
   const at = typeof now === 'function' ? now() : (now ?? (typeof store?.now === 'function' ? store.now() : Date.now()));
   const due = findEvidenceRepairDueTorrentFiles(store, { limit, now: at }).map((r) => r.torrentFileId);
   if (due.length === 0) {
     return { scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [] };
   }
-  return repairCandidates({ store, secondPlacement, candidates: due, limit, log });
+  return repairCandidates({ store, secondPlacement, candidates: due, limit, log, lastAttemptAt });
 }
 
 /**

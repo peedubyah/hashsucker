@@ -74,6 +74,26 @@ import {
   ROUTE_STATES,
 } from './route-classification.js';
 
+/** TorBox download state -> provider_placements.state. Mirrors the
+ * provider adapter's readiness derivation: a cached torrent is a READY
+ * placement, an in-flight one is PENDING, and an unknown state is
+ * UNKNOWN (never a guess). */
+export const TORBOX_STATE_MAP = Object.freeze({
+  cached: 'ready',
+  completed: 'ready',
+  downloaded: 'ready',
+  ready: 'ready',
+  seeding: 'ready',
+  uploading: 'ready',
+  queued: 'pending',
+  checking_resume_data: 'pending',
+  downloading: 'pending',
+  meta_downloading: 'pending',
+  pending: 'pending',
+  error: 'error',
+  failed: 'error',
+});
+
 /** RD status -> provider_placements.state. Mirrors rd-placement-realizer. */
 export const RD_STATE_MAP = Object.freeze({
   downloaded: 'ready',
@@ -100,6 +120,18 @@ function normalizeInfoHash(value) {
 
 function isValidSize(value) {
   return Number.isSafeInteger(value) && value > 0;
+}
+
+/**
+ * Did the provider say "this resource is gone" (as opposed to "I could
+ * not answer")? A gone resource is a fact to move past; anything else is
+ * an error to report.
+ */
+function isGoneError(error) {
+  if (!error) return false;
+  if (error.category === 'not-found' || error.category === 'gone') return true;
+  const status = Number(error.status);
+  return status === 404 || status === 410;
 }
 
 function stripLeadingSlash(value) {
@@ -139,6 +171,11 @@ export function createSecondPlacementEnsurer({
     throw new TypeError('second-placement requires a control-plane store');
   }
   const log = logger ?? (() => {});
+  // The account listing is multi-megabyte and its read time is variable
+  // (measured 0.4 s - 5.8 s for a 5.5 MB account). The budget for that
+  // read is therefore larger than the budget for a targeted read, and it
+  // is spent only where the provider's hash index is genuinely needed.
+  const accountReadTimeoutMs = Number(process.env.ROUTE_REPAIR_ACCOUNT_READ_TIMEOUT_MS ?? 20_000);
   const poll = {
     maxAttempts: Math.max(1, Math.trunc(Number(rdPoll.maxAttempts) || RD_POLL_MAX_ATTEMPTS)),
     delayMs: Math.max(0, Number(rdPoll.delayMs ?? RD_POLL_DELAY_MS)),
@@ -219,6 +256,54 @@ export function createSecondPlacementEnsurer({
       && r.mappingState === 'mapped') ?? null;
   }
 
+  /**
+   * The provider resources that hold THIS release, minus the ones whose
+   * route is proven dead (a dead route is not a replacement for itself).
+   *
+   * The account listing is the provider's only hash index: it is the only
+   * way to learn that a release was re-created under a new resource id.
+   * It is therefore read ONLY on the repair path, and with a budget that
+   * fits an account-sized read.
+   */
+  async function listAccountResources(provider, infoHash, { deadResourceIds = new Set(), apiCalls = () => 0 } = {}) {
+    const budgetMs = accountReadTimeoutMs;
+    if (provider === 'torbox') {
+      if (typeof torbox?.listPlacements === 'function') {
+        try {
+          apiCalls();
+          const listed = await torbox.listPlacements(
+            { infoHash },
+            { signal: AbortSignal.timeout(budgetMs) },
+          );
+          const resources = (Array.isArray(listed) ? listed : [])
+            .map((r) => ({
+              providerResourceId: String(r?.providerResourceId ?? '').trim(),
+              state: r?.state ?? 'unknown',
+            }))
+            .filter((r) => r.providerResourceId && !deadResourceIds.has(r.providerResourceId));
+          return { resources };
+        } catch (error) {
+          return { resources: [], error: error.message };
+        }
+      }
+      // Fallback (test doubles, older surfaces): the singular lookup.
+      try {
+        apiCalls();
+        const observed = await torbox.lookupPlacement(
+          { infoHash },
+          { signal: AbortSignal.timeout(budgetMs) },
+        );
+        if (!observed) return { resources: [] };
+        const id = String(observed.providerResourceId ?? '').trim();
+        if (!id || deadResourceIds.has(id)) return { resources: [] };
+        return { resources: [{ providerResourceId: id, state: observed.state ?? 'unknown' }] };
+      } catch (error) {
+        return { resources: [], error: error.message };
+      }
+    }
+    return { resources: [] };
+  }
+
   function persistInventory(placementId, files, evidence) {
     return store.replaceProviderFileInventory(placementId, files, {
       authoritative: true,
@@ -235,72 +320,90 @@ export function createSecondPlacementEnsurer({
     const expiresAt = observedAt + ttlMs;
     const magnet = `magnet:?xt=urn:btih:${infoHash}`;
 
-    // Durable-first: reuse what we already recorded — but NEVER a route
-    // that is proven dead. Reusing it would report a repair that did not
-    // happen: the same resource, still gone.
+    // EVERY recorded placement for the hash is considered, not just one: a
+    // provider that re-created the release under a new resource id has two
+    // routes, and the singular lookup would hide the replacement behind
+    // the dead one.
     //
-    // EVERY recorded placement for the hash is considered, not just one:
-    // a provider that re-created the release under a new resource id has
-    // two routes, and the singular lookup would hide the replacement
-    // behind the dead one.
+    // A route that is proven DEAD is re-observed here rather than trusted
+    // or discarded: the targeted inventory read is the cheapest proof of
+    // whether the resource is really gone. If it is still there, the fresh
+    // observation supersedes the terminal verdict and the route is alive
+    // again; if it is gone, the read says so and the search continues.
     const durable = typeof store.listPlacementsByInfoHash === 'function'
       ? store.listPlacementsByInfoHash('torbox', infoHash)
       : [store.findPlacementByInfoHash('torbox', infoHash)].filter(Boolean);
-    let placement = durable.find((p) => !deadResourceIds.has(p.providerResourceId)) ?? null;
-    if (placement) {
+    let placement = null;
+    for (const candidate of durable) {
+      let inventory;
       try {
         apiCalls += 1;
-        const inventory = await torbox.getFileInventory({
+        inventory = await torbox.getFileInventory({
+          provider: 'torbox', accountScope, providerResourceId: candidate.providerResourceId,
+        });
+        // The inventory write is the RE-OBSERVATION: a route that is still
+        // listed is not dead, and the fresh observation supersedes the
+        // terminal verdict (the store does that, in the same write).
+        persistInventory(candidate.id, inventory.files, {
+          source: 'second-placement', providerResourceId: candidate.providerResourceId,
+        });
+      } catch (error) {
+        if (isGoneError(error)) continue; // the resource is gone: try the next one
+        return { status: 'provider-error', operation: 'file-inventory', reason: error.message, apiCalls };
+      }
+      const mapped = mappedFileFor(candidate.id, torrentFile.id);
+      if (mapped) {
+        placement = candidate;
+        return {
+          status: 'created', provider: 'torbox',
+          idSource: deadResourceIds.has(candidate.providerResourceId) ? 're-observed' : 'durable',
+          apiCalls, placementId: candidate.id, providerFileId: mapped.providerFileId,
+        };
+      }
+      // The resource exists but does not carry this exact file: it is not
+      // a route to this TorrentFile. Keep looking.
+    }
+
+    // Passive recovery: an account resource we never recorded, or a
+    // REPLACEMENT for a route that died.
+    //
+    // The account listing is the provider's only hash index, so it is read
+    // ONLY here — and with a budget that fits the account it reads (the
+    // observed account is multi-megabyte and its read time is variable).
+    const accountResources = await listAccountResources('torbox', infoHash, { deadResourceIds, apiCalls: () => apiCalls });
+    if (accountResources.error) {
+      return { status: 'provider-error', operation: 'placement-lookup', reason: accountResources.error, apiCalls };
+    }
+    for (const resource of accountResources.resources) {
+      const existing = durable.find((p) => p.providerResourceId === resource.providerResourceId);
+      if (existing) continue; // already tried above
+      placement = store.recordPlacement({
+        provider: 'torbox', accountScope, infoHash,
+        providerResourceId: resource.providerResourceId,
+        state: TORBOX_STATE_MAP[String(resource.state ?? '').trim().toLowerCase()] ?? 'unknown',
+        ownership: 'external',
+        ownerKey: null,
+        provenance: 'second-placement',
+        observedAt, expiresAt,
+      });
+      observeLookup({ provider: 'torbox', infoHash, state: 'present', placementId: placement.id, observedAt, expiresAt, source: 'second-placement' });
+      let inventory;
+      try {
+        apiCalls += 1;
+        inventory = await torbox.getFileInventory({
           provider: 'torbox', accountScope, providerResourceId: placement.providerResourceId,
         });
         persistInventory(placement.id, inventory.files, {
           source: 'second-placement', providerResourceId: placement.providerResourceId,
         });
       } catch (error) {
-        return { status: 'provider-error', operation: 'file-inventory', reason: error.message, apiCalls };
+        if (isGoneError(error)) continue; // the account listed a resource that is not there
+        return { status: 'provider-error', operation: 'file-inventory', reason: error.message, apiCalls, placementId: placement.id };
       }
       const mapped = mappedFileFor(placement.id, torrentFile.id);
       if (mapped) {
-        return { status: 'created', provider: 'torbox', idSource: 'durable', apiCalls, placementId: placement.id, providerFileId: mapped.providerFileId };
+        return { status: 'created', provider: 'torbox', idSource: 'recovered', apiCalls, placementId: placement.id, providerFileId: mapped.providerFileId };
       }
-      return { status: 'failed', reason: 'no-exact-match', apiCalls, placementId: placement.id };
-    }
-
-    // Passive recovery: an account placement we never recorded, or a
-    // REPLACEMENT resource for a route that died.
-    try {
-      apiCalls += 1;
-      const observed = await torbox.lookupPlacement({ infoHash });
-      if (observed) {
-        placement = store.recordPlacement({
-          provider: 'torbox', accountScope, infoHash,
-          providerResourceId: observed.providerResourceId,
-          state: observed.state ?? 'unknown',
-          ownership: observed.ownership ?? 'external',
-          ownerKey: observed.ownerKey ?? null,
-          provenance: 'second-placement',
-          observedAt, expiresAt,
-        });
-        observeLookup({ provider: 'torbox', infoHash, state: 'present', placementId: placement.id, observedAt, expiresAt, source: 'second-placement' });
-        try {
-          apiCalls += 1;
-          const inventory = await torbox.getFileInventory({
-            provider: 'torbox', accountScope, providerResourceId: placement.providerResourceId,
-          });
-          persistInventory(placement.id, inventory.files, {
-            source: 'second-placement', providerResourceId: placement.providerResourceId,
-          });
-        } catch (error) {
-          return { status: 'provider-error', operation: 'file-inventory', reason: error.message, apiCalls, placementId: placement.id };
-        }
-        const mapped = mappedFileFor(placement.id, torrentFile.id);
-        if (mapped) {
-          return { status: 'created', provider: 'torbox', idSource: 'recovered', apiCalls, placementId: placement.id, providerFileId: mapped.providerFileId };
-        }
-        return { status: 'failed', reason: 'no-exact-match', apiCalls, placementId: placement.id };
-      }
-    } catch (error) {
-      return { status: 'provider-error', operation: 'placement-lookup', reason: error.message, apiCalls };
     }
 
     // Cached-only creation gate: never manufacture an uncached download.
@@ -428,29 +531,66 @@ export function createSecondPlacementEnsurer({
     return { status: 'ok', info };
   }
 
-  async function ensureRealDebrid(torrentFile, infoHash, { discoverOnly = false } = {}) {
+  async function ensureRealDebrid(torrentFile, infoHash, { discoverOnly = false, deadResourceIds = new Set() } = {}) {
     let apiCalls = 0;
     const observedAt = now();
     const expiresAt = observedAt + ttlMs;
     const magnet = `magnet:?xt=urn:btih:${infoHash}`;
 
-    // Durable-first: reuse the recorded RD torrent id (no list call) — but
-    // never a route that is proven dead, and never only the FIRST row: a
-    // provider that re-created the release under a new id has two routes.
-    let known = null;
+    // Durable-first: re-observe EVERY recorded RD torrent id for this
+    // hash, not just the first row: a provider that re-created the release
+    // under a new id has two routes, and the singular lookup would hide
+    // the replacement behind the dead one.
+    //
+    // A route that is proven DEAD is re-observed rather than trusted: the
+    // info read is the cheapest proof of whether the torrent is still
+    // there, and a fresh observation supersedes the terminal verdict.
     const durableRd = typeof store.listPlacementsByInfoHash === 'function'
       ? store.listPlacementsByInfoHash('realdebrid', infoHash)
       : [store.findPlacementByInfoHash('realdebrid', infoHash)].filter(Boolean);
-    const usableRd = durableRd.find((p) => !deadResourceIds.has(p.providerResourceId));
-    if (usableRd && typeof usableRd.providerResourceId === 'string') {
-      known = usableRd.providerResourceId.trim();
+    for (const candidate of durableRd) {
+      const id = String(candidate?.providerResourceId ?? '').trim();
+      if (!id) continue;
+      let verified;
+      try {
+        apiCalls += 1;
+        verified = await fetchRdInfoChecked(realdebrid, id, infoHash);
+      } catch (error) {
+        if (isGoneError(error)) continue; // the torrent is gone: try the next one
+        return { status: 'provider-error', operation: 'torrents-info', rdId: id, reason: error.message, apiCalls };
+      }
+      if (verified.status === 'unavailable') continue; // the torrent is gone
+      if (verified.status !== 'ok') {
+        return { status: 'failed', reason: verified.status, rdId: id, apiCalls, reported: verified.reported ?? null };
+      }
+      const match = matchRdFile(verified.info, torrentFile);
+      if (match.status !== 'matched') {
+        // 'ambiguous' is NOT a negative: the file exists, we just cannot
+        // bind it to one provider file id.
+        return { status: 'failed', reason: match.status, rdId: id, apiCalls };
+      }
+      const placement = persistRdPlacement({
+        rdId: id, rdStatus: verified.info.status, owned: false,
+        observedAt, expiresAt, info: verified.info,
+        matchedFile: match.file, fullPath: match.fullPath,
+      });
+      observeLookup({ provider: 'realdebrid', infoHash, state: 'present', placementId: placement.id, observedAt, expiresAt, source: 'second-placement' });
+      const mapped = mappedFileFor(placement.id, torrentFile.id);
+      if (mapped) {
+        return {
+          status: 'created', provider: 'realdebrid',
+          idSource: deadResourceIds.has(id) ? 're-observed' : 'durable',
+          apiCalls, placementId: placement.id, providerFileId: mapped.providerFileId,
+        };
+      }
+      return { status: 'failed', reason: 'no-exact-match', rdId: id, apiCalls, placementId: placement.id };
     }
 
     // Bounded discovery: one list call, exact-hash filter. Anything for
     // another hash is ignored and can never satisfy this request.
-    let rdId = known;
-    let idSource = known ? 'durable' : null;
-    if (!rdId) {
+    let rdId = null;
+    let idSource = null;
+    {
       let list;
       try {
         apiCalls += 1;

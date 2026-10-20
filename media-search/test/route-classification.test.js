@@ -140,9 +140,17 @@ test('ensurer: a dead route makes its own provider the repair target', async (t)
   const torbox = store.findPlacementByInfoHash('torbox', HASH);
   recordEvidence(store, { placement: torbox, providerFileId: '0', provider: 'torbox', state: 'terminal' });
 
-  const calls = { tbCheck: 0, tbCreate: 0, rdList: 0, rdInfo: 0, rdAdd: 0 };
+  const calls = { tbInventory: 0, tbLookup: 0, tbCheck: 0, tbCreate: 0, rdList: 0, rdInfo: 0, rdAdd: 0 };
   const tb = {
-    async lookupPlacement() { return null; },
+    // The dead route is re-observed: the provider says the resource is
+    // gone.
+    async getFileInventory() {
+      calls.tbInventory += 1;
+      const error = new Error('TorBox resource 1 is absent');
+      error.category = 'not-found';
+      throw error;
+    },
+    async lookupPlacement() { calls.tbLookup += 1; return null; },
     async checkCached() { calls.tbCheck += 1; return { cached: new Set(), failed: new Set(), details: new Map(), latencyMs: new Map() }; },
     async createPlacement() { calls.tbCreate += 1; return { providerResourceId: 'TB-NEW' }; },
   };
@@ -154,7 +162,8 @@ test('ensurer: a dead route makes its own provider the repair target', async (t)
   const ensurer = createSecondPlacementEnsurer({ store, torbox: tb, realdebrid: rd, now: () => NOW });
   const outcome = await ensurer.ensureSecondPlacement({ torrentFileId: tf.id, discoverOnly: true });
 
-  assert.equal(calls.tbCheck, 1, 'the DEAD provider is the one that is asked for a route');
+  assert.equal(calls.tbInventory, 1, 'the DEAD provider is the one that is asked about its route');
+  assert.equal(calls.tbCheck, 1, 'and whether it has the release cached at all');
   assert.equal(calls.rdList, 0, 'the healthy provider is not disturbed');
   assert.equal(calls.rdAdd, 0, 'never manufacture an uncached download');
   assert.equal(outcome.targetProvider, 'torbox');
@@ -171,6 +180,11 @@ test('ensurer: a negative that skipped an account is not a complete negative', a
   recordEvidence(store, { placement: torbox, providerFileId: '0', provider: 'torbox', state: 'terminal' });
 
   const tb = {
+    async getFileInventory() {
+      const error = new Error('TorBox resource 1 is absent');
+      error.category = 'not-found';
+      throw error;
+    },
     async lookupPlacement() { return null; },
     async checkCached() { return { cached: new Set(), failed: new Set(), details: new Map(), latencyMs: new Map() }; },
     async createPlacement() { return { providerResourceId: 'TB-NEW' }; },
@@ -254,7 +268,66 @@ test('a replaced resource id is a new route and the dead route stays dead', (t) 
     'the provider view is the BEST of its routes');
 });
 
-// ── 9. the policy needs a complete negative, not a partial one ─────────────
+// ── 9. a dead route that is still listed is re-observed and restored ──────
+test('a dead route that is still listed is re-observed, not replaced', async (t) => {
+  const store = createControlPlaneStore({ dbPath: tempDbPath(t), now: () => NOW });
+  const tf = seedRoutes(store, { routes: [{ provider: 'torbox', resourceId: 'tb-1' }] });
+  const torbox = store.findPlacementByInfoHash('torbox', HASH);
+  recordEvidence(store, { placement: torbox, providerFileId: '0', provider: 'torbox', state: 'terminal' });
+
+  // The provider still lists the resource: the route is alive and the
+  // terminal verdict was wrong (or the resource came back).
+  const tb = {
+    async getFileInventory() {
+      return { files: [{ providerFileId: '0', path: INTERNAL, name: 'movie.mkv', size: 4096, selected: true }] };
+    },
+    async lookupPlacement() { throw new Error('the account must not be read for a live route'); },
+    async checkCached() { throw new Error('the account must not be read for a live route'); },
+    async createPlacement() { throw new Error('nothing may be created'); },
+  };
+  const ensurer = createSecondPlacementEnsurer({ store, torbox: tb, realdebrid: null, now: () => NOW });
+  const outcome = await ensurer.ensureSecondPlacement({ torrentFileId: tf.id, discoverOnly: true });
+  assert.equal(outcome.status, 'created');
+  assert.equal(outcome.idSource, 're-observed');
+  const view = classifyRoutesForTorrentFile(store, { torrentFileId: tf.id, now: NOW + 1 });
+  assert.equal(view.byProvider.torbox.state, ROUTE_STATES.SERVICEABLE,
+    'the fresh observation superseded the terminal verdict');
+});
+
+// ── 10. a replacement resource id is a new route ──────────────────────────
+test('a replacement resource id becomes a new route', async (t) => {
+  const store = createControlPlaneStore({ dbPath: tempDbPath(t), now: () => NOW });
+  const tf = seedRoutes(store, { routes: [{ provider: 'torbox', resourceId: 'tb-dead' }] });
+  const torbox = store.findPlacementByInfoHash('torbox', HASH);
+  recordEvidence(store, { placement: torbox, providerFileId: '0', provider: 'torbox', state: 'terminal' });
+
+  const tb = {
+    async getFileInventory({ providerResourceId }) {
+      if (providerResourceId === 'tb-dead') {
+        const error = new Error('TorBox resource tb-dead is absent');
+        error.category = 'not-found';
+        throw error;
+      }
+      return { files: [{ providerFileId: '9', path: INTERNAL, name: 'movie.mkv', size: 4096, selected: true }] };
+    },
+    async listPlacements() { return [{ providerResourceId: 'tb-new', state: 'cached' }]; },
+    async checkCached() { return { cached: new Set(), failed: new Set(), details: new Map(), latencyMs: new Map() }; },
+    async createPlacement() { throw new Error('nothing may be created'); },
+  };
+  const ensurer = createSecondPlacementEnsurer({ store, torbox: tb, realdebrid: null, now: () => NOW });
+  const outcome = await ensurer.ensureSecondPlacement({ torrentFileId: tf.id, discoverOnly: true });
+  assert.equal(outcome.status, 'created');
+  assert.equal(outcome.idSource, 'recovered');
+  assert.equal(outcome.placementId != torbox.id, true, 'the replacement is a NEW route');
+
+  const view = classifyRoutesForTorrentFile(store, { torrentFileId: tf.id, now: NOW + 1 });
+  const dead = view.routes.find((r) => r.providerResourceId === 'tb-dead');
+  const fresh = view.routes.find((r) => r.providerResourceId === 'tb-new');
+  assert.equal(dead.state, ROUTE_STATES.DEAD, 'the dead route is history');
+  assert.notEqual(fresh.state, ROUTE_STATES.DEAD, 'the replacement is live');
+});
+
+// ── 11. the policy needs a complete negative, not a partial one ─────────────
 test('representation policy: a partial negative cannot authorize a switch', () => {
   const policy = createRepresentationPolicy({ now: () => NOW });
   const routes = [{ kind: 'terminal' }];
