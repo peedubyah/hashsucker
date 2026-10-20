@@ -1245,6 +1245,11 @@ export function createMovieWebDav({
           const resurrection = await routeResurrection?.resurrect({
             torrentFileId: state.entry.torrentFileId,
           });
+          // The discovery outcome IS the route-set completeness proof: the
+          // provider account was searched for this exact release.
+          const discoveryOutcome = resurrection
+            ? { completed: resurrection.discoveryCompleted === true, status: resurrection.status }
+            : null;
           if (resurrection?.recovered) {
             try {
               await streamFromDataPlane({
@@ -1278,6 +1283,7 @@ export function createMovieWebDav({
           mediaId: state.entry.mediaId,
           routes: error?.routes ?? [],
           evidence: evidenceSummary,
+          discovery: discoveryOutcome ?? null,
           hasAuthoritativeBinding: true,
         }) ?? { allow: false, reason: 'no-representation-policy' };
         if (policyDecision.allow) {

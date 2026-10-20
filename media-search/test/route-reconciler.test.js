@@ -15,12 +15,16 @@ import test from 'node:test';
 
 import { createControlPlaneStore } from '../src/lib/control-plane/store.js';
 import {
-  findRottedRouteTorrentFiles,
   retireVerifiedDeadRedundantRoutes,
   findStaleRouteTorrentFiles,
+  reconcileEvidenceDueRoutes,
   reconcileStaleRoutes,
   usablePlacementCount,
 } from '../src/lib/control-plane/route-reconciler.js';
+import {
+  findEvidenceProvenDeadPlacements,
+  findEvidenceRepairDueTorrentFiles,
+} from '../src/lib/control-plane/route-recovery.js';
 
 const HASH_A = 'a'.repeat(40);
 const HASH_B = 'b'.repeat(40);
@@ -120,6 +124,31 @@ function seedBoundTorrentFile(store, { infoHash, size, route }) {
     `).run(UNTIL, placement.id);
   }
   return tf;
+}
+
+/**
+ * Record the durable delivery evidence for one route: 'terminal' (the
+ * provider answered "gone"), 'usable' (it delivered bytes) or 'temporary'
+ * (the provider said wait).
+ */
+function recordRouteEvidence(store, { placement, providerFileId, provider, accountScope = 'default', state = 'terminal', observedAt = 1_000_000, expiresAt = UNTIL }) {
+  const tfId = store.db.prepare(
+    'SELECT torrent_file_id FROM provider_files WHERE placement_id = ? AND provider_file_id = ?',
+  ).get(placement.id, providerFileId)?.torrent_file_id ?? null;
+  const infoHash = tfId ? store.getTorrentFile(tfId)?.infoHash ?? null : null;
+  store.recordDeliveryEvidence({
+    provider,
+    accountScope,
+    placementId: placement.id,
+    providerFileId,
+    infoHash,
+    fileIndexKey: -1,
+    state,
+    reason: 'test',
+    failureCategory: state === 'terminal' ? 'route-terminal' : null,
+    observedAt,
+    expiresAt,
+  });
 }
 
 test('T1 — a TorrentFile with a usable recorded route is never probed', (t) => {
@@ -301,100 +330,95 @@ test('fixture sanity: the seeded placement carries a present mapped file', (t) =
 });
 
 // ---------------------------------------------------------------------------
-// Live verification: durable inventory cannot see provider-side rot.
+// Evidence-first recovery: the durable evidence is the input, and a
+// terminal fact is never re-proved by asking the provider again.
 // ---------------------------------------------------------------------------
 
-const torboxProvidersWith = (cached, { fail = false } = {}) => ({
-  torbox: { checkCached: async () => { if (fail) throw new Error('provider timeout'); return cached; } },
-  realdebrid: null,
-});
-const rdProvidersWith = (hashes) => ({
-  torbox: null,
-  realdebrid: { listTorrents: async () => [...hashes].map((hash) => ({ hash, status: 'downloaded' })) },
-});
-
-test('T9 — a live verified route is never a candidate, even when durability would say so', async (t) => {
+test('T9 — a route proven alive is never a recovery candidate', (t) => {
   const store = buildStore(t);
   const tf = seedBoundTorrentFile(store, {
-    infoHash: HASH_A, size: 1000, route: { provider: 'torbox', resourceId: 'tb-1' },
+    infoHash: HASH_A, size: 1000, route: { provider: 'torbox', resourceId: 'tb-1', providerFileId: '0' },
   });
-  const providers = torboxProvidersWith(new Set([HASH_A]));
-  assert.deepEqual(await findRottedRouteTorrentFiles(store, { limit: 10, providers }), []);
-  // The durable-only criterion agrees here only because nothing demoted it;
-  // that is precisely the blind spot T10 exposes.
-  assert.equal(usablePlacementCount(store, tf.id), 1);
+  const placement = store.findPlacementByInfoHash('torbox', HASH_A);
+  recordRouteEvidence(store, { placement, providerFileId: '0', provider: 'torbox', state: 'usable' });
+  assert.deepEqual(findEvidenceRepairDueTorrentFiles(store, { limit: 10, now: 1_000_000 }), [],
+    'a route that delivered bytes needs no repair');
 });
 
-test('T10 — provider-side rot makes a healthy-looking route a candidate', async (t) => {
+test('T10 — a route proven dead makes the TorrentFile a recovery candidate, with no provider call', (t) => {
   const store = buildStore(t);
   const tf = seedBoundTorrentFile(store, {
-    infoHash: HASH_B, size: 2000, route: { provider: 'torbox', resourceId: 'tb-drift' },
+    infoHash: HASH_B, size: 2000, route: { provider: 'torbox', resourceId: 'tb-dead', providerFileId: '0' },
   });
-  // Durably pristine: no demotion happened. Only the provider knows.
-  assert.equal(usablePlacementCount(store, tf.id), 1);
-  assert.deepEqual(findStaleRouteTorrentFiles(store, { limit: 10 }), [], 'durable-only finds nothing');
-  const providers = torboxProvidersWith(new Set()); // nothing cached any more
-  assert.deepEqual(await findRottedRouteTorrentFiles(store, { limit: 10, providers }), [tf.id],
-    'the provider, not the stale row, is the authority on rot');
+  const placement = store.findPlacementByInfoHash('torbox', HASH_B);
+  recordRouteEvidence(store, { placement, providerFileId: '0', provider: 'torbox', state: 'terminal' });
+  const due = findEvidenceRepairDueTorrentFiles(store, { limit: 10, now: 1_000_000 });
+  assert.deepEqual(due.map((r) => r.torrentFileId), [tf.id],
+    'the durable evidence IS the work item');
+  assert.equal(due[0].deadRoutes, 1);
+  // The durable-only criterion still sees a usable row: the evidence is the
+  // authority on DEATH, not on inventory.
+  assert.deepEqual(findStaleRouteTorrentFiles(store, { limit: 10 }), [],
+    'inventory was never demoted; only the delivery evidence says the route died');
 });
 
-test('T11 — an unanswerable probe defers; it never declares rot', async (t) => {
+test('T11 — a route nobody observed is never a candidate', (t) => {
   const store = buildStore(t);
-  const tf = seedBoundTorrentFile(store, {
-    infoHash: HASH_C, size: 3000, route: { provider: 'torbox', resourceId: 'tb-1' },
+  seedBoundTorrentFile(store, {
+    infoHash: HASH_C, size: 3000, route: { provider: 'torbox', resourceId: 'tb-1', providerFileId: '0' },
   });
-  const providers = torboxProvidersWith(new Set(), { fail: true });
-  assert.deepEqual(await findRottedRouteTorrentFiles(store, { limit: 10, providers }), [],
-    'a failed probe must not manufacture a candidate');
-  assert.equal(usablePlacementCount(store, tf.id), 1, 'durable truth is untouched by a failed probe');
+  assert.deepEqual(findEvidenceRepairDueTorrentFiles(store, { limit: 10, now: 1_000_000 }), [],
+    'no observation is not a failure');
 });
 
-test('T12 — an RD route rots while TorBox still serves the same TorrentFile', async (t) => {
+test('T12 — a throttled route is not a recovery candidate (throttling is not death)', (t) => {
   const store = buildStore(t);
   const tf = seedBoundTorrentFile(store, {
-    infoHash: HASH_A, size: 4000,
-    route: { provider: 'realdebrid', resourceId: 'rd-1', providerFileId: '1' },
+    infoHash: HASH_A, size: 4000, route: { provider: 'torbox', resourceId: 'tb-throttled', providerFileId: '0' },
   });
-  const rdProviders = rdProvidersWith(new Set()); // RD no longer has it
-  const rotted = await findRottedRouteTorrentFiles(store, { limit: 10, providers: rdProviders });
-  assert.deepEqual(rotted, [tf.id]);
-  // TorBox still has the exact bytes — the discover-only repair must find
-  // the SAME TorrentFile on TorBox without acquiring anything.
+  const placement = store.findPlacementByInfoHash('torbox', HASH_A);
+  recordRouteEvidence(store, { placement, providerFileId: '0', provider: 'torbox', state: 'temporary' });
+  assert.deepEqual(findEvidenceRepairDueTorrentFiles(store, { limit: 10, now: 1_000_000 }), [],
+    'a temporary failure is retried by the next read, not repaired');
+});
+
+test('T12b — the recovery pass makes NO provider call when nothing is due', async (t) => {
+  const store = buildStore(t);
+  seedBoundTorrentFile(store, {
+    infoHash: HASH_B, size: 2000, route: { provider: 'torbox', resourceId: 'tb-ok', providerFileId: '0' },
+  });
+  let providerCalls = 0;
+  const ensurer = {
+    async ensureSecondPlacementCoalesced() { providerCalls += 1; return { status: 'unavailable' }; },
+  };
+  const result = await reconcileEvidenceDueRoutes({ store, secondPlacement: ensurer, limit: 10, now: 1_000_000 });
+  assert.equal(result.scanned, 0);
+  assert.equal(providerCalls, 0, 'an idle evidence pass must not touch a provider');
+});
+
+test('T12c — the recovery pass repairs a TorrentFile whose routes are proven dead', async (t) => {
+  const store = buildStore(t);
+  const tf = seedBoundTorrentFile(store, {
+    infoHash: HASH_C, size: 5000, route: { provider: 'torbox', resourceId: 'tb-dead', providerFileId: '0' },
+  });
+  const placement = store.findPlacementByInfoHash('torbox', HASH_C);
+  recordRouteEvidence(store, { placement, providerFileId: '0', provider: 'torbox', state: 'terminal' });
   const ensurer = {
     async ensureSecondPlacementCoalesced({ torrentFileId, discoverOnly }) {
       assert.equal(torrentFileId, tf.id);
-      assert.equal(discoverOnly, true);
-      const placement = store.recordPlacement({
-        provider: 'torbox', accountScope: 'default', infoHash: HASH_A,
-        providerResourceId: 'tb-recovered', state: 'ready', ownership: 'owned',
-        ownerKey: 'owner-key', provenance: 'route-reconciler-test',
-        observedAt: 1_000_000, expiresAt: UNTIL,
-      });
-      store.replaceProviderFileInventory(placement.id, [{
-        providerFileId: '0', path: INTERNAL, name: 'Show - S01E01.mkv', size: 4000, selected: true,
-      }], { authoritative: true, complete: true, observedAt: 1_000_000, expiresAt: UNTIL });
-      store.db.prepare(`
-        UPDATE provider_files SET torrent_file_id = ?, mapping_state = 'mapped',
-        inventory_observed_at = ?, inventory_expires_at = ?
-        WHERE placement_id = ?
-      `).run(tf.id, 1_000_000, UNTIL, placement.id);
-      return { status: 'created', targetProvider: 'torbox', idSource: 'recovered', apiCalls: 2, placementId: placement.id };
+      assert.equal(discoverOnly, true, 'the repair never acquires uncached content');
+      return { status: 'unavailable', reason: 'no-cached-route', apiCalls: 2 };
     },
   };
-  const result = await reconcileStaleRoutes({ store, secondPlacement: ensurer, providers: rdProviders, limit: 10 });
-  assert.deepEqual(result, { scanned: 1, repaired: 1, unavailable: 0, failed: 0, ids: [tf.id] });
+  const result = await reconcileEvidenceDueRoutes({ store, secondPlacement: ensurer, limit: 10, now: 1_000_000 });
+  assert.deepEqual(result, { scanned: 1, repaired: 0, unavailable: 1, failed: 0, ids: [] });
   assert.equal(store.db.prepare('SELECT COUNT(*) c FROM torrent_files').get().c, 1,
     'the representation did not change');
 });
 
 // ---------------------------------------------------------------------------
-// Retirement: durable provider-truth only, and never a title's last route
+// Retirement: proven route death only, and never a title's last route
 // ---------------------------------------------------------------------------
-
-const twoProviderSurfaces = ({ torboxCached, rdHashes }) => ({
-  torbox: { checkCached: async () => torboxCached },
-  realdebrid: { listTorrents: async () => [...rdHashes].map((hash) => ({ hash, status: 'downloaded' })) },
-});
 
 test('T13 — a dead placement with a live sibling route is retired', async (t) => {
   const store = buildStore(t);
@@ -417,21 +441,30 @@ test('T13 — a dead placement with a live sibling route is retired', async (t) 
   `).run(tf.id, alternate.id);
   assert.equal(usablePlacementCount(store, tf.id), 2, 'both routes recorded');
 
-  // TorBox no longer has the bytes; RD does. The TorBox placement is a
-  // verified-dead REDUNDANT route.
-  const providers = twoProviderSurfaces({ torboxCached: new Set(), rdHashes: new Set([HASH_A]) });
-  const outcome = await retireVerifiedDeadRedundantRoutes({ store, providers, limit: 10 });
+  // The TorBox route is proven dead (terminal evidence) and the RD route
+  // delivered bytes (usable evidence): a redundant dead route.
+  const dead = store.findPlacementByInfoHash('torbox', HASH_A);
+  const alive = store.findPlacementByInfoHash('realdebrid', HASH_A);
+  recordRouteEvidence(store, { placement: dead, providerFileId: '0', provider: 'torbox', state: 'terminal' });
+  recordRouteEvidence(store, { placement: alive, providerFileId: '9', provider: 'realdebrid', state: 'usable' });
+  // The proof is available BEFORE any retirement, and it costs no provider
+  // call: the evidence already said the route is dead and the sibling
+  // delivered bytes.
+  assert.deepEqual(
+    findEvidenceProvenDeadPlacements(store, { now: 1_000_000 }).map((r) => r.placementId),
+    [dead.id],
+    'the evidence alone identifies the retirable route',
+  );
+  const outcome = await retireVerifiedDeadRedundantRoutes({ store, limit: 10, now: 1_000_000 });
   assert.equal(outcome.retired.length, 1, 'the dead redundant placement is retired');
   assert.equal(outcome.retired[0].provider, 'torbox');
   assert.equal(outcome.deferred, 0, 'nothing was unanswerable');
   assert.equal(store.findPlacementByInfoHash('torbox', HASH_A), null,
     'a removed placement is not reused by delivery');
   assert.equal(usablePlacementCount(store, tf.id), 1, 'the live route keeps the title servable');
-  assert.deepEqual(findRottedRouteTorrentFilesVerbatim(store, providers), []);
-
-  function findRottedRouteTorrentFilesVerbatim(_st, _p) {
-    return [];
-  }
+  // After the retirement the route is gone from the projection, so the
+  // proven-dead set is empty again: the pass is idempotent.
+  assert.deepEqual(findEvidenceProvenDeadPlacements(store, { now: 1_000_000 }), []);
 });
 
 test('T14 — a title\'s LAST route is never retired', async (t) => {
@@ -439,8 +472,9 @@ test('T14 — a title\'s LAST route is never retired', async (t) => {
   const tf = seedBoundTorrentFile(store, {
     infoHash: HASH_B, size: 2000, route: { provider: 'torbox', resourceId: 'tb-solo', providerFileId: '0' },
   });
-  const providers = twoProviderSurfaces({ torboxCached: new Set(), rdHashes: new Set() });
-  const outcome = await retireVerifiedDeadRedundantRoutes({ store, providers, limit: 10 });
+  const only = store.findPlacementByInfoHash('torbox', HASH_B);
+  recordRouteEvidence(store, { placement: only, providerFileId: '0', provider: 'torbox', state: 'terminal' });
+  const outcome = await retireVerifiedDeadRedundantRoutes({ store, limit: 10, now: 1_000_000 });
   assert.equal(outcome.retired.length, 0,
     'retiring the only route would un-serve the title until discovery replaces it');
   assert.equal(store.findPlacementByInfoHash('torbox', HASH_B)?.state, 'ready',
@@ -466,14 +500,14 @@ test('T15 — an unanswerable probe never retires anything', async (t) => {
     UPDATE provider_files SET torrent_file_id = (SELECT id FROM torrent_files WHERE info_hash = ?),
     mapping_state = 'mapped' WHERE placement_id = ? AND provider_file_id = '9'
   `).run(HASH_C, alternate.id);
-  // The TorBox probe cannot be answered at all.
-  const providers = {
-    torbox: { checkCached: async () => { throw new Error('provider timeout'); } },
-    realdebrid: { listTorrents: async () => [] },
-  };
-  const outcome = await retireVerifiedDeadRedundantRoutes({ store, providers, limit: 10 });
-  assert.equal(outcome.retired.length, 0, 'a provider outage must not retire durable inventory');
-  assert.ok(outcome.deferred >= 1, 'the unanswerable route is reported as deferred');
+  // The TorBox route was never observed as dead: a temporary record is not
+  // death, so nothing is retired.
+  const dead = store.findPlacementByInfoHash('torbox', HASH_C);
+  const alive = store.findPlacementByInfoHash('realdebrid', HASH_C);
+  recordRouteEvidence(store, { placement: dead, providerFileId: '0', provider: 'torbox', state: 'temporary' });
+  recordRouteEvidence(store, { placement: alive, providerFileId: '9', provider: 'realdebrid', state: 'usable' });
+  const outcome = await retireVerifiedDeadRedundantRoutes({ store, limit: 10, now: 1_000_000 });
+  assert.equal(outcome.retired.length, 0, 'a throttled route must not retire durable inventory');
   assert.equal(store.findPlacementByInfoHash('torbox', HASH_C)?.state, 'ready');
 });
 
@@ -495,9 +529,12 @@ test('T16 — retirement is idempotent across passes', async (t) => {
     UPDATE provider_files SET torrent_file_id = ?, mapping_state = 'mapped'
     WHERE placement_id = ? AND provider_file_id = '9'
   `).run(tf.id, alternate.id);
-  const providers = twoProviderSurfaces({ torboxCached: new Set(), rdHashes: new Set([HASH_A]) });
-  const first = await retireVerifiedDeadRedundantRoutes({ store, providers, limit: 10 });
-  const second = await retireVerifiedDeadRedundantRoutes({ store, providers, limit: 10 });
+  const dead = store.findPlacementByInfoHash('torbox', HASH_A);
+  const alive = store.findPlacementByInfoHash('realdebrid', HASH_A);
+  recordRouteEvidence(store, { placement: dead, providerFileId: '0', provider: 'torbox', state: 'terminal' });
+  recordRouteEvidence(store, { placement: alive, providerFileId: '9', provider: 'realdebrid', state: 'usable' });
+  const first = await retireVerifiedDeadRedundantRoutes({ store, limit: 10, now: 1_000_000 });
+  const second = await retireVerifiedDeadRedundantRoutes({ store, limit: 10, now: 1_000_000 });
   assert.equal(first.retired.length, 1);
   assert.equal(second.retired.length, 0, 'a second pass finds nothing left to retire');
   assert.equal(store.db.prepare(`SELECT COUNT(*) c FROM provider_placements WHERE state='removed'`).get().c, 1);

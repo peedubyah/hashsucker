@@ -28,6 +28,7 @@ export const REPRESENTATION_POLICY_REASONS = Object.freeze({
   ALLOWED: 'no-live-route-and-budget-available',
   NO_DURABLE_EVIDENCE: 'no-durable-route-failure-evidence',
   TRANSIENT_ROUTE: 'route-failure-is-transient',
+  ROUTE_SET_NOT_PROVEN: 'route-set-completeness-not-proven',
   BUDGET_SPENT: 'representation-switch-budget-spent',
   NOT_AUTHORITATIVE: 'no-authoritative-binding',
 });
@@ -59,10 +60,21 @@ export function createRepresentationPolicy({
    * @param {Array<Object>} [params.routes] - the routes the data plane failed on
    * @param {Object} [params.evidence] - the durable-evidence write summary
    *   {recorded, terminal, temporary, skipped}
+   * @param {Object} [params.discovery] - the same-TorrentFile discovery
+   *   outcome: {completed, status}. `completed` means the provider account
+   *   was actually searched for this exact release. This is the ROUTE-SET
+   *   COMPLETENESS proof: "every known route is dead" only becomes "no
+   *   same-TorrentFile route exists" after the account was consulted.
    * @param {boolean} [params.hasAuthoritativeBinding]
    * @returns {{allow: boolean, reason: string}}
    */
-  function decide({ mediaId, routes = [], evidence = null, hasAuthoritativeBinding = true } = {}) {
+  function decide({
+    mediaId,
+    routes = [],
+    evidence = null,
+    discovery = null,
+    hasAuthoritativeBinding = true,
+  } = {}) {
     if (!hasAuthoritativeBinding) {
       return { allow: false, reason: REPRESENTATION_POLICY_REASONS.NOT_AUTHORITATIVE };
     }
@@ -83,6 +95,12 @@ export function createRepresentationPolicy({
     }
     if (!evidence || evidence.recorded < routes.length || evidence.temporary > 0) {
       return { allow: false, reason: REPRESENTATION_POLICY_REASONS.NO_DURABLE_EVIDENCE };
+    }
+    // ROUTE-SET COMPLETENESS: the known routes being dead is not the same
+    // fact as "no route to this exact TorrentFile exists". Only a completed
+    // discovery that found nothing can carry that claim.
+    if (!discovery || discovery.completed !== true || discovery.status !== 'unavailable') {
+      return { allow: false, reason: REPRESENTATION_POLICY_REASONS.ROUTE_SET_NOT_PROVEN };
     }
     return { allow: true, reason: REPRESENTATION_POLICY_REASONS.ALLOWED };
   }

@@ -156,31 +156,48 @@ test('the representation policy requires terminal evidence and a budget', () => 
   assert.equal(transient.allow, false);
   assert.equal(transient.reason, REPRESENTATION_POLICY_REASONS.TRANSIENT_ROUTE);
 
-  // Durable terminal evidence for every route -> allowed.
+  // Durable terminal evidence for every route, AND a completed discovery
+  // that found nothing -> allowed.
   const allowed = policy.decide({
-    mediaId: 'tt-1', routes: terminalRoutes, evidence: { recorded: 1, terminal: 1, temporary: 0 },
+    mediaId: 'tt-1', routes: terminalRoutes,
+    evidence: { recorded: 1, terminal: 1, temporary: 0 },
+    discovery: { completed: true, status: 'unavailable' },
   });
   assert.equal(allowed.allow, true);
   assert.equal(allowed.reason, REPRESENTATION_POLICY_REASONS.ALLOWED);
 
+  // Without the route-set completeness proof the switch is refused: "every
+  // known route is dead" is not "no same-TorrentFile route exists".
+  const unproven = policy.decide({
+    mediaId: 'tt-1', routes: terminalRoutes, evidence: { recorded: 1, terminal: 1, temporary: 0 },
+  });
+  assert.equal(unproven.allow, false);
+  assert.equal(unproven.reason, REPRESENTATION_POLICY_REASONS.ROUTE_SET_NOT_PROVEN);
+
   // The budget: a flapping route cannot churn the representation.
   policy.noteSwitch({ mediaId: 'tt-1' });
   const spent = policy.decide({
-    mediaId: 'tt-1', routes: terminalRoutes, evidence: { recorded: 1, terminal: 1, temporary: 0 },
+    mediaId: 'tt-1', routes: terminalRoutes,
+    evidence: { recorded: 1, terminal: 1, temporary: 0 },
+    discovery: { completed: true, status: 'unavailable' },
   });
   assert.equal(spent.allow, false);
   assert.equal(spent.reason, REPRESENTATION_POLICY_REASONS.BUDGET_SPENT);
 
   // A different media intent has its own budget.
   const other = policy.decide({
-    mediaId: 'tt-2', routes: terminalRoutes, evidence: { recorded: 1, terminal: 1, temporary: 0 },
+    mediaId: 'tt-2', routes: terminalRoutes,
+    evidence: { recorded: 1, terminal: 1, temporary: 0 },
+    discovery: { completed: true, status: 'unavailable' },
   });
   assert.equal(other.allow, true);
 
   // After the window the budget is available again.
   clock += 60_001;
   const renewed = policy.decide({
-    mediaId: 'tt-1', routes: terminalRoutes, evidence: { recorded: 1, terminal: 1, temporary: 0 },
+    mediaId: 'tt-1', routes: terminalRoutes,
+    evidence: { recorded: 1, terminal: 1, temporary: 0 },
+    discovery: { completed: true, status: 'unavailable' },
   });
   assert.equal(renewed.allow, true);
 });

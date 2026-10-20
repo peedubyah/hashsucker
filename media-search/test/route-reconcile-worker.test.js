@@ -155,7 +155,7 @@ test('W1 — a manual pass joins an in-flight pass (single-flight)', async (t) =
   assert.equal(first, second, 'the second call joins the in-flight pass, never duplicates it');
   assert.equal(workers.routeReconcileInFlight(), true, 'the pass is observable as in-flight');
   const result = await first;
-  assert.equal(result.scanned, 0, 'a live route is not probed for recovery');
+  assert.equal(result.scanned, 0, 'a live route is not a recovery candidate');
   assert.equal(result.retired, 0, 'a live route is not retired');
 });
 
@@ -174,6 +174,22 @@ test('W2 — a provider-disproved REDUNDANT route is retired by the pass', async
     dependencies: deps,
   });
   t.after(() => workers.stop());
+
+  // The retirement is EVIDENCE-driven: the TorBox route is proven dead and
+  // the Real-Debrid route delivered bytes. No provider call is needed to
+  // know that.
+  const dead = store.findPlacementByInfoHash('torbox', HASH);
+  const alive = store.findPlacementByInfoHash('realdebrid', HASH);
+  store.recordDeliveryEvidence({
+    provider: 'torbox', accountScope: 'default', placementId: dead.id, providerFileId: '0',
+    infoHash: HASH, fileIndexKey: -1, state: 'terminal', reason: 'gone',
+    failureCategory: 'route-terminal', observedAt: 1_000_000, expiresAt: UNTIL,
+  });
+  store.recordDeliveryEvidence({
+    provider: 'realdebrid', accountScope: 'default', placementId: alive.id, providerFileId: '1',
+    infoHash: HASH, fileIndexKey: -1, state: 'usable', reason: 'delivered',
+    failureCategory: null, observedAt: 1_000_000, expiresAt: UNTIL,
+  });
 
   const result = await workers.runRouteReconcilePass();
   assert.equal(result.retired, 1, 'the dead redundant route is retired');
@@ -237,6 +253,29 @@ test('W4 — an unreachable provider neither repairs nor retires', async (t) => 
   assert.equal(result.repaired, 0, 'an outage must not mint a recovery placement');
   assert.equal(store.findPlacementByInfoHash('torbox', HASH)?.state, 'ready');
   assert.equal(store.findPlacementByInfoHash('realdebrid', HASH)?.state, 'ready');
+});
+
+test('W5 — a pass makes NO provider call when the durable evidence says nothing is due', async (t) => {
+  const { store } = seedStore(t, [{ provider: 'torbox', resourceId: 'tb-1' }]);
+  let providerCalls = 0;
+  const deps = fakeProviders({ torboxCached: new Set([HASH]) });
+  deps.torboxCheckCached = async () => { providerCalls += 1; return new Set([HASH]); };
+  deps.rdClient.listTorrents = async () => { providerCalls += 1; return []; };
+  const discoveryCache = createDiscoveryCache({ dbPath: ':memory:' });
+  t.after(() => discoveryCache.close());
+  const workers = startBackgroundWorkers({
+    discoveryCache,
+    controlPlaneStore: store,
+    port: 0,
+    dependencies: deps,
+  });
+  t.after(() => workers.stop());
+
+  const result = await workers.runRouteReconcilePass();
+  assert.equal(result.scanned, 0);
+  assert.equal(result.retired, 0);
+  assert.equal(providerCalls, 0,
+    'a terminal fact is never re-proved, and a healthy route is never re-asked about');
 });
 
 // Silence the unused-symbol warning while keeping ALT_HASH as documentation of

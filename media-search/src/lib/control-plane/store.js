@@ -2178,6 +2178,9 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   }
 
   return {
+    // The store's clock. Freshness comparisons against durable rows must use
+    // the SAME clock that wrote them, never a second wall clock.
+    now: () => now(),
     ensureLibraryItem,
     getLibraryItem,
     getLibraryItemByIdentityKey,

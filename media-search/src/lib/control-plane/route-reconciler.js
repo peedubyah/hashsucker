@@ -34,6 +34,11 @@
  * mapped provider-file row bound to the exact TorrentFile. This mirrors the
  * authoritative S-1 projection (`listDataPlaneCoordinates`): a placement in
  * state `removed` is a runtime durability verdict, never a route. */
+import {
+  findEvidenceProvenDeadPlacements,
+  findEvidenceRepairDueTorrentFiles,
+} from './route-recovery.js';
+
 export function usablePlacementCount(store, torrentFileId) {
   if (!store || typeof store.db?.prepare !== 'function') return 0;
   const row = store.db.prepare(`
@@ -54,7 +59,6 @@ export function usablePlacementCount(store, torrentFileId) {
  * provider-file row). Cheap and offline-safe, but it shares
  * `presentProviders()`'s blind spot — a row that still looks healthy after
  * the provider freed the resource reads as usable. Use
- * `findRottedRouteTorrentFiles` when live provider truth is available.
  *
  * Bounded by `limit`, oldest-binding first. The bound counts stale
  * candidates only: healthy inventory is never re-examined.
@@ -81,199 +85,59 @@ export function findStaleRouteTorrentFiles(store, { limit = 25 } = {}) {
 }
 
 /**
- * Find active-bound TorrentFiles whose recorded routes are all unusable,
- * verified against live provider state with cache-only reads.
- *
- * Durable inventory cannot see a route whose row still looks healthy while
- * the provider freed the resource — `presentProviders()` and this module's
- * durable-only criterion share that blind spot by construction. So when
- * provider surfaces are supplied, every recorded route is verified: TorBox
- * `checkcached` answers "the account still has these bytes", RD `torrents`
- * answers the same for the account's downloaded list.
- *
- * A probe that cannot be answered is UNKNOWN, never stale: the pass defers
- * those TorrentFiles rather than minting work (or teardown) from a network
- * failure.
- *
- * @returns {Promise<string[]>} TorrentFile ids with no live recorded route
- */
-export async function findRottedRouteTorrentFiles(store, {
-  limit = 25,
-  providers,
-  log = () => {},
-} = {}) {
-  const verdicts = await verifyRecordedRoutes(store, { providers, log });
-  const max = Math.max(1, Math.trunc(Number(limit) || 25));
-  const rotted = [];
-  for (const info of verdicts) {
-    if (!info.rotted) continue;
-    rotted.push(info.torrentFileId);
-    if (rotted.length >= max) break;
-  }
-  return rotted;
-}
-
-/**
  * Bounded retirement of placements the provider has objectively disproven.
  *
- * Removal is a durability verdict, so it is allowed only for durable
- * provider-truth failures: the exact hash is confirmed absent from the
- * provider account (not a timeout, not a 5xx, not a rate limit). Two further
- * guards keep it safe:
+ * Removal is a durability verdict, so it is allowed only for PROVEN route
+ * death: the route's own delivery evidence is terminal (the provider
+ * answered "gone"), and a sibling route of the same TorrentFile is proven
+ * alive (its evidence is usable — it delivered bytes). Two guards keep it
+ * safe:
  *
  *   - REDUNDANT ONLY. A placement is retired only when the same TorrentFile
- *     has at least one other live route. Retiring a title's last route would
- *     un-serve it for as long as discovery takes to find a replacement.
- *   - PROVEN, NOT INFERRED. A probe that cannot be answered is UNKNOWN and is
- *     never a removal reason, so a provider outage cannot retire inventory.
+ *     has at least one other PROVEN-ALIVE route. Retiring a title's last
+ *     route would un-serve it for as long as discovery takes to find a
+ *     replacement.
+ *   - PROVEN, NOT INFERRED. A route with no evidence, or a temporary one,
+ *     is never a removal reason, so an outage cannot retire inventory.
  *
- * Idempotent: a retired placement is already `removed` in durable truth and
- * disappears from the S-1 projection, so a later pass finds nothing to do.
+ * No provider call is made: the evidence already proves what a provider
+ * probe would have been asked to prove. Idempotent: a retired placement is
+ * already `removed` in durable truth and disappears from the S-1
+ * projection, so a later pass finds nothing to do.
  *
  * @returns {Promise<{retired: Array<{torrentFileId,provider,resourceId,placementId}>, deferred:number}>}
  */
 export async function retireVerifiedDeadRedundantRoutes({
   store,
   limit = 25,
-  providers,
+  now = null,
   log = () => {},
 } = {}) {
+  // Freshness is compared against the SAME clock that wrote the rows.
+  const at = typeof now === 'function' ? now() : (now ?? (typeof store?.now === 'function' ? store.now() : Date.now()));
   const result = { retired: [], deferred: 0 };
-  const verdicts = await verifyRecordedRoutes(store, { providers, log });
-  if (verdicts.length === 0) return result;
   const max = Math.max(1, Math.trunc(Number(limit) || 25));
-
-  for (const info of verdicts) {
-    if (info.unknown) result.deferred += 1;
-    if (!info.hasLiveRoute) continue; // never retire a title's last route here
-    for (const route of info.deadRoutes) {
-      if (result.retired.length >= max) return result;
-      try {
-        store.markPlacementRemoved(route.placementId, {
-          reason: 'route-verification-absent',
-          observedAt: Date.now(),
-        });
-      } catch (error) {
-        log(`route-reconcile retire skipped placement=${route.placementId}: ${error?.message ?? error}`);
-        continue;
-      }
-      result.retired.push({
-        torrentFileId: info.torrentFileId,
-        provider: route.provider,
-        resourceId: route.resourceId,
-        placementId: route.placementId,
+  for (const route of findEvidenceProvenDeadPlacements(store, { now: at, limit: max })) {
+    if (result.retired.length >= max) return result;
+    try {
+      store.markPlacementRemoved(route.placementId, {
+        reason: 'route-terminal-evidence',
+        observedAt: at,
       });
-      log(`route-reconcile retired placement=${route.placementId} provider=${route.provider} `
-        + `resource=${route.resourceId} tf=${info.torrentFileId} reason=provider-absent`);
+    } catch (error) {
+      log(`route-reconcile retire skipped placement=${route.placementId}: ${error?.message ?? error}`);
+      continue;
     }
+    result.retired.push({
+      torrentFileId: route.torrentFileId,
+      provider: route.provider,
+      resourceId: route.resourceId,
+      placementId: route.placementId,
+    });
+    log(`route-reconcile retired placement=${route.placementId} provider=${route.provider} `
+      + `resource=${route.resourceId} tf=${route.torrentFileId} reason=terminal-evidence`);
   }
   return result;
-}
-
-/**
- * One live verification of every recorded route, shared by the rotted-route
- * finder and the retirement pass so a pass makes ONE probe set, never two.
- *
- * @returns {Promise<Array<{torrentFileId:string,infoHash:string,routes:Array,
- *   liveRoutes:Array, deadRoutes:Array, hasLiveRoute:boolean, rotted:boolean,
- *   unknown:boolean}>>}
- */
-async function verifyRecordedRoutes(store, { providers, log = () => {} } = {}) {
-  if (!store || typeof store.db?.prepare !== 'function' || !providers) return [];
-
-  const rows = store.db.prepare(`
-    SELECT DISTINCT tf.id AS torrent_file_id, tf.info_hash AS info_hash,
-           pl.provider AS provider, pl.provider_resource_id AS resource_id,
-           pl.id AS placement_id
-    FROM torrent_files tf
-    JOIN bindings b ON b.torrent_file_id = tf.id AND b.status = 'active'
-    JOIN provider_files pf ON pf.torrent_file_id = tf.id AND pf.present = 1
-      AND pf.mapping_state = 'mapped'
-    JOIN provider_placements pl ON pl.id = pf.placement_id AND pl.state <> 'removed'
-    ORDER BY b.valid_from ASC, b.id ASC
-  `).all();
-  if (rows.length === 0) return [];
-
-  const byTf = new Map();
-  for (const row of rows) {
-    if (!byTf.has(row.torrent_file_id)) {
-      byTf.set(row.torrent_file_id, { infoHash: row.info_hash, routes: [] });
-    }
-    byTf.get(row.torrent_file_id).routes.push({
-      provider: row.provider,
-      resourceId: row.resource_id,
-      placementId: row.placement_id,
-    });
-  }
-
-  const hashes = [...new Set(
-    [...byTf.values()].map((v) => String(v.infoHash ?? '').trim().toLowerCase()).filter(Boolean),
-  )];
-  const torboxCached = await readTorBoxCached(providers, hashes, log);
-  const rdHashes = await readRdHashes(providers, log);
-
-  const verdicts = [];
-  for (const [torrentFileId, info] of byTf) {
-    const hash = String(info.infoHash ?? '').trim().toLowerCase();
-    if (!hash) continue; // no exact identity recorded: nothing to verify
-    const liveRoutes = [];
-    const deadRoutes = [];
-    let unknown = false;
-    for (const route of info.routes) {
-      const provider = String(route.provider ?? '').toLowerCase();
-      let live = null; // null = could not answer
-      if (provider === 'torbox') {
-        if (torboxCached) live = torboxCached.has(hash);
-      } else if (provider === 'realdebrid') {
-        if (rdHashes) live = rdHashes.has(hash);
-      }
-      if (live === null) unknown = true;
-      else if (live) liveRoutes.push(route);
-      else deadRoutes.push(route);
-    }
-    verdicts.push({
-      torrentFileId,
-      infoHash: hash,
-      routes: info.routes,
-      liveRoutes,
-      deadRoutes,
-      hasLiveRoute: liveRoutes.length > 0,
-      rotted: liveRoutes.length === 0 && !unknown,
-      unknown,
-    });
-  }
-  return verdicts;
-}
-
-async function readTorBoxCached(providers, hashes, log) {
-  const probe = providers?.torbox?.checkCached ?? providers?.checkCached;
-  if (typeof probe !== 'function') return null;
-  try {
-    const result = await probe(hashes);
-    if (result instanceof Set) return result;
-    if (result?.cached instanceof Set) return result.cached;
-    log(`route-reconcile torbox cache probe returned unusable payload`);
-    return null;
-  } catch (error) {
-    log(`route-reconcile torbox cache probe failed: ${error?.message ?? error}`);
-    return null;
-  }
-}
-
-async function readRdHashes(providers, log) {
-  const probe = providers?.realdebrid?.listTorrents;
-  if (typeof probe !== 'function') return null;
-  try {
-    const listed = await probe({ limit: 5000 });
-    return new Set(
-      (Array.isArray(listed) ? listed : [])
-        .map((entry) => String(entry?.hash ?? '').trim().toLowerCase())
-        .filter(Boolean),
-    );
-  } catch (error) {
-    log(`route-reconcile rd torrents probe failed: ${error?.message ?? error}`);
-    return null;
-  }
 }
 
 /**
@@ -290,13 +154,7 @@ async function readRdHashes(providers, log) {
  * @param {Function} [params.log]
  * @returns {Promise<{scanned:number, repaired:number, unavailable:number, failed:number, ids:string[]}>}
  */
-export async function reconcileStaleRoutes({
-  store,
-  secondPlacement,
-  providers = null,
-  limit = 25,
-  log = () => {},
-} = {}) {
+async function repairCandidates({ store, secondPlacement, candidates, limit, log }) {
   const result = { scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [] };
   if (!store || !secondPlacement) return result;
   const ensure = typeof secondPlacement.ensureSecondPlacementCoalesced === 'function'
@@ -305,11 +163,8 @@ export async function reconcileStaleRoutes({
       ? secondPlacement.ensureSecondPlacement.bind(secondPlacement)
       : null);
   if (!ensure) return result;
-
-  const stale = providers
-    ? await findRottedRouteTorrentFiles(store, { limit, providers, log })
-    : findStaleRouteTorrentFiles(store, { limit });
-  for (const torrentFileId of stale) {
+  for (const torrentFileId of candidates) {
+    if (result.scanned >= limit) break;
     result.scanned += 1;
     let outcome;
     try {
@@ -337,4 +192,48 @@ export async function reconcileStaleRoutes({
     }
   }
   return result;
+}
+
+/**
+ * FAILURE-DRIVEN recovery: the TorrentFiles whose repair is DUE because the
+ * durable delivery evidence says every recorded route is dead.
+ *
+ * This pass is LOCAL until work is due: the candidate set is a read of the
+ * evidence, and the provider is consulted only for the discovery the repair
+ * itself needs ("is there another resource for this exact TorrentFile?").
+ * A terminal fact is never re-proved.
+ */
+export async function reconcileEvidenceDueRoutes({
+  store,
+  secondPlacement,
+  limit = 25,
+  now = null,
+  log = () => {},
+} = {}) {
+  const at = typeof now === 'function' ? now() : (now ?? (typeof store?.now === 'function' ? store.now() : Date.now()));
+  const due = findEvidenceRepairDueTorrentFiles(store, { limit, now: at }).map((r) => r.torrentFileId);
+  if (due.length === 0) {
+    return { scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [] };
+  }
+  return repairCandidates({ store, secondPlacement, candidates: due, limit, log });
+}
+
+/**
+ * DISCOVERY sweep: actively bound TorrentFiles with NO recorded route at
+ * all. Their release may have appeared in an account since we last looked,
+ * and only the provider can answer that. A slow cadence is correct: nothing
+ * is broken, the item simply is not available yet.
+ */
+export async function reconcileStaleRoutes({
+  store,
+  secondPlacement,
+  limit = 25,
+  now = Date.now(),
+  log = () => {},
+} = {}) {
+  const stale = findStaleRouteTorrentFiles(store, { limit });
+  if (stale.length === 0) {
+    return { scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [] };
+  }
+  return repairCandidates({ store, secondPlacement, candidates: stale, limit, log });
 }

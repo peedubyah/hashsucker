@@ -43,6 +43,7 @@ import { createArrClient } from '../lib/anticipation/arr-client.js';
 import { createSecondPlacementEnsurer } from '../lib/control-plane/second-placement.js';
 import { createRouteProviderSurfaces } from '../lib/control-plane/route-providers.js';
 import {
+  reconcileEvidenceDueRoutes,
   reconcileStaleRoutes,
   retireVerifiedDeadRedundantRoutes,
 } from '../lib/control-plane/route-reconciler.js';
@@ -718,7 +719,7 @@ function arrSyncIntervalMs() {
  * worker and any operator/test invocation share one in-flight pass instead of
  * starting a second one that would duplicate provider probes.
  *
- * @returns {{run: (options?: {limit?: number}) => Promise<object>, inFlight: () => boolean}}
+ * @returns {{run: (options?: {limit?: number}) => Promise<object>, runRecovery: (options?: {limit?: number}) => Promise<object>, inFlight: () => boolean}}
  */
 function createRouteReconcileRunner({ store, dependencies, env = process.env }) {
   let inFlight = null;
@@ -738,7 +739,7 @@ function createRouteReconcileRunner({ store, dependencies, env = process.env }) 
     );
     return pass;
   }
-  async function runPass({ limit } = {}) {
+  async function runPass({ limit, evidenceOnly = false } = {}) {
     {
       const surfaces = createRouteProviderSurfaces({
         torBoxProvider: dependencies.torBoxProvider ?? null,
@@ -751,13 +752,32 @@ function createRouteReconcileRunner({ store, dependencies, env = process.env }) 
         store, ...surfaces, now: () => Date.now(),
       });
       const batch = limit ?? envNumber(env, 'ROUTE_RECONCILE_BATCH', { fallback: 25, min: 1, max: 500 });
-      const recovery = await reconcileStaleRoutes({
+      // FAILURE-DRIVEN recovery first: the durable evidence says which
+      // TorrentFiles have no live route, and that IS the work. The
+      // discovery sweep (a TorrentFile with NO route at all) follows.
+      const due = await reconcileEvidenceDueRoutes({
         store,
         secondPlacement: ensurer,
-        providers: surfaces,
         limit: batch,
+        now: Date.now(),
         log: (msg) => console.log(`media-search: ${msg}`),
       });
+      const stale = evidenceOnly
+        ? { scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [] }
+        : await reconcileStaleRoutes({
+          store,
+          secondPlacement: ensurer,
+          limit: batch,
+          now: Date.now(),
+          log: (msg) => console.log(`media-search: ${msg}`),
+        });
+      const recovery = {
+        scanned: due.scanned + stale.scanned,
+        repaired: due.repaired + stale.repaired,
+        unavailable: due.unavailable + stale.unavailable,
+        failed: due.failed + stale.failed,
+        ids: [...due.ids, ...stale.ids],
+      };
       // Hygiene: retire placements the provider disproved, but only where a
       // live sibling route exists (route-reconciler.js holds the guards).
       const retireFlag = String(env.ROUTE_RECONCILE_RETIRE ?? '1').toLowerCase();
@@ -765,8 +785,10 @@ function createRouteReconcileRunner({ store, dependencies, env = process.env }) 
       if (retireFlag !== '0' && retireFlag !== 'false') {
         const outcome = await retireVerifiedDeadRedundantRoutes({
           store,
-          providers: surfaces,
           limit: batch,
+          // The store's clock: freshness is compared against the clock that
+          // wrote the rows.
+          now: () => store.now(),
           log: (msg) => console.log(`media-search: ${msg}`),
         });
         retired = outcome.retired.length;
@@ -782,6 +804,19 @@ function createRouteReconcileRunner({ store, dependencies, env = process.env }) 
 
 function routeReconcileIntervalMs(env = process.env) {
   return envNumber(env, 'ROUTE_RECONCILE_INTERVAL_MIN', { fallback: 360, min: 30 }) * 60 * 1000;
+}
+
+/**
+ * Failure-driven recovery cadence.
+ *
+ * The evidence-driven pass is LOCAL until work is due: the candidate set is
+ * a read of the durable delivery evidence, and the provider is consulted
+ * only when a TorrentFile's routes are proven dead. It can therefore run
+ * often — the cost of an idle pass is one indexed query, and the latency
+ * of a dead route's recovery follows the FAILURE, not a timer.
+ */
+function routeRecoveryIntervalMs(env = process.env) {
+  return envNumber(env, 'ROUTE_RECOVERY_INTERVAL_SEC', { fallback: 60, min: 10 }) * 1000;
 }
 const routeReconcileOn = (() => {
   const v = String(process.env.ROUTE_RECONCILE_ENABLED ?? '1').toLowerCase();
@@ -810,6 +845,36 @@ function armRouteReconcileTimer(delayMs) {
 if (routeReconcileOn && routeReconcileRunner) {
   armRouteReconcileTimer(envNumber(process.env, 'ROUTE_RECONCILE_FIRST_DELAY_MIN', { fallback: 10, min: 1 }) * 60 * 1000);
   console.log(`media-search: route reconcile armed intervalMs=${routeReconcileIntervalMs()}`);
+}
+
+// ─── failure-driven route recovery ────────────────────────────────────────
+// The durable delivery evidence IS the work item: a TorrentFile whose
+// recorded routes are all proven dead needs another route. This pass reads
+// that evidence (local) and only calls a provider when a repair is really
+// due. It also covers the restart case: evidence written just before a
+// crash is still there, so the repair resumes without waiting for the
+// six-hourly sweep.
+let routeRecoveryTimer = null;
+function armRouteRecoveryTimer(delayMs) {
+  routeRecoveryTimer = arm(async () => {
+    if (routeReconcileOn && routeReconcileRunner) {
+      try {
+        const result = await routeReconcileRunner.run({ evidenceOnly: true });
+        if (result.scanned > 0) {
+          console.log(`media-search: route recovery scanned=${result.scanned} repaired=${result.repaired} unavailable=${result.unavailable} failed=${result.failed}`);
+        }
+      } catch (error) {
+        console.warn('media-search: route recovery pass failed', error?.message);
+      }
+    }
+    armRouteRecoveryTimer(routeRecoveryIntervalMs());
+  }, delayMs);
+}
+if (routeReconcileOn && routeReconcileRunner) {
+  // A short first delay: the durable evidence may already name work that a
+  // previous process could not finish.
+  armRouteRecoveryTimer(envNumber(process.env, 'ROUTE_RECOVERY_FIRST_DELAY_SEC', { fallback: 15, min: 5 }) * 1000);
+  console.log(`media-search: route recovery armed intervalMs=${routeRecoveryIntervalMs()}`);
 }
 
 const arrSyncClients = (() => {
@@ -992,6 +1057,10 @@ if (hygiene) {
      */
     runRouteReconcilePass: (options) => (routeReconcileRunner
       ? routeReconcileRunner.run(options)
+      : Promise.resolve({ scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [], retired: 0 })),
+    // The failure-driven pass: evidence-driven only, no discovery sweep.
+    runRouteRecoveryPass: (options) => (routeReconcileRunner
+      ? routeReconcileRunner.run({ ...(options ?? {}), evidenceOnly: true })
       : Promise.resolve({ scanned: 0, repaired: 0, unavailable: 0, failed: 0, ids: [], retired: 0 })),
     // The in-flight pass itself, so a caller can await the SAME promise a
     // periodic tick is already running instead of starting a second one.

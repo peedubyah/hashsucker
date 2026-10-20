@@ -80,8 +80,12 @@ export function createRouteResurrector({
     // (a placement + provider file mapped to that exact TorrentFile). That
     // is route repair, not media reselection.
     const recovered = status === 'created';
-    log(`[route-resurrection] tf=${torrentFileId} status=${status} recovered=${recovered}`);
-    return { status, recovered, outcome: outcome ?? null };
+    // The provider was actually consulted: the account was searched for this
+    // exact release. That is the ROUTE-SET COMPLETENESS proof — without it
+    // "every known route is dead" is not "no same-TorrentFile route exists".
+    const discoveryCompleted = status !== 'unknown' && status !== 'invalid-input';
+    log(`[route-resurrection] tf=${torrentFileId} status=${status} recovered=${recovered} discoveryCompleted=${discoveryCompleted}`);
+    return { status, recovered, discoveryCompleted, outcome: outcome ?? null };
   }
 
   return Object.freeze({ resurrect });
