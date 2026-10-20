@@ -356,6 +356,9 @@ CREATE TABLE IF NOT EXISTS playback_handoffs (
   selection_reason TEXT,
   selected_at INTEGER NOT NULL,
   torrent_file_id TEXT,
+  -- WHY this handoff may replace the intent's current representation.
+  -- NULL on legacy handoffs and on route-scoped handoffs.
+  representation_reason TEXT,
   created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER)),
   FOREIGN KEY (request_id) REFERENCES media_requests(id)
 );
@@ -1854,11 +1857,18 @@ function migrateMediaRequestResultsSelectedFileSize(db) {
 // handoffs and on candidates without an exact selected-file size. The
 // controlPlaneStore is the source of truth; this column is a soft pointer.
 function migratePlaybackHandoffsTorrentFileId(db) {
+  // The representation reason: WHY a handoff may replace the intent's
+  // current representation. Nullable and additive; applied on every open,
+  // outside the migration ledger, so an existing database gains it.
+  const handoffInfo = db.prepare('PRAGMA table_info(playback_handoffs)').all();
+  if (!handoffInfo.some((col) => col.name === 'representation_reason')) {
+    db.exec('ALTER TABLE playback_handoffs ADD COLUMN representation_reason TEXT');
+  }
   const applied = db.prepare(
     'SELECT 1 FROM schema_migrations WHERE name = ?',
   ).get(PLAYBACK_HANDOFF_TORRENT_FILE_COLUMN);
   if (applied) return;
-  const info = db.prepare('PRAGMA table_info(playback_handoffs)').all();
+  const info = handoffInfo;
   if (!info.some((col) => col.name === 'torrent_file_id')) {
     db.exec('ALTER TABLE playback_handoffs ADD COLUMN torrent_file_id TEXT');
   }
@@ -4230,12 +4240,12 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       request_id, media_id, media_type, season, episode,
       release_key, info_hash, file_index, filename,
       provider, provider_state, identity_tier, resolution_state,
-      selection_reason, selected_at, torrent_file_id
+      selection_reason, selected_at, torrent_file_id, representation_reason
     ) VALUES (
       @request_id, @media_id, @media_type, @season, @episode,
       @release_key, @info_hash, @file_index, @filename,
       @provider, @provider_state, @identity_tier, @resolution_state,
-      @selection_reason, @selected_at, @torrent_file_id
+      @selection_reason, @selected_at, @torrent_file_id, @representation_reason
     )
     ON CONFLICT(media_type, media_id, IFNULL(season, -1), IFNULL(episode, -1))
     DO UPDATE SET
@@ -4256,7 +4266,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       resolution_state = excluded.resolution_state,
       selection_reason = excluded.selection_reason,
       selected_at = excluded.selected_at,
-      torrent_file_id = excluded.torrent_file_id
+      torrent_file_id = excluded.torrent_file_id,
+      representation_reason = excluded.representation_reason
     WHERE
       (
         playback_handoffs.torrent_file_id IS NULL
@@ -4448,6 +4459,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       identity_tier: handoff.identityTier,
       resolution_state: handoff.resolutionState,
       selection_reason: handoff.selectionReason,
+      representation_reason: handoff.representationReason ?? null,
       selected_at: handoff.selectedAt,
       // Slice 1.75: durable pointer to the control-plane TorrentFile once
       // ensureTorBoxFileIdentity has bound the selected candidate to an
@@ -4861,6 +4873,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       identityTier: row.identity_tier,
       resolutionState: row.resolution_state,
       selectionReason: row.selection_reason,
+      representationReason: row.representation_reason ?? null,
       selectedAt: row.selected_at,
       createdAt: row.created_at,
       // Slice 1.75: durable pointer to the control-plane TorrentFile once

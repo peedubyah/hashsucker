@@ -15,6 +15,7 @@ import {
   inferMoviePresentation,
   inferEpisodePresentation,
 } from '../control-plane/presentation-identity.js';
+import { representationReasonOf } from '../control-plane/representation-authority.js';
 
 import { isPlayableVideoTorrentFile } from '../resolver/tv-episode-resolver.js';
 import { getServiceability } from './byte-health.js';
@@ -226,6 +227,10 @@ function tryActivateAuthoritativeBinding({
       providerFileId,
       exposureId: exposure.id,
       reason,
+      // The representation reason travels with the handoff, which is the
+      // representation owner's decision. A handoff without one may not
+      // change the representation (the store refuses it).
+      representationReason: representationReasonOf(handoff),
     });
     bindingActivationRetryAt.delete(activationKey);
   } catch (error) {

@@ -11,6 +11,7 @@ import {
   stableLibraryItemId,
 } from './canonical-path.js';
 import { normalizePresentationYear } from './presentation-identity.js';
+import { assertRepresentationChangeAllowed } from './representation-authority.js';
 import { createLifecycleEvent, projectLifecycle } from './lifecycle.js';
 import { perfTrace } from '../perf-trace.js';
 
@@ -249,6 +250,11 @@ CREATE TABLE IF NOT EXISTS bindings (
   superseded_at INTEGER,
   reconciled_at INTEGER NOT NULL,
   failure_category TEXT,
+  -- WHY this binding names a different TorrentFile than the one it
+  -- replaced. NULL means the representation did not change (a route
+  -- change, or the first binding). Only the representation-policy owners
+  -- may set it (representation-authority.js).
+  representation_reason TEXT,
   UNIQUE (library_item_id, version),
   FOREIGN KEY (library_item_id) REFERENCES library_items(id),
   FOREIGN KEY (library_path_id) REFERENCES library_paths(id),
@@ -440,6 +446,13 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     }
     if (libraryColumns.length > 0 && !libraryColumns.includes('upgrade_policy')) {
       db.exec("ALTER TABLE library_items ADD COLUMN upgrade_policy TEXT NOT NULL DEFAULT 'auto'");
+    }
+    // The representation reason on a binding: WHY it names a different
+    // TorrentFile than the one it replaced. Nullable and additive: an
+    // existing binding simply has no reason recorded.
+    const bindingColumns = db.prepare('PRAGMA table_info(bindings)').all().map((c) => c.name);
+    if (bindingColumns.length > 0 && !bindingColumns.includes('representation_reason')) {
+      db.exec('ALTER TABLE bindings ADD COLUMN representation_reason TEXT');
     }
     // PRESENTATION IDENTITY columns. Additive and nullable: an existing
     // library has no committed identity yet, and the adoption path fills
@@ -1796,6 +1809,18 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       const newest = db.prepare(
         "SELECT * FROM bindings WHERE library_item_id = ? ORDER BY version DESC LIMIT 1",
       ).get(item.id);
+      // THE REPRESENTATION BOUNDARY. A Binding may name a different
+      // TorrentFile than the one it replaces only with an explicit
+      // representation reason, and only one of the legal reasons exists.
+      // A route-scoped mechanism (the routine reconciler's rebind, a
+      // rediscovery, a provider's current file) has no reason to give and
+      // is refused here — the one place a Binding is written.
+      assertRepresentationChangeAllowed({
+        currentTorrentFileId: active?.torrent_file_id ?? null,
+        nextTorrentFileId: torrentFileId ?? null,
+        reason: input.representationReason ?? null,
+        caller: input.reason ?? 'activateBinding',
+      });
       if (input.expectedBindingVersion != null
         && input.expectedBindingVersion !== (newest?.version ?? 0)) {
         throw new Error('Active binding version changed during reconciliation');
@@ -1847,14 +1872,15 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
         INSERT INTO bindings (
           id, library_item_id, library_path_id, release_key, info_hash, file_index,
           file_index_key, torrent_file_id, placement_id, provider_file_id, exposure_id, version,
-          status, reason, valid_from, reconciled_at, failure_category
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+          status, reason, valid_from, reconciled_at, failure_category, representation_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
       `).run(
         id, item.id, libraryPath.id, identity.releaseKey, identity.infoHash,
         identity.fileIndex, identity.fileIndex ?? -1, torrentFileId, input.placementId,
         input.providerFileId, input.exposureId, version,
         requireString(input.reason, 'reason', 1000), timestamp, timestamp,
         input.failureCategory ?? null,
+        input.representationReason ?? null,
       );
       return rowToBinding(db.prepare('SELECT * FROM bindings WHERE id = ?').get(id));
     });
@@ -2620,6 +2646,7 @@ function rowToBinding(row) {
     exposureId: row.exposure_id, version: row.version, status: row.status,
     reason: row.reason, validFrom: row.valid_from, supersededAt: row.superseded_at,
     reconciledAt: row.reconciled_at, failureCategory: row.failure_category,
+    representationReason: row.representation_reason ?? null,
   };
 }
 function rowToRepairTransaction(row) {

@@ -85,6 +85,11 @@ export function buildRequestContext(cache, request) {
       : DEFAULT_LIVE_DISCOVERY_THRESHOLD,
     skipLiveDiscovery: request.skipLiveDiscovery === true,
     liveOnly: request.liveOnly === true,
+    // WHY this request may replace the intent's current representation.
+    // The caller is a representation owner (the request path, the upgrade
+    // watch, the delivery-exhaustion fallback). A route-scoped caller has
+    // no reason and may not replace the representation.
+    representationReason: request.representationReason ?? null,
     bloodhound: request.bloodhound === true,
     skipAvailability: request.skipAvailability === true,
     // Preparation tranche: discovery/ranking/selection/binding + durable
@@ -843,6 +848,11 @@ export function buildHandoffForSelection({ cache, ctx, requestId, selection, exp
     // Durable TorrentFile id from bindable selection. NULL when no
     // bindable candidate exists (all candidates unbindable).
     ...(selection.selected._torrentFileId ? { torrentFileId: selection.selected._torrentFileId } : {}),
+    // WHY this selection may replace the intent's current representation.
+    // The request path is a representation owner: the user asked for this
+    // media and the ranking chose this representation. A route-scoped
+    // caller never carries a reason.
+    representationReason: ctx.representationReason ?? 'request-reselection',
   };
   const handoffStartedAt = Date.now();
   const handoff = buildPlaybackHandoff(selection, handoffRequest);

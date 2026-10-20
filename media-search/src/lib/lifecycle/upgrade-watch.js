@@ -322,6 +322,9 @@ export function createUpgradeEvaluator({
       // not the already-prepared short-circuit (which would return the
       // OLD handoff and park as already-bound forever).
       forceDiscovery: true,
+      // The upgrade policy is a REPRESENTATION owner: it may replace the
+      // TorrentFile, and it says so explicitly.
+      representationReason: 'quality-upgrade',
     };
     if (row.season != null) body.season = row.season;
     if (row.episode != null) body.episode = row.episode;

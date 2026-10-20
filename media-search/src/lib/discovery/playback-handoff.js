@@ -89,6 +89,11 @@ export function buildPlaybackHandoff(selection, request) {
     identityTier: sel.identityTier || 'unknown',
     resolutionState,
     selectionReason: selection.reason || 'unknown',
+    // WHY this handoff may replace the intent's current representation.
+    // The request path's selection owns it; the route reconciler never
+    // carries one (it may not choose a representation at all).
+    representationReason: request.representationReason
+      ?? 'request-reselection',
     selectedAt: Date.now(),
     // Slice 1.75: durable pointer to the control-plane TorrentFile once
     // ensureTorBoxFileIdentity has bound the selected candidate to an exact

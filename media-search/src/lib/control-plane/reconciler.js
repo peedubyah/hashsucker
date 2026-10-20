@@ -47,14 +47,56 @@ export function planReconciliation(input, options = {}) {
     }
   }
 
-  const candidates = placements.filter((placement) => placement.infoHash === desired.infoHash);
+  // THE ROUTE/REPRESENTATION BOUNDARY.
+  //
+  // This reconciler is ROUTE-scoped: it may move an intent to another
+  // route (a placement, a provider file) FOR THE SAME EXACT TorrentFile.
+  // It may never choose a different representation. When the desired
+  // release is not the active Binding's release, the change is a
+  // REPRESENTATION decision and belongs to the representation policy — the
+  // reconciler reports it and stops.
+  const representationChangeRequested = Boolean(currentBinding)
+    && currentBinding.releaseKey !== desired.releaseKey;
+  const scope = currentBinding
+    ? {
+      // The BINDING's release and TorrentFile: the reconciler operates
+      // inside the representation the authority already chose.
+      releaseKey: currentBinding.releaseKey,
+      infoHash: currentBinding.infoHash,
+      fileIndex: currentBinding.fileIndex ?? null,
+      torrentFileId: currentBinding.torrentFileId ?? null,
+    }
+    : {
+      // No binding yet: the first selection is a representation decision
+      // and the reconciler may propose it.
+      releaseKey: desired.releaseKey,
+      infoHash: desired.infoHash,
+      fileIndex: desired.fileIndex ?? null,
+      torrentFileId: null,
+    };
+
+  if (representationChangeRequested) {
+    // Not a route fact: the representation policy owns this transition.
+    failures.push(failure('representation-change-requires-policy', false, null));
+    actions.push({
+      action: 'representation-change-required',
+      reason: 'active-binding-names-a-different-release',
+      libraryItemId: desired.libraryItemId,
+      currentTorrentFileId: currentBinding.torrentFileId ?? null,
+      requestedReleaseKey: desired.releaseKey,
+      owner: 'representation-policy',
+    });
+    return finishPlan(desired, actions, failures);
+  }
+
+  const candidates = placements.filter((placement) => placement.infoHash === scope.infoHash);
   if (candidates.length === 0) {
     actions.push({
       action: 'create-or-reuse-placement',
       reason: 'no-placement-for-exact-release',
       libraryItemId: desired.libraryItemId,
       providerPreferences: desired.providerPreferences,
-      releaseKey: desired.releaseKey,
+      releaseKey: scope.releaseKey,
       idempotencyKey: desired.placementIdempotencyKey,
     });
     return finishPlan(desired, actions, failures);
@@ -130,7 +172,7 @@ export function planReconciliation(input, options = {}) {
       continue;
     }
 
-    const mapping = findMapping(input.mappings, desired.releaseKey, placement.id);
+    const mapping = findMapping(input.mappings, scope.releaseKey, placement.id);
     if (!mapping || mapping.state !== 'mapped' || mapping.authoritative !== true) {
       const mapResult = chooseExactProviderFile(desired, inventory, mapping);
       if (mapResult.status === 'mapped') {
@@ -208,18 +250,23 @@ export function planReconciliation(input, options = {}) {
 
     // When current binding is degraded, we're recovering - create a new binding
     const isRecovery = currentBinding && currentBinding.status === 'degraded';
+    // The rebind is ROUTE-scoped: the SAME TorrentFile, another route.
+    // `representationReason` stays null: the representation did not
+    // change, and the store's boundary refuses anything else.
     actions.push({
       action: currentBinding && !isRecovery ? 'rebind' : 'bind',
       reason: currentBinding && !isRecovery ? 'preferred-usable-placement-changed' : (isRecovery ? 'recovery-from-degraded' : 'exact-file-is-usable'),
       libraryItemId: desired.libraryItemId,
       libraryPathId: desired.libraryPathId,
-      releaseKey: desired.releaseKey,
-      infoHash: desired.infoHash,
-      fileIndex: desired.fileIndex,
+      releaseKey: scope.releaseKey,
+      infoHash: scope.infoHash,
+      fileIndex: scope.fileIndex,
+      torrentFileId: scope.torrentFileId ?? undefined,
       placementId: placement.id,
       providerFileId: providerFile.providerFileId,
       exposureId: exposure.id,
       expectedBindingVersion: currentBinding?.version ?? 0,
+      representationReason: null,
     });
     return finishPlan(desired, actions, failures);
   }
@@ -366,10 +413,15 @@ export function executeReconciliation(plan, store, options = {}) {
           releaseKey: action.releaseKey,
           infoHash: action.infoHash,
           fileIndex: action.fileIndex,
+          torrentFileId: action.torrentFileId,
           placementId: action.placementId,
           providerFileId: action.providerFileId,
           exposureId: action.exposureId,
           reason: action.reason,
+          // The reconciler is route-scoped: it never carries a
+          // representation reason, and the store's boundary refuses a
+          // representation change without one.
+          representationReason: action.representationReason ?? null,
         });
         notifyBindingActivated({ libraryItemId: action.libraryItemId, binding });
         break;
@@ -381,11 +433,13 @@ export function executeReconciliation(plan, store, options = {}) {
           releaseKey: action.releaseKey,
           infoHash: action.infoHash,
           fileIndex: action.fileIndex,
+          torrentFileId: action.torrentFileId,
           placementId: action.placementId,
           providerFileId: action.providerFileId,
           exposureId: action.exposureId,
           reason: action.reason,
           expectedBindingVersion: action.expectedBindingVersion,
+          representationReason: action.representationReason ?? null,
         });
         notifyBindingActivated({ libraryItemId: action.libraryItemId, binding });
         break;

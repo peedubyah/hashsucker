@@ -177,35 +177,78 @@ test('placement, exposure, mapping, and binding remain independent boundaries', 
   store.close();
 });
 
-test('provider failover preserves canonical path and creates binding history', () => {
+test('a provider failover for the SAME TorrentFile preserves the canonical path and creates binding history', () => {
   let time = 1_000;
   const store = createControlPlaneStore({ now: () => ++time });
   const item = store.ensureLibraryItem(movie());
-  const rdIdentity = createReleaseIdentity(HASH, 0);
-  const rd = setupBindable(store, item, rdIdentity, { provider: 'realdebrid' });
+  const identity = createReleaseIdentity(HASH, 0);
+  const rd = setupBindable(store, item, identity, { provider: 'realdebrid' });
   const first = store.activateBinding({
-    libraryItemId: item.id, libraryPathId: rd.path.id, ...rdIdentity,
+    libraryItemId: item.id, libraryPathId: rd.path.id, ...identity,
     placementId: rd.placement.id, providerFileId: rd.providerFileId,
     exposureId: rd.exposure.id, reason: 'initial-preference',
   });
-  const torboxIdentity = createReleaseIdentity(OTHER_HASH, 7);
-  const torbox = setupBindable(store, item, torboxIdentity, {
+  // The same release, the same exact file, another provider: a ROUTE
+  // change. The representation does not move.
+  const torbox = setupBindable(store, item, identity, {
     provider: 'torbox', resourceId: 'tb-22', providerFileId: 'tb-file',
     transport: 'torbox-webdav-rclone', exposureKey: 'tb-22:tb-file',
   });
   const second = store.activateBinding({
-    libraryItemId: item.id, libraryPathId: rd.path.id, ...torboxIdentity,
+    libraryItemId: item.id, libraryPathId: rd.path.id, ...identity,
     placementId: torbox.placement.id, providerFileId: torbox.providerFileId,
     exposureId: torbox.exposure.id, reason: 'provider-failover',
   });
   const history = store.listBindings(item.id);
 
+  // A route change updates the execution coordinates IN PLACE: no new
+  // Binding version, no representation change, no representation reason.
   assert.equal(first.version, 1);
-  assert.equal(second.version, 2);
-  assert.equal(history[0].status, 'superseded');
-  assert.equal(history[1].status, 'active');
-  assert.equal(history[0].libraryPathId, history[1].libraryPathId);
+  assert.equal(second.version, 1, 'a route change creates no Binding version');
+  assert.equal(second.torrentFileId, first.torrentFileId, 'a failover keeps the TorrentFile');
+  assert.equal(second.placementId, torbox.placement.id, 'the route moved');
+  assert.equal(history.length, 1);
+  assert.equal(history[0].status, 'active');
+  assert.equal(history[0].libraryPathId, second.libraryPathId);
+  assert.equal(history[0].representationReason, null,
+    'a route change records no representation reason');
   assert.equal(rd.path.canonicalPath, store.ensureCanonicalPath(item.id).canonicalPath);
+  store.close();
+});
+
+test('a representation change without a representation reason is refused', () => {
+  const store = createControlPlaneStore({ now: () => 1_000 });
+  const item = store.ensureLibraryItem(movie());
+  const identity = createReleaseIdentity(HASH, 0);
+  const rd = setupBindable(store, item, identity, { provider: 'realdebrid' });
+  store.activateBinding({
+    libraryItemId: item.id, libraryPathId: rd.path.id, ...identity,
+    placementId: rd.placement.id, providerFileId: rd.providerFileId,
+    exposureId: rd.exposure.id, reason: 'initial-preference',
+  });
+
+  // A DIFFERENT release: a representation decision. Without a reason it is
+  // refused — this is the boundary the route reconciler cannot cross.
+  const otherIdentity = createReleaseIdentity(OTHER_HASH, 7);
+  const torbox = setupBindable(store, item, otherIdentity, {
+    provider: 'torbox', resourceId: 'tb-22', providerFileId: 'tb-file',
+    transport: 'torbox-webdav-rclone', exposureKey: 'tb-22:tb-file',
+  });
+  assert.throws(() => store.activateBinding({
+    libraryItemId: item.id, libraryPathId: rd.path.id, ...otherIdentity,
+    placementId: torbox.placement.id, providerFileId: torbox.providerFileId,
+    exposureId: torbox.exposure.id, reason: 'provider-failover',
+  }), /no representation reason/);
+
+  // With a representation reason it is allowed, and the reason is the
+  // audit trail.
+  const allowed = store.activateBinding({
+    libraryItemId: item.id, libraryPathId: rd.path.id, ...otherIdentity,
+    placementId: torbox.placement.id, providerFileId: torbox.providerFileId,
+    exposureId: torbox.exposure.id, reason: 'quality-upgrade',
+    representationReason: 'quality-upgrade',
+  });
+  assert.equal(allowed.representationReason, 'quality-upgrade');
   store.close();
 });
 

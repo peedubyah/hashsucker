@@ -655,6 +655,10 @@ export function createAlternateFallback(dependencies = {}) {
       identityTier: 'Verified',
       resolutionState: 'resolved',
       selectionReason: 'alternate-bounded-byte-validated',
+      // The delivery-exhaustion fallback is a REPRESENTATION owner: it
+      // replaces the TorrentFile, and it says so explicitly. The route
+      // reconciler may not invoke it implicitly.
+      representationReason: 'delivery-exhaustion-fallback',
       selectedAt: clock(),
       torrentFileId: torrentFile.id,
       torrentFileIdentity: {
