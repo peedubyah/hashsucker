@@ -2420,3 +2420,144 @@ with the typed provider failure.
   (placement id + provider file id), so the north must map the provider
   resource id to the placement id on every write. The mapping is exact
   (the durable index), but it is a mapping.
+
+## 2026-10-19 — THE DEAD SPEAK: event-driven route recovery — CLOSED
+
+Slice: the durable route-failure evidence existed but the reconciler
+still re-derived route failure by probing the providers on a six-hour timer.
+Make the evidence the input, react to evidence transitions, and ask the
+provider only what the evidence cannot answer.
+
+### PHASE 1 — THE RECONCILER, TRACED
+
+| | before |
+|---|---|
+| trigger | `armRouteReconcileTimer`, every `ROUTE_RECONCILE_INTERVAL_MIN` (default 360 = 6 h) |
+| candidate selection | `findRottedRouteTorrentFiles` → `verifyRecordedRoutes`: EVERY active-bound TorrentFile × its present+mapped provider files × non-removed placements (unbounded SQL), then compared with the provider's account view |
+| provider calls | 1 × `checkCached(all bound hashes)` + 1 × `listTorrents({limit: 5000})` (a 5 MB account download) — EVERY pass, whether or not anything was wrong |
+| DB reads/writes | the routes/bindings/evidence tables (read); `markPlacementRemoved` (write) |
+| state predicates | "usable" = present + mapped + placement ≠ removed; "live" = the hash is in the provider's account; "rotted" = no live route and no unknown |
+| interaction with Binding | read only (the active bindings are the candidate set) |
+| interaction with `provider_delivery_evidence` | **NONE** — the table existed and was never consulted |
+
+Provider-call classification:
+
+| call | what new fact can it produce that local state cannot? | class |
+|---|---|---|
+| `checkCached(all hashes)` | "does the TorBox account still hold these bytes?" — already answered per route by the terminal evidence | **redundant re-proof** |
+| `listTorrents({limit: 5000})` | "does the RD account still hold these bytes?" — same | **redundant re-proof** |
+| per-TorrentFile ensurer (discover-only) | "is there ANOTHER resource for this exact TorrentFile?" | **required discovery** |
+| per-TorrentFile ensurer (TorBox cached-only create) | "is the release still cached on the provider that lost it?" | **required discovery** |
+
+### PHASE 2 — EVIDENCE TRANSITIONS
+
+| transition | meaning | work required |
+|---|---|---|
+| unknown → usable | the route delivered bytes | none; the negative evidence is superseded |
+| usable → temporary | the provider said wait (throttle/timeout) | none: the next read retries the route; NEVER a representation change |
+| usable → terminal | the provider answered "gone" | **route repair** (find another route for the SAME TorrentFile) |
+| temporary → usable | the route recovered | none |
+| terminal → usable | the route recovered (a later delivery) | none; the negative record is cleared |
+| terminal → resource replaced | the provider re-added the release under a new resource id | none: the new route is simply unobserved |
+| (no evidence) | nobody observed this route | none |
+
+Only `→ terminal` is work. Repeated identical reports are one row and one
+work item (idempotent by the primary key).
+
+### PHASE 3–4 — THE EVENT-DRIVEN MODEL
+
+- The candidate set is now READ FROM THE EVIDENCE: an actively bound
+  TorrentFile whose every recorded route is proven dead has a repair DUE.
+  The evidence IS the work item — no new table, no queue, no generic
+  scheduler.
+- The pass is LOCAL until work is due, so it now runs every MINUTE
+  (`ROUTE_RECOVERY_INTERVAL_SEC`, default 60) instead of every six
+  hours. An idle pass costs one indexed query and makes NO provider call.
+- The provider is asked only what the evidence cannot answer: "is there
+  another resource for this exact TorrentFile?" — the existing
+  discover-only second-placement ensurer (cache-only; it never acquires).
+- Retirement of a dead redundant placement is evidence-based too
+  (terminal on the route, usable on a sibling) and makes NO provider call.
+- The legacy account-wide verification (the redundant re-proof) is
+  removed.
+
+### PHASE 5 — ROUTE-SET COMPLETENESS
+
+"Every KNOWN route is dead" is not "no same-TorrentFile route exists": the
+durable index is not a proof of completeness. The representation policy
+therefore requires a COMPLETED, NEGATIVE same-TorrentFile discovery
+(the account was searched and does not hold the release) before it may
+replace the authoritative representation. Without that proof the request
+fails closed with the typed provider failure and the representation stays
+authoritative. A different TorrentFile never answers the same-TorrentFile
+question (pinned by a negative control).
+
+### PHASE 6 — RESTART
+
+The evidence is durable, so a process that died between the evidence
+write and the repair leaves the work item behind: the next pass (≤60 s
+after the restart) picks it up. Pinned by a focused test (a store reopen
+between the write and the recovery) and proven in production: a durable
+terminal record written at T was picked up by the recovery pass within
+80 s ("route recovery scanned=1 repaired=0 unavailable=1"), and the
+injected record was removed afterwards with the item still serving
+(206/65536 B).
+
+### PHASE 7 — THE PERIODIC SWEEP, NARROWED
+
+What still needs a slow, periodic pass:
+
+| work | owner | cadence |
+|---|---|---|
+| failure-driven recovery | the evidence-driven pass | 60 s, local until due |
+| discovery of a newly appeared resource for a TorrentFile with NO recorded route | the periodic sweep | 6 h (nothing is broken; the item is simply not available yet) |
+| stale inventory maintenance | the request path (the inventory observation TTL is refreshed when a route is used) | on use |
+| hygiene / audit (retiring a proven-dead redundant route) | the evidence-driven pass (no provider call) | 60 s |
+
+### PHASE 8 — METRICS (production, same appliance)
+
+| metric | before | after |
+|---|---|---|
+| provider calls by an idle reconcile pass | 2 (`checkCached` over every bound hash + a 5 MB RD account list) | **0** (the pass is local until work is due) |
+| RD rate-limit waits in a 60-minute window | 10 | **0** |
+| failure → repair attempt | up to 6 h (the sweep) or the next read | **≤ 60 s**, and immediately on the failing read |
+| restart → recovery resumes | only after the next sweep (≤6 h) | **≤ 60 s** |
+| account-list downloads | one per sweep, always | only when a repair is actually due |
+
+### PHASE 9 — CORRECTNESS MATRIX (16 focused cases)
+
+terminal route + healthy alternate · terminal route + undiscovered
+same-hash alternate · temporary throttle · repeated identical terminal
+report · temporary → usable · terminal route replaced by a new resource
+id · both providers terminal · a different TorrentFile · a stale placement ·
+a restart between the evidence write and the recovery · an idle pass makes
+no provider call · a route that is not in the durable index records
+nothing · a delivered route clears the negative evidence · the budget
+stops a flapping route from churning the representation.
+
+### COMMITS
+
+| commit | change |
+|---|---|
+| `de25fff` | feat(recovery): the durable evidence drives route recovery, not a timer |
+
+### FULL SUITE
+
+3452 tests, 3448 pass, 1 fail, 3 skipped (exit 1). The one failure is the
+pre-existing baseline `vfs-collection-resilience` C1/C2/C3. Focused
+route/recovery/VFS suites: 159/159.
+
+### WHAT REMAINS
+
+- The second-placement ensurer's "is this provider already present?"
+  question does not consult the evidence, so a route marked terminal is
+  still counted as present when choosing WHICH provider to look at. The
+  repair therefore looks for a second route before re-observing the dead
+  one. The repair still happens within a minute; only its target is
+  suboptimal.
+- The periodic sweep still runs every six hours for the one job the
+  evidence cannot answer: a TorrentFile with no recorded route at all
+  whose release may have appeared in an account since we last looked.
+- The recovery is triggered by a poll of the durable evidence (a local
+  read every minute), not by a push. The latency is therefore the poll
+  interval, not the failure.

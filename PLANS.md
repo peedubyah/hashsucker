@@ -71,6 +71,23 @@ decision (durable terminal evidence for EVERY failed route, plus a
 one-switch-per-window budget) instead of a side effect of a read. The
 inert reconciler no longer plans 'mark-degraded' for route facts.
 
+Completed product slice: **the dead speak — event-driven route
+recovery** — **CLOSED** (`de25fff`; evidence in `docs/BUILD-LOG.md`
+2026-10-19). The route reconciler re-derived route failure by probing the
+providers every six hours (an account-wide TorBox cache check plus a 5 MB
+Real-Debrid account list) even though the durable delivery evidence
+already recorded what died, when, and whether it was merely throttled. The
+evidence is now the input: a TorrentFile whose every recorded route is
+proven dead has a repair DUE, the pass is local until work is due (so it
+runs every minute instead of every six hours), the provider is asked only
+"is there another resource for this exact TorrentFile?", and the
+retirement of a dead redundant route makes no provider call at all.
+Measured in production: an idle pass 2 provider calls → 0, RD rate-limit
+waits 10/60min → 0, failure→repair ≤6 h → ≤60 s, and a restart resumes
+recovery without waiting for the sweep. The periodic sweep keeps one
+narrow job: a TorrentFile with no recorded route at all, whose release may
+have appeared in an account since we last looked.
+
 Next earned slice: **one presentation identity for the `.strm` and the
 VFS path**. They are two resolvers with different year handling, so a
 published item can present two different paths to Plex and to Jellyfin,

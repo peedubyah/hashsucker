@@ -70,6 +70,20 @@ trust old containers or historical HY4 handoffs.
 - Evidence: `docs/BUILD-LOG.md` 2026-10-19; retrospective
   `docs/retrospectives/2026-10-19-durable-route-failure.md`.
 
+## Live session state (2026-10-19, event-driven route recovery)
+
+- Production `media-search` RUNS the local build of `de25fff` (both
+  services healthy). The route reconciler is now EVIDENCE-driven: the
+  durable delivery evidence is the candidate set, the pass is local until
+  a repair is due (so it runs every minute), and a provider is consulted
+  only for "is there another resource for this exact TorrentFile?".
+- Two cadences now exist, with different jobs:
+  `ROUTE_RECOVERY_INTERVAL_SEC` (default 60) = failure-driven recovery;
+  `ROUTE_RECONCILE_INTERVAL_MIN` (default 360) = the discovery sweep for
+  TorrentFiles with no recorded route at all.
+- Evidence: `docs/BUILD-LOG.md` 2026-10-19; retrospective
+  `docs/retrospectives/2026-10-19-event-driven-route-recovery.md`.
+
 ## Architecture boundaries (frozen)
 
 Non-authoritative session-local summary. Canonical:

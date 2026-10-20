@@ -219,10 +219,20 @@ delivers again clears the negative evidence. A throttled route is never
 recorded as death.
 
 Replacing the authoritative representation is a POLICY decision, not a read
-side effect: it requires durable terminal evidence for EVERY failed route and
-is budgeted (at most one switch per media intent per window), so a transient
-exhaustion leaves the representation authoritative and the delivery degraded,
-and a flapping route cannot churn the representation.
+side effect: it requires durable terminal evidence for EVERY failed route AND a
+completed, negative same-TorrentFile discovery (the account was searched and
+does not hold the release) — "every known route is dead" is not "no route
+exists" — and it is budgeted (at most one switch per media intent per window),
+so a transient exhaustion leaves the representation authoritative and the
+delivery degraded, and a flapping route cannot churn the representation.
+
+RECOVERY follows the EVIDENCE, not a timer. The durable delivery evidence is
+the work item: a TorrentFile whose every recorded route is proven dead has a
+repair DUE, and the pass that looks for it is local until work is due (it can
+run every minute at zero provider cost). The provider is asked only what the
+evidence cannot answer — "is there another resource for this exact
+TorrentFile?" — and a route that is merely throttled is never repaired and
+never retired, because throttling is not death.
 
 ## 6. Physical acquisition
 
