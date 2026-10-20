@@ -130,6 +130,7 @@ import { isWithinRoot as isWithinDownloadRoot } from '../lib/download/paths.js';
 
 import { getRdResolutionCache } from '../lib/providers/realdebrid/rd-resolution-cache.js';
 import { createMovieWebDav } from '../lib/vfs/movie-webdav.js';
+import { createRouteResurrector } from '../lib/vfs/route-resurrection.js';
 import { createTvWebDav } from '../lib/vfs/tv-webdav.js';
 import { createSecondPlacementEnsurer } from '../lib/control-plane/second-placement.js';
 import { createRouteProviderSurfaces } from '../lib/control-plane/route-providers.js';
@@ -1026,6 +1027,25 @@ export function createRequestHandler(dependencies = {}) {
       });
     })();
 
+  // Route resurrection: when every known route to an authoritative
+  // TorrentFile is exhausted, look for ANOTHER route to the SAME TorrentFile
+  // before any consideration of a different representation. It reuses the
+  // existing cache-only second-placement machinery (the same mechanism the
+  // periodic route reconciler uses), so there is one recovery mechanism, not
+  // two. The Binding is never re-pointed here.
+  const routeResurrection = createRouteResurrector({
+    ensureSecondPlacementFn: coverageEnsurer
+      ? (params) => coverageEnsurer.ensureSecondPlacementCoalesced({
+        torrentFileId: params.torrentFileId,
+        // Cache-only: the RD path stops at account discovery, and the
+        // TorBox path is already cache-gated. No uncached acquisition.
+        discoverOnly: true,
+      })
+      : null,
+    now: clock,
+    log: (msg) => console.log(`media-search: ${msg}`),
+  });
+
   const handleMovieWebDav = createMovieWebDav({
     searchCache,
     controlPlaneStore,
@@ -1033,6 +1053,7 @@ export function createRequestHandler(dependencies = {}) {
     rdResolutionCache,
     resolveTorBoxDeliverySeam,
     torBoxDownloadUrlCache,
+    routeResurrection,
     // P5: reuse the EXISTING persisted-candidate fallback seam in the VFS
     // (tfId-present class-D exhaustion → alternate TorrentFile → re-forward to Rust).
     alternateFallback,
@@ -1055,6 +1076,7 @@ export function createRequestHandler(dependencies = {}) {
     rdResolutionCache,
     resolveTorBoxDeliverySeam,
     torBoxDownloadUrlCache,
+    routeResurrection,
     // P5: reuse the EXISTING persisted-candidate fallback seam in the VFS
     // (tfId-present class-D exhaustion → alternate TorrentFile → re-forward to Rust).
     alternateFallback,

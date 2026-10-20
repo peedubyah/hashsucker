@@ -274,6 +274,12 @@ export function createMovieWebDav({
   // awaited). The VFS passes the optional controller through; a missing
   // controller means T10 is unwired and byte serving is unchanged.
   playbackRedundancy = null,
+  // Route resurrection seam: a bounded, cache-only attempt to find another
+  // route to the SAME authoritative TorrentFile when every known route is
+  // exhausted. It never changes the representation; a missing resurrector
+  // means the VFS behaves exactly as before (the persisted-candidate
+  // fallback is then the only recovery step).
+  routeResurrection = null,
   now = () => Date.now(),
   fetchFn = fetch,
   dataPlaneBaseUrl = 'http://data-plane:3001',
@@ -1186,6 +1192,41 @@ export function createMovieWebDav({
         });
         return;
       } catch (error) {
+        // A dead ROUTE must not re-decide the REPRESENTATION. Before any
+        // consideration of a different TorrentFile, try to find another
+        // route to the SAME one: the authoritative Binding keeps naming the
+        // same bytes, and only the delivery path is repaired.
+        //
+        // The class-D error is emitted before any 206 is committed, so the
+        // response has not started and a re-forward is still possible.
+        if (error?.class === 'D' && state.entry.torrentFileId) {
+          const resurrection = await routeResurrection?.resurrect({
+            torrentFileId: state.entry.torrentFileId,
+          });
+          if (resurrection?.recovered) {
+            try {
+              await streamFromDataPlane({
+                fetchFn,
+                baseUrl: dataPlaneBaseUrl,
+                tfId: state.entry.torrentFileId,
+                request,
+                response,
+                contentType: CONTENT_TYPE,
+                onServingAttribution: reportServingPrimaryFor(state.entry.torrentFileId),
+              });
+              return;
+            } catch (retryError) {
+              // The resurrected route did not deliver either. Fall through
+              // to the policy decision; if bytes were already committed the
+              // response can no longer carry a typed failure.
+              if (response.headersSent) {
+                response.destroy(retryError);
+                return;
+              }
+              error = retryError;
+            }
+          }
+        }
         const recovered = await attemptPersistedAlternateFallback({
           error,
           state,
