@@ -3361,6 +3361,7 @@ export function createRequestHandler(dependencies = {}) {
         const result = await repairConsumerProjection({
           desired,
           consumer: body?.consumer ?? 'plex',
+          bumpCache: searchCache,
           log: (msg) => console.log(`[projection] ${msg}`),
         });
         return sendJson(response, 200, { desired, result });
