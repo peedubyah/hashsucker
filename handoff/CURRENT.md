@@ -120,6 +120,11 @@ trust old containers or historical HY4 handoffs.
   Fixed (`12c5ed9`); the regression test fails without the fix.
 - Evidence: `docs/BUILD-LOG.md` 2026-10-20; retrospective
   `docs/retrospectives/2026-10-20-one-truth-for-routes.md`.
+- Unrelated live observation (not caused by this slice, not chased here):
+  the Jellyfin consumer's API key is rejected — `GET
+  $JELLYFIN_URL/System/Info` answers 401 from inside the container, and
+  the consumer reconcile logs `JELLYFIN_AUTH_FAILED`. Plex answers
+  normally and the VFS/byte path is unaffected.
 
 ## Architecture boundaries (frozen)
 
