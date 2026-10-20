@@ -226,6 +226,10 @@ test('different sections are independent, so movies are not blocked by TV', asyn
     mediaId: 'tt9999999',
     env: ENV,
     findResult: async () => ({ partId: '1', file: '/mnt/hashsucker-vfs/Movies/x.mkv', size: 5, ratingKey: '9' }),
+    // The expected Part file is what makes the verification meaningful:
+    // without it the consumer's own Part ordering would be the arbiter.
+    expectedPartFile: '/mnt/hashsucker-vfs/Movies/x.mkv',
+    expectedSize: 5,
     ...movieSeams,
   });
   assert.equal(out.outcome, INGEST_OUTCOMES.VERIFIED);
