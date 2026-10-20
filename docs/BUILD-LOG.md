@@ -2705,7 +2705,7 @@ restored (the placement state back to `ready`).
 
 3465 tests, 3461 pass, 1 fail, 3 skipped (exit 1). The one failure is the
 pre-existing baseline `vfs-collection-resilience` C1/C2/C3. The focused
-route/recovery/VFS suites: 118/118.
+route/recovery/VFS suites: 112/112.
 
 ### COMMITS
 
