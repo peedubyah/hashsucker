@@ -118,10 +118,12 @@ test('hydrateVfsTvEntry returns TorrentFile-backed size without invoking the pro
 
   const result = await handler.hydrateVfsTvEntry({ mediaId: 'tt0000001', season: 1, episode: 1 });
   assert.equal(result.size, 5_000_000_000, 'size comes from TorrentFile');
-  // canonicalTitle is not persisted to playback_handoffs; the materialize
-  // path falls back to mediaId as the title segment. The important fact is
-  // that the path is stable and the same as the VFS row.
-  assert.equal(result.canonicalPath, 'TV/tt0000001/Season 01/tt0000001 - S01E01.mkv');
+  // canonicalTitle is not persisted to playback_handoffs, so the
+  // materialize path resolves the name from the release filename — the
+  // same last resort the `.strm` publisher uses, so the two consumer
+  // paths cannot disagree. The important fact is that the path is stable
+  // and the same as the VFS row.
+  assert.equal(result.canonicalPath, 'TV/Carmencita (1894)/Season 01/Carmencita (1894) - S01E01.mkv');
   assert.equal(seamCalls, 0, 'provider seam is not invoked for already-hydrated authoritative size');
 
   // Durable row reflects the TorrentFile identity.

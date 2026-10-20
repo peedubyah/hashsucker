@@ -4,10 +4,18 @@ import {
   addDeterministicCollisionSuffix,
   buildPreferredCanonicalPath,
   createLibraryIdentityKey,
+  stableLibraryItemId,
 } from '../control-plane/canonical-path.js';
 import { notifyBindingActivated } from '../control-plane/durability-enroller.js';
 import { createDefaultRdPlacementRealizer } from '../control-plane/rd-placement-realizer.js';
 import { getMedia } from '../metadata/cinemeta.js';
+import {
+  resolvePresentationName,
+  derivePresentationIdentity,
+  inferMoviePresentation,
+  inferEpisodePresentation,
+} from '../control-plane/presentation-identity.js';
+
 import { isPlayableVideoTorrentFile } from '../resolver/tv-episode-resolver.js';
 import { getServiceability } from './byte-health.js';
 import { perfTrace } from '../perf-trace.js';
@@ -324,53 +332,67 @@ function libraryItemInputFromHandoff(handoff) {
   };
 }
 
+/**
+ * The COMMITTED presentation identity of a media intent, if it has one.
+ *
+ * The identity lives on the control-plane library item, whose id is
+ * derived from the identity key — so it can be read before the item row
+ * exists, and it survives the item row being rewritten.
+ */
+export function committedPresentationFor(controlPlaneStore, handoff) {
+  if (!controlPlaneStore || typeof controlPlaneStore.getPresentationIdentity !== 'function') return null;
+  try {
+    const identityKey = createLibraryIdentityKey({
+      mediaType: handoff.mediaType === 'movie' ? 'movie' : 'episode',
+      mediaId: handoff.mediaId,
+      season: handoff.season ?? undefined,
+      episode: handoff.episode ?? undefined,
+    });
+    return controlPlaneStore.getPresentationIdentity(stableLibraryItemId(identityKey)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function releaseKeyFor(handoff) {
   return `${handoff.infoHash.toLowerCase()}:${handoff.fileIndex == null ? 'torrent' : handoff.fileIndex}`;
 }
 
-function movieIdentity(filename, mediaId) {
-  const basename = path.posix.basename(String(filename || '').replaceAll('\\', '/'));
-  const parsed = path.posix.parse(basename);
-  const stem = parsed.name || basename || mediaId;
-  const yearMatch = stem.match(/(?:^|[. _-])((?:19|20)\d{2})(?=$|[. _-])/);
-  const year = yearMatch ? Number(yearMatch[1]) : null;
-  const titlePart = yearMatch ? stem.slice(0, yearMatch.index).trim() : stem.trim();
-  const title = titlePart
-    .replace(/[._-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim() || mediaId;
-  const extension = /^\.[a-z0-9]{1,10}$/i.test(parsed.ext) ? parsed.ext : '.mkv';
-  return { title, year, extension };
-}
+// The filename inference lives with the presentation identity: the VFS
+// path and the `.strm` path must infer the SAME name from the SAME
+// filename, or they drift.
+const movieIdentity = inferMoviePresentation;
 
 /**
- * Resolve the presentation title and year for VFS path construction.
+ * Resolve the presentation title and year for path construction.
  *
- * Priority:
- *   1. handoff.canonicalTitle / handoff.canonicalYear  (explicit API override)
- *   2. Cinemeta metadata for the mediaId                  (clean canonical name)
- *   3. movieIdentity() on the filename                    (last-resort fallback)
- *
- * This mirrors the logic in publishStrm() so that VFS and STRM paths agree.
+ * The precedence lives in ONE place (`resolvePresentationName`): the
+ * request's explicit canonical title, then the catalog metadata, then the
+ * release attributes, then the filename inference. The `.strm` publisher
+ * resolves through the SAME function, so the two consumer paths cannot
+ * disagree about the name.
  *
  * @param {object} handoff
- * @returns {Promise<{title: string, year: number|null, extension: string|null}>}
+ * @param {Object} [options]
+ * @param {Object} [options.release] - the selection's release attributes
+ * @returns {Promise<{title: string, year: number|null, extension: string}>}
  */
 async function resolvePresentationIdentity(handoff) {
-  // Priority 1: explicit canonical override
-  if (typeof handoff.canonicalTitle === 'string' && handoff.canonicalTitle.trim()) {
-    return {
-      title: handoff.canonicalTitle.trim(),
-      year: Number.isSafeInteger(handoff.canonicalYear) && handoff.canonicalYear >= 0
-        ? handoff.canonicalYear
-        : null,
-      extension: movieIdentity(handoff.filename, handoff.mediaId).extension,
-    };
-  }
-
-  // Priority 2: Cinemeta lookup (the same source strm-publisher uses)
+  const isEpisode = handoff.mediaType === 'series' || handoff.mediaType === 'tv';
+  const inferred = isEpisode
+    ? episodeIdentity(handoff.filename, handoff.mediaId)
+    : movieIdentity(handoff.filename, handoff.mediaId);
+  let catalogTitle = null;
+  let catalogYear = null;
   const cinemetaStartedAt = Date.now();
+  // The catalog is consulted ONLY when the request did not name the media.
+  // An explicit canonical title is the identity authority, and the year
+  // rule follows the title's authority — so an explicit title needs no
+  // metadata call at all. That keeps the identity resolvable offline and
+  // keeps a metadata outage out of a publication that was already named.
+  const explicitTitle = typeof handoff.canonicalTitle === 'string' ? handoff.canonicalTitle.trim() : '';
   try {
+    if (explicitTitle) throw new Error('skip: the request named the media');
     const type = handoff.mediaType === 'series' ? 'series' : 'movie';
     const meta = await getMedia(type, handoff.mediaId);
     perfTrace('provider.cinemeta', {
@@ -379,11 +401,8 @@ async function resolvePresentationIdentity(handoff) {
       ms: Date.now() - cinemetaStartedAt, ok: true,
     });
     if (meta?.title) {
-      return {
-        title: meta.title,
-        year: Number.isSafeInteger(meta.year) ? Number(meta.year) : null,
-        extension: movieIdentity(handoff.filename, handoff.mediaId).extension,
-      };
+      catalogTitle = meta.title;
+      catalogYear = meta.year ?? null;
     }
   } catch (error) {
     perfTrace('provider.cinemeta', {
@@ -392,25 +411,22 @@ async function resolvePresentationIdentity(handoff) {
       ms: Date.now() - cinemetaStartedAt, ok: false,
       err: String(error?.message ?? error),
     });
-    // Cinemeta unavailable — fall through to priority 3
+    // Cinemeta unavailable — fall through to the release/filename sources.
   }
 
-  // Priority 3: filename parsing (existing last-resort behavior)
-  return movieIdentity(handoff.filename, handoff.mediaId);
+  const { title, year } = resolvePresentationName({
+    canonicalTitle: handoff.canonicalTitle,
+    canonicalYear: handoff.canonicalYear,
+    catalogTitle,
+    catalogYear,
+    inferredTitle: inferred.title,
+    inferredYear: isEpisode ? null : inferred.year,
+    mediaId: handoff.mediaId,
+  });
+  return { title, year };
 }
 
-function episodeIdentity(filename, mediaId) {
-  const basename = path.posix.basename(String(filename || '').replaceAll('\\', '/'));
-  const parsed = path.posix.parse(basename);
-  const base = parsed.name || basename || mediaId;
-  const title = base
-    .replace(/[._-]+/g, ' ')
-    .replace(/\s+S\d+E\d+.*$/i, '')
-    .replace(/\s+/g, ' ')
-    .trim() || mediaId;
-  const extension = /^\.[a-z0-9]{1,10}$/i.test(parsed.ext) ? parsed.ext : '.mkv';
-  return { title, extension };
-}
+const episodeIdentity = inferEpisodePresentation;
 
 function torrentFileForHandoff(controlPlaneStore, handoff, allowLegacy) {
   if (!handoff.torrentFileId) {
@@ -800,26 +816,51 @@ async function materializeVfsEntryInner(
       throw new Error(`Durable movie handoff identity is inconsistent for ${handoff.mediaId}`);
     }
 
-    // Prefer the canonical request identity (e.g. "Dune: Part Two", 2024
-    // from the Seerr detail body) for the Plex-facing VFS path. Fall back
-    // to the provider release filename only when no canonical identity
-    // was supplied. The provider-backed `filename` and `infoHash` are
-    // unchanged either way.
-    const { title: presentationTitle, year: presentationYear, extension: presentationExt } =
-      await resolvePresentationIdentity(handoff);
-    const physicalFile = movieIdentity(torrentFile?.internalPath ?? handoff.filename, handoff.mediaId);
-    let canonicalPath = buildPreferredCanonicalPath({
-      mediaType: 'movie',
-      mediaId: handoff.mediaId,
-      title: presentationTitle,
-      year: presentationYear,
-    }, { extension: physicalFile.extension });
-    const usedPaths = new Set(searchCache.listVfsMovieEntries().map((entry) => entry.canonicalPath));
-    if (usedPaths.has(canonicalPath)) {
-      canonicalPath = addDeterministicCollisionSuffix(
+    // The presentation identity, resolved ONCE through the shared
+    // precedence, and — when the intent already has a committed identity —
+    // taken from that identity instead of being recomputed.
+    //
+    // A committed identity is what makes a published path stable across a
+    // restart, a metadata outage and a representation change: the name was
+    // decided once, at the commit point, and nothing since may move it.
+    const committed = committedPresentationFor(controlPlaneStore, handoff);
+    let canonicalPath;
+    let presentation;
+    if (committed?.canonicalPath) {
+      canonicalPath = committed.canonicalPath;
+      presentation = {
+        title: committed.title,
+        year: committed.year,
         canonicalPath,
-        torrentFile?.id ?? handoff.releaseKey,
-      );
+        strmPath: committed.strmPath,
+        committed: true,
+      };
+    } else {
+      // Prefer the canonical request identity (e.g. "Dune: Part Two", 2024
+      // from the Seerr detail body) for the Plex-facing VFS path. Fall back
+      // to the catalog metadata, then the release attributes, then the
+      // provider release filename. The provider-backed `filename` and
+      // `infoHash` are unchanged either way.
+      const physicalExtension = movieIdentity(
+        torrentFile?.internalPath ?? handoff.filename, handoff.mediaId,
+      ).extension;
+      const resolved = await resolvePresentationIdentity(handoff);
+      const derived = derivePresentationIdentity({
+        mediaType: 'movie',
+        title: resolved.title,
+        year: resolved.year,
+        extension: physicalExtension,
+      });
+      canonicalPath = derived.canonicalPath;
+      presentation = { ...derived, committed: false };
+      const usedPaths = new Set(searchCache.listVfsMovieEntries().map((entry) => entry.canonicalPath));
+      if (usedPaths.has(canonicalPath)) {
+        canonicalPath = addDeterministicCollisionSuffix(
+          canonicalPath,
+          torrentFile?.id ?? handoff.releaseKey,
+        );
+        presentation.canonicalPath = canonicalPath;
+      }
     }
     const previousGeneration = searchCache.db.prepare(
       'SELECT MAX(updated_at) AS max_updated_at FROM vfs_movie_entries',
@@ -867,9 +908,16 @@ async function materializeVfsEntryInner(
       && !isLegacyVfsEntry(existing)) {
       const orphanFields = authoritativeTvFields(torrentFile, handoff, existing.canonicalPath, now());
       const ext = path.posix.extname(torrentFile.internalPath).toLowerCase();
-      const canonicalPath = ext && ext !== '.exe'
-        ? existing.canonicalPath.replace(/\.[^.]+$/, ext)
-        : existing.canonicalPath;
+      // A COMMITTED presentation identity owns the path, extension
+      // included: the extension is a presentation decision, and a
+      // representation change must not rename the media. Only a path that
+      // was never committed may converge its extension.
+      const committedPath = committedPresentationFor(controlPlaneStore, handoff)?.canonicalPath;
+      const canonicalPath = committedPath
+        ? committedPath
+        : (ext && ext !== '.exe'
+          ? existing.canonicalPath.replace(/\.[^.]+$/, ext)
+          : existing.canonicalPath);
       const replaced = searchCache.replaceVfsTvEntry(
         { ...orphanFields, canonicalPath },
         { allowRejectionSupersede: true },
@@ -880,7 +928,10 @@ async function materializeVfsEntryInner(
       && existing.torrentFileId === torrentFile.id
       && existing.canonicalPath.toLowerCase().endsWith('.exe')
       && path.posix.extname(torrentFile.internalPath).toLowerCase() !== '.exe') {
-      const canonicalPath = existing.canonicalPath.replace(/\.[^.]+$/, path.posix.extname(torrentFile.internalPath).toLowerCase());
+      const committedExePath = committedPresentationFor(controlPlaneStore, handoff)?.canonicalPath;
+      const canonicalPath = committedExePath
+        ? committedExePath
+        : existing.canonicalPath.replace(/\.[^.]+$/, path.posix.extname(torrentFile.internalPath).toLowerCase());
       const replaced = searchCache.replaceVfsTvEntry(
         authoritativeTvFields(torrentFile, handoff, canonicalPath, now()),
         { allowRejectionSupersede: true },
@@ -893,9 +944,12 @@ async function materializeVfsEntryInner(
       // is already media-valid; otherwise converge it to the new video type.
       const replacementExt = path.posix.extname(torrentFile.internalPath).toLowerCase();
       const existingExt = path.posix.extname(existing.canonicalPath).toLowerCase();
-      const replacementPath = isPlayableVideoTorrentFile(torrentFile) && existingExt === '.exe'
-        ? existing.canonicalPath.replace(/\.[^.]+$/, replacementExt)
-        : existing.canonicalPath;
+      const committedSupersedePath = committedPresentationFor(controlPlaneStore, handoff)?.canonicalPath;
+      const replacementPath = committedSupersedePath
+        ? committedSupersedePath
+        : (isPlayableVideoTorrentFile(torrentFile) && existingExt === '.exe'
+          ? existing.canonicalPath.replace(/\.[^.]+$/, replacementExt)
+          : existing.canonicalPath);
       // Legacy supersede: keep the existing canonical_path when valid and
       // atomically replace the physical identity with the validated TorrentFile bundle.
       //
@@ -930,23 +984,45 @@ async function materializeVfsEntryInner(
     assertExistingIdentity(existing, handoff, torrentFile);
     return finalize(existing, 'vfs-tv-idempotent');
   }
+  // The physical extension comes from the TorrentFile (the actual file),
+  // while the NAME inference comes from the release filename.
   const episode = episodeIdentity(torrentFile?.internalPath ?? handoff.filename, handoff.mediaId);
-  const presentationTitle = typeof handoff.canonicalTitle === 'string' && handoff.canonicalTitle.trim()
-    ? handoff.canonicalTitle.trim()
-    : (torrentFile ? handoff.mediaId : episode.title);
-  let canonicalPath = buildPreferredCanonicalPath({
-    mediaType: 'episode',
-    mediaId: handoff.mediaId,
-    title: presentationTitle,
-    season: handoff.season,
-    episode: handoff.episode,
-  }, { extension: episode.extension });
-  const usedPaths = new Set(searchCache.listVfsTvEntries().map((entry) => entry.canonicalPath));
-  if (usedPaths.has(canonicalPath)) {
-    canonicalPath = addDeterministicCollisionSuffix(
+  const episodeName = episodeIdentity(handoff.filename, handoff.mediaId);
+  // The committed identity wins; otherwise the name is resolved once
+  // through the shared precedence (the request's canonical title, then the
+  // catalog's series title, then the filename inference).
+  const committedEpisode = committedPresentationFor(controlPlaneStore, handoff);
+  let canonicalPath;
+  let presentation;
+  if (committedEpisode?.canonicalPath) {
+    canonicalPath = committedEpisode.canonicalPath;
+    presentation = {
+      title: committedEpisode.title,
+      year: committedEpisode.year,
       canonicalPath,
-      torrentFile?.id ?? handoff.releaseKey,
-    );
+      strmPath: committedEpisode.strmPath,
+      committed: true,
+    };
+  } else {
+    const resolved = await resolvePresentationIdentity(handoff);
+    const derived = derivePresentationIdentity({
+      mediaType: 'episode',
+      title: resolved.title || episodeName.title,
+      year: resolved.year,
+      extension: episode.extension,
+      season: handoff.season,
+      episode: handoff.episode,
+    });
+    canonicalPath = derived.canonicalPath;
+    presentation = { ...derived, committed: false };
+    const usedPaths = new Set(searchCache.listVfsTvEntries().map((entry) => entry.canonicalPath));
+    if (usedPaths.has(canonicalPath)) {
+      canonicalPath = addDeterministicCollisionSuffix(
+        canonicalPath,
+        torrentFile?.id ?? handoff.releaseKey,
+      );
+      presentation.canonicalPath = canonicalPath;
+    }
   }
   const previousGeneration = searchCache.db.prepare(
     'SELECT MAX(updated_at) AS max_updated_at FROM vfs_tv_entries',

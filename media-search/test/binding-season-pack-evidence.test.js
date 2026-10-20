@@ -302,7 +302,7 @@ test('A2 — replay of a single episode is idempotent (no duplicate library_item
   assert.equal(bindings[0].version, 1);
 });
 
-test('A3 — concurrent replay of all 4 episodes converges to exactly 1 binding per episode', (t) => {
+test('A3 — concurrent replay of all 4 episodes converges to exactly 1 binding per episode', async (t) => {
   const { cache, store } = buildStoreAndCache(t);
   const { placementId } = seedSeasonPackFixture(store);
 
@@ -310,16 +310,19 @@ test('A3 — concurrent replay of all 4 episodes converges to exactly 1 binding 
   // convergence guarantee is that no episode ends up with more than one
   // library_items row OR more than one active binding row, regardless of
   // interleaving.
+  // The materializer resolves the presentation identity asynchronously
+  // (the name may come from the catalog), so the concurrent replay is
+  // awaited: the convergence guarantee under test is that the interleaving
+  // of concurrent materializations produces one row per episode, not that
+  // they are synchronous.
   for (let round = 0; round < 2; round += 1) {
-    for (const ep of EPISODES) {
-      materializeVfsEntry(
-        cache,
-        seasonPackHandoff(ep, placementId),
-        store,
-        () => 1_000 + round * 100,
-        { allowLegacy: false },
-      );
-    }
+    await Promise.all(EPISODES.map((ep) => materializeVfsEntry(
+      cache,
+      seasonPackHandoff(ep, placementId),
+      store,
+      () => 1_000 + round * 100,
+      { allowLegacy: false },
+    )));
   }
 
   const libItems = store.db.prepare(

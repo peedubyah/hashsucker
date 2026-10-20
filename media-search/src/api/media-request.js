@@ -18,7 +18,10 @@
 import { isPlayableVideoTorrentFile } from '../lib/resolver/tv-episode-resolver.js';
 import { getServiceability } from '../lib/vfs/byte-health.js';
 import { publishStrm } from '../lib/requests/strm-publisher.js';
-import { createLibraryIdentityKey } from '../lib/control-plane/canonical-path.js';
+import {
+  createLibraryIdentityKey,
+  stableLibraryItemId,
+} from '../lib/control-plane/canonical-path.js';
 import { notifyJellyfin } from '../lib/requests/jellyfin-notifier.js';
 import { confirmPlexEpisode } from '../lib/consumers/plex.js';
 import {
@@ -162,7 +165,25 @@ export function getPreparedDurableState({
  * @param {number|null} episode - Episode number (episodes only)
  * @returns {Promise<{ strmPath: string|null, handoff: Object|null }>} Result
  */
-async function ensureStrmForExistingHandoff(cache, mediaId, mediaType, season = null, episode = null) {
+/**
+ * The committed presentation identity of a media intent, if it has one.
+ */
+function committedPresentation(controlPlaneStore, { mediaId, mediaType, season = null, episode = null }) {
+  if (!controlPlaneStore || typeof controlPlaneStore.getPresentationIdentity !== 'function') return null;
+  try {
+    const identityKey = createLibraryIdentityKey({
+      mediaType: mediaType === 'movie' ? 'movie' : 'episode',
+      mediaId,
+      season: season ?? undefined,
+      episode: episode ?? undefined,
+    });
+    return controlPlaneStore.getPresentationIdentity(stableLibraryItemId(identityKey)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureStrmForExistingHandoff(cache, controlPlaneStore, mediaId, mediaType, season = null, episode = null) {
   // Look up existing handoff (if any). Movies key by mediaId only; episodes
   // must use exact season/episode identity to avoid ambiguity when a series
   // has multiple episode handoffs.
@@ -217,8 +238,17 @@ async function ensureStrmForExistingHandoff(cache, mediaId, mediaType, season = 
     selectedAt: handoff.selectedAt,
   };
 
-  // Attempt STRM publication (idempotent - returns existing if present)
-  const strmResult = await publishStrm({ handoff: handoffObj });
+  // Attempt STRM publication (idempotent - returns existing if present).
+  // The COMMITTED presentation identity names the artifact when it exists:
+  // no title is resolved and no metadata is fetched, so a republication
+  // can neither move the artifact nor duplicate it.
+  const presentation = committedPresentation(controlPlaneStore, {
+    mediaId, mediaType, season, episode,
+  });
+  const strmResult = await publishStrm({
+    handoff: handoffObj,
+    ...(presentation ? { presentation } : {}),
+  });
 
   if (strmResult.published && strmResult.path) {
     // Notify Jellyfin (non-blocking)
@@ -584,7 +614,7 @@ export async function searchByMedia(cache, request) {
     // No corpus candidates and no title-index hits — but an existing
     // durable handoff may still need its STRM materialized (idempotence
     // invariant).
-    const { strmPath } = await ensureStrmForExistingHandoff(cache, ctx.mediaId, ctx.mediaType, ctx.season, ctx.episode);
+    const { strmPath } = await ensureStrmForExistingHandoff(cache, ctx.controlPlaneStore, ctx.mediaId, ctx.mediaType, ctx.season, ctx.episode);
     return {
       requestId: null,
       intent: ctx.intent,
@@ -614,7 +644,7 @@ async function runLivePipeline(ctx, { titleIndex, titleInputs }) {
   if (liveCandidates.length === 0) {
     // No candidates from corpus or live discovery — but an existing durable
     // handoff may still need its STRM materialized (idempotence invariant).
-    const { strmPath } = await ensureStrmForExistingHandoff(ctx.cache, ctx.mediaId, ctx.mediaType, ctx.season, ctx.episode);
+    const { strmPath } = await ensureStrmForExistingHandoff(ctx.cache, ctx.controlPlaneStore, ctx.mediaId, ctx.mediaType, ctx.season, ctx.episode);
     return {
       requestId: null,
       intent: ctx.intent,

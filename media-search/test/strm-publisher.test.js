@@ -12,8 +12,9 @@
  *
  * Test strategy: redirect STRM_OUTPUT_PATH to a per-process temp directory so
  * the publisher writes real files without polluting the production tree.
- * Pass `selection.selected.release.title` to short-circuit the Cinemeta
- * lookup (which would require a network or stub).
+ * Pass the title on the HANDOFF (`canonicalTitle`) — that is the identity
+ * authority, and it short-circuits the catalog lookup (which would require
+ * a network or stub).
  */
 
 import assert from 'node:assert/strict';
@@ -42,7 +43,7 @@ function seriesHandoff({ mediaId, season, episode }) {
   };
 }
 
-function movieHandoff({ mediaId }) {
+function movieHandoff({ mediaId, canonicalTitle = 'Movie', canonicalYear = 2024 }) {
   return {
     mediaId,
     mediaType: 'movie',
@@ -50,6 +51,8 @@ function movieHandoff({ mediaId }) {
     episode: null,
     releaseKey: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0',
     filename: 'Movie (2024).mkv',
+    canonicalTitle,
+    canonicalYear,
   };
 }
 
@@ -112,11 +115,10 @@ test('publishStrm: title uses the canonical presentation rule shared with VFS', 
     ['A/B: C? "D"', 2020, 'A B C D (2020)', 'A B C D (2020).strm'],
   ];
   for (const [title, year, dirBase, file] of cases) {
-    const handoff = movieHandoff({ mediaId: `tt_canon_${year}` });
-    const result = await publishStrm({
-      handoff,
-      selection: { selected: { release: { title, year } } },
-    });
+    // The title travels on the handoff: the request's canonical title is
+    // the identity authority (the release attributes are not).
+    const handoff = movieHandoff({ mediaId: `tt_canon_${year}`, canonicalTitle: title, canonicalYear: year });
+    const result = await publishStrm({ handoff });
     assert.equal(result.published, true);
     assert.ok(
       result.path.endsWith(path.join('Movies', dirBase, file)),
@@ -126,25 +128,24 @@ test('publishStrm: title uses the canonical presentation rule shared with VFS', 
   }
 });
 
-test('publishStrm: legacy underscore publication migrates to the canonical name', async () => {
+test('publishStrm: a legacy publication is ADOPTED where it is, not renamed and not duplicated', async () => {
   const root = process.env.STRM_OUTPUT_PATH;
   const legacyDir = path.join(root, 'Movies', 'Test_ Migration Case (2030)');
   const legacyFile = path.join(legacyDir, 'Test_ Migration Case (2030).strm');
   await fs.mkdir(legacyDir, { recursive: true });
   await fs.writeFile(legacyFile, 'http://localhost:8080/stream/movie/tt_mig_1\n', 'utf8');
 
-  const handoff = movieHandoff({ mediaId: 'tt_mig_1' });
-  const result = await publishStrm({
-    handoff,
-    selection: { selected: { release: { title: 'Test: Migration Case', year: 2030 } } },
+  // The handoff names the media differently from the legacy artifact. A
+  // publication must not move the artifact the consumer already has, and
+  // must not write a second one beside it: the CONTENT identifies the
+  // artifact, so the existing one is adopted where it is.
+  const handoff = movieHandoff({
+    mediaId: 'tt_mig_1', canonicalTitle: 'Test: Migration Case', canonicalYear: 2030,
   });
+  const result = await publishStrm({ handoff });
   assert.equal(result.published, true);
-  assert.ok(
-    result.path.endsWith(path.join('Movies', 'Test Migration Case (2030)', 'Test Migration Case (2030).strm')),
-    `migrated to canonical path: got ${result.path}`,
-  );
+  assert.equal(result.path, legacyFile, 'the existing artifact is adopted where it is');
   assert.equal(await readStrm(result.path), 'http://localhost:8080/stream/movie/tt_mig_1');
-  await assert.rejects(fs.access(legacyFile), 'legacy file must be gone (no duplicates)');
-  const remaining = await fs.readdir(legacyDir).catch(() => []);
-  assert.equal(remaining.length, 0, 'legacy dir must be empty or removed');
+  const files = await fs.readdir(legacyDir);
+  assert.equal(files.length, 1, 'no duplicate artifact was written');
 });

@@ -24,6 +24,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { publishStrm, expectedStrmPath } from './strm-publisher.js';
+import { createLibraryIdentityKey, stableLibraryItemId } from '../control-plane/canonical-path.js';
+import { resolvePresentationName } from '../control-plane/presentation-identity.js';
 import { materializeVfsEntry } from '../vfs/materialize.js';
 import { notifyJellyfin } from './jellyfin-notifier.js';
 import { notifyPlex } from './plex-notifier.js';
@@ -83,7 +85,8 @@ function assertVfsEntry({ handoff, vfsEntry }) {
  * remove and republish exactly once so repair converges instead of
  * compounding. Without a VFS row, publish directly.
  */
-async function publishStrmConverged({ handoff, selection, vfsEntry }) {
+async function publishStrmConverged({ handoff, selection, vfsEntry, controlPlaneStore = null }) {
+  const identity = committedIdentityFor(controlPlaneStore, handoff);
   const verify = () => verifyPublishedStrm({
     vfsCanonicalPath: vfsEntry?.canonicalPath,
     mediaType: handoff.mediaType,
@@ -91,9 +94,25 @@ async function publishStrmConverged({ handoff, selection, vfsEntry }) {
     season: handoff.season ?? null,
     episode: handoff.episode ?? null,
   }).catch(() => null);
+
+  if (identity?.strmPath) {
+    // The identity is committed: the artifact's path is known, no title
+    // is resolved and no metadata is fetched. A missing artifact is
+    // rewritten at the SAME path — the identity is the path.
+    const target = path.join(strmOutputRoot(), identity.strmPath);
+    const existing = await verifyAt(target, handoff);
+    if (existing) return { path: existing, adopted: true, identity };
+    const published = await runPublishStrm({ handoff, selection, presentation: identity });
+    if (published?.path) return { path: published.path, adopted: false, identity };
+    return { path: null, adopted: false, identity };
+  }
+
   if (vfsEntry?.canonicalPath) {
     const adopted = await verify();
-    if (adopted) return { path: adopted, adopted: true };
+    if (adopted) {
+      await commitIdentity(controlPlaneStore, handoff, vfsEntry, adopted, selection);
+      return { path: adopted, adopted: true };
+    }
     const published = await runPublishStrm({ handoff, selection });
     if (published?.path) {
       const verified = await verify();
@@ -104,18 +123,143 @@ async function publishStrmConverged({ handoff, selection, vfsEntry }) {
           // Already gone; republishing recreates it.
         }
         const repaired = await runPublishStrm({ handoff, selection });
-        if (repaired?.path) return { path: repaired.path, adopted: false, repaired: true };
+        if (repaired?.path) {
+          await commitIdentity(controlPlaneStore, handoff, vfsEntry, repaired.path, selection);
+          return { path: repaired.path, adopted: false, repaired: true };
+        }
       }
+      await commitIdentity(controlPlaneStore, handoff, vfsEntry, published.path, selection);
     }
     return { path: published?.path ?? null, adopted: false };
   }
   const published = await runPublishStrm({ handoff, selection });
+  await commitIdentity(controlPlaneStore, handoff, vfsEntry, published?.path ?? null, selection);
   return { path: published?.path ?? null, adopted: false };
 }
 
-async function runPublishStrm({ handoff, selection }) {
+/**
+ * The committed presentation identity of a media intent, if it has one.
+ */
+function committedIdentityFor(controlPlaneStore, handoff) {
+  if (!controlPlaneStore || typeof controlPlaneStore.getPresentationIdentity !== 'function') return null;
   try {
-    return await publishStrm({ handoff, ...(selection ? { selection } : {}) });
+    const identityKey = createLibraryIdentityKey({
+      mediaType: handoff.mediaType === 'movie' ? 'movie' : 'episode',
+      mediaId: handoff.mediaId,
+      season: handoff.season ?? undefined,
+      episode: handoff.episode ?? undefined,
+    });
+    return controlPlaneStore.getPresentationIdentity(stableLibraryItemId(identityKey)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * COMMIT the presentation identity of a media intent.
+ *
+ * The commit happens once, at the publication that produced the artifacts
+ * a consumer can see. The canonical path is the durable VFS path; the
+ * `.strm` path is the artifact that was just written (or adopted). The
+ * title and year are resolved through the shared precedence, so the
+ * identity describes the same name every surface uses.
+ */
+async function commitIdentity(controlPlaneStore, handoff, vfsEntry, strmPath, selection) {
+  if (!controlPlaneStore || typeof controlPlaneStore.commitPresentationIdentity !== 'function') return null;
+  if (!strmPath) return null;
+  const relative = path.relative(strmOutputRoot(), strmPath);
+  const title = await resolveTitleForIdentity(handoff, selection);
+  try {
+    const result = controlPlaneStore.commitPresentationIdentity(
+      stableLibraryItemId(createLibraryIdentityKey({
+        mediaType: handoff.mediaType === 'movie' ? 'movie' : 'episode',
+        mediaId: handoff.mediaId,
+        season: handoff.season ?? undefined,
+        episode: handoff.episode ?? undefined,
+      })),
+      {
+        title: title.title,
+        year: title.year,
+        canonicalPath: vfsEntry?.canonicalPath ?? null,
+        strmPath: relative,
+      },
+    );
+    return result?.identity ?? null;
+  } catch (error) {
+    console.warn(`[publication] presentation identity commit failed for ${handoff.mediaId}: ${error?.message ?? error}`);
+    return null;
+  }
+}
+
+/**
+ * The `.strm` root. The identity stores the path RELATIVE to it: the root
+ * is a deployment detail, the identity is not.
+ */
+function strmOutputRoot() {
+  return process.env.STRM_OUTPUT_PATH || '/strm';
+}
+
+/**
+ * The display name of a media intent, resolved through the shared
+ * precedence. Used only when the identity is committed (the first
+ * publication); a committed identity is never re-resolved.
+ */
+async function resolveTitleForIdentity(handoff, selection) {
+  const release = selection?.selected?.release ?? null;
+  let catalogTitle = null;
+  let catalogYear = null;
+  try {
+    // The catalog is consulted only where the request was silent (the same
+    // rule the VFS materializer and the `.strm` publisher use).
+    const explicitTitle = typeof handoff.canonicalTitle === 'string' ? handoff.canonicalTitle.trim() : '';
+    if (!explicitTitle) {
+      const { getMedia } = await import('../metadata/cinemeta.js');
+      const media = await getMedia(handoff.mediaType === 'series' ? 'series' : 'movie', handoff.mediaId);
+      if (media?.title) {
+        catalogTitle = media.title;
+        catalogYear = media.year ?? null;
+      }
+    }
+  } catch {
+    // The catalog is optional: a name is committed either way.
+  }
+  return resolvePresentationName({
+    canonicalTitle: handoff.canonicalTitle ?? null,
+    canonicalYear: handoff.canonicalYear ?? null,
+    catalogTitle,
+    catalogYear,
+    inferredTitle: release?.title ?? null,
+    inferredYear: release?.year ?? null,
+    mediaId: handoff.mediaId,
+  });
+}
+
+/**
+ * Does the file at `target` carry THIS media's resolver URL?
+ */
+async function verifyAt(target, handoff) {
+  let content;
+  try {
+    content = await fs.readFile(target, 'utf8');
+  } catch {
+    return null;
+  }
+  const firstLine = content.split('\n')[0].trim();
+  const isMovie = handoff.mediaType === 'movie';
+  if (isMovie) return firstLine.includes(`/stream/movie/${handoff.mediaId}`) ? target : null;
+  if (!firstLine.includes(`/stream/series/${handoff.mediaId}`)) return null;
+  if (handoff.season != null && !firstLine.includes(`season=${handoff.season}`)) return null;
+  if (handoff.episode != null && !firstLine.includes(`episode=${handoff.episode}`)) return null;
+  return target;
+}
+
+async function runPublishStrm({ handoff, selection, presentation = null }) {
+  try {
+    return await publishStrm({
+      handoff,
+      ...(selection ? { selection } : {}),
+      ...(presentation ? { presentation } : {}),
+    });
   } catch (error) {
     throw new PublicationError('strm-publication', error);
   }
@@ -381,7 +525,7 @@ export async function publishSelectedHandoff({
   const vfsEntry = await materializeHandoff({ cache, controlPlaneStore, handoff });
   console.log(`[e2e] vfs_materialized media=${mediaId} ts=${Date.now()}`);
   assertVfsEntry({ handoff, vfsEntry });
-  const strm = await publishStrmConverged({ handoff, selection, vfsEntry });
+  const strm = await publishStrmConverged({ handoff, selection, vfsEntry, controlPlaneStore });
   if (strm.path) handoff.strmPath = strm.path;
   console.log(`[e2e] strm_written media=${mediaId} ts=${Date.now()} path=${strm.path}`);
   notifyJellyfinBestEffort({ strmPath: strm.path, handoff });
@@ -410,7 +554,7 @@ export async function republishHealthyHandoff({
     throw new PublicationError('vfs-materialization',
       new Error(`VFS materialization returned no entry for ${handoff.mediaId}`));
   }
-  const strm = await publishStrmConverged({ handoff, vfsEntry });
+  const strm = await publishStrmConverged({ handoff, vfsEntry, controlPlaneStore });
   if (strm.path) handoff.strmPath = strm.path;
   notifyJellyfinBestEffort({ strmPath: strm.path, handoff });
   const hydratedEntry = await hydrateVfsMetadata({ vfsEntry, mediaType, mediaId, season, episode, hydrateVfs });
