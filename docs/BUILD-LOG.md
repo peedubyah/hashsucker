@@ -3848,8 +3848,7 @@ corpus/exact-file/provider suites: 74/74.
 
 | commit | change |
 |---|---|
-| `c2a5f0a` | feat(corpus): the corpus's per-file identity, and the candidate's evidence strength |
-| `5f1c9d2` | test(corpus): the per-file identity chain |
+| `a05410a` | feat(corpus): the corpus's per-file identity, the candidate's evidence strength, and the TorBox exact path |
 
 ### WHAT REMAINS UNPROVEN
 
