@@ -1917,3 +1917,168 @@ Bound the Cinemeta lookup (timeout + fail-closed) so an external
 metadata outage cannot move a presentation path or hold a request open;
 that also removes the load-sensitive failure in
 `media-request.test.js:1212`.
+
+## 2026-10-19 — Critical-path independence & autonomous recovery audit — CLOSED
+
+Slice: enumerate every external dependency that can still make a normal
+request, publication or playback unnecessarily slow, stuck or permanently
+broken; classify each by semantic necessity; make the justified ones
+bounded, background-owned or autonomously recoverable.
+
+Evidence: the gated request-path trace (`f671483`, `HASHSUCKER_PERF_TRACE=1`)
+plus production-path measurement on the live appliance. Full matrix:
+`docs/critical-path-dependencies.md`.
+
+### PHASE 1 — PRODUCTION DEPENDENCY GRAPH (from code)
+
+Request path `POST /api/media-request` → discovery → identity → ranking →
+provider evidence → Binding → VFS publication → WebDAV → Plex ingest →
+MediaPart → bytes:
+
+| # | dependency | caller | purpose | critical? | timeout | abort | retry | limiter | fallback | durable substitute | failure owner |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | Cinemeta `/meta/*` | `resolveWantedIdentity`, `resolvePresentationIdentity`, `resolveMediaTitle` | clean title/year; optional title cross-check | D (enrichment) + B (title cross-check) | **NONE (fixed)** | **NONE (fixed)** | none | none | release attributes / request canonical identity / release filename | corpus `release_attributes`, handoff canonical identity | none (fixed: bounded + remembered) |
+| 2 | Cinemeta `/catalog/*/search` | `cinemeta-identity-resolver` | candidate→media identity | D | **NONE (fixed)** | **NONE (fixed)** | none | none | resolver short-circuit | corpus associations | fixed |
+| 3 | Torrentio / Comet (Stremio) | `searchStremio` | live candidate discovery | A/B | 5 s | yes | none | none | Torznab + corpus + Prowlarr | corpus (2.1 M candidates) | live bridge (per-source disposition) |
+| 4 | Torznab | `searchTorznab` | live candidate discovery | B | 5 s | yes | none | none | corpus | corpus | live bridge |
+| 5 | Prowlarr | `searchProwlarr` | escalation discovery | B | 8 s | yes | none | none | — (skipped when the fast layer is viable) | corpus | live bridge (escalation only) |
+| 6 | TorBox `checkcached` | availability checker | cached/uncached per hash | B | 2 s | yes | none | 30 req/min (in-process) | cached observation (5 min TTL) | `provider_observations` | availability checker |
+| 7 | TorBox `mylist` (account) | `lookupPlacement`, create-verify | hash→resource index | A (create path only) | 15 s | yes | 1 (coordinator) | none | none | durable placement rows | create-first path (proven floor) |
+| 8 | TorBox `mylist?id=` | `getFileInventory` | one torrent's file list | A (binding) | 15 s | yes | 1 | none | none | durable provider_files + inventory snapshot | request path |
+| 9 | TorBox `createtorrent` | create-first placement | cached-only placement create | A (create path) | 5 s | yes | none | none | passive lookup | — | request path |
+| 10 | Real-Debrid `torrents` (account) | RD ensure, RD realizer, coverage ensurer | hash→resource index | B/D | 10 s | yes | 1 (rate-limit) | 500 ms min interval + global cooldown | durable RD placement | `provider_placements` | **realizer had no memory (fixed)** |
+| 11 | Real-Debrid `torrents/info/*` | RD realizer | authoritative file list | B | 10 s | yes | 1 | as above | — | durable provider_files | realizer |
+| 12 | PMS `/library/sections/*/refresh` | `notifyPlex` | targeted Plex scan | E | 5 s | yes | none | coalescer (60 s window) | Plex's own scan | VFS row + .strm | plex-notifier (fire-and-forget) |
+| 13 | PMS `/activities`, `/library/metadata` | `plex-ingest` | ingest confirmation | D | 10 s/req | yes | poll 250 ms | flight (1 per section) | .strm + VFS | VFS row | publication path (bounded 20 s/60 s) |
+| 14 | PMS `confirmPlexEpisode` | reuse + publication confirm | "is it visible to Plex" | D | 60 s | yes | none | none | publish state | VFS row | request path (60 s budget) |
+| 15 | Jellyfin `/Library/*` | `notifyJellyfin` | consumer refresh | E | 5 s | yes | none | none | Jellyfin's own scan | .strm | fire-and-forget (currently 401: bad key) |
+| 16 | data-plane `/files/:tfId` | `streamFromDataPlane`, byte probe | bytes | A (playback) | 30 s (headers) | yes | Rust-owned | Rust-owned | alternate TF (class D) | — | Rust |
+| 17 | edge (Caddy) → media-search | all | ingress | A | — | — | — | — | — | — | Caddy |
+| 18 | Cinemeta/Plex/TorBox DNS+TLS | all | transport | A | per call | per call | per provider | per provider | — | — | undici |
+
+Other paths traced: healthy re-request (12–39 ms, zero external calls);
+requested-season/background fulfillment (anticipation tick 60 s, season
+reconcile → intent rows only); provider reconciliation (route reconciler,
+6 h, single-flight); publication replay (reuse → republish); playback
+recovery (Rust class-D → persisted alternate TorrentFile).
+
+### PHASE 2–3 — WHAT WAS ACTUALLY UNBOUNDED OR MISPLACED
+
+Classified by what the product invariant needs (A authority-critical,
+B critical only without local evidence, C reconciliation, D enrichment,
+E telemetry):
+
+- **Cinemeta `getJson()` had no timeout and no AbortSignal** → an optional
+  public service could hold a request, a publication or a playback open
+  indefinitely, and its failure moved the PMS-visible canonical path
+  (D/B, and a correctness hazard rather than enrichment).
+- **The RD placement realizer had no memory of an absent resource** → the
+  provider's only hash index was re-downloaded once per release per
+  catalog sweep, forever (C/D — enrichment pretending to be reconciliation).
+- **The Binding was re-authorized on every catalog sweep** → the store's
+  route-observation guard turned an expired 5-minute inventory observation
+  into a permanent error for an already-authorized Binding (C — read
+  traffic doing authorization work).
+- **The publication path fetches the same Cinemeta metadata twice**
+  (VFS presentation identity + `.strm` title) — duplicated proof, cheap
+  but real.
+
+Everything else on the foreground path was already bounded: Stremio 5 s,
+Torznab 5 s, Prowlarr 8 s, TorBox 2/5/15 s, RD 10 s + 500 ms limiter,
+Plex 5/10 s, data-plane 30 s.
+
+### PHASE 4 — BUDGETS (measured, not invented)
+
+Cinemeta healthy p50 80 ms, max 205 ms; the slow-but-valid outlier was
+1.72 s. Budget: **3 s, abortable** (`CINEMETA_TIMEOUT_MS`). Failure
+memory: 30 s per (transport, path).
+
+### PHASE 5 — RECOVERY OWNERSHIP
+
+| state | notices | retries | durable record | wake-up | hot-loop guard | human? |
+|---|---|---|---|---|---|---|
+| Cinemeta unavailable | caller (catch) | next request | none needed | next request | 30 s per-lookup memory | no |
+| Cinemeta degraded path | publication | never (path is stable) | VFS row + `.strm` | — | — | no |
+| Discovery source unavailable | live bridge | next request | per-source disposition | next request | none needed | no |
+| No serviceable provider route | selection | alternates (bounded 4) | `serviceability` in response | next request | bounded | no |
+| Stale ProviderPlacement | route reconciler | 6 h | placement row | reconciler tick | single-flight | no |
+| Stale ProviderFile | request path | next request | provider_files | next request | — | no |
+| Negative byte-health | selection probe | half-open | in-process registry | next probe | 20 s→5 min backoff | no |
+| Publication ok, consumer invisible | Plex notify | coalescer | VFS row + `.strm` | Plex scan | 60 s coalescer | no |
+| PMS unavailable | notify/confirm | next request | none needed | next request | bounded 5/10/60 s | no |
+| Active Binding route fails | Rust | same-TF failover | byte-health | byte read | per-route | no |
+| Alternate route exists | Rust + VFS | class D | persisted alternate | byte read | — | no |
+| No alternate route | VFS | terminal 5xx | — | new request | — | no |
+| RD account enumeration | realizer | — | — | — | **fixed (memory+snapshot+single-flight)** | no |
+| Binding re-authorization | catalog sweep | — | — | — | **fixed (identity-scoped skip)** | no |
+
+### PHASE 6–7 — DUPLICATED PROOF / IMPLICIT STATE
+
+- Duplicated: Cinemeta metadata (2 calls per publication) — cheap, now
+  bounded; provider route validation (selection probe + catalog sweep +
+  reconciler) — genuinely different semantics (serve-time vs repair-time).
+- Implicit state that has already caused harm: the provider inventory
+  observation's TTL is used as an AUTHORIZATION gate, so a normal
+  5-minute expiry reads as a permanent failure on the read path (fixed by
+  not re-authorizing an unchanged Binding); and the Binding's route
+  (placement+provider file) is a CHOICE among the provider files that map
+  to one provider-neutral TorrentFile, which is re-pointed by provider
+  churn — intended, but it means "the handoff's route" and "the Binding's
+  route" are two different facts that the projection does not reconcile.
+
+### PHASE 9 — FIXES IMPLEMENTED (one commit each)
+
+1. `b18fc4a fix(metadata): bound and de-duplicate the optional Cinemeta lookup`
+2. `c707e12 fix(rd): remember an absent RD resource instead of re-downloading the account`
+3. `500c3b5 perf(rd): share one RD account snapshot across a catalog pass`
+4. `33e6e09 perf(rd): single-flight the RD account download across concurrent kicks`
+5. `1d7c94b fix(binding): do not re-authorize an already-authorized Binding`
+
+### MEASURED EFFECT (production, same procedure before/after)
+
+| metric | before | after |
+|---|---|---|
+| RD account-list calls, 4 forced catalog passes (127 s) | 147 | **1** |
+| RD rate-limit waits, same window | 175 | **17** |
+| `activateBinding failed` warnings | 330 / 30 min | **16 / 5 min** (residual = route churn) |
+| Cinemeta stall on the publication path | unbounded (would block forever) | **3 001 ms, aborted, publication completed** (measured live on tt0056058) |
+
+A live Cinemeta stall was caught during the measurement: the catalog hung
+for one call, the request aborted at the 3 s budget, the publication
+completed (`published: true`, Binding activated) instead of hanging.
+
+E2E cohort (10 movies, live pipeline, real Plex Part + Range):
+- stale provider inventory: request→Binding 1353/1686/2298/…/6138 ms
+  (dominated by live discovery 0.9–5.0 s; the binding stage itself is
+  150–261 ms, of which the targeted inventory read is 143–250 ms);
+- fresh provider inventory: request→Binding 192/217/228/…/658 ms;
+- healthy re-request: 12–39 ms with ZERO external calls;
+- episode re-request (Plex confirm): 49–305 ms, Plex visible.
+- Part and 206 follow the Binding by 20–50 ms and 45–100 ms.
+
+### FULL SUITE
+
+3413 tests, 3409 pass, 1 fail, 3 skipped (exit 1). The single failure is
+the PRE-EXISTING baseline failure (`vfs-collection-resilience.test.js`
+C1/C2/C3), reproduced before any change of this slice. The
+load-sensitive `media-request.test.js:1212` reuse test passed this run.
+
+### REMAINING EXTERNAL DEPENDENCIES (justified exceptions)
+
+- Cinemeta: optional enrichment, now bounded at 3 s and remembered.
+- TorBox account `mylist` on the FIRST-ACQUISITION path: the provider's
+  only hash index; the ">1 resource matches this hash" conflict rule
+  cannot be proven by a targeted read (negative control in `7497770`).
+- Discovery sources: the corpus is the durable substitute, but a cold
+  corpus cannot answer a new release; bounded at 5 s each.
+- PMS/Jellyfin: projections, never canonical truth; bounded 5–10 s.
+- RD account list: the provider's only hash index; now bounded by
+  memory + snapshot + single-flight.
+
+### NEXT SMALLEST EARNED SLICE
+
+Make the `.strm` title and the VFS canonical path derive from ONE
+presentation identity. Today they use two different resolvers with
+different year handling (the VFS path drops a string year, the `.strm`
+path keeps it), so a published item can present two different paths to
+Plex and Jellyfin, and a catalog outage can move one of them.

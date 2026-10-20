@@ -29,12 +29,24 @@ TorrentFile on every fixture. Remaining known cost: the create-first
 verify still needs the account-wide read (the provider's only hash index —
 a proven floor, once per release), pinned by a negative control.
 
-Next earned slice: **bound the Cinemeta metadata lookup**. `getJson()` in
-`media-search/src/lib/metadata/cinemeta.js` has no timeout and no abort
-signal; the call sits on the publication path and a live `fetch failed`
-moved a `.strm` to a filename-derived path. It is also the cause of the
-load-sensitive `media-request.test.js:1212` failure. Unbounded external
-latency on the request path is a defect, not a footnote.
+Completed product slice: **critical-path independence & autonomous
+recovery audit** — **CLOSED** (`b18fc4a`, `c707e12`, `500c3b5`, `33e6e09`,
+`1d7c94b`; evidence in `docs/BUILD-LOG.md` 2026-10-19, matrix in
+`docs/critical-path-dependencies.md`). The foreground was already bounded
+almost everywhere; the audit found one unbounded external call (Cinemeta:
+no timeout, no abort) and two background loops that a READ path drove
+forever: the RD realizer re-downloaded the provider's whole account once
+per release per catalog pass (147 downloads per 4 forced passes → 1), and
+the WebDAV catalog sweep re-authorized already-authorized Bindings, so an
+expired 5-minute inventory observation read as a permanent failure (330
+warnings / 30 min → 16 / 5 min). A live Cinemeta stall was caught during
+the measurement and now aborts at the 3 s budget with the publication
+completing.
+
+Next earned slice: **one presentation identity for the `.strm` and the
+VFS path**. They are two resolvers with different year handling, so a
+published item can present two different paths to Plex and to Jellyfin,
+and a metadata outage can move one of them.
 
 Completed product slice: **exact durable-truth republication** — **CLOSED**.
 E01 VFS publication was genuinely removed, then recreated through

@@ -7,31 +7,32 @@ Read this file, `../AGENTS.override.md` (operating rules), and
 [`../docs/architecture.md`](../docs/architecture.md) (durable model). Do not
 trust old containers or historical HY4 handoffs.
 
-## Live session state (2026-10-19, post-discovery binding tail slice)
+## Live session state (2026-10-19, critical-path independence audit)
 
-- `main` is AHEAD of `github/main` (28 local commits, unpushed). The
-  header line above is stale on that point only; everything else below
-  still describes the live appliance.
-- Production `media-search` RUNS the local build of `1cc5445`
-  ("read one torrent for file inventory"), rebuilt with
-  `docker compose build media-search` + `docker compose up -d --no-deps
-  media-search`. Container healthy. No release/tag/push performed.
-- `HASHSUCKER_PERF_TRACE` is OFF in the running container. It is a
-  request-path timing trace added by `f671483`; set it to `1` in `.env`
-  (compose exposes it) to re-enable it. OFF is the default and must stay
-  the default in production.
-- Scratch from that slice is removed: no perf worktree, no perf-before
-  image, no scratch DB copies, no `/var/tmp/patrick/hashsucker/perf-*`
-  dirs. Evidence kept in `artifacts/perf-binding-tail/`.
-- Library state after the measurement: the 10 benchmarked movies are
-  published, bound, and byte-verified; two fixtures that a corpus-path
-  probe had re-routed (tt0076759, tt0102926) were restored to their
-  original bindings. Details in `docs/BUILD-LOG.md` 2026-10-19.
+- `main` is AHEAD of `github/main` (local commits, unpushed). The header
+  line above is stale on that point only; everything else below still
+  describes the live appliance.
+- Production `media-search` RUNS the local build of `1d7c94b` ("do not
+  re-authorize an already-authorized Binding"), which includes the
+  bounded Cinemeta lookup (`b18fc4a`) and the bounded Real-Debrid account
+  enumeration (`c707e12`, `500c3b5`, `33e6e09`). Container healthy. No
+  release/tag/push performed.
+- `HASHSUCKER_PERF_TRACE=1` is currently SET in `.env` (the measurement
+  window of this slice). It is the request-path trace added by `f671483`;
+  it is off by default and MUST be removed from `.env` before the slice
+  closes (compose exposes it as `HASHSUCKER_PERF_TRACE`).
+- Dependency matrix and recovery ownership:
+  `docs/critical-path-dependencies.md`. Evidence:
+  `docs/BUILD-LOG.md` 2026-10-19; retrospective
+  `docs/retrospectives/2026-10-19-critical-path-independence-audit.md`.
+- Background behaviour now: a WebDAV catalog sweep (PROPFIND, ≤60 s)
+  costs ONE Real-Debrid account download instead of one per release, and
+  it no longer re-authorizes Bindings that are already authorized
+  (measured: 147 → 1 account downloads per 4 forced sweeps; 330 → 16
+  activation warnings per 5 min).
 - Known baseline test failures (pre-existing, not caused by this slice):
-  `media-request.test.js:1212` (reuse-episode `< 5000 ms` assertion;
-  load-sensitive, passes in isolation — its wall time contains one
-  UNBOUNDED Cinemeta fetch) and `vfs-collection-resilience.test.js:131`
-  (C1/C2/C3, deterministic). The Cinemeta bound is the next earned slice.
+  `vfs-collection-resilience.test.js:131` (C1/C2/C3, deterministic) and,
+  under load, `media-request.test.js:1212` (reuse-episode `< 5000 ms`).
 
 ## Architecture boundaries (frozen)
 
