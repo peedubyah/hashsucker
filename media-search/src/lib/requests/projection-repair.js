@@ -27,8 +27,13 @@
  *                absence was proven
  */
 
-import { classifyProjection, PROJECTION_STATES } from '../control-plane/desired-projection.js';
+import {
+  classifyProjection,
+  PROJECTION_STATES,
+  sectionKindFor,
+} from '../control-plane/desired-projection.js';
 import { observePlexProjection } from '../consumers/projection-observer.js';
+import { confirmPlexEpisode } from '../consumers/plex.js';
 import { notifyPlex } from './plex-notifier.js';
 import { opportunisticIngestConfirm } from './plex-ingest.js';
 
@@ -38,32 +43,32 @@ import { opportunisticIngestConfirm } from './plex-ingest.js';
  * @param {Object} params
  * @returns {Promise<{observed: boolean, items: Array<Object>, error: string|null}>}
  */
-export async function observeProjection({ mediaId, mediaType, season = null, episode = null, consumer = 'plex' }) {
+export async function observeProjection({
+  mediaId, mediaType, season = null, episode = null, consumer = 'plex', expectedPartFile = null,
+}) {
   if (consumer !== 'plex') {
     return { observed: false, items: [], error: `unsupported-consumer:${consumer}` };
   }
-  return observePlexProjection({ mediaId, mediaType, season, episode });
+  return observePlexProjection({ mediaId, mediaType, season, episode, expectedPartFile });
 }
 
 /**
  * Compare the desired projection with what the consumer holds.
  */
 export async function classifyConsumerProjection({ desired, consumer = 'plex', observe = null }) {
+  const observerParams = {
+    mediaId: desired?.mediaId ?? null,
+    mediaType: desired?.mediaType ?? 'movie',
+    season: desired?.season ?? null,
+    episode: desired?.episode ?? null,
+    consumer,
+    // The expected Part file is the precise matcher: the consumer's own
+    // metadata (the file's embedded IMDb tag) can name a DIFFERENT film.
+    expectedPartFile: desired?.desired?.[consumer]?.partFile ?? null,
+  };
   const observed = observe
-    ? await observe({
-      mediaId: desired?.mediaId ?? null,
-      mediaType: desired?.mediaType ?? 'movie',
-      season: desired?.season ?? null,
-      episode: desired?.episode ?? null,
-      consumer,
-    })
-    : await observeProjection({
-      mediaId: desired?.mediaId ?? null,
-      mediaType: desired?.mediaType ?? 'movie',
-      season: desired?.season ?? null,
-      episode: desired?.episode ?? null,
-      consumer,
-    });
+    ? await observe(observerParams)
+    : await observeProjection(observerParams);
   const classification = classifyProjection({
     desired,
     observed: observed.observed ? observed : null,
@@ -119,7 +124,9 @@ export async function repairConsumerProjection({
   try {
     const notified = await notify({
       mediaId: desired.mediaId,
-      mediaType: desired.mediaType,
+      // The consumer's vocabulary: the library says 'episode', the Plex
+      // section says 'series'.
+      mediaType: sectionKindFor(desired.mediaType),
       canonicalPath: desired.presentation?.canonicalPath ?? null,
       fullSection: false,
     });
@@ -134,14 +141,29 @@ export async function repairConsumerProjection({
   if (typeof confirm === 'function') {
     try {
       const result = await confirm({
-        mediaType: desired.mediaType,
+        mediaType: sectionKindFor(desired.mediaType),
         canonicalPath: desired.presentation?.canonicalPath ?? null,
         mediaId: desired.mediaId,
         season: desired.season ?? null,
         episode: desired.episode ?? null,
         expectedPartFile: want.partFile ?? null,
         expectedSize: want.partSize ?? null,
-        timeoutMs: 30_000,
+        timeoutMs: 60_000,
+        findResult: async () => {
+          const plex = await confirmPlexEpisode({
+            mediaId: desired.mediaId,
+            season: desired.season ?? null,
+            episode: desired.episode ?? null,
+            ...(want.partFile ? { expectedPartFile: want.partFile } : {}),
+          });
+          if (!plex?.visible || !plex.mediaPart?.file) return null;
+          return {
+            partId: plex.mediaPart.id == null ? null : String(plex.mediaPart.id),
+            file: plex.mediaPart.file,
+            size: plex.mediaPart.size,
+            ratingKey: plex.ratingKey,
+          };
+        },
       });
       confirmed = result?.outcome === 'verified';
     } catch {

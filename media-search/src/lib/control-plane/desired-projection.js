@@ -53,6 +53,14 @@ export const PROJECTION_STATES = Object.freeze({
 });
 
 /**
+ * The CONSUMER's vocabulary for a media kind: the library item says
+ * 'movie' | 'episode', the consumer sections say 'movie' | 'series'.
+ */
+export function sectionKindFor(mediaType) {
+  return mediaType === 'movie' ? 'movie' : 'series';
+}
+
+/**
  * The scan path PMS must process for a canonical path: the parent
  * directory of the file, under the section root.
  *
@@ -135,14 +143,17 @@ export function desiredProjection({
   env = process.env,
 } = {}) {
   const mediaId = item?.mediaId ?? null;
+  // The CONSUMER's vocabulary is 'movie' | 'series'; the library item's
+  // is 'movie' | 'episode'. The section geometry is keyed by the former.
   const mediaType = item?.mediaType === 'episode' ? 'episode' : 'movie';
+  const sectionKind = mediaType === 'episode' ? 'series' : 'movie';
   const season = item?.season ?? null;
   const episode = item?.episode ?? null;
   const canonicalPath = presentation?.canonicalPath ?? vfsEntry?.canonicalPath ?? null;
   const strmPath = presentation?.strmPath ?? null;
   const size = torrentFile?.size ?? vfsEntry?.size ?? null;
 
-  const cfg = sectionConfigFor(mediaType, env);
+  const cfg = sectionConfigFor(sectionKind, env);
   const partFile = desiredPartFile(canonicalPath, cfg.root);
   const scanPath = desiredScanPath(canonicalPath, cfg.root);
 

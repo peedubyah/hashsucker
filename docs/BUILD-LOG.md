@@ -2951,3 +2951,156 @@ the identity yet: the Plex library's own metadata for these items (the
 title/year Plex parses out of the file name, the poster, the summary).
 That is descriptive enrichment, and it must be proven to leave the
 committed identity alone.
+
+## 2026-10-20 — CONSUMER PROJECTION FROM FIRST PRINCIPLES — CLOSED
+
+Slice: Plex and Jellyfin are projections of HashSucker's durable truth.
+Nothing said what that projection WAS: the refresh notifier derived a scan
+path, the ingest derived an expected Part file, the request path asked
+"does Plex hold SOME Part", and the operator surface reported a single
+`published` state. Prove the boundary, then make the missing projection
+reconstructible from our own state.
+
+### PHASE 1 — THE PROJECTION CONTRACT (what each surface actually does)
+
+| surface | durable input | consumer call | consumer answer used | durable write | retry owner |
+|---|---|---|---|---|---|
+| VFS materialization | handoff + committed identity | none | — | `vfs_*_entries` | the request path |
+| VFS size hydration | the VFS row | none (our own WebDAV) | — | `vfs_*_entries.size` | the request path, once |
+| Plex refresh | the canonical path | `GET /library/sections/{id}/refresh?path=` | **HTTP status only** (a 200 proves nothing) | none | **nobody** |
+| Plex ingest confirm | the canonical path + the size | `refresh?path=`, `GET /activities`, item fetch | the Part file, the Part size, the Part id | none | the request path (bounded) |
+| Jellyfin notify | the committed `.strm` path | `POST /Library/Media/Updated` | **HTTP status only** | none | **nobody** |
+| consumer reconcile | the library items | the consumer's library list | the item ids | `consumer_observations` | a 15-minute worker |
+| playback observation | nothing | `GET /status/sessions` | the progress, the Part file | `accepted_torrent_files`, `library_items.retire_at` | a 2-second worker |
+
+No Plex ratingKey, item id or Part id is written into `torrent_files`,
+`bindings`, `library_paths`, `vfs_*_entries` or `library_items.media_id`:
+the identity is the IMDb id throughout.
+
+### PHASE 2 — THE DESIRED PROJECTION (one derivation)
+
+`control-plane/desired-projection.js` derives, from the library item, the
+committed presentation identity, the VFS row, the binding and the
+authoritative TorrentFile:
+
+- the scan path PMS must process (the parent directory of our artifact);
+- the expected Part.file (our durable path under the section root);
+- the expected Part.size (the authoritative exact size);
+- the expected consumer path for Jellyfin (the committed `.strm` path);
+- the provider id (the IMDb id) and the item type.
+
+Pure: same inputs, same answer, no clock, no network. It replaces three
+independent derivations that agreed only because the deployment happened
+to be configured that way (the section root and the hard-coded
+`/mnt/hashsucker-vfs`).
+
+### PHASE 3 — THE TRUTH LEAKS FOUND, AND WHAT WAS DONE
+
+| leak | where | verdict | action |
+|---|---|---|---|
+| a Plex **title** was accepted as an identity fallback | `consumers/plex.js` | authority leak (it compared the title against an IMDb id — dead code, and wrong in principle) | removed; identity is the guid or the Part file |
+| Plex's **Part ordering** could pick the "authoritative" Part when no expected path was supplied | `consumers/plex.js`, `api/media-request.js` | authority leak (a consumer-chosen Part certified OUR publication) | the expected Part file is now always supplied; without it the confirm cannot return `verified` |
+| `String(null)` for a missing Part id | `requests/publication.js` | defect (it defeated the consumer's own readiness check) | the id is `null`, not `"null"` |
+| a truncated Jellyfin list was recorded as **absence** | `consumers/jellyfin.js` | stale-cache problem | a list at its cap is UNKNOWN, never absence |
+| a single consumer absence created durable republication work | `consumers/reconcile.js` | retry/reconciliation concern | the absence must persist (15 min) before it schedules work |
+| Plex session progress rewrote `library_items.retire_at` | `library/retirement.js` | **legitimate** — only the consumer knows what was watched; it touches no identity, path or representation | left, documented |
+| Plex absence could retire a publication | `consumers/eligibility.js` | policy-gated already (default off) | left; the truncated-list fix removes the false absence that fed it |
+| the accepted-playback row stores Plex ids | `consumers/accepted-playback.js` | a live candidate for a future leak | left; the row has no production reader and the identity comes from the active Binding |
+
+### PHASE 4 — THE PROJECTION STATES
+
+`aligned | missing | stale-path | stale-size | conflicted | unknown`,
+derived by comparison — not a new enum in the database, and no new table.
+The important distinction: **consumer-missing is not media-invalid**. An
+unobserved consumer is `unknown`, never `missing`; a `conflicted` consumer
+(several items for one intent) is an operator decision, not a repair.
+
+### PHASE 5 — THE RECONCILIATION AND THE REPAIR
+
+`control-plane/projection-audit.js` compares the desired projection with
+what the consumer holds; `requests/projection-repair.js` repairs it. The
+repair's entire vocabulary is: ask the consumer to look at the EXACT
+directory that holds our artifact, then observe again. No media
+reselection, no provider acquisition, no presentation rename, no Binding
+mutation, and never a whole-section scan.
+
+### PRODUCTION EVIDENCE (the appliance, 2026-10-20)
+
+`media-search` rebuilt and recreated; container healthy.
+
+| observation | value |
+|---|---|
+| intents audited | 190 |
+| aligned | **170** |
+| no byte path (the VFS row is gone; the identity keeps the `.strm` path) | 13 |
+| **missing** (the consumer holds nothing for our intent) | 6 |
+| stale size | 1 |
+| conflicted | 0 (the one earlier conflict was a guid artefact — a DIFFERENT film with the same title) |
+
+**The reconstruction proof** (a missing projection restored from our truth
+alone):
+
+| step | observation |
+|---|---|
+| the durable truth | LibraryItem `episode:tt31510819:default:2:1`, presentation identity committed (`TV/MobLand/Season 02/MobLand - S02E01.mkv`), TorrentFile `tf_5f619fba…`, size 9573001343 |
+| the desired projection | Part `/mnt/hashsucker-vfs/TV/MobLand/Season 02/MobLand - S02E01.mkv`, size 9573001343, scan path `…/TV/MobLand/Season 02` |
+| the consumer before | no item for that path |
+| the repair | `POST /api/operator/projection/repair` → one targeted refresh of that directory (1.2 s), no discovery, no ranking, no provider work |
+| the consumer after | the item exists (ratingKey 1743) with Part.file = our path |
+| the byte path | 206, `Content-Range: bytes 0-65535/9573001343` |
+| our durable truth | unchanged (the identity, the binding and the VFS row are exactly as before the repair) |
+
+A second case (`Casablanca`) showed why the Part file, not the guid, is
+the matcher: the Plex item for our file carries `imdb://tt0303279` (the
+file's embedded tag names another film), so a guid-only match reports a
+PRESENT projection as missing. Matching by the durable path classifies it
+correctly.
+
+### THE OUTAGE AND RESTART PROOF
+
+The publication intent is durable and independent of the consumer: the
+library item, the active binding, the committed presentation identity and
+the `.strm` artifact all exist before any consumer is told anything, and a
+Jellyfin or Plex outage changes none of them. A container restart left 179
+identities, 106 consumer directories and the byte path byte-identical
+(sha256 `ae83cd8c…` on City Lights). When the consumer returns, the
+projection converges through the audit + repair path — no rediscovery, no
+re-ranking, no re-binding.
+
+### THE FULL SUITE
+
+3492 tests, 3488 pass, 1 fail, 3 skipped (exit 1). The one failure is the
+pre-existing baseline `vfs-collection-resilience` C1/C2/C3. The focused
+projection/consumer suites: 22/22.
+
+### COMMITS
+
+| commit | change |
+|---|---|
+| `f7ff87e` | feat(projection): state what SHOULD exist in the consumer, and repair only that |
+
+### WHAT REMAINS UNPROVEN
+
+- **Jellyfin's live projection is blocked by the environment**: the
+  appliance's Jellyfin API key is rejected (HTTP 401), so every Jellyfin
+  call fails and the reconciler records UNKNOWN (fail closed). The
+  Jellyfin code path is characterised and unit-tested; the live proof is
+  blocked by the credential, not by the code.
+- The **stale-size** class has two different causes and only one repair:
+  a stale Plex Part (a refresh re-analyses it) and a VFS row that still
+  points at an older TorrentFile than the active binding (the VFS row must
+  be re-materialized — a VFS-layer action, not a projection repair). The
+  audit reports the VFS row's own size so the operator can tell them
+  apart; the re-materialization is not implemented here.
+- The **13 no-byte-path** items have a committed `.strm` and no VFS row:
+  they are playable through Jellyfin but are not projected into Plex, and
+  re-materializing them would be a media-side action (out of scope here).
+
+### NEXT SMALLEST EARNED SLICE
+
+The consumer projection is now stateable and repairable for what is
+MISSING. What is STALE still splits between "the consumer is behind" and
+"our own VFS row is behind the binding" — the durable truth has two
+copies of the byte identity, and only one of them is the authority. Making
+the VFS row a projection of the binding (rather than a second copy of the
+byte identity) would collapse the class.

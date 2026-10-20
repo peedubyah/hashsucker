@@ -146,10 +146,40 @@ re-request and a TV republication each left one artifact and one
 identity, the Plex ratingKey was unchanged (423), and the read served
 the same bytes.
 
-Next earned slice: **the consumer library's own metadata for these
-items** — the title/year Plex parses out of the file name, the poster,
-the summary. That is descriptive enrichment, and it must be proven to
-leave the committed presentation identity alone.
+Completed product slice: **consumer projection from first principles** —
+**CLOSED** (`f7ff87e`; evidence in `docs/BUILD-LOG.md` 2026-10-20). Plex
+and Jellyfin are projections of HashSucker's durable truth, but nothing
+said what that projection WAS: the refresh notifier derived a scan path,
+the ingest derived an expected Part file, the request path asked "does
+Plex hold SOME Part", and the operator surface reported one `published`
+state — so a missing consumer item and a missing media item were the same
+sentence. There is now ONE derivation of the desired projection (the scan
+path, the expected Part.file, the expected Part.size, the consumer path ✓)
+from the library item, the committed presentation identity, the VFS row and
+the binding; a comparison that classifies the difference (aligned /
+missing / stale-path / stale-size / conflicted / unknown ✓ — an
+unobserved consumer is UNKNOWN, never absent ✓); and a repair that asks
+the consumer to look at the exact directory and observes again (no media
+reselection ✓, no provider work ✓, no rename ✓, no Binding mutation ✓).
+The truth leaks are closed: a Plex title is no longer an identity
+fallback ✓, a consumer-chosen Part can no longer certify our publication
+✓, a missing Part id is no longer the truthy string "null" ✓, a truncated
+Jellyfin list is UNKNOWN rather than absence ✓, and a consumer absence
+must persist before it schedules durable republication work ✓. Proven on
+the appliance: 190 intents audited ✓, 170 aligned ✓, 6 missing ✓, 13
+without a byte path ✓, 1 stale size ✓ — and a missing projection was
+RESTORED from our truth alone ✓ (one targeted refresh ✓, the Part
+appeared ✓ at our exact path ✓, the byte path served 206 ✓, and our
+durable truth was unchanged ✓). The proof also found that our own truth
+has TWO copies of the byte identity ✓ (the VFS row and the binding can
+name different TorrentFiles ✓) — the next earned slice.
+
+Next earned slice: **one byte identity, two projections**. The VFS row
+and the active binding can name different TorrentFiles for one media
+intent, and the byte path serves the row's while the authority is the
+binding's. Making the VFS row a projection of the binding — rather than a
+second copy of the byte identity — collapses the stale-size class and
+makes "what is served" and "what is authoritative" the same fact.
 
 Completed product slice: **exact durable-truth republication** — **CLOSED**.
 E01 VFS publication was genuinely removed, then recreated through

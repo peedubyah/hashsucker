@@ -129,6 +129,29 @@ churn without changing TorrentFile identity. `candidate_file_mappings` separatel
 discovery `releaseKey` to a provider file. Never assume a placement is per-file or equate a
 discovery file index with a provider file ID.
 
+**Consumer projection** — what a consumer library should hold for a media
+intent:
+
+```text
+DesiredProjection = library item + presentation identity + VFS row + binding
+  plex      the scan path, the expected Part.file, the expected Part.size
+  jellyfin  the expected consumer path for the `.strm` artifact
+```
+
+The desired projection is DERIVED from durable truth (`desired-projection.js`),
+never from a consumer. It is compared with what the consumer holds
+(`projection-audit.js`), and the comparison classifies the difference:
+`aligned | missing | stale-path | stale-size | conflicted | unknown`. A
+consumer that could not be observed is `unknown`, never `missing`:
+**consumer-missing is not media-invalid**. The repair
+(`projection-repair.js`) asks the consumer to look at the exact directory
+that holds our artifact and observes again — no media reselection, no
+provider acquisition, no rename, no Binding mutation. A consumer item is
+matched by its Part file first (our path cannot be wrong) and by its IMDb
+guid second (a release's embedded tag can name a different film).
+Plex ratingKeys, item ids and Part ids are projection handles: they may
+change, they are never media identity.
+
 **Presentation identity** — the consumer-visible name of a media intent:
 
 ```text

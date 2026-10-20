@@ -161,6 +161,44 @@ trust old containers or historical HY4 handoffs.
 - Evidence: `docs/BUILD-LOG.md` 2026-10-20; retrospective
   `docs/retrospectives/2026-10-20-one-name-to-rule-them-all.md`.
 
+## Live session state (2026-10-20, consumer projection from first principles)
+
+- Production `media-search` RUNS the local build of `f7ff87e` (container
+  healthy; the data plane is untouched). No release/tag/push performed.
+- What a consumer library SHOULD hold is now DERIVED from durable truth
+  (`src/lib/control-plane/desired-projection.js`): the scan path, the
+  expected Part.file, the expected Part.size, the consumer path. It is
+  compared with what the consumer holds
+  (`src/lib/control-plane/projection-audit.js`): aligned / missing /
+  stale-path / stale-size / conflicted / unknown. An unobserved consumer
+  is UNKNOWN, never absent.
+- The repair (`src/lib/requests/projection-repair.js`) asks the consumer
+  to look at the exact directory that holds our artifact and observes
+  again. It never reselects media, never acquires, never renames and
+  never mutates a Binding. Operator surfaces:
+  `GET /api/operator/projection` (the audit) and `POST
+  /api/operator/projection/repair` (the repair, one media intent).
+- A consumer item is matched by its PART FILE first and by its IMDb guid
+  only as a fallback: a release's embedded tag can name a different film
+  (the production "Casablanca" item carries `imdb://tt0303279` ✓ — the
+  file's tag ✓ — and a guid-only match called a present projection
+  missing ✓).
+- Production drift: 190 intents audited, 170 aligned, 6 missing, 13
+  without a byte path, 1 stale size, 0 conflicted. One missing projection
+  was restored from our truth alone (one targeted refresh; the Part
+  appeared at our exact path; the byte path served 206; our durable truth
+  was unchanged).
+- The consumer truth leaks are closed: no Plex title as an identity
+  fallback, no consumer-chosen Part certifying our publication, no
+  `String(null)` Part id, a truncated Jellyfin list is UNKNOWN rather than
+  absence, and a consumer absence must persist before it schedules durable
+  republication work.
+- Known: the appliance's Jellyfin key is rejected (HTTP 401), so
+  Jellyfin's live projection proof is BLOCKED BY THE ENVIRONMENT; its code
+  path is characterised and unit-tested.
+- Evidence: `docs/BUILD-LOG.md` 2026-10-20; retrospective
+  `docs/retrospectives/2026-10-20-consumer-projection-from-first-principles.md`.
+
 ## Architecture boundaries (frozen)
 
 Non-authoritative session-local summary. Canonical:

@@ -242,6 +242,22 @@ change — consumes that one definition. A dead route is not offered to the
 byte path, and its placement row is kept: it is history, not a licence to
 serve. A different resource id for the same release is a NEW route.
 
+A CONSUMER LIBRARY is a projection, and what it SHOULD hold is stated
+before anyone asks whether it does. `desired-projection.js` derives the
+desired projection — the scan path, the expected Part.file, the expected
+Part.size, the consumer path — from the library item, the committed
+presentation identity, the VFS row and the binding. `projection-audit.js`
+compares it with what the consumer holds and classifies the difference
+(`aligned | missing | stale-path | stale-size | conflicted | unknown`); an
+unobserved consumer is UNKNOWN, never absent, so "the consumer is missing
+our projection" and "the media is missing" are different statements. The
+repair asks the consumer to look at the exact directory that holds our
+artifact and observes again: no media reselection, no provider work, no
+rename, no Binding mutation. A consumer item is matched by its Part file
+first — the file IS the projection — and by its IMDb guid only as a
+fallback, because a release's embedded tag can name a different film than
+the one we bound.
+
 A NAME is a committed durable fact too. A media intent has ONE presentation
 identity: the display title, the year, the canonical VFS path (the byte
 path) and the `.strm` path (the consumer path). It is resolved once, at the
