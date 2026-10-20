@@ -24,6 +24,7 @@
 
 import { RdCooldownError } from './client.js';
 import { classifyCandidateToRdFile } from './resolve.js';
+import { exactFileIdentity } from '../exact-file-identity.js';
 import { canonicalizeRdPath } from '../../control-plane/rd-placement-realizer.js';
 
 const HEX40 = /^[a-f0-9]{40}$/i;
@@ -206,6 +207,34 @@ export function createRdEnsure({ store, client, now = () => Date.now(), log = ()
       if (!mapped || !isValidSize(Number(mapped.bytes))) {
         if (createdByUs) await cleanupQuietly(rdId);
         return { status: 'not-cached', reason: 'rd-mapping-invalid-size', apiCalls, cleaned: createdByUs };
+      }
+      // EXACT FILE IDENTITY. The classification above is release-level (it
+      // finds WHICH file of the release the discovery meant); this is the
+      // route authorization, and it needs the EXACT file: the same path
+      // AND the same exact size. A file that merely shares the release, or
+      // the basename, or the byte count, is NOT our file.
+      const exact = exactFileIdentity({
+        provider: 'realdebrid',
+        providerPath: mapped.path ?? mapped.filename ?? '',
+        // Real-Debrid lists each file RELATIVE to the torrent root and
+        // names the root separately; TorBox's file name already includes
+        // it. The root is what makes the two framings comparable.
+        providerRoot: info.original_filename ?? info.filename ?? null,
+        providerSize: Number(mapped.bytes),
+        torrentFilePath: filename ?? '',
+        torrentFileSize: size == null ? null : Number(size),
+        // The discovery's release filename and the provider's file name are
+        // the corpus's and the provider's own casing of the same name.
+        caseInsensitive: true,
+      });
+      if (!exact.matched) {
+        if (createdByUs) await cleanupQuietly(rdId);
+        return {
+          status: 'not-cached',
+          reason: `rd-exact-file-mismatch:${exact.reason}`,
+          apiCalls,
+          cleaned: createdByUs,
+        };
       }
       // TV: the mapped RD path must carry the exact S/E tokens. Basename
       // matching already encodes episode precision for well-formed names;

@@ -167,7 +167,10 @@ test('ensure: exception after creation still cleans up', async () => {
     return origInfo(id, opts);
   };
   const { ensure } = createRdEnsure({ store, client: base });
-  const r = await ensure({ infoHash: HASH, filename: 'Movie.2024.1080p.mkv' });
+  // The exact file identity holds here (the file's path and size are the
+  // candidate's), so the failure is the mid-flight explosion and NOT an
+  // identity rejection.
+  const r = await ensure({ infoHash: HASH, filename: 'Movie.2024.1080p.mkv', size: 1000 });
   assert.equal(r.status, 'transient');
   assert.equal(r.cleaned, true);
   assert.equal(base.db.torrents.size, 0, 'no leak on exception');
@@ -186,7 +189,9 @@ test('ensure: TV requires exact S/E tokens on the mapped path', async () => {
   // Wrong episode for S01E02 query: size-only match must not bind.
   const r = await ensure({ infoHash: HASH2, filename: 'Show.S01E02.1080p.mkv', size: 500, season: 1, episode: 2 });
   assert.equal(r.status, 'not-cached');
-  assert.match(r.reason, /episode-unverifiable/);
+  // The wrong episode fails closed on the EXACT file identity (the path is
+  // not ours) before the S/E tokens are even considered.
+  assert.match(r.reason, /rd-exact-file-mismatch|episode-unverifiable/);
   assert.equal(client.db.torrents.size, 0, 'unverifiable TV probe cleaned');
 });
 
