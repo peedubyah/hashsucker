@@ -60,6 +60,12 @@
  * Everything else is verbatim proven behavior.
  */
 
+import {
+  classifyRoutesForTorrentFile,
+  providersNeedingRoute,
+  ROUTE_STATES,
+} from './route-classification.js';
+
 const HEX40 = /^[0-9a-f]{40}$/;
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_LOOKUP_LIMIT = 100;
@@ -67,12 +73,6 @@ const RD_POLL_MAX_ATTEMPTS = 10;
 const RD_POLL_DELAY_MS = 2000;
 
 const PROVIDERS = Object.freeze(['torbox', 'realdebrid']);
-
-import {
-  classifyRoutesForTorrentFile,
-  providersNeedingRoute,
-  ROUTE_STATES,
-} from './route-classification.js';
 
 /** TorBox download state -> provider_placements.state. Mirrors the
  * provider adapter's readiness derivation: a cached torrent is a READY
