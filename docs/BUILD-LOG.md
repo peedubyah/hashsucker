@@ -3297,3 +3297,271 @@ change (a rebind) still moves the representation, because the routine
 reconciler treats the provider's current file as the intent's
 representation. Making a route change update the ROUTE and never the
 REPRESENTATION would close the last place where a route can rename bytes.
+
+## 2026-10-20 — THE ROUTE SHALL NOT CHOOSE THE RELEASE — CLOSED
+
+Slice: the byte authority was closed, but one representation-authority
+leak remained — a ROUTE-level mechanism could choose the representation.
+Separate the two policy domains completely.
+
+### PHASE 1 — EVERY BINDING-CHANGING CALLER, CLASSIFIED
+
+| caller | trigger | old TF → new TF | class |
+|---|---|---|---|
+| `vfs/materialize.js` — the activation | a publication (the handoff's TorrentFile) | A → B when the handoff names B | **representation-owned** (it executes the owner's decision) |
+| `vfs/materialize.js` — the rejection/legacy supersede | the old TorrentFile was proven invalid | A → B | **representation-owned** (`rejection-supersede`) |
+| `control-plane/reconciler.js` — `rebind` | a preferred placement became usable | **A → B** (the desired's release!) | **route-owned — THE LEAK** |
+| `control-plane/reconciler.js` — `bind` | no active Binding | — → A | representation-owned (the first selection) |
+| `lifecycle/upgrade-watch.js` — `adoptNew` | a quality probe found a better candidate | A → B | **representation-owned** (`quality-upgrade`) |
+| `resolver/alternate-fallback.js` — `promoteAlternate` | the authoritative routes are exhausted and the representation policy allowed it | A → B | **representation-owned** (`delivery-exhaustion-fallback`) |
+| `request` path — the selection | a request for the media | A → B | **representation-owned** (`request-reselection`) |
+| `request` path — the reuse path | the same request again | A → A | none |
+| `vfs/materialize.js` — the idempotent replay | a replay | A → A (the route may move) | route-owned, correctly |
+| `route-recovery` / the second-placement ensurer | a dead route | **never** a TorrentFile change | route-owned, correctly |
+| `consumers/reconcile.js` | a consumer absence | never | none |
+| `library/unpublish.js` | an operator unpublish | the Binding is superseded | none |
+
+### PHASE 2 — THE LEAK, REPRODUCED
+
+`control-plane/reconciler.js` planned its rebind from the **desired**
+release, not from the active Binding's:
+
+```js
+actions.push({
+  action: currentBinding && !isRecovery ? 'rebind' : 'bind',
+  releaseKey: desired.releaseKey,      // ← the desired release, not the binding's
+  infoHash: desired.infoHash,
+  fileIndex: desired.fileIndex,
+  ...
+});
+```
+
+So a route-level mechanism — a preferred placement becoming usable, a
+provider's current file, a rediscovery — could activate a Binding for a
+DIFFERENT TorrentFile. The route reconciler's own plan is now
+exact-TorrentFile scoped: it rebinds inside the active Binding's release,
+and a desired release that differs is reported as
+`representation-change-required` with `owner: 'representation-policy'`.
+
+**The premise checked against the evidence**: the routine reconciler has
+never changed a Binding in production. Every one of the 96 historical
+representation changes came from the MATERIALIZER (the publication path):
+85 `vfs-movie-idempotent`, 8 `vfs-tv-idempotent`, 2
+`vfs-rejection-supersede`, 1 `vfs-movie-materialize`. Zero came from the
+reconciler (`preferred-usable-placement-changed` never appears in the
+history). The routine reconciler is executed by nothing in production
+today — the operator endpoint only produces a shadow plan — so the leak was
+latent, not active. It is closed structurally rather than by observation.
+
+### PHASE 3/4 — THE LEGAL REASONS, AND WHO OWNS THEM
+
+| reason | owner | trigger | automatic? |
+|---|---|---|---|
+| `initial-selection` | the request selection | the first Binding for an intent | yes |
+| `request-reselection` | the request selection | a request chose a different representation | yes (the user's request) |
+| `quality-upgrade` | the upgrade policy | the quality probe found a better candidate | yes |
+| `rejection-supersede` | the publication policy | the bound TorrentFile was proven invalid | yes |
+| `delivery-exhaustion-fallback` | the representation policy | the authoritative routes are exhausted AND the discovery completed negatively AND the candidate is identity-qualified AND the budget permits | yes |
+| `manual-override` | the operator | an explicit request | no |
+
+Anything else may not replace the representation. The reasons are a
+closed set; a caller outside the set is refused.
+
+### PHASE 5 — THE BOUNDARY
+
+The store's `activateBinding` is the one place a Binding is written, so
+the rule is enforced there:
+
+```
+A Binding may name a different TorrentFile than the one it replaces only
+with an explicit representation reason, and only one of the legal reasons
+exists.
+```
+
+The reason is recorded on the binding (`bindings.representation_reason`),
+so "why did this Binding change?" has an answer — the question the
+history could not answer (every historical change says `vfs-movie-
+idempotent`, which describes the mechanism, not the decision).
+
+The reconciler never carries a reason, so it cannot cross the boundary
+even by accident; the handoff carries the reason its owner supplied
+(`playback_handoffs.representation_reason`), and the materializer
+passes it through.
+
+### PHASE 6 — THE ROUTE POLICY CONTRACT
+
+Route policy may answer, inside ONE exact TorrentFile: which known route
+should be attempted, which provider route is dead, whether another
+RESOURCE exists for the same TorrentFile, whether same-TorrentFile
+discovery is complete, whether no known route is currently usable.
+
+It may not answer "what other TorrentFile should represent this media?" —
+the same release under a wrong file is not a representation (the exact
+path and size remain required; the hash is not enough), and the
+representation policy owns the answer.
+
+### PHASE 7 — THE PERSISTED-CANDIDATE FALLBACK
+
+Still the only automatic path that may choose a different TorrentFile
+because delivery is exhausted, and it is explicitly representation-policy
+owned: the policy's completeness gate (every failed route terminal, the
+same-TorrentFile discovery completed negatively, the candidate
+identity-qualified, the budget permitting) decides, and the fallback
+carries `delivery-exhaustion-fallback` as its reason. The route
+reconciler cannot invoke it implicitly: it has no reason to give.
+
+### PHASE 8 — THE UPGRADE WATCH
+
+The upgrade policy remains a representation owner and stays functional: it
+probes the market for a better candidate (`probeMarket`, read-only) and
+only then prepares and publishes one (`prepareNew`), and the prepare
+carries `quality-upgrade`. Provider availability only ENABLES an upgrade
+that the quality policy already wanted; it never causes one by itself —
+the probe is about desirability, the route state is not an input to it.
+
+### PHASE 9 — THE FAILED-ACTIVATION RETRY
+
+The retry map is process-local, so a restart loses it. It is not the
+authority boundary (the durable reconciliation now converges the VFS
+projection, and the boundary refuses a representation change that has no
+reason), so it was left as it is: it is a route-level retry of a
+route-level write, and the durable state that matters (the Binding, the
+evidence, the projection) is durable. No generic durable job system was
+introduced.
+
+### PHASE 10 — THE REQUESTED-SEASON PATH
+
+Background fulfilment goes through the request path, which is a
+representation owner: a NEW episode has no active Binding, so the first
+selection needs no reason; an EXISTING episode that is re-prepared goes
+through the same precedence as a user request, and the upgrade watch's
+prepare declares `quality-upgrade`. Neither the route reconciler nor the
+consumer reconcile can reach the activation with a different TorrentFile.
+
+### PHASE 11/12 — THE ROUTE RECONCILER'S INPUTS
+
+The reconciler still reads the desired release (the plan needs to know
+what is wanted when there is NO binding ✓), but once a binding exists its
+scope IS the binding's release and TorrentFile ✓ — the plan's rebind
+carries the binding's `torrentFileId` ✓ and no representation reason ✓.
+It never needs the universe of alternate representations ✓.
+
+### PHASE 13 — THE ENFORCEMENT
+
+- The store refuses a representation change without a legal reason ✓.
+- The reconciler's plan is exact-TorrentFile scoped ✓ and reports a
+  differing desired release as a representation decision ✓.
+- The reconciler's execution carries no reason ✓ → the store refuses it ✓.
+- The legal owners declare their reason ✓ → the handoff carries it ✓ → the
+  binding records it ✓.
+- Tests assert that a route change creates NO Binding version ✓ (the store
+  updates the execution coordinates in place ✓) and that the reconciler
+  never produces a representation change ✓.
+
+### PHASE 14 — THE AUDIT TRAIL
+
+`bindings.representation_reason` records WHY a binding names a different
+TorrentFile; `playback_handoffs.representation_reason` carries the
+owner's decision to the publication. The operator surfaces report both
+(`GET /api/control-plane/items/:id` → the binding history ✓).
+
+### PHASE 15 — THE HISTORICAL AUDIT (evidence, not repair)
+
+| history | count |
+|---|---|
+| binding versions | 96 representation changes, 73 route changes, 176 first bindings |
+| representation changes by mechanism | 85 `vfs-movie-idempotent`, 8 `vfs-tv-idempotent`, 2 `vfs-rejection-supersede`, 1 `vfs-movie-materialize` — all from the PUBLICATION path |
+| representation changes by the ROUTE reconciler | **0** |
+| changes with a recorded representation reason | 0 (the column did not exist — the reason is now recorded) |
+
+The historical versions are evidence and are NOT rewritten.
+
+### PHASE 16 — THE CURRENT PRODUCTION AUDIT
+
+190 intents: **175 aligned** (the VFS names exactly the Binding's
+TorrentFile), 13 without a VFS row, 2 legacy items without a Binding,
+**0 drifted**. No pending route work can replace a Binding: the route
+reconciler has no representation reason, and the routine reconciler's
+rebind is exact-TorrentFile scoped.
+
+### PHASE 20 — THE FAILURE MATRIX (8 cases, all green)
+
+| case | outcome |
+|---|---|
+| the active TF loses its TB route, the RD survives | the TB provider needs another ROUTE; the intent stays deliverable; the representation unchanged |
+| every route temporarily unavailable | not a death; no repair due; the representation unchanged |
+| every route terminal, the discovery incomplete | the repair is due and targets the SAME TorrentFile; the representation unchanged |
+| every route terminal, the discovery complete and negative | the last route of an intent is never retired; the representation is the policy's decision |
+| a stale provider inventory | a route fact; the route is unobserved, not dead |
+| the same release under a wrong file | the identity is unchanged — the exact path and size are required, the hash is not enough |
+| a route failure racing a representation switch | one active Binding; the route failure cannot move it |
+| a restart with a pending repair | the representation, the VFS projection and the repair obligation all survive |
+
+### PHASE 19 — CONSUMER STABILITY
+
+Route-only work moves no bytes and no names: the presentation path, the
+Binding's TorrentFile, the VFS projection, the Plex ratingKey and the
+Part.file are all unchanged (the route state is the only thing that
+moves). A legal representation switch moves the Binding's TorrentFile, the
+VFS projection and the Part.size — and the presentation identity stays
+where it was (the previous slice's invariant ✓).
+
+### PHASE 22 — THE PRODUCTION COHORT
+
+| cohort | Binding | VFS row | presentation | Plex | bytes |
+|---|---|---|---|---|---|
+| City Lights (movie, RD route) | v1 `tf_c0656148…` 1 452 039 706 B | the same TF, the same size | `Movies/City Lights/City Lights.mp4` (committed, unchanged) | ratingKey 423 | 206, `bytes 0-65535/1452039706`, sha256 `ae83cd8c…` |
+| 81⁄2 (movie) | v4 `tf_80926a72…` 49 792 746 B | the same TF | `Movies/81⁄2/81⁄2.mkv` | — | 206 |
+| Ted Lasso S04E01 (episode) | v1 `tf_1d637ab4…` 6 645 443 137 B | the same TF | `TV/Ted Lasso/Season 04/Ted Lasso - S04E01.mkv` | ratingKey 527 | 206 |
+| MobLand S02E01 (the specimen) | v2 `tf_5f619fba…` 9 573 001 343 B | the same TF | `TV/MobLand/Season 02/MobLand - S02E01.mkv` | ratingKey 1743 | 206 |
+
+**The route-repair negative control, on the appliance.** A terminal
+delivery verdict was injected for City Lights' Real-Debrid route (the
+fault the previous slice's proof used). The route reconciler retired the
+dead route. Through all of it:
+
+| | before | after |
+|---|---|---|
+| the Binding | v1, `tf_c0656148…` | **v1, `tf_c0656148…`** |
+| the VFS row | `tf_c0656148…`, 1 452 039 706 B | **the same** |
+| the presentation identity | `Movies/City Lights/City Lights.mp4` (commit 1792479548426) | **the same** |
+| the bytes | 206, sha256 `ae83cd8c…` | **206, the same sha256** |
+
+The injected fault was removed afterwards and the placement restored, so
+the production state is as it was.
+
+### THE FULL SUITE
+
+3527 tests, 3523 pass, 1 fail, 3 skipped (exit 1). The one failure is the
+pre-existing baseline `vfs-collection-resilience` C1/C2/C3. The focused
+representation/authority/VFS suites: 87/87.
+
+### COMMITS
+
+| commit | change |
+|---|---|
+| `e6d1543` | feat(representation): the route reconciler may not choose the release |
+| `bbaa21a` | fix(representation): the request path's selection is a legal representation reason |
+
+### WHAT REMAINS UNPROVEN
+
+- The **routine reconciler is executed by nothing in production** — only a
+  shadow plan exists (the operator endpoint). Its rebind is now
+  exact-TorrentFile scoped ✓, but the executor itself is dead code ✓; it
+  was not removed here (removing it is a separate decision).
+- The **failed-activation retry is still process-local** ✓ (a restart
+  loses it ✓); the durable reconciliation covers the projection ✓ but
+  not the retry itself ✓.
+- The **historical representation changes carry no reason** ✓ (the column
+  did not exist ✓); the trail starts now ✓.
+
+### NEXT SMALLEST EARNED SLICE
+
+The route policy is now separated from the representation policy, and the
+separation is enforced where the Binding is written. The next question is
+the same one for the ROUTE side: the second-placement ensurer still
+discovers "another resource for the same release" through the provider's
+hash index, and the identity it accepts there is a release-level match
+rather than the exact TorrentFile. Making the route's identity the exact
+file (path + size) everywhere would close the last place where a release
+can be mistaken for a representation.

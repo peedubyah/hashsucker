@@ -224,6 +224,31 @@ trust old containers or historical HY4 handoffs.
 - Evidence: `docs/BUILD-LOG.md` 2026-10-20; retrospective
   `docs/retrospectives/2026-10-20-one-byte-identity.md`.
 
+## Live session state (2026-10-20, the route shall not choose the release)
+
+- Production `media-search` RUNS the local build of `bbaa21a` (container
+  healthy; the data plane untouched). No release/tag/push performed.
+- A Binding may name a different TorrentFile only with an explicit
+  representation reason from a closed set: `initial-selection`,
+  `request-reselection`, `quality-upgrade`, `rejection-supersede`,
+  `delivery-exhaustion-fallback`, `manual-override`. The rule is enforced
+  in `activateBinding` — the one place a Binding is written — and the
+  reason is recorded on the binding (`bindings.representation_reason`),
+  so "why did this Binding change?" now has an answer.
+- ROUTE policy owns none of those reasons. The routine reconciler is
+  exact-TorrentFile scoped: it rebinds the route inside the active
+  Binding's release and reports a differing desired release as
+  `representation-change-required` (owner: the representation policy).
+- The premise was checked against the production history: 96 historical
+  representation changes, ALL from the publication path, ZERO from the
+  route reconciler. The leak was latent (the routine reconciler's
+  executor is not wired in production; only a shadow plan exists) and is
+  now closed structurally.
+- Production audit after the change: 190 intents, 175 aligned, 0 drifted.
+- Evidence: `docs/BUILD-LOG.md` 2026-10-20; the failure matrix is
+  `media-search/test/representation-failure-matrix.test.js` and the
+  boundary is `media-search/test/representation-authority.test.js`.
+
 ## Architecture boundaries (frozen)
 
 Non-authoritative session-local summary. Canonical:

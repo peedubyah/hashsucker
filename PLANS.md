@@ -192,11 +192,31 @@ reconciliation (startup + every 5 min, no provider/metadata/discovery
 work) converges any surviving drift. The route-repair negative control
 holds: a route change moves the route, never the bytes.
 
-Next earned slice: **a route change must not move the representation**.
-The routine reconciler still rebinds an intent to whatever the provider's
-current file is — and that changed the RELEASE (not merely the route) of
-the specimen's intent. The byte identity is now consistent, but a
-route-level decision should have no representation authority at all.
+Completed product slice: **the route shall not choose the release** —
+**CLOSED** (`e6d1543`, `bbaa21a`; evidence in `docs/BUILD-LOG.md`
+2026-10-20). The byte authority was closed, but one representation leak
+remained: the routine reconciler planned its rebind from the DESIRED
+release rather than the active Binding's, so a route-level mechanism
+could activate a Binding for a different TorrentFile. The two policy
+domains are now separated and the separation is enforced where a Binding
+is written: a Binding may name a different TorrentFile only with an
+explicit reason from a closed set (the request path's selection, the
+upgrade watch's quality policy, the delivery-exhaustion fallback, the
+rejection supersede, the operator), and the reason is recorded on the
+binding. The reconciler is exact-TorrentFile scoped: it rebinds the route
+inside the Binding's own release, and a differing desired release is
+reported as a representation decision the representation policy owns. The
+premise was checked against the production history: all 96 historical
+representation changes came from the publication path and ZERO from the
+route reconciler — the leak was latent, and it is now closed
+structurally rather than by observation.
+
+Next earned slice: **the route's identity is the exact file, everywhere**.
+The second-placement ensurer still discovers "another resource for the
+same release" through the provider's hash index and accepts a
+release-level match. Making the route's identity the exact file (path +
+size) everywhere would close the last place where a release can be
+mistaken for a representation.
 
 Completed product slice: **exact durable-truth republication** — **CLOSED**.
 E01 VFS publication was genuinely removed, then recreated through

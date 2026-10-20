@@ -129,6 +129,24 @@ churn without changing TorrentFile identity. `candidate_file_mappings` separatel
 discovery `releaseKey` to a provider file. Never assume a placement is per-file or equate a
 discovery file index with a provider file ID.
 
+**Representation authority** — who may choose the TorrentFile:
+
+```text
+Representation change = active Binding.torrent_file_id -> a different one
+  allowed only with an explicit reason, from a closed set:
+    initial-selection | request-reselection | quality-upgrade
+    | rejection-supersede | delivery-exhaustion-fallback | manual-override
+```
+
+The owners are named: the request path's selection, the upgrade watch's
+quality policy, the delivery-exhaustion fallback, the publication
+policy's rejection supersede, and the operator. ROUTE policy owns none of
+them: a route-scoped mechanism (the routine reconciler, a rediscovery, a
+provider's "current file") may move an intent to another ROUTE inside the
+same exact TorrentFile and may never choose a representation. The rule is
+enforced where a Binding is written (`activateBinding`), and the reason is
+recorded on the binding so "why did this Binding change?" has an answer.
+
 **Byte authority** — the TorrentFile a media intent's bytes come from:
 
 ```text
