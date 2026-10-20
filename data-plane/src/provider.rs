@@ -84,10 +84,37 @@ pub async fn acquire(
     match coord.provider.as_str() {
         "torbox" => acquire_torbox(coord, tf, keys, client, metrics).await,
         "realdebrid" => acquire_realdebrid(coord, tf, keys, client, metrics).await,
-        other => Err(AcquireError::NoCapability(format!(
+        other => Err(AcquireError::terminal(format!(
             "unsupported provider: {other}"
         ))),
     }
+}
+
+/// Classify a provider HTTP status into a route-failure class.
+///
+/// 404/410 mean the provider revoked the resource: the ROUTE is dead and
+/// durable evidence may record it. 429 is throttling (never death). 5xx and
+/// everything else are transient: the route did not answer, which must never
+/// be persisted as permanent death.
+fn status_error(op: &str, status: reqwest::StatusCode) -> AcquireError {
+    let code = status.as_u16();
+    if code == 404 || code == 410 {
+        AcquireError::terminal(format!("{op} status {code}"))
+    } else if code == 429 {
+        AcquireError::RateLimited(None)
+    } else if code >= 500 {
+        AcquireError::Transient(format!("{op} status {code}"))
+    } else {
+        AcquireError::no_capability(format!("{op} status {code}"))
+    }
+}
+
+fn torbox_status_error(status: reqwest::StatusCode) -> AcquireError {
+    status_error("torbox requestdl", status)
+}
+
+fn rd_status_error(op: &str, status: reqwest::StatusCode) -> AcquireError {
+    status_error(op, status)
 }
 
 // ---- TorBox ---------------------------------------------------------------
@@ -99,7 +126,7 @@ async fn acquire_torbox(
     metrics: &Metrics,
 ) -> Result<Arc<DeliveryCapability>, AcquireError> {
     if keys.torbox.is_empty() {
-        return Err(AcquireError::NoCapability("torbox: missing API key".into()));
+        return Err(AcquireError::terminal("torbox: missing API key"));
     }
     // Slice 3.5 §1: default to NO redirect=true so we never follow a 3xx and never
     // preserve requestdl as the media origin. TB_REDIRECT_TRUE=1 restores the legacy
@@ -152,20 +179,14 @@ async fn acquire_torbox(
     let final_url = if use_redirect {
         // Legacy path: client followed the 307; the final url is the CDN url.
         if !resp.status().is_success() {
-            return Err(AcquireError::NoCapability(format!(
-                "torbox requestdl status {}",
-                resp.status()
-            )));
+            return Err(torbox_status_error(resp.status()));
         }
         metrics.record_redirect_hop();
         resp.url().to_string()
     } else {
         // Slice 3.5 path: 200 JSON with `data` = final CDN URL (no redirect hop).
         if !resp.status().is_success() {
-            return Err(AcquireError::NoCapability(format!(
-                "torbox requestdl status {}",
-                resp.status()
-            )));
+            return Err(torbox_status_error(resp.status()));
         }
         let body: serde_json::Value = resp
             .json()
@@ -175,7 +196,7 @@ async fn acquire_torbox(
             .get("data")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                AcquireError::NoCapability("torbox requestdl: missing `data` CDN URL".into())
+                AcquireError::terminal("torbox requestdl: missing `data` CDN URL")
             })?;
         data.to_string()
     };
@@ -184,9 +205,7 @@ async fn acquire_torbox(
     // have left the TorBox API host and landed on a CDN.
     if let Some(host) = host_of(&final_url) {
         if host.ends_with("torbox.app") {
-            return Err(AcquireError::NoCapability(
-                "torbox requestdl did not resolve to a CDN (protocol-invalid)".into(),
-            ));
+            return Err(AcquireError::terminal("torbox requestdl did not resolve to a CDN (protocol-invalid)"));
         }
         metrics.set_final_cdn_host(&host);
     }
@@ -225,7 +244,7 @@ async fn acquire_realdebrid(
     metrics: &Metrics,
 ) -> Result<Arc<DeliveryCapability>, AcquireError> {
     if keys.realdebrid.is_empty() {
-        return Err(AcquireError::NoCapability("realdebrid: missing API key".into()));
+        return Err(AcquireError::terminal("realdebrid: missing API key"));
     }
     // MODE A — reuse an existing /downloads artifact (no provider state created).
     if let Ok(cap) = acquire_rd_mode_a(coord, tf, keys, client, metrics).await {
@@ -237,8 +256,10 @@ async fn acquire_realdebrid(
             return Ok(cap);
         }
     }
-    Err(AcquireError::NoCapability(
-        "realdebrid: no existing download (MODE_A miss) and MODE_B disabled".into(),
+    // The RD account does not hold a cached copy of this file: the ROUTE is
+    // gone (not merely slow). Terminal for that route.
+    Err(AcquireError::terminal(
+        "realdebrid: no existing download (MODE_A miss) and MODE_B disabled",
     ))
 }
 
@@ -357,10 +378,7 @@ async fn rd_list_scan_rid(
         return Err(AcquireError::RateLimited(ra));
     }
     if !list_resp.status().is_success() {
-        return Err(AcquireError::NoCapability(format!(
-            "rd torrents status {}",
-            list_resp.status()
-        )));
+        return Err(rd_status_error("rd torrents", list_resp.status()));
     }
     let list_json: serde_json::Value = list_resp
         .json()
@@ -368,7 +386,7 @@ async fn rd_list_scan_rid(
         .map_err(|e| AcquireError::Transient(format!("rd torrents json: {e}")))?;
     let torrents = list_json
         .as_array()
-        .ok_or_else(|| AcquireError::NoCapability("rd torrents not an array".into()))?;
+        .ok_or_else(|| AcquireError::Transient("rd torrents not an array".into()))?;
 
     for t in torrents {
         let h = t
@@ -381,9 +399,8 @@ async fn rd_list_scan_rid(
             }
         }
     }
-    Err(AcquireError::NoCapability(
-        "rd torrents: no torrent for infoHash".into(),
-    ))
+    // The account does not hold this release: the ROUTE is gone, not slow.
+    Err(AcquireError::terminal("rd torrents: no torrent for infoHash"))
 }
 
 // by canonicalInternalPath + exact size -> POST /unrestrict/link -> build capability around
@@ -439,7 +456,7 @@ async fn acquire_rd_mode_a(
             match rd_info_checked(&rid, &want_hash, keys, client, metrics).await? {
                 Some(j) => j,
                 None => {
-                    return Err(AcquireError::NoCapability(format!(
+                    return Err(AcquireError::terminal(format!(
                         "rd info: torrent {rid} does not match authoritative infoHash"
                     )))
                 }
@@ -454,7 +471,7 @@ async fn acquire_rd_mode_a(
     let files = info_json
         .get("files")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| AcquireError::NoCapability("rd info: no files array".into()))?;
+        .ok_or_else(|| AcquireError::Transient("rd info: no files array".into()))?;
     let links = info_json.get("links").and_then(|v| v.as_array());
     let status = info_json
         .get("status")
@@ -490,11 +507,11 @@ async fn acquire_rd_mode_a(
         if exact_size_indices.len() == 1 {
             file_idx = Some(exact_size_indices[0]);
         } else if exact_size_indices.is_empty() {
-            return Err(AcquireError::NoCapability(
-                "rd info: no file matches authoritative size".into(),
-            ));
+            // The route cannot serve the AUTHORITATIVE bytes: a size
+            // mismatch is a file-identity failure, not a slow route.
+            return Err(AcquireError::terminal("rd info: no file matches authoritative size"));
         } else {
-            return Err(AcquireError::NoCapability(format!(
+            return Err(AcquireError::terminal(format!(
                 "rd info: {} files match size, ambiguous without canonical path",
                 exact_size_indices.len()
             )));
@@ -522,7 +539,7 @@ async fn acquire_rd_mode_a(
             }
         })
         .ok_or_else(|| {
-            AcquireError::NoCapability(format!(
+            AcquireError::no_capability(format!(
                 "rd info: no link for file idx={file_idx} (torrent status={status})"
             ))
         })?;
@@ -558,10 +575,7 @@ async fn acquire_rd_mode_a(
         return Err(AcquireError::RateLimited(ra));
     }
     if !unres_resp.status().is_success() {
-        return Err(AcquireError::NoCapability(format!(
-            "rd unrestrict status {}",
-            unres_resp.status()
-        )));
+        return Err(rd_status_error("rd unrestrict", unres_resp.status()));
     }
     let uj: serde_json::Value = unres_resp
         .json()
@@ -571,7 +585,7 @@ async fn acquire_rd_mode_a(
         .get("download")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            AcquireError::NoCapability("rd unrestrict missing download field".into())
+            AcquireError::no_capability("rd unrestrict missing download field")
         })?;
 
     let ttl = std::env::var("RD_TTL_SECONDS")
@@ -612,10 +626,7 @@ async fn acquire_rd_mode_b(
         .await
         .map_err(|e| AcquireError::Transient(format!("rd addMagnet: {e}")))?;
     if !add.status().is_success() {
-        return Err(AcquireError::NoCapability(format!(
-            "rd addMagnet status {}",
-            add.status()
-        )));
+        return Err(rd_status_error("rd addMagnet", add.status()));
     }
     let add_json: serde_json::Value = add
         .json()
@@ -624,7 +635,7 @@ async fn acquire_rd_mode_b(
     let rid = add_json
         .get("id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| AcquireError::NoCapability("rd addMagnet missing id".into()))?;
+        .ok_or_else(|| AcquireError::no_capability("rd addMagnet missing id"))?;
 
     let sel = client
         .post(format!("{REALDEBRID_API_BASE}/torrents/selectFiles/{rid}"))
@@ -635,7 +646,7 @@ async fn acquire_rd_mode_b(
         .await
         .map_err(|e| AcquireError::Transient(format!("rd selectFiles: {e}")))?;
     if !sel.status().is_success() {
-        return Err(AcquireError::NoCapability(format!(
+        return Err(AcquireError::no_capability(format!(
             "rd selectFiles status {}",
             sel.status()
         )));
@@ -680,7 +691,7 @@ async fn acquire_rd_mode_b(
         tokio::time::sleep(Duration::from_secs(4)).await;
     }
     let link = link
-        .ok_or_else(|| AcquireError::NoCapability("rd mode_b: torrent not ready".into()))?;
+        .ok_or_else(|| AcquireError::no_capability("rd mode_b: torrent not ready"))?;
 
     let unrestrict = client
         .post(format!("{REALDEBRID_API_BASE}/unrestrict/link"))
@@ -691,7 +702,7 @@ async fn acquire_rd_mode_b(
         .await
         .map_err(|e| AcquireError::Transient(format!("rd unrestrict: {e}")))?;
     if !unrestrict.status().is_success() {
-        return Err(AcquireError::NoCapability(format!(
+        return Err(AcquireError::no_capability(format!(
             "rd unrestrict status {}",
             unrestrict.status()
         )));
@@ -703,7 +714,7 @@ async fn acquire_rd_mode_b(
     let dl = uj
         .get("download")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| AcquireError::NoCapability("rd unrestrict missing download".into()))?;
+        .ok_or_else(|| AcquireError::no_capability("rd unrestrict missing download"))?;
 
     // Range-validate the unrestricted link serves bytes.
     let probe = client
@@ -713,7 +724,7 @@ async fn acquire_rd_mode_b(
         .await
         .map_err(|e| AcquireError::Transient(format!("rd mode_b validate: {e}")))?;
     if !probe.status().is_success() && probe.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-        return Err(AcquireError::NoCapability(format!(
+        return Err(AcquireError::no_capability(format!(
             "rd mode_b validate status {}",
             probe.status()
         )));

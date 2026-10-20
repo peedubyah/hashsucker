@@ -31,8 +31,32 @@ pub enum CapabilityStatus {
 #[derive(Debug, Clone)]
 pub enum AcquireError {
     RateLimited(Option<Duration>), // 429 — honor Retry-After, do NOT poison TorrentFile
-    NoCapability(String),           // provider cannot produce a capability for this file
-    Transient(String),             // network/unknown; retryable within a slot
+    /// The provider cannot produce a capability for this file.
+    ///
+    /// `terminal` says the ROUTE is provably dead (404/410, a protocol-invalid
+    /// resolution, an unsupported provider, a missing credential) rather than
+    /// merely unfindable right now. It is the difference between "this route
+    /// died" (durable, survives a restart) and "this route did not answer"
+    /// (transient, must never be persisted as death).
+    NoCapability { detail: String, terminal: bool },
+    Transient(String), // network/unknown; retryable within a slot
+}
+
+impl AcquireError {
+    /// The provider could not produce a capability, for an unclassified reason.
+    pub fn no_capability(detail: impl Into<String>) -> Self {
+        Self::NoCapability { detail: detail.into(), terminal: false }
+    }
+
+    /// The route is provably dead. Durable evidence may record it.
+    pub fn terminal(detail: impl Into<String>) -> Self {
+        Self::NoCapability { detail: detail.into(), terminal: true }
+    }
+
+    /// True when the route is provably dead (not merely unavailable now).
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::NoCapability { terminal: true, .. })
+    }
 }
 
 impl std::fmt::Display for AcquireError {
@@ -41,7 +65,7 @@ impl std::fmt::Display for AcquireError {
             AcquireError::RateLimited(d) => {
                 write!(f, "rate_limited retry_after={:?}", d)
             }
-            AcquireError::NoCapability(s) => write!(f, "no_capability: {s}"),
+            AcquireError::NoCapability { detail, .. } => write!(f, "no_capability: {detail}"),
             AcquireError::Transient(s) => write!(f, "transient: {s}"),
         }
     }

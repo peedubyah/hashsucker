@@ -226,7 +226,29 @@ pub enum DeliveryError {
     AllSameTfFailed {
         last: Option<String>,
         retry_after: Option<Duration>,
+        /// The exact route (provider, account scope, provider resource id,
+        /// provider file id) that failed, and WHY it failed. This is the
+        /// information the north needs to record durable route-failure
+        /// evidence: a route that answered "gone" (404/410, protocol
+        /// invalid, wrong file) is DEAD and must survive a restart, while a
+        /// route that was throttled or timed out is NOT dead and must never
+        /// be recorded as such.
+        routes: Vec<RouteFailure>,
     },
+}
+
+/// One route's failure, in the terms the north records.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteFailure {
+    pub provider: String,
+    pub account_scope: String,
+    pub provider_resource_id: String,
+    pub provider_file_id: String,
+    /// "terminal" (the route is provably dead) | "temporary" (it did not
+    /// answer / was throttled / its breaker was open).
+    pub kind: String,
+    pub detail: String,
 }
 
 /// Prewarm vocabulary, trimmed to the existing-slot scope: no fresh-S-1
@@ -579,7 +601,7 @@ impl CapabilityManager {
                             tf.id, coord.provider
                         );
                         let res: Result<Arc<DeliveryCapability>, AcquireError> = Err(
-                            AcquireError::NoCapability(format!(
+                            AcquireError::no_capability(format!(
                                 "p15 runtime fault: tfId={} provider={} denied",
                                 tf.id, coord.provider
                             )),
@@ -834,9 +856,7 @@ impl CapabilityManager {
                 Err(_) => return Err(AcquireError::Transient("permit closed".into())),
             }
         }
-        Err(AcquireError::NoCapability(
-            "slot has no usable capability".into(),
-        ))
+        Err(AcquireError::no_capability("slot has no usable capability"))
     }
 
     /// Acquire a reserved capability for one read, failing over across all Node-supplied
@@ -849,6 +869,7 @@ impl CapabilityManager {
         let now = Instant::now();
         let mut last_err: Option<String> = None;
         let mut retry_after: Option<Duration> = None;
+        let mut route_failures: Vec<RouteFailure> = Vec::new();
         // Failover-aware fast path: a slot whose cap is usable AND free
         // right now wins immediately, in Node-supplied preference order,
         // before any slot is asked to grow, acquire, or wait out a
@@ -874,6 +895,17 @@ impl CapabilityManager {
             if slot.breaker.is_open(now) {
                 last_err = Some("breaker-open".into());
                 self.metrics.record_breaker_open();
+                // An open breaker means the route failed recently. It is NOT
+                // proof of death (the breaker also opens on throttling), so
+                // it is reported as temporary.
+                route_failures.push(RouteFailure {
+                    provider: slot.coord.provider.clone(),
+                    account_scope: slot.coord.account_scope.clone(),
+                    provider_resource_id: slot.coord.provider_resource_id.clone(),
+                    provider_file_id: slot.coord.provider_file_id.clone(),
+                    kind: "temporary".to_string(),
+                    detail: "breaker-open".to_string(),
+                });
                 continue;
             }
             match self.try_slot(slot, now, priority).await {
@@ -884,11 +916,29 @@ impl CapabilityManager {
                 Err(AcquireError::RateLimited(ra)) => {
                     retry_after = retry_after.or(ra);
                     last_err = Some("rate-limited".into());
+                    // Throttling is not death. Never recorded as terminal.
+                    route_failures.push(RouteFailure {
+                        provider: slot.coord.provider.clone(),
+                        account_scope: slot.coord.account_scope.clone(),
+                        provider_resource_id: slot.coord.provider_resource_id.clone(),
+                        provider_file_id: slot.coord.provider_file_id.clone(),
+                        kind: "temporary".to_string(),
+                        detail: "rate-limited".to_string(),
+                    });
                     continue; // fail over to next provider
                 }
                 Err(e) => {
                     slot.breaker.record_failure();
                     last_err = Some(format!("{e}"));
+                    let kind = if e.is_terminal() { "terminal" } else { "temporary" };
+                    route_failures.push(RouteFailure {
+                        provider: slot.coord.provider.clone(),
+                        account_scope: slot.coord.account_scope.clone(),
+                        provider_resource_id: slot.coord.provider_resource_id.clone(),
+                        provider_file_id: slot.coord.provider_file_id.clone(),
+                        kind: kind.to_string(),
+                        detail: format!("{e}"),
+                    });
                     continue;
                 }
             }
@@ -897,6 +947,7 @@ impl CapabilityManager {
         Err(DeliveryError::AllSameTfFailed {
             last: last_err,
             retry_after,
+            routes: route_failures,
         })
     }
 
@@ -1041,6 +1092,7 @@ impl CapabilityManager {
                 return Err(DeliveryError::AllSameTfFailed {
                     last: Some("all breakers open on reacquire".into()),
                     retry_after: None,
+                    routes: Vec::new(),
                 });
             }
         };
@@ -1054,6 +1106,7 @@ impl CapabilityManager {
                 return Err(DeliveryError::AllSameTfFailed {
                     last: Some("reacquire failed".into()),
                     retry_after: None,
+                    routes: Vec::new(),
                 });
             }
         };
@@ -1067,6 +1120,7 @@ impl CapabilityManager {
             None => Err(DeliveryError::AllSameTfFailed {
                 last: Some("reacquire reserve failed".into()),
                 retry_after: None,
+                routes: Vec::new(),
             }),
         }
     }

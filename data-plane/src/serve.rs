@@ -280,19 +280,40 @@ pub fn data_plane_error(
     tf_id: &str,
     retry_after: Option<Duration>,
 ) -> Response<Body> {
+    data_plane_error_with_routes(status, code, tf_id, retry_after, &[])
+}
+
+/// The class-D error carries the EXACT routes that failed and why, so the
+/// north can record durable route-failure evidence: a route that answered
+/// "gone" is dead (and survives a restart), a route that was throttled or
+/// timed out is not (and must never be recorded as death).
+pub fn data_plane_error_with_routes(
+    status: StatusCode,
+    code: &str,
+    tf_id: &str,
+    retry_after: Option<Duration>,
+    routes: &[manager::RouteFailure],
+) -> Response<Body> {
     let mut b = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json");
     if let Some(d) = retry_after {
         b = b.header(header::RETRY_AFTER, d.as_secs().to_string());
     }
-    let body = serde_json::json!({ "error": { "code": code, "torrent_file_id": tf_id } }).to_string();
+    let body = serde_json::json!({
+        "error": {
+            "code": code,
+            "torrent_file_id": tf_id,
+            "routes": routes,
+        }
+    })
+    .to_string();
     b.body(Body::from(body)).unwrap()
 }
 
 pub fn delivery_error(e: manager::DeliveryError, m: &Metrics) -> Response<Body> {
     match e {
-        manager::DeliveryError::AllSameTfFailed { last, retry_after } => {
+        manager::DeliveryError::AllSameTfFailed { last, retry_after, routes } => {
             let mut b = Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .header(header::CONTENT_TYPE, "text/plain");
@@ -1595,12 +1616,17 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         stage.set_t1(Instant::now());
         match state.manager.acquire_for_read(priority).await {
             Ok(r) => Some(r),
-            Err(manager::DeliveryError::AllSameTfFailed { retry_after, .. }) => {
-                return data_plane_error(
+            Err(manager::DeliveryError::AllSameTfFailed { retry_after, routes, .. }) => {
+                // The failed routes travel with the error: the north records
+                // durable route-failure evidence from them (a route that
+                // answered "gone" is dead; a throttled or timed-out route is
+                // not).
+                return data_plane_error_with_routes(
                     StatusCode::BAD_GATEWAY,
                     "PROVIDER_EXHAUSTED",
                     &state.tf_id,
                     retry_after,
+                    &routes,
                 );
             }
         }
