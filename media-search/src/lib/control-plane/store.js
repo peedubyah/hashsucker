@@ -1114,7 +1114,8 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
             failure_category = NULL, observed_at = ?, expires_at = ?, recorded_at = ?
         WHERE provider = ? AND account_scope = ? AND placement_id = ? AND provider_file_id = ?
       `).run(
-        observedAt, observedAt + 10 * 60 * 1000, now(),
+        // The same horizon the recorder gives a usable observation.
+        observedAt, observedAt + 30 * 60 * 1000, now(),
         placement.provider, placement.accountScope, placement.id, row.provider_file_id,
       );
     }
