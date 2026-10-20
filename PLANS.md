@@ -8,6 +8,24 @@ publication → real Plex playback → runtime recovery is proven sufficiently f
 product evolution. Continued hardening requires a newly observed defect; no
 open theoretical gap is primary work.
 
+Since then the authority model itself was sealed — presentation identity,
+byte authority, representation authority, provider-route identity and
+corpus identity are now separately owned and separately enforced (see
+`docs/architecture.md` §2). No moonshot is selected: the next direction is
+a product decision, not a consequence of a known defect.
+
+**Open debt, by class** (nothing here is a selected slice):
+
+| class | item |
+|---|---|
+| correctness | `vfs-collection-resilience` C1/C2/C3 fails deterministically on the baseline (pre-existing; classified, not normalized away) |
+| correctness | the 13 published intents with a committed `.strm` and no VFS row, and the 2 legacy library items with no Binding — legacy shape, classified, not repaired |
+| environmental | the appliance's Jellyfin API key is rejected (HTTP 401): Jellyfin's live projection cannot be proven end to end until the credential is replaced |
+| operational | the routine reconciler's executor is not wired in production (only a shadow plan runs); the failed-activation retry map is process-local, so a restart loses it (the deterministic reconciliation covers the projection) |
+| optimization | a byte count is ambiguous for 424 of 4099 mapped provider files (10.3 %); the corpus holds no per-file path, so file selection still leans on the byte count |
+| speculative | a per-file path for the corpus from a source that has one (torrent-metadata sidecar) — the plumbing exists and is proven; the SOURCE does not |
+
+
 Completed final slice: **bound stale-inventory binding retry churn** —
 **CLOSED**. The host-only canary passed clean E01 plus the full E01/E05/MobLand
 rotation against deployed `57bbfe1`; immediate replay/restart churn is bounded
@@ -261,21 +279,20 @@ playback passed after reconstruction. Missing retained truth returns 409 and
 fails closed. This is an earned continuity primitive, not a general
 consumer-replacement framework.
 
-Active product slice: **cached byte routing default cutover** — NOT FLIPPED
-(`fcd7967` made `STREAM_BYTE_ROUTE` default `cached`, validated, then `8f1b9e1`
-reverted it; `b889f70` fixed a related regression). The `cached` path itself
-works end to end for TorBox-only, RD-only, and dual-route items (307 → /bytes →
-Rust 206 + seeks + cache hits), but the acceptance gate failed on **same-file
-concurrency**: concurrent readers of a cold multi-chunk fill intermittently get
-a truncated body (coalescing is correct — one fill, one provider connection, no
-duplicate pulls — but joiner delivery is unreliable). The residual is a
-fill/join race in the Rust path the Plex VFS already used. Next earned slice:
-fix that race, then re-run this cutover (a one-line default change with a proven
-escape hatch `STREAM_BYTE_ROUTE=provider`). Non-goals: architecture refactor,
-new provider behavior, representation change.
+Recently active slice (now settled): **cached byte routing default
+cutover** — FLIPPED in
+`f35d906` (compose default is now `STREAM_BYTE_ROUTE:-cached`; code-level env
+fallback remains `provider` when unset). `fcd7967` first flipped it, `8f1b9e1`
+reverted it, and `f35d906` re-flipped it after the recorded gates; `PLANS.md`
+was not updated after that commit, so this is the reconciliation. Earlier notes
+recorded a same-file concurrency joiner-delivery race; the later flip asserts
+that gate passed (Jellyfin 2/3-session exact, Plex canary exact, soak 15/15
+exact). If a truncated-body regression reappears, the escape hatch remains
+`STREAM_BYTE_ROUTE=provider`. Non-goals: architecture refactor, new provider
+behavior, representation change.
 
-Active product slice: **TorBox delivery attribution + blocked-item handling** —
-RESOLVED (AT&T block lifted) + HARDENED (`1ca03e1`; evidence in `docs/BUILD-LOG.md` 2026-10-16,
+Recently active slice (now settled): **TorBox delivery attribution +
+blocked-item handling** — RESOLVED (AT&T block lifted) + HARDENED (`1ca03e1`; evidence in `docs/BUILD-LOG.md` 2026-10-16,
 incident `artifacts/incident/torbox-cdn-sni-reset.md`). The `nexus.erth.tb-cdn.earth`
 TLS reset is NOT a TorBox/CDN fault: it is an SNI-exact, destination-independent
 reset on the operator's WAN path (AT&T gateway/ISP filter) — proven by resetting

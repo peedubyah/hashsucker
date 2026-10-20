@@ -32,6 +32,38 @@ byte authority into the gateway.
 
 ## 2. Identity
 
+### 2.0 The durable chain
+
+One media intent travels one chain, and each link has exactly one owner:
+
+```text
+media intent (library item)
+  → representation chosen by the Binding          (representation authority)
+  → exact TorrentFile (hash + canonical path + exact size)
+  → exact ProviderFile route(s)                  (delivery routes)
+  → VFS projection                               (a projection of the Binding)
+  → Rust byte execution                           (the exact projected TorrentFile)
+  → consumer projection                           (Plex / Jellyfin)
+```
+
+The separations that matter, each of them enforced in code:
+
+| fact | owner | never decided by |
+|---|---|---|
+| media intent | the library item | a provider, a consumer |
+| representation | the Binding | a route, a provider state, a consumer |
+| exact bytes | the TorrentFile | a file index, a basename, a byte count alone |
+| route | the ProviderFile mapping | the release |
+| delivery health | the delivery evidence | the representation |
+| consumer-visible name | the presentation identity | a catalog fetch, a consumer |
+| consumer library | a projection | HashSucker |
+
+A healthy reuse therefore needs no external proof: the durable state
+already says which TorrentFile represents the intent, which ProviderFile
+routes reach it, and what the consumer should be showing.
+
+### 2.1 Identity grains
+
 The following identity grains coexist and must not be collapsed.
 
 **Release identity** — the torrent release:

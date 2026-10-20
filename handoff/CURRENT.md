@@ -1,11 +1,25 @@
 # HashSucker self-handoff (durable — survives session death)
 
-If this session dies right now: `main` == `github/main` at c1075c5 (pushed).
-Production media-search RUNNING v0.4.0. Web UI = household appliance,
-TUI (`npm run tui` in media-search/) = operator control room.
+If this session dies right now: `main` is ahead of `github/main` (the
+authority-model slices are committed locally; the push happened at the end
+of the 2026-10-20 sealing session — check `git log github/main`).
+Production media-search RUNS the LOCAL build of the sealing session
+(`a05410a` plus the docs commits), not the v0.4.0 release image. Web UI =
+household appliance, TUI (`npm run tui` in media-search/) = operator control
+room.
 Read this file, `../AGENTS.override.md` (operating rules), and
 [`../docs/architecture.md`](../docs/architecture.md) (durable model). Do not
 trust old containers or historical HY4 handoffs.
+
+The authority model is now SEALED (see `docs/architecture.md` §2 for the
+chain and the separations): media intent → representation (Binding) →
+exact TorrentFile → exact ProviderFile routes → VFS projection → Rust
+bytes → consumer projection. Presentation identity is durable and
+consumer-independent; routes and delivery evidence never choose the
+representation; release-level evidence may discover a resource but never
+authorizes an exact file; the VFS byte identity is a projection of the
+Binding; Plex and Jellyfin are projections, not canonical truth; and a
+healthy reuse needs no external proof.
 
 ## Live session state (2026-10-19, critical-path independence audit)
 

@@ -16,6 +16,7 @@ No management UI by design. Not a media frontend, not a torrent browser, and not
 - **Discovery** — a 1.5M-row release corpus that bootstraps itself on first install, plus live sourcing (Torrentio, Comet, Prowlarr, Torznab), merged on exact release identity with explained ranking.
 - **Automation** — future-intent preparation from Sonarr/Radarr monitoring, quality-aware automatic upgrades (with a durability veto against fragile replacements), temporary watch-once publications with Plex-aware retention, cheap dual-provider enrichment, and storm-triggered redundancy escalation.
 - **Lifecycle** — restart-safe downloads and promotions with bounded retries, a durable importer handoff for staged files, stale provider repair, invalid-fragment-tolerant corpus updates, and clean boot from empty state.
+- **Identity** — one durable representation per intent: the Binding names the exact TorrentFile, the provider routes are proven against that exact file, the published path is stable across representation changes, and a dead route is repaired without re-selecting the release.
 
 ## How it works
 
@@ -49,7 +50,7 @@ Request → control plane resolves one exact media file → provider placements 
 
 ## Quick start
 
-Packaged images, no source build. Latest stable release: **v0.2.0**.
+Packaged images, no source build. Latest stable release: **v0.4.0**.
 
 ```sh
 cp .env.unraid.example .env   # or .env.example for the full reference
@@ -85,7 +86,7 @@ Absent integrations disable cleanly — nothing dummy required.
 
 ## Deployment
 
-Docker + GHCR images (`latest` tracks stable releases, `main` is the dev channel, `v0.2.0` pins immutable). One compose file, one env template, one VFS mount unit. Fresh installs bootstrap from empty state; updates are atomic (`pull` + `up -d`, no manual migration, schema-safe rollback); restarts self-heal to playable in seconds with byte-identical media.
+Docker + GHCR images (`latest` tracks stable releases, `main` is the dev channel, `v0.4.0` pins immutable). One compose file, one env template, one VFS mount unit. Fresh installs bootstrap from empty state; updates are atomic (`pull` + `up -d`, no manual migration, schema-safe rollback); restarts self-heal to playable in seconds with byte-identical media.
 
 **Unraid is a first-class target:** Compose Manager, appdata/media share layout, `99:100` ownership, backup/restore procedure. See [`UNRAID.md`](UNRAID.md).
 
@@ -103,7 +104,7 @@ Docker + GHCR images (`latest` tracks stable releases, `main` is the dev channel
   technical documentation: pipeline, identity model, providers,
   consumers, persistence, operations, testing, failure recovery.
   Human-readable projection; repo docs stay canonical.
-- [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) — what the current release improved.
+- [`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md) — what the current release improved.
 - [`docs/architecture.md`](docs/architecture.md) — services, identity model, data model, HTTP surface.
 - [`docs/operations.md`](docs/operations.md) — deployment, environment variables, health checks.
 - [`UNRAID.md`](UNRAID.md) — Unraid Compose Manager quick-start, backup, restore, update.
