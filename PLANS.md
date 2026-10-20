@@ -230,12 +230,28 @@ durable provider-file mappings are exact (the release + path + size all
 agree), 50 are unmapped extras, zero mismatches — so nothing needed
 repair and nothing was rewritten.
 
-Next earned slice: **give the corpus the per-file PATH it lacks**. A
-multi-file release's filename is the PACK's name, so the only per-file
-fact the discovery can state today is the byte count — a weaker identity
-than a path. Carrying the corpus's per-file path would let the provider
-match on path AND size everywhere, make the release-level classification
-dispensable, and remove the remaining size-only selections.
+Completed product slice: **the corpus knows the file: exact discovery
+identity** — **CLOSED** (`a05410a`; evidence in `docs/BUILD-LOG.md`
+2026-10-20). The audit changed the plan: the corpus is a release-level
+FILENAME PARSER — 1 593 141 rows, **none** with a file-level path, the
+`candidates` cache 100% release-level too, and the only per-file fact in
+the chain is the stream's exact byte count. There was no path information
+being discarded: there was none. So the corpus's per-file record now
+carries `file_path`/`file_size` (nullable, additive, never fabricated from
+a release name), every candidate states its identity STRENGTH explicitly
+(`exact-file` / `size-corroborated` / `release-only`), the TorBox helper
+consumes the exact path when a candidate has one, and the byte count is
+labelled for what it is: the audit measured that 424 of 4099 mapped
+provider files (10.3 %) share their byte count with another file of the
+same resource, which is why a size-only match inside a resource must fail
+closed.
+
+Next earned slice: **give the discovery a per-file path from a source
+that HAS one**. The provider's inventory has it; the corpus does not. A
+torrent-metadata sidecar (the .torrent's own file list) for the releases
+the corpus already holds would give the corpus the per-file path at a
+fraction of the cost of a provider scan — and would make the size-only
+selection disappear.
 
 Completed product slice: **exact durable-truth republication** — **CLOSED**.
 E01 VFS publication was genuinely removed, then recreated through
