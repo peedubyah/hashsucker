@@ -34,6 +34,8 @@
 export const REPRESENTATION_CHANGE_REASONS = Object.freeze({
   /** The first Binding for a media intent: the request's selection. */
   INITIAL_SELECTION: 'initial-selection',
+  /** A request selected a different representation for the intent. */
+  REQUEST_RESELECTION: 'request-reselection',
   /** A quality/upgrade policy chose a better representation. */
   QUALITY_UPGRADE: 'quality-upgrade',
   /** The bound representation was proven invalid and is replaced. */
@@ -48,6 +50,7 @@ export const REPRESENTATION_CHANGE_REASONS = Object.freeze({
 /** Who owns each reason. The owner is the only legitimate source. */
 export const REPRESENTATION_CHANGE_OWNERS = Object.freeze({
   [REPRESENTATION_CHANGE_REASONS.INITIAL_SELECTION]: 'request-selection',
+  [REPRESENTATION_CHANGE_REASONS.REQUEST_RESELECTION]: 'request-selection',
   [REPRESENTATION_CHANGE_REASONS.QUALITY_UPGRADE]: 'upgrade-policy',
   [REPRESENTATION_CHANGE_REASONS.REJECTION_SUPERSEDE]: 'publication-policy',
   [REPRESENTATION_CHANGE_REASONS.DELIVERY_EXHAUSTION_FALLBACK]: 'representation-policy',

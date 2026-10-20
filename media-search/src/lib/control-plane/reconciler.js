@@ -61,8 +61,8 @@ export function planReconciliation(input, options = {}) {
     ? {
       // The BINDING's release and TorrentFile: the reconciler operates
       // inside the representation the authority already chose.
-      releaseKey: currentBinding.releaseKey,
-      infoHash: currentBinding.infoHash,
+      releaseKey: currentBinding.releaseKey ?? desired.releaseKey,
+      infoHash: currentBinding.infoHash ?? desired.infoHash,
       fileIndex: currentBinding.fileIndex ?? null,
       torrentFileId: currentBinding.torrentFileId ?? null,
     }

@@ -228,9 +228,16 @@ function tryActivateAuthoritativeBinding({
       exposureId: exposure.id,
       reason,
       // The representation reason travels with the handoff, which is the
-      // representation owner's decision. A handoff without one may not
-      // change the representation (the store refuses it).
-      representationReason: representationReasonOf(handoff),
+      // representation owner's decision (the request path's selection, the
+      // upgrade watch, the delivery-exhaustion fallback). A handoff without
+      // one — a legacy row, or a hand-built one — is treated as the
+      // request path's choice, because the PUBLICATION path is a
+      // representation owner by construction.
+      //
+      // The route-scoped paths never reach here: they repair routes and
+      // never publish, and the reconciler's own activation carries no
+      // reason at all, so the store refuses it if it moves the TorrentFile.
+      representationReason: representationReasonOf(handoff) ?? 'request-reselection',
     });
     bindingActivationRetryAt.delete(activationKey);
   } catch (error) {

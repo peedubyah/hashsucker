@@ -60,7 +60,7 @@ function publishedStoreWithActiveBinding(t, { infoHash, mediaId = 'tt-regression
   return { store, item, canonicalPath, placement, tfId, infoHash };
 }
 
-function handoff({ mediaId = 'tt-regression', infoHash, torrentFileId, size = 4096 }) {
+function handoff({ mediaId = 'tt-regression', infoHash, torrentFileId, size = 4096, representationReason = null }) {
   return {
     mediaId,
     mediaType: 'movie',
@@ -78,6 +78,10 @@ function handoff({ mediaId = 'tt-regression', infoHash, torrentFileId, size = 40
     identityTier: 'Verified',
     resolutionState: 'confirmed',
     selectionReason: 'test-new-release',
+    // WHY this handoff may replace the intent's representation. A handoff
+    // without a reason may not (the store refuses a representation change
+    // that does not declare one).
+    ...(representationReason ? { representationReason } : {}),
     selectedAt: 1_788_000_000_000,
     torrentFileIdentity: {
       status: 'exact-size',
@@ -115,7 +119,12 @@ test('materializeVfsEntry does not project a new release onto a different active
     WHERE placement_id = ?
   `).run(tfB, 1_000_000, UNTIL, placementB.id);
 
-  const newHandoff = handoff({ infoHash: HASH_B, torrentFileId: tfB, size: 8192 });
+  const newHandoff = handoff({
+    infoHash: HASH_B, torrentFileId: tfB, size: 8192,
+    // A different release is a representation decision: the upgrade
+    // policy owns it and says so.
+    representationReason: 'quality-upgrade',
+  });
   const entry = await materializeVfsEntry(cache, newHandoff, active.store, () => 1_788_000_000_000, { allowLegacy: false });
 
   assert.equal(entry.torrentFileId, tfB, 'VFS row must point at the new TorrentFile');

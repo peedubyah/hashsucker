@@ -101,7 +101,10 @@ function seedRoute(store, torrentFile, { placementId = 'pl-1', providerFileId = 
   return { placementId: placement.id, providerFileId };
 }
 
-function movieHandoff({ torrentFileId, infoHash = HASH_A, canonicalTitle = 'Oppenheimer', mediaId = 'tt1' }) {
+function movieHandoff({
+  torrentFileId, infoHash = HASH_A, canonicalTitle = 'Oppenheimer', mediaId = 'tt1',
+  representationReason = null,
+}) {
   return {
     mediaId,
     mediaType: 'movie',
@@ -119,6 +122,9 @@ function movieHandoff({ torrentFileId, infoHash = HASH_A, canonicalTitle = 'Oppe
     identityTier: 'Verified',
     resolutionState: 'confirmed',
     selectionReason: 'test',
+    // WHY this handoff may replace the intent's representation. A handoff
+    // without one may not (the store refuses the change).
+    ...(representationReason ? { representationReason } : {}),
     selectedAt: NOW,
   };
 }
@@ -163,7 +169,12 @@ test('a Binding replacement moves the VFS row with it', async (t) => {
   // A representation change: a different release for the same intent.
   await materializeVfsEntry(
     cache,
-    movieHandoff({ torrentFileId: 'tf-b', infoHash: HASH_B }),
+    movieHandoff({
+      torrentFileId: 'tf-b', infoHash: HASH_B,
+      // A different release is a representation decision: the upgrade
+      // policy owns it and says so.
+      representationReason: 'quality-upgrade',
+    }),
     controlPlane,
     () => NOW + 1000,
     { allowLegacy: false },
