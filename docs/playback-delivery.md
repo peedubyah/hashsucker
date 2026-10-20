@@ -58,6 +58,16 @@ Configuration:
 | `PLAYBACK_TOKEN_SECRET` | unset | the signing secret (≥ 16 chars). Unset ⇒ the `/play` route is inert and answers `503` |
 | `PLAYBACK_TOKEN_TTL_SECONDS` | `86400` | the token lifetime. `0` means no expiry and is never the default |
 
+**Production state (2026-10-20):** the appliance runs `STREAM_BYTE_ROUTE=playback`. The
+resolver-first surface is proven in production against the real consumer path — the Plex HTPC
+canary creates a real PMS session, the client follows the `307` to `/play/<token>`, and every
+byte, seek and near-EOF read is served from the same URL. The identity invariants (Binding,
+TorrentFile, VFS path, presentation identity, Plex ratingKey, Plex `Part.file`, `Part.size`)
+are unchanged, and no `.strm` file was rewritten.
+
+The route is **configuration, not a migration**: flipping it back and forth changes the
+resolver's answer and nothing else — no durable identity row differs before and after.
+
 Under the `playback` policy the resolver **never** falls back to a provider redirect. With no
 authoritative Binding it answers `409 NO_AUTHORITATIVE_BINDING` before touching a provider API,
 because there are no authoritative bytes to serve.

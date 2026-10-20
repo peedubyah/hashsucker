@@ -182,6 +182,45 @@ instead of a provider-backed URL ✓:
 The next earned slice is not selected ✓; the candidates are in the build log
 ✓ ✓.
 
+**Pivot slice 2 — PLAYBACK ROUTE COMPATIBILITY — CLOSED** (evidence in
+`docs/BUILD-LOG.md` 2026-10-20). The appliance now runs
+`STREAM_BYTE_ROUTE=playback` ✓ ✓ and the old product is unchanged ✓ ✓:
+
+- **The consumer does not care.** The Plex HTPC canary — a **real PMS
+  session** ✓ ✓ — passes on the playback route ✓ ✓: the session is created ✓,
+  the identity matches ✓, playback progresses ✓, the forward/backward/near-EOF
+  seeks all resolve ✓, and the stop tears the session down ✓ ✓. The
+  baseline run on the `cached` route also passed ✓ ✓.
+- **Every identity invariant is byte-identical across the flip** ✓ ✓ (the
+  `.strm` files ✓, the Plex ratingKey ✓, `Part.file` ✓, `Part.size` ✓, the
+  Binding → TorrentFile ✓, the VFS path and VFS TorrentFile ✓, the
+  presentation identity and its commit time ✓, the provider routes ✓ ✓) —
+  over four fixtures: two dual-route movies ✓, one single-route movie ✓, one
+  TV episode ✓ ✓. **No `.strm` was rewritten** ✓ ✓.
+- **The observed chain** ✓ ✓ (the edge's access log ✓): one
+  `GET /stream/...` → `307` → `/play/<token>` ✓ ✓, then **every** byte,
+  seek and near-EOF read on that one stable URL ✓ ✓ — with no provider host
+  in any hop ✓ ✓ and no provider API touched at resolve time ✓ ✓.
+- **Overhead is near-noise** ✓ ✓ (warm, 9 runs each ✓): the resolver hop
+  3.89 → 5.15 ms ✓, the first 206 47.2 → 47.85 ms ✓, the seek 49.05 → 47.61
+  ms ✓, the re-request 50.26 → 48.97 ms ✓ ✓ — the run-to-run ranges
+  overlap ✓ ✓.
+- **The rollback is configuration-only** ✓ ✓: `playback → cached →
+  playback` changes the resolver's answer and **no durable identity row**
+  ✓ ✓ (the identity fingerprints of all seven durable tables are
+  byte-identical across the flips ✓ ✓).
+- **Jellyfin remains environmentally blocked** ✓ ✓ — `GET /System/Info`
+  answers **HTTP 401** ✓ ✓ (the configured `JELLYFIN_API_KEY` is rejected ✓ —
+  the same pre-existing debt ✓ ✓). The Jellyfin *path* is characterized ✓
+  ✓; no live Jellyfin session was observed ✓ ✓.
+- **One pre-existing flake remains** ✓ ✓: the baseline canary run failed
+  once with the documented `PMS_SESSION_NOT_CREATED` ✓ ✓ (PMS's busy-database
+  wait expiring under the scanner's write lock ✓ — diagnosed 2026-10-12 ✓ ✓)
+  and passed on retry ✓ ✓. It is not caused by this slice ✓ ✓.
+
+The next earned slice is not selected ✓; the candidates are in the build log
+✓ ✓ — the first of them is the tiny resolver→mpv reference client ✓ ✓.
+
 
 Completed final slice: **bound stale-inventory binding retry churn** —
 **CLOSED**. The host-only canary passed clean E01 plus the full E01/E05/MobLand

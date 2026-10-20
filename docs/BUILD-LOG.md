@@ -4399,3 +4399,166 @@ contract (position, subtitle/audio preference, continuity) so a client can
 resume a session across a token expiry; (3) a provider-leak guard over the
 whole resolver response set (not just the playback object) ✓ — the harness
 already knows how ✓.
+
+## 2026-10-20 — PLAYBACK ROUTE COMPATIBILITY: the new byte route does not break the old product — CLOSED
+
+Slice: **PIVOT SLICE 2**. Enable `STREAM_BYTE_ROUTE=playback` on the appliance and prove the
+existing consumer path (`.strm` → Plex/Jellyfin → HashSucker → authoritative TorrentFile → Rust
+bytes) still works unchanged through the HashSucker-owned playback boundary. A compatibility
+slice, not a feature slice: no client, no session state, no direct torrent, no representation
+policy change.
+
+### WHAT CHANGED
+
+- **Configuration only.** `STREAM_BYTE_ROUTE=playback` in the appliance's `.env` (host
+  configuration, not tracked), and the `media-search` container recreated to pick it up. The
+  source did not change for this slice; one regression test was added.
+- `media-search/test/playback-object.test.js` — `P16 — switching the byte route mutates no
+  durable state`: under both policies the resolver reads the Binding and writes nothing to the
+  control plane.
+- `docs/playback-delivery.md` — the production state of the route and the rollback property.
+
+### WHAT WAS PROVEN
+
+**The cohort (four fixtures: two dual-route movies, one single-route movie, one TV episode),
+before and after the flip, same fixtures, same measurements:**
+
+| invariant | before | after |
+|---|---|---|
+| `.strm` count / content | 1 / 1 / 4 / 1 | **identical** |
+| Plex `ratingKey` | 423 / 514 / 377 / 489 | **identical** |
+| Plex `Part.file` | `/mnt/hashsucker-vfs/…` | **identical** |
+| Plex `Part.size` | 1452039706 / 6499499430 / 8453206325 / 4340539373 | **identical** |
+| Binding → TorrentFile | `tf_c0656148…` / `tf_1355e37f…` / `tf_149c41e9…` / `tf_287b5593…` | **identical** |
+| VFS canonical path + VFS TorrentFile | — | **identical** |
+| presentation identity + `presentation_committed_at` | — | **identical** |
+| provider routes (provider, state, mapping) | 2 / 1 / 2 / 1 | **identical** |
+| first `206` + `Content-Range` | 206, exact | **identical** |
+| seek forward / backward / near EOF | 206 / 206 / 206 | **identical** |
+| clean stop | aborted cleanly | **identical** |
+| provider URL or credential in any hop | none | **none** |
+| **resolver byte route** | `data-plane` → `/bytes/:tfId` | **`playback-object` → `/play/<token>`** |
+
+The only fields that changed are the two the slice was supposed to change.
+
+**The real consumer path (Plex HTPC canary, a genuine PMS session):** passes on the playback
+route — the session is created, the identity matches, playback progresses, the forward, backward
+and near-EOF seeks all resolve, and the stop tears the session down (`stopToPmsGone` 108 ms,
+`stopToIdle` 164 ms, `pass: true`). The baseline canary run on the `cached` route also passed
+(`stopToPmsGone` 27 ms, `stopToIdle` 37 ms). One baseline run failed with the **documented,
+pre-existing** `PMS_SESSION_NOT_CREATED` condition (PMS's SQLite busy-database wait expiring
+because the library scanner holds the write lock — `src/PRODUCTION-PLAYBACK-TESTING.md`, diagnosed
+2026-10-12); the retry passed. That failure is not caused by this slice: it was observed with the
+`cached` route still live.
+
+**The observed request chain** (from the edge's access log — the consumer's own view):
+
+```
+GET /stream/movie/tt0075686                    → 307, Location: /play/<token>
+                                                   X-Hashsucker-Byte-Route: playback-object
+                                                   X-Availability-Source: authoritative-binding
+                                                   X-Provider-Check-Occurred: false
+GET /play/<token>  Range: bytes=0-1023           → 206, Content-Range: bytes 0-1023/4340539373
+GET /play/<token>  Range: bytes=2170269686-…     → 206   (the forward seek)
+GET /play/<token>  Range: bytes=0-1023           → 206   (the backward seek)
+GET /play/<token>  Range: bytes=4340537325-…     → 206   (the near-EOF read)
+GET /play/<token>  Range: bytes=0-1048575        → 206   (the read-ahead)
+```
+
+One stable URL for every request; no provider host appears in any hop; the resolver touched no
+provider API (`X-Provider-Check-Occurred: false`). HashSucker's own consumer observer recorded the
+session against the exact TorrentFile (`accepted=yes`, `plex-session-progress`).
+
+**Same-TorrentFile dual-route proof (observational, as required):** City Lights
+(`tf_c0656148…`) and Rear Window (`tf_149c41e9…`) each carry two `ready`/`mapped` routes (TorBox
+and Real-Debrid) that agree on the exact size, and each is served through one playback object.
+No destructive provider failure was manufactured; the transition itself remains covered by the
+data plane's deterministic suite (`cargo test --test same_tf_route_recovery` → 11/11, including
+"the client still gets the full bytes").
+
+**Overhead (warm, 9 runs each, same fixture):**
+
+| | `cached` | `playback` | delta |
+|---|---|---|---|
+| resolver hop (median) | 3.89 ms | 5.15 ms | +1.26 ms |
+| first 206 (median) | 47.2 ms | 47.85 ms | +0.65 ms |
+| seek (median) | 49.05 ms | 47.61 ms | −1.44 ms |
+| healthy re-request (median) | 50.26 ms | 48.97 ms | −1.29 ms |
+
+Near-noise: the run-to-run ranges overlap in both modes (the first byte ranged 12–72 ms in each).
+The canary agrees — first-read TTFB 11 ms before, 13 ms after; session→first read 117 ms before,
+103 ms after.
+
+**Rollback is configuration-only (Phase 8):** flipping `playback → cached → playback` changes the
+resolver's answer and **nothing else** — the identity-bearing fingerprints of `library_items`,
+`bindings`, `library_paths`, `torrent_files`, `provider_placements`, `provider_files` and
+`exposures` are byte-identical across the flips. (The full-row hashes of `library_items` and
+`exposures` do drift, but only in observation timestamps: `updated_at`/`last_played_at` from the
+consumer playback observer and `observed_at`/`expires_at` from the exposure observer. Neither is
+identity, and neither is touched by the flag.)
+
+### WHAT REMAINS UNPROVEN
+
+- **Jellyfin's live playback is environmentally blocked.** `GET /System/Info` on the appliance's
+  Jellyfin returns **HTTP 401** — the configured `JELLYFIN_API_KEY` is rejected. The Jellyfin
+  *path* is characterized (it consumes the same `.strm` → `/stream` → playback-object → bytes
+  chain, and the chain is proven through Plex and through mpv), but no live Jellyfin session was
+  observed. This is the same pre-existing environmental debt recorded in `PLANS.md`; the
+  credential must be replaced before Jellyfin can be proven.
+- **No movie was played through a real Plex session.** The canary's application bridge hard-codes
+  `type: 'episode'`, so the Plex-session proof is an episode (Lanterns S01E05, ratingKey 514).
+  The movies are characterized through the same `.strm` → resolver → bytes chain with their full
+  Plex identity recorded (ratingKey, `Part.file`, `Part.size` unchanged) and their seeks and
+  near-EOF reads passing.
+- The forced end-to-end production failover was not performed (provoking provider failures for
+  confidence is out of bounds); the production data plane's failover counter remains `0`.
+- The playback-object route was not exercised by a **Jellyfin** client, and the token's expiry
+  behaviour under a long session was not re-measured here (the TTL is 24 h).
+
+### WHAT WAS LEARNED
+
+- **The consumer does not care about the byte route.** Plex followed the `307` to a signed,
+  opaque, per-item URL without a hiccup: the same session, the same identity, the same bytes,
+  the same seeks. The playback object is invisible from the consumer's side — which is the point.
+- **The route is genuinely configuration.** Two container recreates and two flips produced zero
+  durable identity difference. The rollback path is free.
+- **The measurement that first looked like a regression was cold-start.** The first after-run
+  showed +50 ms on the first byte; that was the data plane's cache after a container recreate,
+  not the route. A warm 9-run median on both sides shows the real delta is inside the noise.
+- **The edge already proxies the new path.** The `.strm` points at the edge
+  (`http://localhost:8080/stream/…`), and the edge passes `/play/<token>` through unchanged
+  (verified byte-identical against the container's direct path) — the resolver-first surface
+  needed no edge change.
+- **The pre-existing PMS session-creation flake is still there.** The canary failed once on the
+  baseline (`PMS_SESSION_NOT_CREATED` — PMS's busy-database wait expiring under the scanner's
+  write lock, with HashSucker's own section refreshes as a documented amplifier) and passed on
+  retry. It is a real, diagnosed, pre-existing condition and it is *not* fixed by this slice.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- "Changing the byte route could disturb the consumer's identity or publication" → false ✓; every
+  identity invariant is byte-identical across the flip ✓ and no `.strm` was rewritten ✓.
+- "The playback object might need the edge to learn a new route" → false ✓; the edge already
+  proxies it ✓.
+- "A signed URL might confuse a real Plex client" → false ✓; the canary's session was created and
+  progressed normally ✓.
+
+### WHAT SHOULD BE UPDATED
+
+- `docs/playback-delivery.md` (the production state of the route + the rollback property ✓),
+  `docs/BUILD-LOG.md` ✓, `PLANS.md` ✓, `handoff/CURRENT.md` ✓ — done in this slice.
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing was deleted. `/bytes/:tfId` is now a compatibility alias of `/play/:token>`: the
+  resolver no longer emits it under the production policy ✓, but the route remains public ✓.
+  It should be folded in or retired when the compatibility window closes — not before ✓.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The candidates this slice leaves standing: (1) the tiny
+**resolver→mpv reference client** (the next slice the product direction names — a thin client that
+calls the resolver and plays, proving the contract from a client's side); (2) retire
+`/bytes/:tfId` as a public alias once the compatibility window closes ✓; (3) replace the Plex
+section refresh that amplifies PMS's scanner contention ✓ (a pre-existing, diagnosed defect that
+blocks the canary's reliability ✓).

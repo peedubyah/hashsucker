@@ -117,6 +117,33 @@ TorrentFile instead of a provider-backed URL ✓:
   (resolve hop ✓, first byte ✓, optional mpv first frame ✓, provider-leak
   guard ✓ ✓).
 
+**Pivot slice 2 — PLAYBACK ROUTE COMPATIBILITY — CLOSED** (2026-10-20). The
+appliance now runs **`STREAM_BYTE_ROUTE=playback`** ✓ ✓ (host `.env` ✓ ✓;
+not tracked ✓ ✓) and the old product is unchanged ✓ ✓:
+
+- The **Plex HTPC canary passes on the playback route** ✓ ✓ — a real PMS
+  session ✓ ✓, the identity ✓ ✓, the forward/backward/near-EOF seeks ✓ ✓, a
+  clean stop ✓ ✓ (`stopToPmsGone` 108 ms ✓ ✓). The baseline run on the
+  `cached` route passed too ✓ ✓; one baseline run hit the documented
+  pre-existing `PMS_SESSION_NOT_CREATED` flake ✓ ✓ (PMS's busy-database wait
+  under the scanner's lock ✓ — `src/PRODUCTION-PLAYBACK-TESTING.md` ✓ ✓).
+- Every identity invariant is **byte-identical across the flip** ✓ ✓ (the
+  `.strm` ✓, the Plex ratingKey ✓, `Part.file` ✓, `Part.size` ✓, the Binding
+  ✓, the VFS path ✓, the presentation identity ✓, the routes ✓ ✓) over four
+  fixtures ✓ ✓ — and **no `.strm` was rewritten** ✓ ✓.
+- The consumer's chain is one stable URL ✓ ✓: `GET /stream/...` → `307` →
+  `/play/<token>` ✓ ✓, then every byte/seek on that URL ✓ ✓ — **no provider
+  host in any hop** ✓ ✓.
+- The overhead is **near-noise** ✓ ✓ (warm medians ✓ ✓): the resolver hop
+  3.89 → 5.15 ms ✓, the first 206 47.2 → 47.85 ms ✓, the seek 49.05 → 47.61
+  ms ✓ ✓.
+- The **rollback is configuration-only** ✓ ✓ — `playback → cached → playback`
+  changed no durable identity row ✓ ✓ (the seven identity fingerprints are
+  byte-identical across the flips ✓ ✓).
+- **Jellyfin is still environmentally blocked** ✓ ✓ — `GET /System/Info`
+  answers **401** ✓ ✓ (the `JELLYFIN_API_KEY` is rejected ✓ ✓). The path is
+  characterized ✓ ✓; no live Jellyfin session was observed ✓ ✓.
+
 One recovery note: a `git stash -u` during the merge was dropped with the
 pre-existing untracked user files inside it
 (`artifacts/ab-baseline-off.jsonl`, `artifacts/ab-off-vs-on.json`,

@@ -463,3 +463,69 @@ test('P15 — an invalid token is refused before the byte path is touched', asyn
   );
   assert.equal(called, false, 'no byte-path contact for an invalid token');
 });
+
+test('P16 — switching the byte route mutates no durable state', async () => {
+  // The route is configuration. Both policies must read the Binding and
+  // nothing else: no write to the control plane, no publication change, no
+  // VFS mutation. The durable identity is whatever the Binding already said.
+  const mutators = [
+    'updateLibraryItem', 'setActiveBinding', 'recordDeliveryEvidence', 'recordAcceptedTorrentFile',
+    'upsertLibraryPath', 'retireLibraryPath', 'setPublication', 'writeExposure', 'deleteLibraryItem',
+  ];
+  const calls = [];
+  const controlPlaneStore = {
+    getLibraryItemByIdentityKey: () => ({ id: 'lib-1' }),
+    getActiveBindingForLibraryItem: () => ({ torrentFile: { id: 'tf-binding-1' } }),
+    getActiveCanonicalPath: () => ({ canonicalPath: 'Movies/X/X.mkv' }),
+    recordDeliveryEvidence: () => ({}),
+    findDeliveryEvidence: () => null,
+    listDeliveryEvidenceForHash: () => [],
+  };
+  for (const name of mutators) {
+    controlPlaneStore[name] = (...args) => { calls.push({ name, args }); return {}; };
+  }
+
+  const { createRequestHandler } = await import('../src/server/app.js');
+  const run = async (policy) => {
+    const handler = createRequestHandler({
+      searchCache: {
+        db: { prepare: () => ({ get: () => null, run: () => ({ changes: 0 }), all: () => [] }) },
+        getExistingSelection: () => ({
+          status: 'selected', selectedHash: 'a'.repeat(40), fileIndex: 0,
+          provider: 'torbox', releaseKey: `${'a'.repeat(40)}:0`, filename: 'x.mkv',
+        }),
+        getTvPlaybackHandoff: () => null,
+        getProviderObservations: () => [],
+      },
+      controlPlaneStore,
+      env: {
+        STREAM_BYTE_ROUTE: policy,
+        PLAYBACK_TOKEN_SECRET: SECRET,
+        DATA_PLANE_URL: 'http://data-plane:3001',
+      },
+      clock: () => 1_000_000,
+    });
+    const server = http.createServer(handler);
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address();
+    try {
+      const resp = await fetch(`http://127.0.0.1:${port}/stream/movie/tt0000001`, { redirect: 'manual' });
+      const location = resp.headers.get('location');
+      await resp.text();
+      return { status: resp.status, location, route: resp.headers.get('x-hashsucker-byte-route') };
+    } finally {
+      server.close();
+    }
+  };
+
+  const before = calls.length;
+  const cached = await run('cached');
+  const playback = await run('playback');
+  assert.equal(calls.length, before, 'neither policy writes to the control plane');
+  assert.equal(cached.status, 307);
+  assert.equal(playback.status, 307);
+  assert.equal(cached.route, 'data-plane');
+  assert.equal(playback.route, 'playback-object');
+  assert.ok(cached.location.startsWith('/bytes/'));
+  assert.ok(playback.location.startsWith('/play/'));
+});
