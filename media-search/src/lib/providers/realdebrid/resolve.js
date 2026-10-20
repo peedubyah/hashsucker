@@ -206,13 +206,26 @@ export function classifyCandidateToRdFile(rdFiles, candidateMetadata = {}) {
     return { rdFileId: null, classification: 'absent' };
   }
 
-  // Single playable video file → select it
+  const { filename, size } = candidateMetadata;
+
+  // A single playable video file is only "the" file when its exact byte
+  // count is the discovery's. A file that merely happens to be the only
+  // video in the resource is not proof: the discovery states a SIZE for the
+  // file it selected, and a contradiction fails closed.
   if (playableFiles.length === 1) {
-    return { rdFileId: String(playableFiles[0].id), classification: 'match' };
+    const only = playableFiles[0];
+    if (size == null || !Number.isSafeInteger(Number(size))) {
+      // The discovery could not state the file's size: the release-level
+      // answer stands (nothing contradicts it).
+      return { rdFileId: String(only.id), classification: 'match' };
+    }
+    if (Number(only.bytes) === Number(size)) {
+      return { rdFileId: String(only.id), classification: 'match' };
+    }
+    return { rdFileId: null, classification: 'absent' };
   }
 
   // Multiple files → attempt to match by filename + size
-  const { filename, size } = candidateMetadata;
   if (filename) {
     const normalizedFilename = filename.toLowerCase();
     const basenameFilename = normalizedFilename.split('/').pop().split('\\').pop();

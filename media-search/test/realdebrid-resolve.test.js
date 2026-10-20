@@ -270,12 +270,21 @@ test('classifyCandidateToRdFile: empty file list → absent', () => {
     .classification, 'absent');
 });
 
-test('classifyCandidateToRdFile: single playable file → match', () => {
+test('classifyCandidateToRdFile: a single playable file is the file only when its size agrees', () => {
   freshAccounting();
-  const files = [rdFile({ id: 'only', path: E02_BASENAME, bytes: 999_999_999 })];
-  const result = classifyCandidateToRdFile(files, { filename: 'anything.mkv', size: 1 });
-  assert.equal(result.classification, 'match');
-  assert.equal(result.rdFileId, 'only');
+  // The only video in the resource, but its byte count contradicts the
+  // discovery's: that is a DIFFERENT file of the release, and it fails
+  // closed.
+  const contradicting = [rdFile({ id: 'only', path: E02_BASENAME, bytes: 999_999_999 })];
+  const rejected = classifyCandidateToRdFile(contradicting, { filename: 'anything.mkv', size: 1 });
+  assert.equal(rejected.classification, 'absent');
+  assert.equal(rejected.rdFileId, null);
+
+  // With the exact size, the same file is the file.
+  const agreeing = [rdFile({ id: 'only', path: E02_BASENAME, bytes: E02_SIZE })];
+  const accepted = classifyCandidateToRdFile(agreeing, { filename: E02_BASENAME, size: E02_SIZE });
+  assert.equal(accepted.classification, 'match');
+  assert.equal(accepted.rdFileId, 'only');
 });
 
 test('classifyCandidateToRdFile: non-playable extensions in mixed list are filtered', () => {
@@ -286,7 +295,7 @@ test('classifyCandidateToRdFile: non-playable extensions in mixed list are filte
     { id: 'i', path: 'cover.jpg', bytes: 200 },
     rdFile({ id: 'v', path: E02_BASENAME, bytes: 7_000_000_000 }),
   ];
-  const result = classifyCandidateToRdFile(files, { filename: 'whatever.mkv', size: 1 });
+  const result = classifyCandidateToRdFile(files, { filename: E02_BASENAME, size: 7_000_000_000 });
   assert.equal(result.classification, 'match');
   assert.equal(result.rdFileId, 'v');
 });
