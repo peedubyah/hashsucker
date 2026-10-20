@@ -2881,8 +2881,8 @@ instead of recomputing a name.
 | | production, after the adoption |
 |---|---|
 | artifacts on disk | 184 |
-| committed identities | **179** |
-| identities whose `.strm` path matches the artifact on disk | **168 aligned, 0 drifted** |
+| committed identities | **179** (180 after the scheduler published a new item during the slice) |
+| identities whose `.strm` path matches the artifact on disk | **168 aligned, 0 drifted** (169/0 after the new item) |
 | identities with no VFS row (published without a byte path — the virtual library) | 11 |
 | artifacts with no media intent to belong to | 4 (an orphan episode, a junk `S00E00` pair, a mis-catalogued movie artifact, a release-grammar artifact) |
 | files renamed | **0** |
