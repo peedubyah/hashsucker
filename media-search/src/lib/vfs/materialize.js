@@ -651,6 +651,55 @@ export function isUnpublishedHandoff(controlPlaneStore, handoff) {
   }
 }
 
+/**
+ * PROJECT a VFS row onto the active Binding's byte identity.
+ *
+ * The row's `torrent_file_id`, `info_hash` and `size` become the
+ * Binding's. The generation (updated_at) advances ONLY when the projected
+ * bytes actually changed — that is the signal a consumer needs to
+ * re-analyse the file, and advancing it needlessly would make every
+ * publication a consumer-visible mutation.
+ */
+function projectVfsRowToAuthority({ searchCache, controlPlaneStore, entry, binding, observedAt }) {
+  if (!entry || !binding?.torrentFile?.id) return null;
+  const torrentFile = binding.torrentFile;
+  if (!Number.isSafeInteger(torrentFile.size) || torrentFile.size <= 0) return null;
+  const sameIdentity = entry.torrentFileId === torrentFile.id
+    && String(entry.infoHash ?? '').toLowerCase() === String(torrentFile.infoHash ?? '').toLowerCase()
+    && Number(entry.size ?? -1) === Number(torrentFile.size);
+  if (sameIdentity) return null;
+  const isEpisode = entry.season != null && entry.episode != null;
+  const table = isEpisode ? 'vfs_tv_entries' : 'vfs_movie_entries';
+  try {
+    const previousGeneration = searchCache.db.prepare(
+      `SELECT MAX(updated_at) AS max_updated_at FROM ${table}`,
+    ).get()?.max_updated_at ?? 0;
+    const materializedAt = Math.max(observedAt ?? Date.now(), previousGeneration + 1000);
+    const result = searchCache.db.prepare(`
+      UPDATE ${table}
+      SET torrent_file_id = ?, info_hash = ?, size = ?, updated_at = ?
+      WHERE ${isEpisode ? 'media_id = ? AND season = ? AND episode = ?' : 'media_id = ?'}
+    `).run(
+      torrentFile.id,
+      String(torrentFile.infoHash ?? '').toLowerCase(),
+      torrentFile.size,
+      materializedAt,
+      ...(isEpisode
+        ? [entry.mediaId, entry.season, entry.episode]
+        : [entry.mediaId]),
+    );
+    entry.torrentFileId = torrentFile.id;
+    entry.infoHash = String(torrentFile.infoHash ?? '').toLowerCase();
+    entry.size = torrentFile.size;
+    entry.updatedAt = materializedAt;
+    console.log(`[vfs] projected byte authority media=${entry.mediaId} path="${entry.canonicalPath}" torrentFileId=${torrentFile.id} size=${torrentFile.size}`);
+    return { changes: result.changes, torrentFileId: torrentFile.id };
+  } catch (error) {
+    console.warn(`[vfs] byte authority projection failed for ${entry.mediaId}: ${error.message}`);
+    return null;
+  }
+}
+
 export async function materializeVfsEntry(
   searchCache,
   handoff,
@@ -721,6 +770,52 @@ async function materializeVfsEntryInner(
     if (!isRealControlPlaneStore(controlPlaneStore)) return null;
     return controlPlaneStore.ensureLibraryItem(libraryItemInputFromHandoff(handoff));
   };
+  /**
+   * The BYTE AUTHORITY for this publication.
+   *
+   * A VFS row's byte identity is a PROJECTION of the active Binding's
+   * TorrentFile. The Binding is settled FIRST (a representation change
+   * lives there), and the row then projects it — so the row can never
+   * name a TorrentFile the authority does not name.
+   *
+   * Before this, the row was written first and the Binding was activated
+   * afterwards, in a different database: when the activation failed (a
+   * stale provider inventory observation, a missing route), the row had
+   * already moved to a new TorrentFile and the two disagreed for days.
+   * The byte path then served one release while the authority named
+   * another.
+   *
+   * @returns {{torrentFile: Object, binding: Object|null, projected: boolean}}
+   */
+  const settleByteAuthority = (candidate, canonicalPath, reason) => {
+    const item = mediaItemFactory?.() ?? null;
+    const activeBefore = item
+      ? controlPlaneStore.getActiveBindingForLibraryItem?.(item.id) ?? null
+      : null;
+    // The representation decision: the Binding settles on the handoff's
+    // TorrentFile.
+    const binding = tryActivateAuthoritativeBinding({
+      searchCache,
+      controlPlaneStore,
+      handoff,
+      torrentFile: candidate,
+      canonicalPath,
+      mediaItemFactory,
+      reason,
+      observedAt: now(),
+    });
+    const active = binding?.status === 'active'
+      ? binding
+      : (item ? controlPlaneStore.getActiveBindingForLibraryItem?.(item.id) ?? activeBefore : activeBefore);
+    // The authority wins. If it names a different TorrentFile than the
+    // handoff, the row projects the AUTHORITY: the handoff was a
+    // representation change that did not settle, and the row must not
+    // move ahead of the authority.
+    if (active?.torrentFile?.id && active.torrentFile.id !== candidate?.id) {
+      return { torrentFile: active.torrentFile, binding: active, projected: true };
+    }
+    return { torrentFile: candidate, binding: active ?? null, projected: false };
+  };
   const finalize = (entry, reason) => {
     if (!entry) return entry;
     // The resolved presentation travels with the entry: the `.strm`
@@ -743,7 +838,7 @@ async function materializeVfsEntryInner(
     // observation time; using the row's historical updated_at would create an
     // immediately stale exposure and prevent Binding activation.
     const observedAt = now();
-    tryActivateAuthoritativeBinding({
+    const activated = tryActivateAuthoritativeBinding({
       searchCache,
       controlPlaneStore,
       handoff,
@@ -751,6 +846,19 @@ async function materializeVfsEntryInner(
       canonicalPath: entry.canonicalPath,
       mediaItemFactory,
       reason,
+      observedAt,
+    });
+    // PROJECT the byte authority: after the Binding settled, the VFS row
+    // names the Binding's TorrentFile. The row's PATH never changes here
+    // — the presentation identity is stable across a representation change,
+    // and only the bytes it points at move.
+    projectVfsRowToAuthority({
+      searchCache,
+      controlPlaneStore,
+      entry,
+      binding: activated?.status === 'active'
+        ? activated
+        : (activated?.binding?.status === 'active' ? activated.binding : null),
       observedAt,
     });
     // P19: after the authoritative binding is in place, give the Real-Debrid
@@ -882,6 +990,10 @@ async function materializeVfsEntryInner(
         presentation.canonicalPath = canonicalPath;
       }
     }
+    // The byte authority settles BEFORE the row is written: the row
+    // projects the active Binding's TorrentFile, never the handoff's.
+    const authority = settleByteAuthority(torrentFile, canonicalPath, 'vfs-movie-materialize');
+    const projectedTorrentFile = authority.torrentFile ?? torrentFile;
     const previousGeneration = searchCache.db.prepare(
       'SELECT MAX(updated_at) AS max_updated_at FROM vfs_movie_entries',
     ).get()?.max_updated_at ?? 0;
@@ -891,11 +1003,11 @@ async function materializeVfsEntryInner(
       created = searchCache.createVfsMovieEntry({
         mediaId: handoff.mediaId,
         releaseKey: handoff.releaseKey,
-        infoHash: torrentFile?.infoHash ?? handoff.infoHash,
-        fileIndex: torrentFile ? null : handoff.fileIndex,
+        infoHash: projectedTorrentFile?.infoHash ?? handoff.infoHash,
+        fileIndex: projectedTorrentFile ? null : handoff.fileIndex,
         canonicalPath,
-        torrentFileId: torrentFile?.id ?? null,
-        size: torrentFile?.size ?? null,
+        torrentFileId: projectedTorrentFile?.id ?? null,
+        size: projectedTorrentFile?.size ?? null,
         createdAt: timestamp,
         updatedAt: timestamp,
       });
@@ -1046,6 +1158,10 @@ async function materializeVfsEntryInner(
       presentation.canonicalPath = canonicalPath;
     }
   }
+  // The byte authority settles BEFORE the row is written: the row
+  // projects the active Binding's TorrentFile, never the handoff's.
+  const authority = settleByteAuthority(torrentFile, canonicalPath, 'vfs-tv-materialize');
+  const projectedTorrentFile = authority.torrentFile ?? torrentFile;
   const previousGeneration = searchCache.db.prepare(
     'SELECT MAX(updated_at) AS max_updated_at FROM vfs_tv_entries',
   ).get()?.max_updated_at ?? 0;
@@ -1057,11 +1173,11 @@ async function materializeVfsEntryInner(
       season: handoff.season,
       episode: handoff.episode,
       releaseKey: handoff.releaseKey,
-      infoHash: torrentFile?.infoHash ?? handoff.infoHash,
-      fileIndex: torrentFile ? null : handoff.fileIndex,
+      infoHash: projectedTorrentFile?.infoHash ?? handoff.infoHash,
+      fileIndex: projectedTorrentFile ? null : handoff.fileIndex,
       canonicalPath,
-      torrentFileId: torrentFile?.id ?? null,
-      size: torrentFile?.size ?? null,
+      torrentFileId: projectedTorrentFile?.id ?? null,
+      size: projectedTorrentFile?.size ?? null,
       createdAt: timestamp,
       updatedAt: timestamp,
     });

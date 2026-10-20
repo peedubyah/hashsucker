@@ -3294,6 +3294,33 @@ export function createRequestHandler(dependencies = {}) {
           claimCalibration: searchCache.listEvidenceClaimCalibration?.({ from, to }) ?? [],
         });
       }
+      // BYTE AUTHORITY: does the VFS name the TorrentFile the active
+      // Binding names? The audit reports the drift; the reconcile projects
+      // the Binding onto the VFS row (no reselection, no provider work, no
+      // metadata lookup).
+      if (request.method === 'GET' && url.pathname === '/api/operator/byte-authority') {
+        const { auditByteAuthority } = await import('../lib/vfs/byte-projection.js');
+        const rows = auditByteAuthority({ store: controlPlaneStore, cache: searchCache });
+        const summary = {};
+        for (const row of rows) summary[row.state] = (summary[row.state] ?? 0) + 1;
+        return sendJson(response, 200, { generatedAt: clock(), summary, total: rows.length, rows });
+      }
+      if (request.method === 'POST' && url.pathname === '/api/operator/byte-authority/reconcile') {
+        const { reconcileByteAuthority } = await import('../lib/vfs/byte-projection.js');
+        const body = await readBody(request);
+        const dryRun = body?.dryRun !== false;
+        const result = reconcileByteAuthority({
+          store: controlPlaneStore, cache: searchCache, dryRun,
+        });
+        return sendJson(response, 200, {
+          generatedAt: clock(),
+          dryRun,
+          scanned: result.scanned,
+          projected: result.repaired.length,
+          skipped: result.skipped.length,
+          detail: result.repaired,
+        });
+      }
       // CONSUMER PROJECTION: what SHOULD exist in Plex and Jellyfin for
       // every published media intent, derived from HashSucker's durable
       // truth, and what each consumer ACTUALLY holds.

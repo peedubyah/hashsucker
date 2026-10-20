@@ -48,6 +48,7 @@ import {
   retireVerifiedDeadRedundantRoutes,
 } from '../lib/control-plane/route-reconciler.js';
 import { createArrSync } from '../lib/anticipation/arr-sync.js';
+import { reconcileByteAuthority } from '../lib/vfs/byte-projection.js';
 import { createSeasonReconciler } from '../lib/anticipation/season-reconciliation.js';
 import { resolveSeerrSeasonEpisodes } from '../lib/intents/providers/seerr.js';
 import { confirmPlexEpisode } from '../lib/consumers/plex.js';
@@ -831,6 +832,46 @@ const routeReconcileOn = (() => {
 const routeReconcileRunner = controlPlaneStore
   ? createRouteReconcileRunner({ store: controlPlaneStore, dependencies })
   : null;
+
+// ─── byte authority: the VFS projects the active Binding ──────────────────
+//
+// A VFS row's byte identity is a projection of the active Binding's
+// TorrentFile. The two live in different databases, so a publication that
+// crashed between them could leave the row naming a TorrentFile the
+// authority does not name. This pass converges that: it reads the control
+// plane and the discovery cache, and writes the VFS row.
+//
+// It is LOCAL by construction: no discovery, no ranking, no provider
+// call, no metadata lookup, no consumer call.
+const byteAuthorityRunner = (controlPlaneStore && discoveryCache)
+  ? { reconcile: () => reconcileByteAuthority({ store: controlPlaneStore, cache: discoveryCache }) }
+  : null;
+let byteAuthorityTimer = null;
+function byteAuthorityIntervalMs(env = process.env) {
+  return envNumber(env, 'BYTE_AUTHORITY_RECONCILE_INTERVAL_SEC', { fallback: 300, min: 60 }) * 1000;
+}
+function armByteAuthorityTimer(delayMs) {
+  byteAuthorityTimer = arm(async () => {
+    if (byteAuthorityRunner) {
+      try {
+        const result = byteAuthorityRunner.reconcile({ dryRun: false });
+        if (result.repaired.length > 0) {
+          console.log(`media-search: byte authority projected=${result.repaired.length} skipped=${result.skipped.length}`);
+        }
+      } catch (error) {
+        console.warn('media-search: byte authority reconcile failed', error?.message);
+      }
+    }
+    armByteAuthorityTimer(byteAuthorityIntervalMs());
+  }, delayMs);
+}
+if (byteAuthorityRunner) {
+  // The first pass runs shortly after boot: a crash between a Binding
+  // commit and the VFS projection must converge on restart, not at the
+  // next publication.
+  armByteAuthorityTimer(envNumber(process.env, 'BYTE_AUTHORITY_FIRST_DELAY_SEC', { fallback: 30, min: 5 }) * 1000);
+  console.log(`media-search: byte authority reconcile armed intervalMs=${byteAuthorityIntervalMs()}`);
+}
 let routeReconcileTimer = null;
 function armRouteReconcileTimer(delayMs) {
   routeReconcileTimer = arm(async () => {
