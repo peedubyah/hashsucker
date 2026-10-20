@@ -3869,3 +3869,119 @@ provider's inventory has it ✓; the corpus does not ✓. A torrent-metadata
 sidecar (the .torrent's own file list) for the releases the corpus already
 holds would give the corpus the per-file path at a fraction of the cost of
 a provider scan — and would make the size-only selection disappear.
+
+## 2026-10-20 — SEAL AND LOOK OUTWARD: the push, and the ecosystem reconnaissance — CLOSED
+
+Slice: two separable jobs, closed together. (1) The sealed state was
+committed but unpushable: GitHub's 100 MB pre-receive limit rejected six
+generated `experiments/temporal-correspondence/corpus/*.mkv` blobs that
+travelled in the local-only commit `3a42710`, which added them before
+`experiments/temporal-correspondence/.gitignore` existed. (2) The online
+ecosystem reconnaissance the product direction needed.
+
+### WHAT CHANGED
+
+- `git rebase --onto github/main 3a42710`: the local-only artifact commit is
+  dropped, the ~88 local commits replay onto `github/main`, the push is now
+  a plain fast-forward (`2258d21`, `ffed151`). No force, no published
+  history rewritten (the local commits were unpublished).
+- The four `docs/recon/` notes that travelled in the dropped commit
+  (`2026-10-atomic-missing-primitives`, `-authority-pivot`, `-missing-truths`,
+  `-product-recon`) were restored from `backup/pre-seal-2026-10-20` and
+  committed as `ffed151`. The generated `corpus/concat_*.txt` artifacts were
+  not restored (they are gitignored outputs).
+- `docs/recon/2026-10-ecosystem-recon.md` — the reconnaissance report
+  (debrid media systems, VFS layers, players, Plex + the 2026-10-16
+  plex2shell RCE disclosure, Jellyfin, the Stremio addon model,
+  discovery/indexers, torrent metadata/DHT, source equivalence, playback
+  failover, media-server alternatives, user pain, competitive comparison).
+- `PLANS.md` — the open-debt table's speculative row (the corpus sidecar) is
+  now answerable at the source level; a reconnaissance section states the
+  three results and the open commercial question.
+- `handoff/CURRENT.md` — the push state is corrected (in sync with
+  `github/main`), the recon tooling and its one missing key are recorded, and
+  the dropped-stash recovery is written down so the next session does not
+  repeat it.
+
+### WHAT WAS PROVEN
+
+- The tree after the rebase equals the sealed tree except for the three
+  gitignored generated artifacts (`git diff backup/pre-seal-2026-10-20 HEAD`
+  → 3 generated files only).
+- The sealed markers survived the replay: `projectVfsRowToAuthority` (2),
+  `canonicalProviderPath` (3), `release_attributes.file_path` (8).
+- The focused suites after the rebase: the identity set 46/46, the
+  VFS/publication/route set 50/50. The full suite was not re-run: the tree
+  is byte-identical to the tree that produced 3544/3540/1/3.
+- `github/main` = `ffed151` = local `main` (no divergence, no force push).
+- The reconnaissance's central fact is source-backed, not asserted:
+  bitmagnet's GraphQL `TorrentFile` fragment exposes `infoHash, index, path,
+  size, fileType`, and torrust's hash2torrent returns the metainfo for an
+  infohash over BEP 9.
+
+### WHAT REMAINS UNPROVEN
+
+- The recon's *readings* (that route repair and durable identity are
+  unclaimed, that the free addons absorb the pain) are inferences from the
+  observed projects and forums, not measurements of demand.
+- The side-car sources were verified by reading their contracts and schemas,
+  not by running them. Neither was deployed here.
+- The Jellyfin live projection is still environmental-blocked (HTTP 401).
+- The baseline failure (`vfs-collection-resilience` C1/C2/C3) is unchanged.
+
+### WHAT WAS LEARNED
+
+- **A dropped stash is still recoverable while its object survives.** A
+  `git stash -u` was dropped with the pre-existing untracked user files inside
+  it; `git fsck --unreachable` found the stash's untracked-files commit
+  (`b4d12bd`) and all seven files were restored untracked. The rule that
+  earned this: when unstaging work with `-u`, keep the stash's SHA until the
+  work is committed elsewhere.
+- **The ecosystem's answer to a dying route is to hide it.** Real-Debrid's
+  May-2026 filter-gate removed cached torrents with no announcement and no
+  per-file reason; ElfHosted's fix filtered `infringing_file` streams out of
+  the result list. Nothing repairs a dead route, and no provider says why
+  one died. HashSucker's sealed model is aimed at that hole, and it is
+  unclaimed.
+- **The exact-file-metadata question is closed at the source level.** The
+  verdict is EXISTING SOURCE IS GOOD ENOUGH for the corpus and a
+  SELF-HOSTABLE SIDE-CAR IS PRACTICAL for arbitrary infohashes — not "no
+  practical source". The side-car's coverage is its crawler's coverage, so
+  it complements the provider's inventory rather than replacing it.
+- **A consumer is a liability as well as a projection.** Plex disclosed an
+  unauthenticated RCE chain on 2026-10-16 (CVE-2026-96652/54/55/56, fixed
+  1.43.3.10861). One concrete consequence for this repo: PMS attaches the
+  owner's admin token to outbound requests whose URL starts with
+  `http://127.0.0.1`, so a `.strm` pointing at a loopback URL is fetched with
+  elevated privilege.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- "No practical public source maps an infohash to the exact file tree" →
+  false; two self-hostable sources do, and the parked corpus debt is
+  unblocked at the source level.
+- "The identity work may be unclaimed because it is hard" → the evidence
+  points the other way: it is unclaimed because the incumbent addons are
+  free and absorb the pain. The open question is commercial.
+
+### WHAT SHOULD BE UPDATED
+
+- `docs/recon/2026-10-ecosystem-recon.md` (new), `PLANS.md`,
+  `handoff/CURRENT.md` — done in this slice.
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- `PLANS.md`'s speculative row ("the SOURCE does not") is now answered by the
+  recon; the row stays until the sidecar is actually used, but its wording
+  was corrected in this slice.
+- `handoff/CURRENT.md`'s "main is ahead of github/main" claim — corrected.
+- Nothing was deleted from the code. The four restored recon notes are the
+  opposite of a deletion: they had been dropped with the artifacts.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The candidate the recon leaves standing is
+the smallest one it already named: give the corpus a per-file path from a
+source that has one (a bitmagnet sidecar or a hash2torrent fetch), which
+would let the size-only selection disappear. Its precondition is now a
+source, not an invention.

@@ -25,6 +25,37 @@ a product decision, not a consequence of a known defect.
 | optimization | a byte count is ambiguous for 424 of 4099 mapped provider files (10.3 %); the corpus holds no per-file path, so file selection still leans on the byte count |
 | speculative | a per-file path for the corpus from a source that has one (torrent-metadata sidecar) — the plumbing exists and is proven; the SOURCE does not |
 
+**Ecosystem reconnaissance (2026-10-20) — done, no moonshot selected.**
+`docs/recon/2026-10-ecosystem-recon.md` surveyed the debrid media systems,
+the VFS layers, the players, Plex (incl. the 2026-10-16 plex2shell RCE
+disclosure), Jellyfin, the Stremio addon model, the discovery/indexers, the
+torrent-metadata sources, source equivalence, playback failover, the
+media-server alternatives and the user pain. Three results change what is
+knowable, none of them selects a direction:
+
+- **The exact-file-metadata question is answered.** The verdict is
+  EXISTING SOURCE IS GOOD ENOUGH for the corpus and a SELF-HOSTABLE SIDE-CAR
+  IS PRACTICAL for arbitrary infohashes — two independent, keyless,
+  self-hostable sources exist and both return exactly the TorrentFile fact
+  (bitmagnet's GraphQL exposes `infoHash, path, size` per file; torrust's
+  hash2torrent returns the .torrent metainfo over BEP 9). The speculative
+  debt row above is therefore **unblocked as a source question**; it is not
+  yet a selected slice.
+- **Route death is unowned and unannounced.** Real-Debrid's May-2026
+  filter-gate removed cached torrents with no announcement and no per-file
+  reason; the whole ecosystem's answer was to filter the stream out of the
+  results before the user sees it. Nothing repairs a dead route, and no
+  provider says why one died. HashSucker's route classification + evidence
+  recovery + representation stability is aimed exactly at that hole.
+- **The consumer is a liability, not a foundation.** Plex's unauthenticated
+  RCE chain (CVE-2026-96652/54/55/56, fixed 1.43.3.10861) and its 2026
+  business pressure make "consumers are projections, never truth" an
+  observation rather than a preference.
+
+The open question the recon cannot answer is commercial, not technical: the
+authority chain is unclaimed and validated, but the users who feel the pain
+(duplicate versions, dead routes) are served for free by incumbents.
+
 
 Completed final slice: **bound stale-inventory binding retry churn** —
 **CLOSED**. The host-only canary passed clean E01 plus the full E01/E05/MobLand

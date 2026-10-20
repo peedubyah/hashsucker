@@ -1,0 +1,6553 @@
+{
+  "label": "test",
+  "before": {
+    "acquisition_mode": null,
+    "all_same_tf": 0,
+    "authoritative_size": 0,
+    "breaker_opens": 0,
+    "bytes_streamed": 478150664,
+    "cache": {
+      "bytes_evicted": 478150656,
+      "bytes_fetched_upstream": 478150656,
+      "bytes_local": 1828716544,
+      "bytes_requested_total": 2315255817,
+      "bytes_upstream": 478150656,
+      "bytes_upstream_issued": 478150656,
+      "chunk_claims": 57,
+      "chunk_fills": 57,
+      "chunk_fills_failed": 0,
+      "chunk_join_waits": 0,
+      "chunk_overfetch_bytes": 0,
+      "chunk_size": 8388608,
+      "chunks_inflight": 0,
+      "chunks_present": 1025,
+      "coalescer_entries": 50,
+      "collapse_ratio": 1.1633,
+      "current_bytes": 8585387556,
+      "durable_sync_us": 280366,
+      "evict_skipped_filling": 0,
+      "evictions": 57,
+      "fetch_spans": 49,
+      "format_version": 2,
+      "full_hits": 208,
+      "gap_join_full_miss": 49,
+      "gap_join_partial_hit": 1,
+      "inflight_joiners": 0,
+      "inflight_joins": 0,
+      "max_bytes": 8589934592,
+      "misses": 49,
+      "overfetch_ratio": 0.0,
+      "overlap_bytes_avoided": 0,
+      "partial_hits": 1,
+      "publish_noop": 0,
+      "scheduler_lane_a_chunks": 0,
+      "scheduler_lane_b_chunks": 0,
+      "scheduler_work_steals": 0,
+      "spans_collapsed_chunks": 57
+    },
+    "cache_decisions": [
+      {
+        "chunk_indices": [
+          2304,
+          2305,
+          2306,
+          2307,
+          2308,
+          2309,
+          2310,
+          2311
+        ],
+        "evictions_before": 0,
+        "fetch_span": {
+          "end": 19394461695,
+          "start": 19327352832
+        },
+        "fetch_span_bytes": 67108864,
+        "joined_inflight": false,
+        "missing": {
+          "end": 19394461695,
+          "start": 19327352832
+        },
+        "missing_bytes": 67108864,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 19394461695,
+          "start": 19327352832
+        }
+      },
+      {
+        "chunk_indices": [
+          2561,
+          2562
+        ],
+        "evictions_before": 8,
+        "fetch_span": {
+          "end": 21500002303,
+          "start": 21483225088
+        },
+        "fetch_span_bytes": 16777216,
+        "joined_inflight": false,
+        "missing": {
+          "end": 21500002303,
+          "start": 21483225088
+        },
+        "missing_bytes": 16777216,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 21500002303,
+          "start": 21483225088
+        }
+      },
+      {
+        "chunk_indices": [
+          13
+        ],
+        "evictions_before": 10,
+        "fetch_span": {
+          "end": 117440511,
+          "start": 109051904
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 117440511,
+          "start": 109051904
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 117440511,
+          "start": 109051904
+        }
+      },
+      {
+        "chunk_indices": [
+          14
+        ],
+        "evictions_before": 11,
+        "fetch_span": {
+          "end": 125829119,
+          "start": 117440512
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 125829119,
+          "start": 117440512
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 125829119,
+          "start": 117440512
+        }
+      },
+      {
+        "chunk_indices": [
+          15
+        ],
+        "evictions_before": 12,
+        "fetch_span": {
+          "end": 134217727,
+          "start": 125829120
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 134217727,
+          "start": 125829120
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 134217727,
+          "start": 125829120
+        }
+      },
+      {
+        "chunk_indices": [
+          16
+        ],
+        "evictions_before": 13,
+        "fetch_span": {
+          "end": 142606335,
+          "start": 134217728
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 142606335,
+          "start": 134217728
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 142606335,
+          "start": 134217728
+        }
+      },
+      {
+        "chunk_indices": [
+          17
+        ],
+        "evictions_before": 14,
+        "fetch_span": {
+          "end": 150994943,
+          "start": 142606336
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 150994943,
+          "start": 142606336
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 150994943,
+          "start": 142606336
+        }
+      },
+      {
+        "chunk_indices": [
+          19
+        ],
+        "evictions_before": 15,
+        "fetch_span": {
+          "end": 167772159,
+          "start": 159383552
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 167772159,
+          "start": 159383552
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 167772159,
+          "start": 159383552
+        }
+      },
+      {
+        "chunk_indices": [
+          20
+        ],
+        "evictions_before": 16,
+        "fetch_span": {
+          "end": 176160767,
+          "start": 167772160
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 176160767,
+          "start": 167772160
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 176160767,
+          "start": 167772160
+        }
+      },
+      {
+        "chunk_indices": [
+          21
+        ],
+        "evictions_before": 17,
+        "fetch_span": {
+          "end": 184549375,
+          "start": 176160768
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 184549375,
+          "start": 176160768
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 184549375,
+          "start": 176160768
+        }
+      },
+      {
+        "chunk_indices": [
+          22
+        ],
+        "evictions_before": 18,
+        "fetch_span": {
+          "end": 192937983,
+          "start": 184549376
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 192937983,
+          "start": 184549376
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 192937983,
+          "start": 184549376
+        }
+      },
+      {
+        "chunk_indices": [
+          23
+        ],
+        "evictions_before": 19,
+        "fetch_span": {
+          "end": 201326591,
+          "start": 192937984
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 201326591,
+          "start": 192937984
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 201326591,
+          "start": 192937984
+        }
+      },
+      {
+        "chunk_indices": [
+          24
+        ],
+        "evictions_before": 20,
+        "fetch_span": {
+          "end": 209715199,
+          "start": 201326592
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 209715199,
+          "start": 201326592
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 209715199,
+          "start": 201326592
+        }
+      },
+      {
+        "chunk_indices": [
+          27
+        ],
+        "evictions_before": 21,
+        "fetch_span": {
+          "end": 234881023,
+          "start": 226492416
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 234881023,
+          "start": 226492416
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 234881023,
+          "start": 226492416
+        }
+      },
+      {
+        "chunk_indices": [
+          28
+        ],
+        "evictions_before": 22,
+        "fetch_span": {
+          "end": 243269631,
+          "start": 234881024
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 243269631,
+          "start": 234881024
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 243269631,
+          "start": 234881024
+        }
+      },
+      {
+        "chunk_indices": [
+          29
+        ],
+        "evictions_before": 23,
+        "fetch_span": {
+          "end": 251658239,
+          "start": 243269632
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 251658239,
+          "start": 243269632
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 251658239,
+          "start": 243269632
+        }
+      },
+      {
+        "chunk_indices": [
+          30
+        ],
+        "evictions_before": 24,
+        "fetch_span": {
+          "end": 260046847,
+          "start": 251658240
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 260046847,
+          "start": 251658240
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 260046847,
+          "start": 251658240
+        }
+      },
+      {
+        "chunk_indices": [
+          31
+        ],
+        "evictions_before": 25,
+        "fetch_span": {
+          "end": 268435455,
+          "start": 260046848
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 268435455,
+          "start": 260046848
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 268435455,
+          "start": 260046848
+        }
+      },
+      {
+        "chunk_indices": [
+          33
+        ],
+        "evictions_before": 26,
+        "fetch_span": {
+          "end": 285212671,
+          "start": 276824064
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 285212671,
+          "start": 276824064
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 285212671,
+          "start": 276824064
+        }
+      },
+      {
+        "chunk_indices": [
+          34
+        ],
+        "evictions_before": 27,
+        "fetch_span": {
+          "end": 293601279,
+          "start": 285212672
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 293601279,
+          "start": 285212672
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 293601279,
+          "start": 285212672
+        }
+      },
+      {
+        "chunk_indices": [
+          36
+        ],
+        "evictions_before": 28,
+        "fetch_span": {
+          "end": 310378495,
+          "start": 301989888
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 310378495,
+          "start": 301989888
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 310378495,
+          "start": 301989888
+        }
+      },
+      {
+        "chunk_indices": [
+          39
+        ],
+        "evictions_before": 29,
+        "fetch_span": {
+          "end": 335544319,
+          "start": 327155712
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 335544319,
+          "start": 327155712
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 335544319,
+          "start": 327155712
+        }
+      },
+      {
+        "chunk_indices": [
+          40
+        ],
+        "evictions_before": 30,
+        "fetch_span": {
+          "end": 343932927,
+          "start": 335544320
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 343932927,
+          "start": 335544320
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 343932927,
+          "start": 335544320
+        }
+      },
+      {
+        "chunk_indices": [
+          41
+        ],
+        "evictions_before": 31,
+        "fetch_span": {
+          "end": 352321535,
+          "start": 343932928
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 352321535,
+          "start": 343932928
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 352321535,
+          "start": 343932928
+        }
+      },
+      {
+        "chunk_indices": [
+          42
+        ],
+        "evictions_before": 32,
+        "fetch_span": {
+          "end": 360710143,
+          "start": 352321536
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 360710143,
+          "start": 352321536
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 360710143,
+          "start": 352321536
+        }
+      },
+      {
+        "chunk_indices": [
+          43
+        ],
+        "evictions_before": 33,
+        "fetch_span": {
+          "end": 369098751,
+          "start": 360710144
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 369098751,
+          "start": 360710144
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 369098751,
+          "start": 360710144
+        }
+      },
+      {
+        "chunk_indices": [
+          44
+        ],
+        "evictions_before": 34,
+        "fetch_span": {
+          "end": 377487359,
+          "start": 369098752
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 377487359,
+          "start": 369098752
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 377487359,
+          "start": 369098752
+        }
+      },
+      {
+        "chunk_indices": [
+          45
+        ],
+        "evictions_before": 35,
+        "fetch_span": {
+          "end": 385875967,
+          "start": 377487360
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 385875967,
+          "start": 377487360
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 385875967,
+          "start": 377487360
+        }
+      },
+      {
+        "chunk_indices": [
+          46
+        ],
+        "evictions_before": 36,
+        "fetch_span": {
+          "end": 394264575,
+          "start": 385875968
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 394264575,
+          "start": 385875968
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 394264575,
+          "start": 385875968
+        }
+      },
+      {
+        "chunk_indices": [
+          47
+        ],
+        "evictions_before": 37,
+        "fetch_span": {
+          "end": 402653183,
+          "start": 394264576
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 402653183,
+          "start": 394264576
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 402653183,
+          "start": 394264576
+        }
+      },
+      {
+        "chunk_indices": [
+          48
+        ],
+        "evictions_before": 38,
+        "fetch_span": {
+          "end": 411041791,
+          "start": 402653184
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 411041791,
+          "start": 402653184
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 411041791,
+          "start": 402653184
+        }
+      },
+      {
+        "chunk_indices": [
+          49
+        ],
+        "evictions_before": 39,
+        "fetch_span": {
+          "end": 419430399,
+          "start": 411041792
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 419430399,
+          "start": 411041792
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 419430399,
+          "start": 411041792
+        }
+      },
+      {
+        "chunk_indices": [
+          50
+        ],
+        "evictions_before": 40,
+        "fetch_span": {
+          "end": 427819007,
+          "start": 419430400
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 427819007,
+          "start": 419430400
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 427819007,
+          "start": 419430400
+        }
+      },
+      {
+        "chunk_indices": [
+          51
+        ],
+        "evictions_before": 41,
+        "fetch_span": {
+          "end": 436207615,
+          "start": 427819008
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 436207615,
+          "start": 427819008
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 436207615,
+          "start": 427819008
+        }
+      },
+      {
+        "chunk_indices": [
+          52
+        ],
+        "evictions_before": 42,
+        "fetch_span": {
+          "end": 444596223,
+          "start": 436207616
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 444596223,
+          "start": 436207616
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 444596223,
+          "start": 436207616
+        }
+      },
+      {
+        "chunk_indices": [
+          53
+        ],
+        "evictions_before": 43,
+        "fetch_span": {
+          "end": 452984831,
+          "start": 444596224
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 452984831,
+          "start": 444596224
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 452984831,
+          "start": 444596224
+        }
+      },
+      {
+        "chunk_indices": [
+          54
+        ],
+        "evictions_before": 44,
+        "fetch_span": {
+          "end": 461373439,
+          "start": 452984832
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 461373439,
+          "start": 452984832
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 461373439,
+          "start": 452984832
+        }
+      },
+      {
+        "chunk_indices": [
+          55
+        ],
+        "evictions_before": 45,
+        "fetch_span": {
+          "end": 469762047,
+          "start": 461373440
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 469762047,
+          "start": 461373440
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 469762047,
+          "start": 461373440
+        }
+      },
+      {
+        "chunk_indices": [
+          56
+        ],
+        "evictions_before": 46,
+        "fetch_span": {
+          "end": 478150655,
+          "start": 469762048
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 478150655,
+          "start": 469762048
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 478150655,
+          "start": 469762048
+        }
+      },
+      {
+        "chunk_indices": [
+          57
+        ],
+        "evictions_before": 47,
+        "fetch_span": {
+          "end": 486539263,
+          "start": 478150656
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 486539263,
+          "start": 478150656
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 486539263,
+          "start": 478150656
+        }
+      },
+      {
+        "chunk_indices": [
+          58
+        ],
+        "evictions_before": 48,
+        "fetch_span": {
+          "end": 494927871,
+          "start": 486539264
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 494927871,
+          "start": 486539264
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 494927871,
+          "start": 486539264
+        }
+      },
+      {
+        "chunk_indices": [
+          59
+        ],
+        "evictions_before": 49,
+        "fetch_span": {
+          "end": 503316479,
+          "start": 494927872
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 503316479,
+          "start": 494927872
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 503316479,
+          "start": 494927872
+        }
+      },
+      {
+        "chunk_indices": [
+          60
+        ],
+        "evictions_before": 50,
+        "fetch_span": {
+          "end": 511705087,
+          "start": 503316480
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 511705087,
+          "start": 503316480
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 511705087,
+          "start": 503316480
+        }
+      },
+      {
+        "chunk_indices": [
+          61
+        ],
+        "evictions_before": 51,
+        "fetch_span": {
+          "end": 520093695,
+          "start": 511705088
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 520093695,
+          "start": 511705088
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 520093695,
+          "start": 511705088
+        }
+      },
+      {
+        "chunk_indices": [
+          62
+        ],
+        "evictions_before": 52,
+        "fetch_span": {
+          "end": 528482303,
+          "start": 520093696
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 528482303,
+          "start": 520093696
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 528482303,
+          "start": 520093696
+        }
+      },
+      {
+        "chunk_indices": [
+          63
+        ],
+        "evictions_before": 53,
+        "fetch_span": {
+          "end": 536870911,
+          "start": 528482304
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 536870911,
+          "start": 528482304
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 536870911,
+          "start": 528482304
+        }
+      },
+      {
+        "chunk_indices": [
+          65
+        ],
+        "evictions_before": 54,
+        "fetch_span": {
+          "end": 553648127,
+          "start": 545259520
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 553648127,
+          "start": 545259520
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 553648127,
+          "start": 545259520
+        }
+      },
+      {
+        "chunk_indices": [
+          66
+        ],
+        "evictions_before": 55,
+        "fetch_span": {
+          "end": 562036735,
+          "start": 553648128
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 562036735,
+          "start": 553648128
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 562036735,
+          "start": 553648128
+        }
+      },
+      {
+        "chunk_indices": [
+          67
+        ],
+        "evictions_before": 56,
+        "fetch_span": {
+          "end": 570425343,
+          "start": 562036736
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 570425343,
+          "start": 562036736
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 570425343,
+          "start": 562036736
+        }
+      }
+    ],
+    "capability": {
+      "acquisitions": 3,
+      "evictions": 2,
+      "negative_hits": 0,
+      "reacquisitions": 0,
+      "reuses": 56
+    },
+    "client_cancellations": 4,
+    "concurrent_demand": {
+      "current": 0,
+      "peak": 1
+    },
+    "demand_joined_fill": 0,
+    "layer_A_api": {
+      "2xx": 3,
+      "429": 0,
+      "4xx": 0,
+      "5xx": 0,
+      "latency_ms_avg": 290,
+      "redirect_true_used": 0,
+      "requests": 3
+    },
+    "layer_B_redirect": {
+      "429": 0,
+      "hops": 0
+    },
+    "layer_C_cdn": {
+      "206": 57,
+      "2xx": 57,
+      "429": 10,
+      "4xx": 0,
+      "5xx": 0,
+      "final_cdn_host": "nexus.erth.tb-cdn.earth",
+      "latency_ms_avg": 249,
+      "requests": 67
+    },
+    "limiter_permit_waits": 1,
+    "limiter_waits": 9,
+    "other_api_calls": {
+      "checkcached": 0,
+      "mylist": 0,
+      "search": 0
+    },
+    "playback_intelligence": {
+      "active_torrent_files": 0,
+      "ahead_chunks": 1,
+      "auto_selected_try": 0,
+      "auto_selected_wait": 0,
+      "enabled": false,
+      "mode": "auto",
+      "prefetch_chunks_completed": 0,
+      "prefetch_chunks_requested": 0,
+      "prefetch_chunks_skipped_present": 0,
+      "prefetch_failures": 0,
+      "prefetch_joined_by_demand": 0,
+      "prefetch_joined_inflight": 0,
+      "prefetch_priority": 0,
+      "prefetch_served_demand": 0,
+      "prefetch_triggered": 0,
+      "prefetches_bailed": 0,
+      "seek_reprioritizations": 0,
+      "sequential_threshold": 3,
+      "spare_capacity": 0,
+      "top": []
+    },
+    "pool": [],
+    "pool_aggregate": {
+      "caps": 0,
+      "target": 0,
+      "utilization_pct": 0
+    },
+    "pool_attribution": [],
+    "pool_growths": 0,
+    "rate_limited": 1,
+    "recovery": {
+      "attempts": 10,
+      "client_416": 0,
+      "client_502": 0,
+      "client_503": 1,
+      "client_truncated": 0,
+      "internal_recoveries_ok": 12,
+      "max_reacquires": 0,
+      "max_same_cap_retries": 1,
+      "mid_body_resumes": 0,
+      "wall_ms_total": 372436
+    },
+    "requests": 267,
+    "retry_after": {
+      "applied_secs": 30,
+      "provider_secs": null
+    },
+    "stage_timing": {
+      "cold_acquire_ms": null,
+      "cold_cdn_first_byte_ms": null,
+      "cold_ttfb_ms": 13,
+      "warm_ttfb_ms": null
+    },
+    "stages_last": {
+      "T0_received_ms": 0,
+      "T1_acquire_issued_ms": null,
+      "T2_capability_ready_ms": null,
+      "T3_cdn_dispatched_ms": null,
+      "T4_first_upstream_byte_ms": null,
+      "T5_first_client_byte_ms": 3,
+      "account_scope": "",
+      "acquisition_api_ms": null,
+      "api_requests_delta": 0,
+      "cache_hit": true,
+      "cap_id": "",
+      "capability_to_client_ms": null,
+      "cdn_attempts": [],
+      "cdn_requests_delta": 0,
+      "control_pre_acquire_ms": null,
+      "corr_id": "corr-267",
+      "downstream_handoff_ms": null,
+      "provider": "",
+      "provider_connect_ms": null,
+      "provider_ttfb_ms": null,
+      "request": {
+        "end": 570425343,
+        "start": 562036736
+      },
+      "total_open_ttfb_ms": 3,
+      "work_class": "demand"
+    },
+    "stages_recent": [
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": 0,
+        "T2_capability_ready_ms": 0,
+        "T3_cdn_dispatched_ms": 0,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": null,
+        "account_scope": "default",
+        "acquisition_api_ms": 0,
+        "api_requests_delta": 0,
+        "cache_hit": false,
+        "cap_id": "torbox-1-2",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [
+          {
+            "attempt": 1,
+            "cap_id": "torbox-1-2",
+            "corr_id": "corr-204",
+            "headers_ms": 249,
+            "headers_received": true,
+            "host": "nexus.erth.tb-cdn.earth",
+            "outcome": "Pending",
+            "provider": "torbox",
+            "recovery_path": "generic_transient_cooldown",
+            "retry_decision_ms": null,
+            "retry_wait_ms": 29999,
+            "same_cap": true,
+            "started_at_ms": 0,
+            "status": 429,
+            "ttfb_ms": null
+          },
+          {
+            "attempt": 2,
+            "cap_id": "torbox-1-2",
+            "corr_id": "corr-204",
+            "headers_ms": 213,
+            "headers_received": true,
+            "host": "nexus.erth.tb-cdn.earth",
+            "outcome": "Pending",
+            "provider": "torbox",
+            "recovery_path": "generic_transient_cooldown",
+            "retry_decision_ms": null,
+            "retry_wait_ms": 29999,
+            "same_cap": true,
+            "started_at_ms": 30251,
+            "status": 429,
+            "ttfb_ms": null
+          },
+          {
+            "attempt": 3,
+            "cap_id": "torbox-1-2",
+            "corr_id": "corr-204",
+            "headers_ms": 216,
+            "headers_received": true,
+            "host": "nexus.erth.tb-cdn.earth",
+            "outcome": "Pending",
+            "provider": "torbox",
+            "recovery_path": "generic_transient_cooldown",
+            "retry_decision_ms": null,
+            "retry_wait_ms": 29999,
+            "same_cap": true,
+            "started_at_ms": 60466,
+            "status": 429,
+            "ttfb_ms": null
+          },
+          {
+            "attempt": 4,
+            "cap_id": "torbox-1-2",
+            "corr_id": "corr-204",
+            "headers_ms": 207,
+            "headers_received": true,
+            "host": "nexus.erth.tb-cdn.earth",
+            "outcome": "Pending",
+            "provider": "torbox",
+            "recovery_path": "generic_transient_cooldown",
+            "retry_decision_ms": null,
+            "retry_wait_ms": 29999,
+            "same_cap": true,
+            "started_at_ms": 90684,
+            "status": 429,
+            "ttfb_ms": null
+          }
+        ],
+        "cdn_requests_delta": 4,
+        "control_pre_acquire_ms": 0,
+        "corr_id": "corr-204",
+        "downstream_handoff_ms": null,
+        "provider": "torbox",
+        "provider_connect_ms": 0,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 0,
+          "start": 0
+        },
+        "total_open_ttfb_ms": null,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-205",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 8388607,
+          "start": 0
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-206",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 25165823,
+          "start": 16777216
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-207",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 33554431,
+          "start": 25165824
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-208",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 50331647,
+          "start": 41943040
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 1,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-209",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 58720255,
+          "start": 50331648
+        },
+        "total_open_ttfb_ms": 1,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-210",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 67108863,
+          "start": 58720256
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-211",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 75497471,
+          "start": 67108864
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-212",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 92274687,
+          "start": 83886080
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 1,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-213",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 100663295,
+          "start": 92274688
+        },
+        "total_open_ttfb_ms": 1,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-214",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 109051903,
+          "start": 100663296
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-215",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 117440511,
+          "start": 109051904
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-216",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 125829119,
+          "start": 117440512
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-217",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 134217727,
+          "start": 125829120
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-218",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 142606335,
+          "start": 134217728
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-219",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 150994943,
+          "start": 142606336
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-220",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 167772159,
+          "start": 159383552
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-221",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 176160767,
+          "start": 167772160
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-222",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 184549375,
+          "start": 176160768
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-223",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 192937983,
+          "start": 184549376
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-224",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 201326591,
+          "start": 192937984
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-225",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 209715199,
+          "start": 201326592
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 1,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-226",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 218103807,
+          "start": 209715200
+        },
+        "total_open_ttfb_ms": 1,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 1,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-227",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 226492415,
+          "start": 218103808
+        },
+        "total_open_ttfb_ms": 1,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-228",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 234881023,
+          "start": 226492416
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-229",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 243269631,
+          "start": 234881024
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-230",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 251658239,
+          "start": 243269632
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-231",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 260046847,
+          "start": 251658240
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-232",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 268435455,
+          "start": 260046848
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-233",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 276824063,
+          "start": 268435456
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-234",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 285212671,
+          "start": 276824064
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-235",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 293601279,
+          "start": 285212672
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-236",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 310378495,
+          "start": 301989888
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-237",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 318767103,
+          "start": 310378496
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-238",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 327155711,
+          "start": 318767104
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-239",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 335544319,
+          "start": 327155712
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-240",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 343932927,
+          "start": 335544320
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-241",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 352321535,
+          "start": 343932928
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-242",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 360710143,
+          "start": 352321536
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-243",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 369098751,
+          "start": 360710144
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-244",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 377487359,
+          "start": 369098752
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 5,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-245",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 385875967,
+          "start": 377487360
+        },
+        "total_open_ttfb_ms": 5,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 5,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-246",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 394264575,
+          "start": 385875968
+        },
+        "total_open_ttfb_ms": 5,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-247",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 402653183,
+          "start": 394264576
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-248",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 411041791,
+          "start": 402653184
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-249",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 419430399,
+          "start": 411041792
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-250",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 427819007,
+          "start": 419430400
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-251",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 436207615,
+          "start": 427819008
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-252",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 444596223,
+          "start": 436207616
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 5,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-253",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 452984831,
+          "start": 444596224
+        },
+        "total_open_ttfb_ms": 5,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-254",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 461373439,
+          "start": 452984832
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 5,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-255",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 469762047,
+          "start": 461373440
+        },
+        "total_open_ttfb_ms": 5,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-256",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 478150655,
+          "start": 469762048
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-257",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 486539263,
+          "start": 478150656
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 5,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-258",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 494927871,
+          "start": 486539264
+        },
+        "total_open_ttfb_ms": 5,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-259",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 503316479,
+          "start": 494927872
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-260",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 511705087,
+          "start": 503316480
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-261",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 520093695,
+          "start": 511705088
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-262",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 528482303,
+          "start": 520093696
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-263",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 536870911,
+          "start": 528482304
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-264",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 545259519,
+          "start": 536870912
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-265",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 553648127,
+          "start": 545259520
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-266",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 562036735,
+          "start": 553648128
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-267",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 570425343,
+          "start": 562036736
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      }
+    ],
+    "timing": {
+      "internal_recovery_ms_total": 300000,
+      "limiter_wait_ms_total": 270836
+    },
+    "torrent_file_id": "",
+    "upstream_errors": 0
+  },
+  "after": {
+    "acquisition_mode": null,
+    "all_same_tf": 0,
+    "authoritative_size": 0,
+    "breaker_opens": 0,
+    "bytes_streamed": 478150664,
+    "cache": {
+      "bytes_evicted": 478150656,
+      "bytes_fetched_upstream": 478150656,
+      "bytes_local": 1828716544,
+      "bytes_requested_total": 2315255817,
+      "bytes_upstream": 478150656,
+      "bytes_upstream_issued": 478150656,
+      "chunk_claims": 57,
+      "chunk_fills": 57,
+      "chunk_fills_failed": 0,
+      "chunk_join_waits": 0,
+      "chunk_overfetch_bytes": 0,
+      "chunk_size": 8388608,
+      "chunks_inflight": 0,
+      "chunks_present": 1025,
+      "coalescer_entries": 50,
+      "collapse_ratio": 1.1633,
+      "current_bytes": 8585387556,
+      "durable_sync_us": 280366,
+      "evict_skipped_filling": 0,
+      "evictions": 57,
+      "fetch_spans": 49,
+      "format_version": 2,
+      "full_hits": 208,
+      "gap_join_full_miss": 49,
+      "gap_join_partial_hit": 1,
+      "inflight_joiners": 0,
+      "inflight_joins": 0,
+      "max_bytes": 8589934592,
+      "misses": 49,
+      "overfetch_ratio": 0.0,
+      "overlap_bytes_avoided": 0,
+      "partial_hits": 1,
+      "publish_noop": 0,
+      "scheduler_lane_a_chunks": 0,
+      "scheduler_lane_b_chunks": 0,
+      "scheduler_work_steals": 0,
+      "spans_collapsed_chunks": 57
+    },
+    "cache_decisions": [
+      {
+        "chunk_indices": [
+          2304,
+          2305,
+          2306,
+          2307,
+          2308,
+          2309,
+          2310,
+          2311
+        ],
+        "evictions_before": 0,
+        "fetch_span": {
+          "end": 19394461695,
+          "start": 19327352832
+        },
+        "fetch_span_bytes": 67108864,
+        "joined_inflight": false,
+        "missing": {
+          "end": 19394461695,
+          "start": 19327352832
+        },
+        "missing_bytes": 67108864,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 19394461695,
+          "start": 19327352832
+        }
+      },
+      {
+        "chunk_indices": [
+          2561,
+          2562
+        ],
+        "evictions_before": 8,
+        "fetch_span": {
+          "end": 21500002303,
+          "start": 21483225088
+        },
+        "fetch_span_bytes": 16777216,
+        "joined_inflight": false,
+        "missing": {
+          "end": 21500002303,
+          "start": 21483225088
+        },
+        "missing_bytes": 16777216,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 21500002303,
+          "start": 21483225088
+        }
+      },
+      {
+        "chunk_indices": [
+          13
+        ],
+        "evictions_before": 10,
+        "fetch_span": {
+          "end": 117440511,
+          "start": 109051904
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 117440511,
+          "start": 109051904
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 117440511,
+          "start": 109051904
+        }
+      },
+      {
+        "chunk_indices": [
+          14
+        ],
+        "evictions_before": 11,
+        "fetch_span": {
+          "end": 125829119,
+          "start": 117440512
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 125829119,
+          "start": 117440512
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 125829119,
+          "start": 117440512
+        }
+      },
+      {
+        "chunk_indices": [
+          15
+        ],
+        "evictions_before": 12,
+        "fetch_span": {
+          "end": 134217727,
+          "start": 125829120
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 134217727,
+          "start": 125829120
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 134217727,
+          "start": 125829120
+        }
+      },
+      {
+        "chunk_indices": [
+          16
+        ],
+        "evictions_before": 13,
+        "fetch_span": {
+          "end": 142606335,
+          "start": 134217728
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 142606335,
+          "start": 134217728
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 142606335,
+          "start": 134217728
+        }
+      },
+      {
+        "chunk_indices": [
+          17
+        ],
+        "evictions_before": 14,
+        "fetch_span": {
+          "end": 150994943,
+          "start": 142606336
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 150994943,
+          "start": 142606336
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 150994943,
+          "start": 142606336
+        }
+      },
+      {
+        "chunk_indices": [
+          19
+        ],
+        "evictions_before": 15,
+        "fetch_span": {
+          "end": 167772159,
+          "start": 159383552
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 167772159,
+          "start": 159383552
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 167772159,
+          "start": 159383552
+        }
+      },
+      {
+        "chunk_indices": [
+          20
+        ],
+        "evictions_before": 16,
+        "fetch_span": {
+          "end": 176160767,
+          "start": 167772160
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 176160767,
+          "start": 167772160
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 176160767,
+          "start": 167772160
+        }
+      },
+      {
+        "chunk_indices": [
+          21
+        ],
+        "evictions_before": 17,
+        "fetch_span": {
+          "end": 184549375,
+          "start": 176160768
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 184549375,
+          "start": 176160768
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 184549375,
+          "start": 176160768
+        }
+      },
+      {
+        "chunk_indices": [
+          22
+        ],
+        "evictions_before": 18,
+        "fetch_span": {
+          "end": 192937983,
+          "start": 184549376
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 192937983,
+          "start": 184549376
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 192937983,
+          "start": 184549376
+        }
+      },
+      {
+        "chunk_indices": [
+          23
+        ],
+        "evictions_before": 19,
+        "fetch_span": {
+          "end": 201326591,
+          "start": 192937984
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 201326591,
+          "start": 192937984
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 201326591,
+          "start": 192937984
+        }
+      },
+      {
+        "chunk_indices": [
+          24
+        ],
+        "evictions_before": 20,
+        "fetch_span": {
+          "end": 209715199,
+          "start": 201326592
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 209715199,
+          "start": 201326592
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 209715199,
+          "start": 201326592
+        }
+      },
+      {
+        "chunk_indices": [
+          27
+        ],
+        "evictions_before": 21,
+        "fetch_span": {
+          "end": 234881023,
+          "start": 226492416
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 234881023,
+          "start": 226492416
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 234881023,
+          "start": 226492416
+        }
+      },
+      {
+        "chunk_indices": [
+          28
+        ],
+        "evictions_before": 22,
+        "fetch_span": {
+          "end": 243269631,
+          "start": 234881024
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 243269631,
+          "start": 234881024
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 243269631,
+          "start": 234881024
+        }
+      },
+      {
+        "chunk_indices": [
+          29
+        ],
+        "evictions_before": 23,
+        "fetch_span": {
+          "end": 251658239,
+          "start": 243269632
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 251658239,
+          "start": 243269632
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 251658239,
+          "start": 243269632
+        }
+      },
+      {
+        "chunk_indices": [
+          30
+        ],
+        "evictions_before": 24,
+        "fetch_span": {
+          "end": 260046847,
+          "start": 251658240
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 260046847,
+          "start": 251658240
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 260046847,
+          "start": 251658240
+        }
+      },
+      {
+        "chunk_indices": [
+          31
+        ],
+        "evictions_before": 25,
+        "fetch_span": {
+          "end": 268435455,
+          "start": 260046848
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 268435455,
+          "start": 260046848
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 268435455,
+          "start": 260046848
+        }
+      },
+      {
+        "chunk_indices": [
+          33
+        ],
+        "evictions_before": 26,
+        "fetch_span": {
+          "end": 285212671,
+          "start": 276824064
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 285212671,
+          "start": 276824064
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 285212671,
+          "start": 276824064
+        }
+      },
+      {
+        "chunk_indices": [
+          34
+        ],
+        "evictions_before": 27,
+        "fetch_span": {
+          "end": 293601279,
+          "start": 285212672
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 293601279,
+          "start": 285212672
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 293601279,
+          "start": 285212672
+        }
+      },
+      {
+        "chunk_indices": [
+          36
+        ],
+        "evictions_before": 28,
+        "fetch_span": {
+          "end": 310378495,
+          "start": 301989888
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 310378495,
+          "start": 301989888
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 310378495,
+          "start": 301989888
+        }
+      },
+      {
+        "chunk_indices": [
+          39
+        ],
+        "evictions_before": 29,
+        "fetch_span": {
+          "end": 335544319,
+          "start": 327155712
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 335544319,
+          "start": 327155712
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 335544319,
+          "start": 327155712
+        }
+      },
+      {
+        "chunk_indices": [
+          40
+        ],
+        "evictions_before": 30,
+        "fetch_span": {
+          "end": 343932927,
+          "start": 335544320
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 343932927,
+          "start": 335544320
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 343932927,
+          "start": 335544320
+        }
+      },
+      {
+        "chunk_indices": [
+          41
+        ],
+        "evictions_before": 31,
+        "fetch_span": {
+          "end": 352321535,
+          "start": 343932928
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 352321535,
+          "start": 343932928
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 352321535,
+          "start": 343932928
+        }
+      },
+      {
+        "chunk_indices": [
+          42
+        ],
+        "evictions_before": 32,
+        "fetch_span": {
+          "end": 360710143,
+          "start": 352321536
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 360710143,
+          "start": 352321536
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 360710143,
+          "start": 352321536
+        }
+      },
+      {
+        "chunk_indices": [
+          43
+        ],
+        "evictions_before": 33,
+        "fetch_span": {
+          "end": 369098751,
+          "start": 360710144
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 369098751,
+          "start": 360710144
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 369098751,
+          "start": 360710144
+        }
+      },
+      {
+        "chunk_indices": [
+          44
+        ],
+        "evictions_before": 34,
+        "fetch_span": {
+          "end": 377487359,
+          "start": 369098752
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 377487359,
+          "start": 369098752
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 377487359,
+          "start": 369098752
+        }
+      },
+      {
+        "chunk_indices": [
+          45
+        ],
+        "evictions_before": 35,
+        "fetch_span": {
+          "end": 385875967,
+          "start": 377487360
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 385875967,
+          "start": 377487360
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 385875967,
+          "start": 377487360
+        }
+      },
+      {
+        "chunk_indices": [
+          46
+        ],
+        "evictions_before": 36,
+        "fetch_span": {
+          "end": 394264575,
+          "start": 385875968
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 394264575,
+          "start": 385875968
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 394264575,
+          "start": 385875968
+        }
+      },
+      {
+        "chunk_indices": [
+          47
+        ],
+        "evictions_before": 37,
+        "fetch_span": {
+          "end": 402653183,
+          "start": 394264576
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 402653183,
+          "start": 394264576
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 402653183,
+          "start": 394264576
+        }
+      },
+      {
+        "chunk_indices": [
+          48
+        ],
+        "evictions_before": 38,
+        "fetch_span": {
+          "end": 411041791,
+          "start": 402653184
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 411041791,
+          "start": 402653184
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 411041791,
+          "start": 402653184
+        }
+      },
+      {
+        "chunk_indices": [
+          49
+        ],
+        "evictions_before": 39,
+        "fetch_span": {
+          "end": 419430399,
+          "start": 411041792
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 419430399,
+          "start": 411041792
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 419430399,
+          "start": 411041792
+        }
+      },
+      {
+        "chunk_indices": [
+          50
+        ],
+        "evictions_before": 40,
+        "fetch_span": {
+          "end": 427819007,
+          "start": 419430400
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 427819007,
+          "start": 419430400
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 427819007,
+          "start": 419430400
+        }
+      },
+      {
+        "chunk_indices": [
+          51
+        ],
+        "evictions_before": 41,
+        "fetch_span": {
+          "end": 436207615,
+          "start": 427819008
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 436207615,
+          "start": 427819008
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 436207615,
+          "start": 427819008
+        }
+      },
+      {
+        "chunk_indices": [
+          52
+        ],
+        "evictions_before": 42,
+        "fetch_span": {
+          "end": 444596223,
+          "start": 436207616
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 444596223,
+          "start": 436207616
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 444596223,
+          "start": 436207616
+        }
+      },
+      {
+        "chunk_indices": [
+          53
+        ],
+        "evictions_before": 43,
+        "fetch_span": {
+          "end": 452984831,
+          "start": 444596224
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 452984831,
+          "start": 444596224
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 452984831,
+          "start": 444596224
+        }
+      },
+      {
+        "chunk_indices": [
+          54
+        ],
+        "evictions_before": 44,
+        "fetch_span": {
+          "end": 461373439,
+          "start": 452984832
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 461373439,
+          "start": 452984832
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 461373439,
+          "start": 452984832
+        }
+      },
+      {
+        "chunk_indices": [
+          55
+        ],
+        "evictions_before": 45,
+        "fetch_span": {
+          "end": 469762047,
+          "start": 461373440
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 469762047,
+          "start": 461373440
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 469762047,
+          "start": 461373440
+        }
+      },
+      {
+        "chunk_indices": [
+          56
+        ],
+        "evictions_before": 46,
+        "fetch_span": {
+          "end": 478150655,
+          "start": 469762048
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 478150655,
+          "start": 469762048
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 478150655,
+          "start": 469762048
+        }
+      },
+      {
+        "chunk_indices": [
+          57
+        ],
+        "evictions_before": 47,
+        "fetch_span": {
+          "end": 486539263,
+          "start": 478150656
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 486539263,
+          "start": 478150656
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 486539263,
+          "start": 478150656
+        }
+      },
+      {
+        "chunk_indices": [
+          58
+        ],
+        "evictions_before": 48,
+        "fetch_span": {
+          "end": 494927871,
+          "start": 486539264
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 494927871,
+          "start": 486539264
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 494927871,
+          "start": 486539264
+        }
+      },
+      {
+        "chunk_indices": [
+          59
+        ],
+        "evictions_before": 49,
+        "fetch_span": {
+          "end": 503316479,
+          "start": 494927872
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 503316479,
+          "start": 494927872
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 503316479,
+          "start": 494927872
+        }
+      },
+      {
+        "chunk_indices": [
+          60
+        ],
+        "evictions_before": 50,
+        "fetch_span": {
+          "end": 511705087,
+          "start": 503316480
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 511705087,
+          "start": 503316480
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 511705087,
+          "start": 503316480
+        }
+      },
+      {
+        "chunk_indices": [
+          61
+        ],
+        "evictions_before": 51,
+        "fetch_span": {
+          "end": 520093695,
+          "start": 511705088
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 520093695,
+          "start": 511705088
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 520093695,
+          "start": 511705088
+        }
+      },
+      {
+        "chunk_indices": [
+          62
+        ],
+        "evictions_before": 52,
+        "fetch_span": {
+          "end": 528482303,
+          "start": 520093696
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 528482303,
+          "start": 520093696
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 528482303,
+          "start": 520093696
+        }
+      },
+      {
+        "chunk_indices": [
+          63
+        ],
+        "evictions_before": 53,
+        "fetch_span": {
+          "end": 536870911,
+          "start": 528482304
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 536870911,
+          "start": 528482304
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 536870911,
+          "start": 528482304
+        }
+      },
+      {
+        "chunk_indices": [
+          65
+        ],
+        "evictions_before": 54,
+        "fetch_span": {
+          "end": 553648127,
+          "start": 545259520
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 553648127,
+          "start": 545259520
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 553648127,
+          "start": 545259520
+        }
+      },
+      {
+        "chunk_indices": [
+          66
+        ],
+        "evictions_before": 55,
+        "fetch_span": {
+          "end": 562036735,
+          "start": 553648128
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 562036735,
+          "start": 553648128
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 562036735,
+          "start": 553648128
+        }
+      },
+      {
+        "chunk_indices": [
+          67
+        ],
+        "evictions_before": 56,
+        "fetch_span": {
+          "end": 570425343,
+          "start": 562036736
+        },
+        "fetch_span_bytes": 8388608,
+        "joined_inflight": false,
+        "missing": {
+          "end": 570425343,
+          "start": 562036736
+        },
+        "missing_bytes": 8388608,
+        "overfetch_bytes": 0,
+        "overlap_bytes_avoided": 0,
+        "plan_origin": "full_miss",
+        "present_before": [],
+        "request": {
+          "end": 570425343,
+          "start": 562036736
+        }
+      }
+    ],
+    "capability": {
+      "acquisitions": 3,
+      "evictions": 2,
+      "negative_hits": 0,
+      "reacquisitions": 0,
+      "reuses": 56
+    },
+    "client_cancellations": 4,
+    "concurrent_demand": {
+      "current": 0,
+      "peak": 1
+    },
+    "demand_joined_fill": 0,
+    "layer_A_api": {
+      "2xx": 3,
+      "429": 0,
+      "4xx": 0,
+      "5xx": 0,
+      "latency_ms_avg": 290,
+      "redirect_true_used": 0,
+      "requests": 3
+    },
+    "layer_B_redirect": {
+      "429": 0,
+      "hops": 0
+    },
+    "layer_C_cdn": {
+      "206": 57,
+      "2xx": 57,
+      "429": 10,
+      "4xx": 0,
+      "5xx": 0,
+      "final_cdn_host": "nexus.erth.tb-cdn.earth",
+      "latency_ms_avg": 249,
+      "requests": 67
+    },
+    "limiter_permit_waits": 1,
+    "limiter_waits": 9,
+    "other_api_calls": {
+      "checkcached": 0,
+      "mylist": 0,
+      "search": 0
+    },
+    "playback_intelligence": {
+      "active_torrent_files": 0,
+      "ahead_chunks": 1,
+      "auto_selected_try": 0,
+      "auto_selected_wait": 0,
+      "enabled": false,
+      "mode": "auto",
+      "prefetch_chunks_completed": 0,
+      "prefetch_chunks_requested": 0,
+      "prefetch_chunks_skipped_present": 0,
+      "prefetch_failures": 0,
+      "prefetch_joined_by_demand": 0,
+      "prefetch_joined_inflight": 0,
+      "prefetch_priority": 0,
+      "prefetch_served_demand": 0,
+      "prefetch_triggered": 0,
+      "prefetches_bailed": 0,
+      "seek_reprioritizations": 0,
+      "sequential_threshold": 3,
+      "spare_capacity": 0,
+      "top": []
+    },
+    "pool": [],
+    "pool_aggregate": {
+      "caps": 0,
+      "target": 0,
+      "utilization_pct": 0
+    },
+    "pool_attribution": [],
+    "pool_growths": 0,
+    "rate_limited": 1,
+    "recovery": {
+      "attempts": 10,
+      "client_416": 0,
+      "client_502": 0,
+      "client_503": 1,
+      "client_truncated": 0,
+      "internal_recoveries_ok": 12,
+      "max_reacquires": 0,
+      "max_same_cap_retries": 1,
+      "mid_body_resumes": 0,
+      "wall_ms_total": 372436
+    },
+    "requests": 267,
+    "retry_after": {
+      "applied_secs": 30,
+      "provider_secs": null
+    },
+    "stage_timing": {
+      "cold_acquire_ms": null,
+      "cold_cdn_first_byte_ms": null,
+      "cold_ttfb_ms": 13,
+      "warm_ttfb_ms": null
+    },
+    "stages_last": {
+      "T0_received_ms": 0,
+      "T1_acquire_issued_ms": null,
+      "T2_capability_ready_ms": null,
+      "T3_cdn_dispatched_ms": null,
+      "T4_first_upstream_byte_ms": null,
+      "T5_first_client_byte_ms": 3,
+      "account_scope": "",
+      "acquisition_api_ms": null,
+      "api_requests_delta": 0,
+      "cache_hit": true,
+      "cap_id": "",
+      "capability_to_client_ms": null,
+      "cdn_attempts": [],
+      "cdn_requests_delta": 0,
+      "control_pre_acquire_ms": null,
+      "corr_id": "corr-267",
+      "downstream_handoff_ms": null,
+      "provider": "",
+      "provider_connect_ms": null,
+      "provider_ttfb_ms": null,
+      "request": {
+        "end": 570425343,
+        "start": 562036736
+      },
+      "total_open_ttfb_ms": 3,
+      "work_class": "demand"
+    },
+    "stages_recent": [
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": 0,
+        "T2_capability_ready_ms": 0,
+        "T3_cdn_dispatched_ms": 0,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": null,
+        "account_scope": "default",
+        "acquisition_api_ms": 0,
+        "api_requests_delta": 0,
+        "cache_hit": false,
+        "cap_id": "torbox-1-2",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [
+          {
+            "attempt": 1,
+            "cap_id": "torbox-1-2",
+            "corr_id": "corr-204",
+            "headers_ms": 249,
+            "headers_received": true,
+            "host": "nexus.erth.tb-cdn.earth",
+            "outcome": "Pending",
+            "provider": "torbox",
+            "recovery_path": "generic_transient_cooldown",
+            "retry_decision_ms": null,
+            "retry_wait_ms": 29999,
+            "same_cap": true,
+            "started_at_ms": 0,
+            "status": 429,
+            "ttfb_ms": null
+          },
+          {
+            "attempt": 2,
+            "cap_id": "torbox-1-2",
+            "corr_id": "corr-204",
+            "headers_ms": 213,
+            "headers_received": true,
+            "host": "nexus.erth.tb-cdn.earth",
+            "outcome": "Pending",
+            "provider": "torbox",
+            "recovery_path": "generic_transient_cooldown",
+            "retry_decision_ms": null,
+            "retry_wait_ms": 29999,
+            "same_cap": true,
+            "started_at_ms": 30251,
+            "status": 429,
+            "ttfb_ms": null
+          },
+          {
+            "attempt": 3,
+            "cap_id": "torbox-1-2",
+            "corr_id": "corr-204",
+            "headers_ms": 216,
+            "headers_received": true,
+            "host": "nexus.erth.tb-cdn.earth",
+            "outcome": "Pending",
+            "provider": "torbox",
+            "recovery_path": "generic_transient_cooldown",
+            "retry_decision_ms": null,
+            "retry_wait_ms": 29999,
+            "same_cap": true,
+            "started_at_ms": 60466,
+            "status": 429,
+            "ttfb_ms": null
+          },
+          {
+            "attempt": 4,
+            "cap_id": "torbox-1-2",
+            "corr_id": "corr-204",
+            "headers_ms": 207,
+            "headers_received": true,
+            "host": "nexus.erth.tb-cdn.earth",
+            "outcome": "Pending",
+            "provider": "torbox",
+            "recovery_path": "generic_transient_cooldown",
+            "retry_decision_ms": null,
+            "retry_wait_ms": 29999,
+            "same_cap": true,
+            "started_at_ms": 90684,
+            "status": 429,
+            "ttfb_ms": null
+          }
+        ],
+        "cdn_requests_delta": 4,
+        "control_pre_acquire_ms": 0,
+        "corr_id": "corr-204",
+        "downstream_handoff_ms": null,
+        "provider": "torbox",
+        "provider_connect_ms": 0,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 0,
+          "start": 0
+        },
+        "total_open_ttfb_ms": null,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-205",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 8388607,
+          "start": 0
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-206",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 25165823,
+          "start": 16777216
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-207",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 33554431,
+          "start": 25165824
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-208",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 50331647,
+          "start": 41943040
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 1,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-209",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 58720255,
+          "start": 50331648
+        },
+        "total_open_ttfb_ms": 1,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-210",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 67108863,
+          "start": 58720256
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-211",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 75497471,
+          "start": 67108864
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-212",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 92274687,
+          "start": 83886080
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 1,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-213",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 100663295,
+          "start": 92274688
+        },
+        "total_open_ttfb_ms": 1,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-214",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 109051903,
+          "start": 100663296
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-215",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 117440511,
+          "start": 109051904
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-216",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 125829119,
+          "start": 117440512
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-217",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 134217727,
+          "start": 125829120
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-218",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 142606335,
+          "start": 134217728
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-219",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 150994943,
+          "start": 142606336
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-220",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 167772159,
+          "start": 159383552
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-221",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 176160767,
+          "start": 167772160
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-222",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 184549375,
+          "start": 176160768
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-223",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 192937983,
+          "start": 184549376
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-224",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 201326591,
+          "start": 192937984
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-225",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 209715199,
+          "start": 201326592
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 1,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-226",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 218103807,
+          "start": 209715200
+        },
+        "total_open_ttfb_ms": 1,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 1,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-227",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 226492415,
+          "start": 218103808
+        },
+        "total_open_ttfb_ms": 1,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-228",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 234881023,
+          "start": 226492416
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-229",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 243269631,
+          "start": 234881024
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-230",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 251658239,
+          "start": 243269632
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-231",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 260046847,
+          "start": 251658240
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-232",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 268435455,
+          "start": 260046848
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-233",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 276824063,
+          "start": 268435456
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-234",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 285212671,
+          "start": 276824064
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-235",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 293601279,
+          "start": 285212672
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-236",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 310378495,
+          "start": 301989888
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-237",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 318767103,
+          "start": 310378496
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-238",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 327155711,
+          "start": 318767104
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-239",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 335544319,
+          "start": 327155712
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-240",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 343932927,
+          "start": 335544320
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-241",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 352321535,
+          "start": 343932928
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-242",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 360710143,
+          "start": 352321536
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 2,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-243",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 369098751,
+          "start": 360710144
+        },
+        "total_open_ttfb_ms": 2,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-244",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 377487359,
+          "start": 369098752
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 5,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-245",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 385875967,
+          "start": 377487360
+        },
+        "total_open_ttfb_ms": 5,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 5,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-246",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 394264575,
+          "start": 385875968
+        },
+        "total_open_ttfb_ms": 5,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-247",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 402653183,
+          "start": 394264576
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-248",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 411041791,
+          "start": 402653184
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-249",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 419430399,
+          "start": 411041792
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-250",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 427819007,
+          "start": 419430400
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-251",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 436207615,
+          "start": 427819008
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-252",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 444596223,
+          "start": 436207616
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 5,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-253",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 452984831,
+          "start": 444596224
+        },
+        "total_open_ttfb_ms": 5,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-254",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 461373439,
+          "start": 452984832
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 5,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-255",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 469762047,
+          "start": 461373440
+        },
+        "total_open_ttfb_ms": 5,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-256",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 478150655,
+          "start": 469762048
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-257",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 486539263,
+          "start": 478150656
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 5,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-258",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 494927871,
+          "start": 486539264
+        },
+        "total_open_ttfb_ms": 5,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-259",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 503316479,
+          "start": 494927872
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-260",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 511705087,
+          "start": 503316480
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-261",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 520093695,
+          "start": 511705088
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-262",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 528482303,
+          "start": 520093696
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-263",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 536870911,
+          "start": 528482304
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-264",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 545259519,
+          "start": 536870912
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-265",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 553648127,
+          "start": 545259520
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 4,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-266",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 562036735,
+          "start": 553648128
+        },
+        "total_open_ttfb_ms": 4,
+        "work_class": "demand"
+      },
+      {
+        "T0_received_ms": 0,
+        "T1_acquire_issued_ms": null,
+        "T2_capability_ready_ms": null,
+        "T3_cdn_dispatched_ms": null,
+        "T4_first_upstream_byte_ms": null,
+        "T5_first_client_byte_ms": 3,
+        "account_scope": "",
+        "acquisition_api_ms": null,
+        "api_requests_delta": 0,
+        "cache_hit": true,
+        "cap_id": "",
+        "capability_to_client_ms": null,
+        "cdn_attempts": [],
+        "cdn_requests_delta": 0,
+        "control_pre_acquire_ms": null,
+        "corr_id": "corr-267",
+        "downstream_handoff_ms": null,
+        "provider": "",
+        "provider_connect_ms": null,
+        "provider_ttfb_ms": null,
+        "request": {
+          "end": 570425343,
+          "start": 562036736
+        },
+        "total_open_ttfb_ms": 3,
+        "work_class": "demand"
+      }
+    ],
+    "timing": {
+      "internal_recovery_ms_total": 300000,
+      "limiter_wait_ms_total": 270836
+    },
+    "torrent_file_id": "",
+    "upstream_errors": 0
+  }
+}

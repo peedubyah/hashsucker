@@ -1,12 +1,15 @@
 # HashSucker self-handoff (durable — survives session death)
 
-If this session dies right now: `main` is ahead of `github/main` (the
-authority-model slices are committed locally; the push happened at the end
-of the 2026-10-20 sealing session — check `git log github/main`).
-Production media-search RUNS the LOCAL build of the sealing session
-(`a05410a` plus the docs commits), not the v0.4.0 release image. Web UI =
-household appliance, TUI (`npm run tui` in media-search/) = operator control
-room.
+If this session dies right now: `main` is PUSHED and in sync with
+`github/main` (`ffed151`, "docs: restore the recon notes dropped with the
+experiment commit"; the sealing commit is `2258d21`). The push needed a
+rebase: the remote's 100 MB blob limit was hit by six generated
+`experiments/temporal-correspondence/corpus/*.mkv` files that travelled in a
+local-only commit; the rebase dropped that commit (and, with it, four
+`docs/recon/` notes — restored in `ffed151`). Production media-search RUNS the
+LOCAL build of the sealing session (`a05410a` plus the docs commits), not the
+v0.4.0 release image. Web UI = household appliance, TUI (`npm run tui` in
+media-search/) = operator control room.
 Read this file, `../AGENTS.override.md` (operating rules), and
 [`../docs/architecture.md`](../docs/architecture.md) (durable model). Do not
 trust old containers or historical HY4 handoffs.
@@ -20,6 +23,40 @@ representation; release-level evidence may discover a resource but never
 authorizes an exact file; the VFS byte identity is a projection of the
 Binding; Plex and Jellyfin are projections, not canonical truth; and a
 healthy reuse needs no external proof.
+
+## Recon tooling (2026-10-20) and what it found
+
+The recon MCPs live OUTSIDE the repo, in `~/.config/opencode/opencode.jsonc`
+(playwright + firecrawl; REA preserved, disabled). This session has no MCP
+tools of its own, so they are driven from bash by a tiny stdio client
+(`@modelcontextprotocol/sdk@1.32.1`): `node mcp.mjs <server> <tool> <json>`.
+`firecrawl_scrape` works keyless; `firecrawl_map`/`firecrawl_crawl` need
+`FIRECRAWL_API_KEY` (the only user action outstanding). Web search goes
+through DuckDuckGo in the Playwright browser (keyless); direct HTTPS fetch
+(GitHub API, raw.githubusercontent, project docs) is the fast path. The
+client and its scratch live in `/var/tmp/patrick/hashsucker/recon/`.
+
+The reconnaissance itself is `docs/recon/2026-10-ecosystem-recon.md`. The
+headline: **the exact-torrent-file-metadata question is answered** — the
+verdict is EXISTING SOURCE IS GOOD ENOUGH for the corpus and a
+SELF-HOSTABLE SIDE-CAR IS PRACTICAL for arbitrary infohashes (bitmagnet's
+GraphQL exposes `infoHash, path, size` per file; torrust's hash2torrent
+returns the .torrent metainfo over BEP 9). Also found: Real-Debrid's
+May-2026 filter-gate killed cached torrents with no announcement and the
+ecosystem's answer was to hide the stream (nobody repairs a dead route), and
+Plex disclosed an unauthenticated RCE chain on 2026-10-16
+(CVE-2026-96652/54/55/56). Nothing out there changes the sealed architecture;
+no moonshot is selected.
+
+One recovery note: a `git stash -u` during the merge was dropped with the
+pre-existing untracked user files inside it
+(`artifacts/ab-baseline-off.jsonl`, `artifacts/ab-off-vs-on.json`,
+`media-search/.env.example`, `media-search/scripts/bench-core-latency.mjs`,
+`media-search/test/vfs-release-key-projection.test.js`,
+`scripts/ab-baseline-driver.sh`, `scripts/ab-concurrent-driver.sh`); they were
+recovered from the dropped stash's untracked commit (`b4d12bd`) and restored
+untracked. A dropped stash is still recoverable while its object survives —
+look in `git fsck --unreachable` before assuming a loss.
 
 ## Live session state (2026-10-19, critical-path independence audit)
 
