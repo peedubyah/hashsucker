@@ -91,7 +91,10 @@ async function resolveMediaTitle({ mediaId, mediaType, selection, handoff }) {
   const explicitTitle = typeof handoff?.canonicalTitle === 'string' ? handoff.canonicalTitle.trim() : '';
   try {
     if (explicitTitle) throw new Error('skip: the request named the media');
-    const type = mediaType === 'series' ? 'series' : 'movie';
+    // The catalog type follows the MEDIA KIND: a TV handoff is labelled
+    // 'tv' (or 'episode'), and the movie catalog answers a series id with
+    // a DIFFERENT film.
+    const type = (mediaType === 'movie') ? 'movie' : 'series';
     const media = await getMedia(type, mediaId);
     perfTrace('provider.cinemeta', {
       provider: 'cinemeta', endpoint: 'meta', action: 'title',

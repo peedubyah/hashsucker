@@ -2751,3 +2751,201 @@ CALLER is told when a route is gone. The class-D body carries the failed
 routes, but a route excluded from the S-1 is invisible to it. Reporting
 "this route is dead, that is why there is nothing to offer" would keep the
 typed detail while excluding the dead route from the byte path.
+
+## 2026-10-20 — ONE NAME TO RULE THEM ALL: the presentation identity — CLOSED
+
+Slice: the consumer-visible name of a media intent was derived twice, with
+two source precedences, and recomputed on every publication. Make one
+durable presentation identity per media intent, and make every surface
+consume it.
+
+### PHASE 1 — THE AUTHORITY GRAPH (every constructor, and who it answered to)
+
+| constructor | file | title source | year source | durable? | moves on restart? | moves on a metadata refresh? |
+|---|---|---|---|---|---|---|
+| VFS canonical path (movie) | `vfs/materialize.js` | request canonical → Cinemeta → filename | request canonical only (Cinemeta's year rejected as non-integer) | yes (`vfs_movie_entries.canonical_path`) | no | no |
+| VFS canonical path (episode) | `vfs/materialize.js` | request canonical → **media id** | none | yes (`vfs_tv_entries.canonical_path`) | no | no |
+| `.strm` path (movie + series) | `requests/strm-publisher.js` | **Cinemeta → release title → filename → media id** (the request's canonical title IGNORED) | Cinemeta's raw year (`2016–2019`, `2024-02-27` reached directory names) | **no** — recomputed per publish | **yes** | **yes** |
+| control-plane canonical path | `control-plane/store.js` | the library item's title | the library item's year | yes (`library_paths`) | no | no |
+| permanent promotion tree | `promotion/paths.js` | `library_items.title` | `library_items.year` | yes (the promotion row) | no | no |
+| download staging tree | `download/paths.js` | request canonical → request title → media id | request year | yes (the download row) | no | no |
+| Plex/Jellyfin part file | `plex/vfs-path.js`, `plex/section-config.js` | derived from the VFS path | — | projection | — | — |
+
+Five trees, three collection names (`Movies`, `TV`, `TV Shows`, `movies`,
+`tv`), two sanitizers with different rules (`sanitizePathSegment` replaces
+illegal characters with a space, `sanitizeSegment` removes them), and a
+`.strm` path that existed nowhere durable.
+
+### PHASE 2 — THE DRIFT, MEASURED (production, before any change)
+
+| observation | count |
+|---|---|
+| `.strm` artifacts on disk | 184 |
+| `.strm` artifacts whose NAME disagrees with the VFS path of the same media | **148 of 168 comparable** |
+| dominant class | the `.strm` carries `(Year)`, the VFS path does not (the catalog's year reached one resolver and not the other) |
+| catalog year ranges in directory names | 14 (`The Office (2005–2013)`, `Ted Lasso (2020–)`) |
+| release-grammar names published as consumer names | 3 (`Deadwood (2004) S01E01 Deadwood (1080p BluRay x265 Silence)`, `companion 2025 dual-audio spanishlat-eng …`) |
+| artifacts with NO season/episode (`Season 00` / `S00E00`) | 2 (they resolve to whichever handoff is latest — the wrong episode) |
+| `.strm` artifacts for a media id that also has a TV artifact | 3 (the movie catalog answered a SERIES id) |
+| control-plane `library_paths` disagreeing with the VFS row | 9 of 111 movies (two collision-suffix identity keys) |
+| `library_items.title` that had been overwritten with the bare media id | **every row** (a republication without a title clobbered it) |
+
+The last row is the operator-facing face of the same defect: the control
+plane's display title was `tt0056801` for a published movie.
+
+### PHASE 3 — THE DURABLE FACT
+
+The presentation identity lives on the control-plane library item (no new
+table): the display title, the year, the canonical VFS path and the
+`.strm` path, with the commit time.
+
+```
+library_items.presentation_title        TEXT
+library_items.presentation_year         INTEGER
+library_items.presentation_path         TEXT   -- the canonical VFS path
+library_items.presentation_strm_path    TEXT   -- the .strm path, relative to the strm root
+library_items.presentation_committed_at INTEGER
+```
+
+The PATHS are written once and never rewritten. The description (title,
+year) may be corrected explicitly — it is what the operator surface shows,
+not what the consumer's path is derived from.
+
+### PHASE 4 — THE PRECEDENCE (one function, `resolvePresentationName`)
+
+```
+title   1. the request's canonical title   (explicit intent — the authority)
+        2. the catalog title               (canonical catalog metadata)
+        3. the filename inference          (release grammar — last resort)
+        4. the media id                    (a stable, honest floor)
+year    1. the request's canonical year
+        2. the catalog year, NORMALIZED    (only where the catalog supplied the title)
+        3. the year parsed from the filename
+```
+
+The year follows the TITLE's authority: an enrichment fills a gap the
+request left, it never adds a fact to a title the request already named.
+That also keeps the catalog OUT of the path when the request was explicit,
+which is what makes a committed identity reconstructible with ZERO metadata
+calls. A range ("2016–2019") or a date ("2024-02-27") contributes its year
+and nothing else.
+
+Release attributes are NOT a presentation source: a release title is
+release grammar and it belongs to a release, not to a media intent — a
+representation reselection would rename the item through it.
+
+### PHASE 5 — THE COMMIT POINT
+
+The publication. That is the moment the consumer-visible artifacts exist,
+and it is the only moment at which both paths are known. The materializer
+derives the canonical path; the publisher writes (or adopts) the `.strm`;
+the identity is committed with both.
+
+### PHASE 6 — THE PATH BUILDERS (one derivation, two projections)
+
+`Movies/<Title> (<Year>)/<Title> (<Year>).<ext>` and
+`TV Shows/<Title> (<Year>)/Season NN/<Title> (<Year>) - SNNENN.strm` are
+the SAME name in two layouts. The `.strm` tree is the consumer's library
+layout; the VFS tree is the byte source. Inside them, the identity is
+identical — so the two cannot drift apart by construction.
+
+### PHASE 7 — THE BEHAVIOUR THAT FOLLOWS
+
+| | before | after |
+|---|---|---|
+| a republication | the `.strm` path was recomputed (Cinemeta) — a metadata answer could write a SECOND artifact | the committed path is written; one artifact |
+| an artifact published under an older naming rule | renamed to the canonical name (a consumer-visible path change) | ADOPTED where it is (the content identifies it); the identity records that path |
+| a representation reselection | the path could move with the TorrentFile's extension | the committed path wins, extension included |
+| a route repair | the path was re-derived | the committed path wins |
+| a metadata answer that arrives late | could rename the item | the identity is committed; the answer is not consulted |
+| the control-plane canonical path | migrated to a new title when a republicublish carried a different request name | never rewritten |
+| `library_items.title` | overwritten with the bare media id | a placeholder never clobbers a real title |
+| the TV catalog lookup | a TV handoff ('tv') asked the MOVIE catalog — and got a different film | the catalog type follows the media kind |
+| an empty route set | — | the typed class-D failure (fixed in the previous slice) |
+
+### PHASE 8 — WHAT THE PROOF FOUND
+
+1. **A TV handoff resolved the MOVIE catalog.** `mediaType === 'series' ? 'series' : 'movie'` sent every 'tv' handoff to the movie catalog, which answers a series id with a DIFFERENT film. That is why the production tree holds "Black Gunn (1972)" (a movie) beside "The Last of Us" (the series) for the same media id, and a release-grammar name beside a clean one. Fixed: the catalog type follows the media kind.
+2. **Two publications of one episode raced on one temp file.** The `.strm` writer used a fixed temp name, so the loser's rename failed with ENOENT — a duplicate-publication failure. Fixed: the temp name is unique per writer.
+3. **The control-plane canonical path migrated** when an unpublish/republish cycle carried a different request name — a published path moved because a request was worded differently. Fixed: the committed identity owns the path.
+4. **The descriptive title was clobbered** by any republication without a title. Fixed: a placeholder never overwrites a real title.
+
+### PHASE 9 — THE EXISTING LIBRARY (audit, adoption, no rename)
+
+The audit compares what is committed against what the consumer trees
+actually contain. The adoption commits the identities that are missing and
+ADOPTS the paths that are already published: the artifact the consumer
+already has keeps its path, and a republication writes to the same place
+instead of recomputing a name.
+
+| | production, after the adoption |
+|---|---|
+| artifacts on disk | 184 |
+| committed identities | **179** |
+| identities whose `.strm` path matches the artifact on disk | **168 aligned, 0 drifted** |
+| identities with no VFS row (published without a byte path — the virtual library) | 11 |
+| artifacts with no media intent to belong to | 4 (an orphan episode, a junk `S00E00` pair, a mis-catalogued movie artifact, a release-grammar artifact) |
+| files renamed | **0** |
+| artifacts deleted | **0** |
+
+### PRODUCTION EVIDENCE (the appliance, 2026-10-20)
+
+`media-search` rebuilt and recreated from the local build; container
+healthy; the control-plane database is the live one and was migrated in
+place (five nullable columns added).
+
+| cohort | observation | result |
+|---|---|---|
+| movie re-request (City Lights, `tt0021749`) | the reuse path | 15 ms, HTTP 200 |
+| | the artifacts for that media id | 1 before, **1 after** — no duplicate |
+| | the committed identity | unchanged (same commit time, same paths) |
+| | the read | 206, 65536 B, sha256 `ae83cd8c…` (the pre-slice baseline) |
+| TV republication (Ted Lasso S01E02, `tt10986410`) | the operator republication path | 321 ms, HTTP 200 |
+| | the artifacts for that episode | 1 before, **1 after** |
+| | the committed identity | unchanged |
+| Plex projection (City Lights) | the library item | title `City Lights`, year 1931, **ratingKey 423** — the same rating key as before the slice |
+| | the artifact | `Movies/City Lights (1931)/City Lights (1931).strm` — the identity's committed path |
+
+### THE FULL SUITE
+
+3487 tests, 3483 pass, 1 fail, 3 skipped (exit 1). The one failure is the
+pre-existing baseline `vfs-collection-resilience` C1/C2/C3. The focused
+presentation/VFS/publication suites: 34/34.
+
+### COMMITS
+
+| commit | change |
+|---|---|
+| `eec42af` | feat(presentation): one durable presentation identity per media intent |
+| `af23a96` | feat(presentation): every surface consumes the committed identity |
+| `40ea543` | feat(presentation): the operator surface reports the identity, and the audit adopts it |
+
+### WHAT REMAINS UNPROVEN
+
+- The legacy divergence between the two trees is PRESERVED for the items
+  published before this slice: their `.strm` name and their VFS path
+  still disagree (the `.strm` carries the year, the VFS path does not).
+  Making them agree means renaming one of the two trees — a whole-library
+  re-mirror of the rclone copy and a Plex item churn per renamed file.
+  That is not justified by a cosmetic difference, so the divergence stays
+  and is REPORTED by the audit instead.
+- Four artifacts have no media intent (an orphan episode, the junk
+  `S00E00` pair, a mis-catalogued movie artifact, a release-grammar
+  artifact). They were left in place: removing a consumer-visible file is
+  a product decision, not a repair.
+- The rename/migration policy does not exist. No product requirement for a
+  rename was found, so none was invented: a committed identity cannot be
+  moved by any code path in the system today.
+- The Jellyfin projection could not be proven end to end: the appliance's
+  Jellyfin API key is rejected (HTTP 401), which is an environment
+  condition, not a presentation one. The Jellyfin path is a pure
+  translation of the same `.strm` path.
+
+### NEXT SMALLEST EARNED SLICE
+
+The presentation identity is closed for the two trees HashSucker owns. The
+next consumer-visible naming surface is the ONE that is not derived from
+the identity yet: the Plex library's own metadata for these items (the
+title/year Plex parses out of the file name, the poster, the summary).
+That is descriptive enrichment, and it must be proven to leave the
+committed identity alone.

@@ -126,6 +126,41 @@ trust old containers or historical HY4 handoffs.
   the consumer reconcile logs `JELLYFIN_AUTH_FAILED`. Plex answers
   normally and the VFS/byte path is unaffected.
 
+## Live session state (2026-10-20, one name to rule them all)
+
+- Production `media-search` RUNS the local build of `40ea543` plus the
+  catalog-type and temp-file fixes (container healthy; the data plane is
+  untouched). The control-plane DB was migrated IN PLACE: five nullable
+  columns on `library_items` (the presentation identity).
+- A media intent has ONE durable presentation identity: the display title,
+  the year, the canonical VFS path and the `.strm` path, committed once at
+  the publication. The paths are never rewritten; the description may be
+  corrected explicitly.
+- The precedence is one function (`src/lib/control-plane/presentation-identity.js`):
+  the request's canonical title, then the catalog, then the filename
+  inference, then the media id. The year follows the title's authority and
+  is normalized to a four-digit year or nothing.
+- The `.strm` and the VFS path are two PROJECTIONS of that identity. An
+  artifact that already exists is ADOPTED where it is (the content
+  identifies it): a republication never writes a second one and never
+  renames the one the consumer has.
+- Operator surfaces: `GET /api/operator/presentation` reports every
+  committed identity and whether the byte path still agrees with it;
+  `GET /api/library` reports the identity per item; `node
+  src/scripts/presentation-audit.mjs [--adopt]` audits the consumer trees
+  against the committed identities (`--adopt` commits the missing ones and
+  adopts the published paths — it renames nothing).
+- The production library was adopted in place: 179 identities committed,
+  168 aligned, 0 drifted, 11 with no VFS row (published without a byte
+  path), 4 artifacts with no media intent. 0 files renamed, 0 deleted.
+- Three real defects the proof found (all fixed): a TV handoff ('tv')
+  resolved the MOVIE catalog and got a different film; two concurrent
+  publications raced on one `.strm` temp file; the control-plane
+  canonical path migrated when a republicublish carried a different
+  request name.
+- Evidence: `docs/BUILD-LOG.md` 2026-10-20; retrospective
+  `docs/retrospectives/2026-10-20-one-name-to-rule-them-all.md`.
+
 ## Architecture boundaries (frozen)
 
 Non-authoritative session-local summary. Canonical:

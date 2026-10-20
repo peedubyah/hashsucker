@@ -116,10 +116,40 @@ class-D path answered 500 `evidenceSummary is not defined` instead of the
 typed provider failure — fixed, with a regression test that fails without
 the fix.
 
-Next earned slice: **one presentation identity for the `.strm` and the
-VFS path**. They are two resolvers with different year handling, so a
-published item can present two different paths to Plex and to Jellyfin,
-and a metadata outage can move one of them.
+Completed product slice: **one name to rule them all (the presentation
+identity)** — **CLOSED** (`eec42af`, `af23a96`, `40ea543`; evidence in
+`docs/BUILD-LOG.md` 2026-10-20). The consumer-visible name of a media
+intent was derived by TWO resolvers with two source precedences: the VFS
+materializer preferred the request's canonical title, the `.strm`
+publisher ignored it and led with the catalog — and the `.strm` path was
+recomputed on EVERY publication, so a metadata answer could write a
+second artifact for the same media. Measured on the appliance: 148 of
+168 comparable `.strm` names disagreed with the VFS path of the same
+media; 14 directory names carried a catalog year RANGE; three carried
+release grammar; two had no season/episode at all; every published
+`library_items.title` had been clobbered with the bare media id. There is
+now ONE durable presentation identity per media intent (on the
+control-plane library item: the display name, the year, the canonical VFS
+path, the `.strm` path), resolved once at the publication, from one
+precedence (request canonical → catalog → filename inference → media id;
+the year follows the title's authority and is normalized). The paths are
+written once and never rewritten — a representation change, a route
+repair, a republication and a late metadata answer all leave the
+published name alone — and an artifact that already exists is ADOPTED
+where it is, never renamed and never duplicated. The proof also found
+three real defects: a TV handoff resolved the MOVIE catalog (and got a
+different film), two publications raced on one temp file, and the
+control-plane canonical path migrated when a republicublish carried a
+different request name. Production: 179 identities committed, 168
+aligned and 0 drifted, 0 files renamed and 0 deleted; a movie
+re-request and a TV republication each left one artifact and one
+identity, the Plex ratingKey was unchanged (423), and the read served
+the same bytes.
+
+Next earned slice: **the consumer library's own metadata for these
+items** — the title/year Plex parses out of the file name, the poster,
+the summary. That is descriptive enrichment, and it must be proven to
+leave the committed presentation identity alone.
 
 Completed product slice: **exact durable-truth republication** — **CLOSED**.
 E01 VFS publication was genuinely removed, then recreated through

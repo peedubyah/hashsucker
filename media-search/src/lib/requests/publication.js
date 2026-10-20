@@ -228,7 +228,8 @@ async function resolveTitleForIdentity(handoff, selection) {
     const explicitTitle = typeof handoff.canonicalTitle === 'string' ? handoff.canonicalTitle.trim() : '';
     if (!explicitTitle) {
       const { getMedia } = await import('../metadata/cinemeta.js');
-      const media = await getMedia(handoff.mediaType === 'series' ? 'series' : 'movie', handoff.mediaId);
+      const type = handoff.mediaType === 'movie' ? 'movie' : 'series';
+      const media = await getMedia(type, handoff.mediaId);
       if (media?.title) {
         catalogTitle = media.title;
         catalogYear = media.year ?? null;

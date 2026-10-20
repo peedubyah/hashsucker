@@ -616,6 +616,28 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   }
 
   /**
+   * Correct the DESCRIPTION of a committed presentation identity.
+   *
+   * The description (the display title and year) is what the operator
+   * surface shows; the PATHS are what the consumer is reached through.
+   * A description may be corrected explicitly — for example when a first
+   * adoption parsed the name from the wrong directory level. The paths are
+   * never touched here: they are frozen at the commit.
+   */
+  function refreshPresentationDescription(libraryItemId, description = {}) {
+    const item = requireLibraryItem(libraryItemId);
+    if (item.presentationCommittedAt == null) return null;
+    const title = description.title == null ? item.presentationTitle : requireString(description.title, 'title');
+    const year = description.year === undefined
+      ? item.presentationYear
+      : (description.year == null ? null : normalizePresentationYear(description.year));
+    db.prepare(`
+      UPDATE library_items SET presentation_title = ?, presentation_year = ? WHERE id = ?
+    `).run(title, year, libraryItemId);
+    return getPresentationIdentity(libraryItemId);
+  }
+
+  /**
    * The committed presentation identity of a media intent, or null when the
    * intent has never been published under one.
    */
@@ -2390,6 +2412,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     getActiveCanonicalPath,
     ensureCanonicalPath,
     commitPresentationIdentity,
+    refreshPresentationDescription,
     getPresentationIdentity,
     listPresentationIdentities,
     recordPlacement,

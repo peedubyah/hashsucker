@@ -65,12 +65,13 @@ function readStrmArtifacts() {
       const first = content.split('\n')[0].trim();
       const movie = first.match(/\/stream\/movie\/([A-Za-z0-9_]+)/);
       if (movie) {
-        byIdentity.set(movie[1], full);
+        byIdentity.set(movie[1], preferArtifact(full, byIdentity.get(movie[1]), null, null));
         continue;
       }
       const series = first.match(/\/stream\/series\/([A-Za-z0-9_]+)(?:\?season=(\d+)&episode=(\d+))?/);
       if (series) {
-        byIdentity.set(`${series[1]}:${series[2] ?? ''}:${series[3] ?? ''}`, full);
+        const key = `${series[1]}:${series[2] ?? ''}:${series[3] ?? ''}`;
+        byIdentity.set(key, preferArtifact(full, byIdentity.get(key), series[2], series[3]));
       }
     }
   };
@@ -78,17 +79,44 @@ function readStrmArtifacts() {
   return { byIdentity, files };
 }
 
-/** The identity components a published `.strm` path carries. */
-function nameFromStrmPath(strmPath) {
+/**
+ * The identity components a published `.strm` path carries.
+ *
+ * The year suffix is parsed leniently: a catalog that answered a range
+ * ("2016-2019") or a year with a dash ("2020-") produced a directory that
+ * no current builder would produce, and the identity must still name the
+ * item the way the consumer sees it.
+ */
+function nameFromStrmPath(strmPath, mediaType = 'movie') {
   const relative = path.relative(strmRoot, strmPath);
   const parts = relative.split(path.sep);
-  const dir = parts.length >= 2 ? parts[parts.length - 2] : '';
-  const file = parts.length >= 1 ? parts[parts.length - 1].replace(/\.strm$/, '') : '';
-  const yearMatch = dir.match(/^(.*) \((\d{4})\)$/);
+  // A movie artifact is `Movies/<name>/<name>.strm`; an episode artifact is
+  // `TV Shows/<series>/Season NN/<series> - SNNENN.strm` — the SERIES name
+  // is one level higher than the season directory.
+  const dir = mediaType === 'episode' && parts.length >= 3
+    ? parts[parts.length - 3]
+    : (parts.length >= 2 ? parts[parts.length - 2] : '');
+  const yearMatch = dir.match(/^(.*) \((\d{4})[^)]*\)$/);
   return {
-    title: yearMatch ? yearMatch[1] : dir,
+    title: yearMatch ? yearMatch[1].trim() : dir,
     year: yearMatch ? Number(yearMatch[2]) : null,
   };
+}
+
+/**
+ * Which artifact represents an episode: the one whose filename carries the
+ * EXACT season/episode code. An artifact published without a season and an
+ * episode ("S00E00") resolves to whatever handoff is latest, so it is a
+ * different thing and must not win the adoption.
+ */
+function preferArtifact(candidate, current, season, episode) {
+  if (!current) return candidate;
+  if (season == null || episode == null) return candidate;
+  const code = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
+  const candidateHas = path.basename(candidate).includes(` - ${code}.strm`);
+  const currentHas = path.basename(current).includes(` - ${code}.strm`);
+  if (candidateHas && !currentHas) return candidate;
+  return current;
 }
 
 /** The canonical VFS paths, keyed by the media identity. */
@@ -173,7 +201,33 @@ async function main() {
   }
 
   const adopted = [];
+  const corrected = [];
   if (adopt) {
+    // A committed identity's PATHS are frozen; its DESCRIPTION may be
+    // corrected explicitly. The description is what the operator surface
+    // shows — and a first adoption that parsed the name from the wrong
+    // directory level (a season directory instead of the series
+    // directory) leaves it wrong.
+    for (const identity of identities) {
+      if (!identity.strmPath) continue;
+      const parsed = nameFromStrmPath(
+        path.join(strmRoot, identity.strmPath),
+        identity.mediaType === 'movie' ? 'movie' : 'episode',
+      );
+      if (parsed.title === identity.title && parsed.year === identity.year) continue;
+      const refreshed = store.refreshPresentationDescription?.(identity.libraryItemId, {
+        title: parsed.title,
+        year: parsed.year,
+      });
+      if (refreshed) {
+        corrected.push({
+          key: identity.identityKey,
+          from: { title: identity.title, year: identity.year },
+          to: { title: parsed.title, year: parsed.year },
+        });
+      }
+    }
+
     for (const item of uncommitted) {
       const [mediaId, season, episode] = item.key.split(':');
       const isMovie = !season && !episode;
@@ -183,7 +237,7 @@ async function main() {
           : `episode:${mediaId}:default:${season}:${episode}`,
       );
       if (!libraryItem) continue;
-      const name = nameFromStrmPath(path.join(strmRoot, item.strmPath));
+      const name = nameFromStrmPath(path.join(strmRoot, item.strmPath), isMovie ? 'movie' : 'episode');
       const result = store.commitPresentationIdentity(libraryItem.id, {
         title: name.title,
         year: name.year,
@@ -192,6 +246,14 @@ async function main() {
       });
       if (result?.committed) {
         adopted.push({ key: item.key, strmPath: item.strmPath, vfsPath: item.vfsPath });
+      } else if (result?.identity && store.refreshPresentationDescription) {
+        // The identity was already committed: its PATHS are frozen, but the
+        // DESCRIPTION may be corrected explicitly (it is what the operator
+        // surface shows, not what the consumer's path is derived from).
+        store.refreshPresentationDescription(libraryItem.id, {
+          title: name.title,
+          year: name.year,
+        });
       }
     }
   }
@@ -206,9 +268,11 @@ async function main() {
     committedIdentities: identities.length,
     uncommittedArtifacts: uncommitted.length,
     adopted: adopted.length,
+    corrected: corrected.length,
     drift: summary,
     rows,
     uncommitted,
+    corrections: corrected,
   };
 
   if (asJson) {
@@ -219,6 +283,7 @@ async function main() {
     console.log(`  committed identities   : ${report.committedIdentities}`);
     console.log(`  artifacts without one  : ${report.uncommittedArtifacts}`);
     console.log(`  adopted this run       : ${report.adopted}`);
+    console.log(`  descriptions corrected : ${report.corrected}`);
     console.log('  drift classes          :');
     for (const [drift, count] of Object.entries(summary)) {
       console.log(`    ${drift.padEnd(16)} ${count}`);

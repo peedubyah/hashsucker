@@ -107,7 +107,7 @@ WAL mode, `foreign_keys=ON`. 16 tables. The ones that define the durable relatio
 
 | Table | Holds |
 |---|---|
-| `library_items` | `desired_state`: `present` \| `absent` |
+| `library_items` | `desired_state`: `present` \| `absent`; the PRESENTATION IDENTITY (`presentation_title`, `presentation_year`, `presentation_path`, `presentation_strm_path`, `presentation_committed_at`) |
 | `library_paths` | one active canonical path per item (partial unique index) |
 | `provider_placements` | provider/account resource records; key `(provider, account_scope, provider_resource_id)`, with immutable `info_hash` |
 | `provider_placement_observations`, `provider_readiness_observations` | current scoped placement/readiness observations |
@@ -128,6 +128,26 @@ presence. Authoritative inventory may map it to one TorrentFile; provider file I
 churn without changing TorrentFile identity. `candidate_file_mappings` separately relates a
 discovery `releaseKey` to a provider file. Never assume a placement is per-file or equate a
 discovery file index with a provider file ID.
+
+**Presentation identity** — the consumer-visible name of a media intent:
+
+```text
+PresentationIdentity = library item + committed paths
+  title/year  the display name (descriptive; correctable explicitly)
+  path        the canonical VFS path (the byte path), frozen at the commit
+  strm_path   the consumer `.strm` path, relative to the `.strm` root, frozen at the commit
+```
+
+A media intent has exactly one. It is resolved once, at the publication that
+produced the artifacts a consumer can see, from an explicit precedence (the
+request's canonical title, then the catalog, then the filename inference, then
+the media id; the year follows the title's authority and is normalized to a
+four-digit year or nothing). The paths are written once and are never
+rewritten: a representation change, a route repair, a republication and a
+metadata answer that arrives late all leave them alone. The consumer-visible
+artifact that already exists is ADOPTED where it is — never renamed, never
+duplicated — and the identity records that path. Plex and Jellyfin are
+projections of this identity, never authorities over it.
 
 A binding records one semantic library item/path relationship to a release, placement, provider
 file, and read-only exposure. On the authoritative path it reaches TorrentFile identity through the

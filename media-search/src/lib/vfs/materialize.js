@@ -393,7 +393,11 @@ async function resolvePresentationIdentity(handoff) {
   const explicitTitle = typeof handoff.canonicalTitle === 'string' ? handoff.canonicalTitle.trim() : '';
   try {
     if (explicitTitle) throw new Error('skip: the request named the media');
-    const type = handoff.mediaType === 'series' ? 'series' : 'movie';
+    // The catalog type follows the MEDIA KIND, not the literal handoff
+    // label: a TV handoff is labelled 'tv' (or 'episode'), and asking the
+    // MOVIE catalog for a series id answers with a DIFFERENT film — which
+    // is how a published episode ended up named after an unrelated movie.
+    const type = (handoff.mediaType === 'movie') ? 'movie' : 'series';
     const meta = await getMedia(type, handoff.mediaId);
     perfTrace('provider.cinemeta', {
       provider: 'cinemeta', endpoint: 'meta', action: 'title',

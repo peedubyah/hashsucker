@@ -242,6 +242,26 @@ change — consumes that one definition. A dead route is not offered to the
 byte path, and its placement row is kept: it is history, not a licence to
 serve. A different resource id for the same release is a NEW route.
 
+A NAME is a committed durable fact too. A media intent has ONE presentation
+identity: the display title, the year, the canonical VFS path (the byte
+path) and the `.strm` path (the consumer path). It is resolved once, at the
+publication that produced the artifacts a consumer can see, from one
+precedence: the request's canonical title (the identity authority), then the
+catalog (enrichment — it fills the gap the request left and never overrules
+it), then the filename inference, then the media id. The year follows the
+title's authority and is normalized to a four-digit year or nothing, so a
+catalog that answers "2016-2019" contributes 2016 and no punctuation.
+
+The paths are written once and never rewritten: a representation reselection,
+a route repair, a republication and a metadata answer that arrives late all
+leave the published name alone. The `.strm` and the VFS path are two
+PROJECTIONS of that one identity (`Movies/<Title> (<Year>)/…` and
+`TV Shows/<Title> (<Year>)/Season NN/…`), so they cannot disagree about the
+name. An artifact that already exists is adopted where it is — the content
+identifies it — so a republication never writes a second one and never
+renames the one the consumer has. Optional metadata may enrich the
+description; it may never move a committed path.
+
 RECOVERY follows the EVIDENCE, not a timer. The durable delivery evidence is
 the work item: a TorrentFile whose every recorded route is proven dead has a
 repair DUE, and the pass that looks for it is local until work is due (it can
