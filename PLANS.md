@@ -148,6 +148,40 @@ CLIENT EXTERNAL**:
 
 Nothing here is a selected slice ✓; the roadmap is unchanged ✓.
 
+**Pivot slice 1 — OWN THE PLAYBACK URL — CLOSED** (`cfd87cb` + the docs
+commit; evidence in `docs/BUILD-LOG.md` 2026-10-20). The resolver can now hand
+the client one HashSucker-owned URL bound to one authoritative TorrentFile
+instead of a provider-backed URL ✓:
+
+- `/play/<token>` — a signed, opaque, expirable token over
+  `{version, torrentFileId, expiresAt}` ✓ — stateless ✓ (no new table ✓;
+  the secret is configuration, so a restart does not invalidate an
+  outstanding URL ✓) ✓ — and it names **nothing but** the TorrentFile ✓
+  (no provider ✓, no placement ✓, no route ✓, no consumer item ✓) ✓.
+- The byte path is **not** duplicated ✓: `/play/<token>` resolves to a
+  TorrentFile id and calls the same `serveAuthoritativeBytes` that
+  `/bytes/:tfId` uses ✓ — Node owns identity ✓, Rust owns bytes ✓ and owns
+  the same-TorrentFile route failover ✓ ✓.
+- `STREAM_BYTE_ROUTE=playback` (opt-in ✓) makes `/stream` mint the object
+  and answer `307 → /play/<token>` ✓; under that policy the resolver never
+  falls back to a provider redirect ✓ — with no authoritative Binding it
+  answers `409 NO_AUTHORITATIVE_BINDING` **before** touching a provider API
+  ✓ ✓.
+- Proven in production ✓: a movie ✓ and an episode ✓ served through the
+  playback object ✓ with byte-identical bytes against the byte route ✓ ✓;
+  **mpv** played through it ✓ (first frame 666 ms ✓, seek forward/backward ✓,
+  near EOF ✓, clean stop ✓) with **no provider URL in the client's chain**
+  ✓ ✓; overhead ≈ **0.3 ms** (3.3 ms vs 3.6 ms median first byte ✓ ✓); the
+  data plane's same-TF failover suite is 11/11 ✓ ✓.
+- **Not enabled in production** ✓: `STREAM_BYTE_ROUTE` stays `cached` ✓ so
+  the `.strm` / Plex / Jellyfin path is untouched ✓ ✓. A forced end-to-end
+  production failover was **not** performed ✓ (provider failures may not be
+  provoked for confidence ✓) — the claim is the composition of two proven
+  facts ✓, not one observed production failover ✓ ✓.
+
+The next earned slice is not selected ✓; the candidates are in the build log
+✓ ✓.
+
 
 Completed final slice: **bound stale-inventory binding retry churn** —
 **CLOSED**. The host-only canary passed clean E01 plus the full E01/E05/MobLand

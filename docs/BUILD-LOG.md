@@ -4250,3 +4250,152 @@ contract from a real player and making same-TorrentFile failover invisible;
 (2) a resolver API in the Stremio-addon shape; (3) speculative resolution on
 item focus; (4) a direct-swarm capability, whose only required outcome is
 the measured cold-start number.
+
+## 2026-10-20 — OWN THE PLAYBACK URL: the playback object — CLOSED
+
+Slice: **PIVOT SLICE 1**. `/stream` must stop handing control away with a
+`307` to a provider-backed URL; instead one HashSucker-owned URL, bound to one
+authoritative TorrentFile, proxies the bytes through the existing
+authoritative byte path. The product claim to prove: *the client opens one
+HashSucker URL bound to one authoritative TorrentFile; route changes
+underneath that TorrentFile are invisible to the client.*
+
+### WHAT CHANGED
+
+- `media-search/src/lib/resolver/playback-object.js` — the playback object: a
+  signed, opaque, expirable token over `{version, torrentFileId, expiresAt}`.
+  Stateless: no new persistence table, and the signing secret is
+  configuration, so a restart does not invalidate an outstanding URL.
+- `media-search/src/server/playback-route.js` — `GET|HEAD /play/:token`.
+  Resolves the token to a TorrentFile id and then calls the **same**
+  `serveAuthoritativeBytes` the `/bytes/:tfId` route uses. No second byte
+  implementation.
+- `media-search/src/server/app.js` — `STREAM_BYTE_ROUTE=playback` makes
+  `/stream` mint a playback object and answer `307 → /play/<token>`. Under
+  that policy the resolver **never** falls back to a provider redirect: with
+  no authoritative Binding it answers `409 NO_AUTHORITATIVE_BINDING` before
+  touching a provider API.
+- `media-search/src/scripts/playback-latency.mjs` — the measurement harness
+  (resolve hop, first byte, optional mpv first frame, provider-leak guard).
+- `compose.yaml` — `PLAYBACK_TOKEN_SECRET` / `PLAYBACK_TOKEN_TTL_SECONDS`
+  passthrough. The production `STREAM_BYTE_ROUTE` is unchanged (`cached`).
+- Docs: `docs/playback-delivery.md` (§1a the resolver-first surface, the
+  contract, the error model; §7 pointing a player at a playback object),
+  `docs/architecture.md` §2 (the playback object as a derived runtime
+  identity grain), retrospective
+  `docs/retrospectives/2026-10-20-own-the-playback-url.md`.
+
+### WHAT WAS PROVEN
+
+Production appliance (`hashsucker-media-search-1` on the rebuilt image):
+
+- **A movie** — `City.Lights.1931.1080p.BluRay.x265-RARBG.mp4`,
+  infoHash `abe45dc4…`, exact size 1452039706, dual route (TorBox
+  `provider_file_id=2` and Real-Debrid `provider_file_id=1`, both `ready`,
+  both `mapped`, both agreeing on the exact size). `GET /play/<token>` with
+  `Range: bytes=0-1023` → `206`, `content-range: bytes 0-1023/1452039706`,
+  `accept-ranges: bytes`, `cache-control: no-store`. The bytes are
+  **byte-identical** to the same range through `/bytes/:tfId` (`cmp` clean).
+- **An episode** — `tf_2c3a7f11…` (4K HEVC, 5429742371 bytes) → `206`,
+  `content-range: bytes 0-5429742370/5429742371`.
+- **mpv as the external client** (Phase 8, all of it): startup ✓, duration
+  detected 5207.203 s ✓, **first frame 666 ms** ✓, seek forward to 3600 s ✓
+  (playback-time 3601.06) ✓, seek backward to 60 s ✓ (61.35) ✓, near EOF
+  (5187.2 → 5188.68) ✓, clean stop ✓ (mpv exit 0) ✓. **No provider URL
+  appeared anywhere in the client's request chain** ✓ — the only URL mpv
+  opened was the HashSucker playback object ✓.
+- **Overhead** (Phase 7), same TorrentFile, same ranges, 5 runs each: byte
+  route median **3.3 ms**, playback object median **3.6 ms**; a mid-file seek
+  2.6 ms vs 3.0 ms; a healthy re-request 2.9 ms vs 3.1 ms. All statuses 206.
+  The delta is one HMAC verification — negligible against playback.
+- **Same-TorrentFile failover**: the data plane's own deterministic suite
+  passes (`cargo test --test same_tf_route_recovery` → **11/11**), including
+  `r1_primary_lost_alternate_recovers_same_torrent_file` and r2a–r2e, whose
+  assertion is that *the client still gets the full bytes* when a lane dies.
+  The proxy in front of it is proven transparent: every attempt asks the data
+  plane for the same TorrentFile at the same upstream path (test P9), and the
+  response never carries a provider URL, a provider name or a location header
+  (test P11).
+- **Security** (Phase 6): the response headers are exactly `content-type`,
+  `content-length`, `content-range`, `accept-ranges`, `cache-control` — the
+  serving-attribution headers are consumed operator-side and never reach the
+  client; a tampered token is `403`; an expired token is `410`; an invalid
+  token never reaches the byte path; the token is stateless, so it is not
+  replayable against a rotated secret and not invalidated by a restart.
+- **Tests**: 15 new (`test/playback-object.test.js`) — the authoritative TF
+  resolves, the URL is provider-independent, Range/seek correctness, client
+  disconnect tears the upstream down, same-TF route change leaves URL and TF
+  unchanged, a different TF cannot silently satisfy the URL, no provider
+  leakage, the resolver mints a playback object and never a provider
+  redirect, the no-Binding case fails loudly, and the provider policy is
+  untouched.
+- **Full suite**: 3559 tests, 3555 pass, 1 fail, 3 skipped (exit 1). The one
+  failure is the pre-existing baseline `vfs-collection-resilience` C1/C2/C3.
+
+### WHAT REMAINS UNPROVEN
+
+- **The forced end-to-end production failover was not performed.** Forcing a
+  provider failure in production is out of bounds, and the production data
+  plane's own failover counter is `0` — no failover has occurred there, so
+  there is no observed production instance to cite. The claim is therefore
+  stated as the composition of two proven facts (the data plane fails over
+  inside one request; the proxy never retargets) plus a production proof that
+  the playback object serves a **dual-route** TorrentFile — not as a single
+  observed production failover.
+- The playback policy is **not enabled in production**. `STREAM_BYTE_ROUTE`
+  stays `cached`, so the `.strm` / Plex / Jellyfin path is unchanged. The
+  resolver-first path is proven by unit/integration tests and by the playback
+  object route itself, which is live.
+- Cross-representation continuity is out of scope by the slice's own terms.
+- The `PLAYBACK_TOKEN_SECRET` rotation procedure is undefined; a rotated
+  secret invalidates outstanding URLs (a client re-resolves via `/stream`).
+
+### WHAT WAS LEARNED
+
+- **The seam was already paid for.** `/bytes/:tfId` and the Rust same-TF
+  failover existed; the slice was binding, not building. The capability
+  abstraction made "own the URL" a ~200-line change.
+- **A derived runtime identity needs no table.** A stateless signed token over
+  a durable id is restart-safe and tamper-evident; the earlier worry ("where
+  do we persist the session?") was the wrong question.
+- **The client computes seeks.** mpv derived the byte offset from the
+  container's own index; the server needed no seek API.
+- **The proxy hop was already there.** The overhead of owning the URL is
+  ~0.3 ms (one HMAC), because the HashSucker byte path already proxied.
+- **Fail early, not late.** The no-Binding guard had to move *before* the
+  provider ladders for the new policy; the cached policy's guard is late by
+  design, and copying its placement would have touched a provider API before
+  failing.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- "Owning the playback URL requires new persistence" → false ✓.
+- "A stable URL must expose something verifiable" → false ✓; the contract is
+  the *absence* of provider detail ✓.
+- "The proxy adds a hop that matters" → no ✓ (~0.3 ms ✓).
+- "`/stream` normally leaks a provider URL" → mostly false ✓: the compose
+  default is `cached` ✓; the leak is the no-Binding / Real-Debrid branch ✓ ✓.
+
+### WHAT SHOULD BE UPDATED
+
+- `docs/playback-delivery.md` ✓, `docs/architecture.md` §2 ✓,
+  `docs/retrospectives/2026-10-20-own-the-playback-url.md` ✓ (new),
+  `PLANS.md` ✓, `handoff/CURRENT.md` ✓ — done in this slice.
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing was deleted. One simplification is *recorded for later*: `/bytes/:tfId`
+  and `/play/:token` are two public doors onto one byte path; once the
+  resolver-first surface is proven in production, `/bytes/:tfId` should
+  become an alias or be retired rather than kept as a second door ✓.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The candidates this slice leaves standing:
+(1) enable `STREAM_BYTE_ROUTE=playback` on the appliance and re-run the
+`.strm` / Plex compatibility proof (the surface is additive and the blast
+radius is one redirect header); (2) give the playback object a session
+contract (position, subtitle/audio preference, continuity) so a client can
+resume a session across a token expiry; (3) a provider-leak guard over the
+whole resolver response set (not just the playback object) ✓ — the harness
+already knows how ✓.

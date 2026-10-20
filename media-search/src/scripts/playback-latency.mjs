@@ -73,7 +73,11 @@ async function resolveHop(target) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(target, { redirect: 'manual', signal: controller.signal });
+    const response = await fetch(target, {
+      redirect: 'manual',
+      signal: controller.signal,
+      headers: { range: 'bytes=0-0' },
+    });
     const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
     const headers = Object.fromEntries(response.headers.entries());
     const location = response.headers.get('location');
@@ -149,11 +153,10 @@ function mpvFirstFrame(target) {
     let settled = false;
     const child = spawn('mpv', [
       '--no-config',
-      '--no-terminal-title',
       '--vo=null',
       '--no-audio',
-      '--really-quiet',
-      '--term-playing-msg=PLAYING ${playlist-pos-0} ${path}',
+      '--msg-level=all=warn',
+      '--term-playing-msg=PLAYING ${path}',
       '--msg-level=term-playing-msg=info',
       target,
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -170,7 +173,7 @@ function mpvFirstFrame(target) {
       ok: false, firstFrameMs: null, reason: 'timeout', output: out.slice(-500),
     }), timeoutMs);
 
-    child.stdout.on('data', (data) => {
+    const absorb = (data) => {
       out += data.toString();
       if (out.includes('PLAYING')) {
         finish({
@@ -179,7 +182,9 @@ function mpvFirstFrame(target) {
           output: out.slice(-500),
         });
       }
-    });
+    };
+    child.stdout.on('data', absorb);
+    child.stderr.on('data', absorb);
     child.on('error', (error) => finish({
       ok: false, firstFrameMs: null, reason: error.message, output: out.slice(-500),
     }));

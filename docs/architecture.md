@@ -111,6 +111,21 @@ surrogate UUID. All of those are replaceable observations. The `canonicalInterna
 TorrentFile is a durable torrent-internal identity component, not a provider, host, mount, or
 consumer path.
 
+**Playback object identity** — the runtime handle a client holds:
+
+```text
+playback object = signed token over { version, torrentFileId, expiresAt }
+```
+
+It is bound to exactly one TorrentFile and names nothing else — not a provider, not a placement,
+not a route, not a consumer item. The media identity inside it is durable (the TorrentFile row);
+the token is runtime material: tamper-evident, expirable, stateless, and therefore restart-safe
+(the signing secret is configuration). A same-TorrentFile route change may occur underneath a
+playback object; a different-TorrentFile representation change is not expressible through it.
+
+The playback object is a **derived** fact. Losing it loses nothing durable: the Binding still
+names the TorrentFile, and the routes still reach it.
+
 ## 3. Data model
 
 Two independent SQLite databases. Neither is a general metadata store.

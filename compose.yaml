@@ -23,6 +23,15 @@ services:
       # historical direct CDN redirect. Enable 'cached' once durable
       # ProviderPlacements are healthy for the library.
       STREAM_BYTE_ROUTE: ${STREAM_BYTE_ROUTE:-cached}
+      # Resolver-first surface. 'playback' makes /stream hand the client ONE
+      # HashSucker-owned URL (/play/:token) bound to the authoritative
+      # TorrentFile instead of a provider redirect; the bytes are proxied
+      # through the Rust data plane, so a same-TorrentFile route change is
+      # invisible to the client and no provider credential is exposed.
+      # PLAYBACK_TOKEN_SECRET signs the playback token (>= 16 chars; unset
+      # means the /play route is inert and answers 503).
+      PLAYBACK_TOKEN_SECRET: ${PLAYBACK_TOKEN_SECRET:-}
+      PLAYBACK_TOKEN_TTL_SECONDS: ${PLAYBACK_TOKEN_TTL_SECONDS:-}
       PORT: "3000"
       HOST: "0.0.0.0"
       REQUESTS_ROOT: /requests

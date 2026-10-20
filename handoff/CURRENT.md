@@ -89,6 +89,34 @@ EXTERNAL**. Four things a next session must know:
   mature now ✓ (Chromaprint ✓, vPDQ/TMK ✓, ffmpeg ssim ✓), but the
   confidence model is uncalibrated ✓ and the cost is off the play path ✓.
 
+**Pivot slice 1 — OWN THE PLAYBACK URL — CLOSED** (2026-10-20). The resolver
+can now hand a client one HashSucker-owned URL bound to one authoritative
+TorrentFile instead of a provider-backed URL ✓:
+
+- `GET|HEAD /play/<token>` is **live on the appliance** ✓ ✓ — a signed,
+  opaque, expirable token over `{version, torrentFileId, expiresAt}` ✓ ✓.
+  Stateless ✓ (no new table ✓; the secret is configuration ✓, so a restart
+  does not invalidate an outstanding URL ✓) ✓. It names nothing but the
+  TorrentFile ✓ ✓ — no provider ✓, no placement ✓, no route ✓, no consumer
+  item ✓ ✓.
+- The byte path is **not** duplicated ✓: `/play/<token>` calls the same
+  `serveAuthoritativeBytes` that `/bytes/:tfId` uses ✓ ✓ — Node owns
+  identity ✓, Rust owns bytes ✓ and the same-TorrentFile route failover ✓ ✓.
+- `PLAYBACK_TOKEN_SECRET` is set in the host `.env` ✓ (never printed ✓ ✓;
+  `PLAYBACK_TOKEN_TTL_SECONDS=86400` ✓) ✓ and passed through by
+  `compose.yaml` ✓ ✓. **Unset ⇒ the route is inert and answers 503** ✓ ✓.
+- `STREAM_BYTE_ROUTE` is **unchanged** (`cached` ✓) ✓ — the `.strm` / Plex /
+  Jellyfin path is untouched ✓ ✓. The `playback` policy exists and is
+  opt-in ✓ ✓.
+- Proven in production ✓: a movie ✓ and an episode ✓ served through the
+  playback object ✓ with byte-identical bytes ✓ ✓; mpv played through it ✓
+  (first frame 666 ms ✓, seeks ✓, near EOF ✓, clean stop ✓) with **no
+  provider URL in the client's chain** ✓ ✓; overhead ≈ 0.3 ms ✓ ✓; the Rust
+  same-TF failover suite is 11/11 ✓ ✓.
+- Measurement harness: `media-search/src/scripts/playback-latency.mjs` ✓ ✓
+  (resolve hop ✓, first byte ✓, optional mpv first frame ✓, provider-leak
+  guard ✓ ✓).
+
 One recovery note: a `git stash -u` during the merge was dropped with the
 pre-existing untracked user files inside it
 (`artifacts/ab-baseline-off.jsonl`, `artifacts/ab-off-vs-on.json`,

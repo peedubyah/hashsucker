@@ -19,6 +19,72 @@ This is the single most important thing to understand about delivery.
 They do not overlap and neither falls through to the other. The `.strm` file is what binds them:
 its contents are a `/stream/` URL.
 
+## 1a. The resolver-first surface: the playback object
+
+`/stream` used to hand the client a **provider-backed URL** (a Real-Debrid / TorBox CDN link).
+That is a credential: whoever holds it holds the provider's access to the file, and the byte path
+leaves HashSucker, so a route change underneath the same exact TorrentFile is neither invisible
+nor HashSucker's to make.
+
+The resolver-first surface replaces that with **one HashSucker-owned URL bound to one
+authoritative TorrentFile**:
+
+```text
+GET /stream/movie/tt0021749      →  307  Location: /play/<token>
+GET /play/<token>                →  206  bytes, proxied through the Rust data plane
+```
+
+`/play/<token>` is the **playback object**. It is:
+
+- **bound to the authoritative TorrentFile** — the token names exactly one
+  `(infoHash, canonicalInternalPath, exact size)` row and nothing else: not a provider, not a
+  placement, not a route, not a consumer item, not a `.strm` target. A same-TorrentFile route
+  change may occur underneath it; a different-TorrentFile representation change is not
+  expressible through it.
+- **tamper-evident and expirable** — the token is
+  `base64url(payload).base64url(HMAC-SHA256(secret, payload))`. A forged or edited token is
+  refused; expiry is explicit.
+- **stateless** — no new persistence table. The durable media identity stays in the TorrentFile
+  row; the token only carries its id and an expiry. The signing secret is configuration, so a
+  HashSucker restart does not invalidate an outstanding URL.
+- **opaque about providers** — the client never receives a provider URL, never learns provider
+  identity, and never holds a provider credential.
+
+Configuration:
+
+| variable | default | meaning |
+|---|---|---|
+| `STREAM_BYTE_ROUTE` | `provider` (compose default `cached`) | `provider` = the historical provider redirect; `cached` = `307` to `/bytes/:tfId`; `playback` = `307` to `/play/<token>` |
+| `PLAYBACK_TOKEN_SECRET` | unset | the signing secret (≥ 16 chars). Unset ⇒ the `/play` route is inert and answers `503` |
+| `PLAYBACK_TOKEN_TTL_SECONDS` | `86400` | the token lifetime. `0` means no expiry and is never the default |
+
+Under the `playback` policy the resolver **never** falls back to a provider redirect. With no
+authoritative Binding it answers `409 NO_AUTHORITATIVE_BINDING` before touching a provider API,
+because there are no authoritative bytes to serve.
+
+### The playback object's contract
+
+| request | answer |
+|---|---|
+| `GET /play/<token>` | the bytes of the named TorrentFile, through the Rust data plane |
+| `HEAD /play/<token>` | the same headers, no body |
+| `Range` (open, closed, suffix) | forwarded verbatim; the data plane owns satisfiability, `206`, `416` and `Content-Range` |
+| invalid / tampered token | `403 PLAYBACK_TOKEN_INVALID` |
+| expired token | `410 PLAYBACK_TOKEN_EXPIRED` |
+| no signing secret | `503 PLAYBACK_OBJECT_UNAVAILABLE` |
+| no route / all routes failed | the data plane's own typed status (`502`, `503`), never a provider URL |
+
+The response carries only `content-type`, `content-length`, `content-range`, `accept-ranges`,
+`etag`, `last-modified` and `cache-control: no-store`. The serving-attribution headers
+(`x-hashsucker-serving-*`) are consumed operator-side and never reach the client.
+
+### Why the byte path is not duplicated
+
+`/play/<token>` resolves the token to a TorrentFile id and then calls the **same**
+`serveAuthoritativeBytes` the `/bytes/:tfId` route uses. Node owns identity; Rust owns bytes,
+the fixed-grid cache, the per-chunk single-flight coalescing and the reactive same-TorrentFile
+route failover. There is exactly one byte-serving implementation.
+
 ## 2. `/stream/:type/:id` — the redirect resolver
 
 `:type` is `movie` or `series`. `:id` may be colon-separated (`tt0944947:1:1`) with optional
@@ -343,6 +409,23 @@ completes is retried ahead of new work every loop. Placement runs through TorBox
   scores. `X-Resolver-*` and `X-Internal-*` headers are stripped at the edge.
 - Jellyfin picks up new files via inotify; Plex polls. Jellyfin reacts faster.
 - HashSucker does not own library metadata, artwork, or subtitles — the player's own agents do.
+
+### Pointing a player directly at a playback object
+
+A client that wants one URL and no redirect can be handed the playback object directly:
+
+```text
+mpv http://<host>/play/<token>
+```
+
+The token is minted by the resolver (`/stream` → `307` → `/play/<token>`) or by an operator that
+holds the secret. Because the URL is bound to the TorrentFile, a route change underneath it is
+invisible to the client: the bytes, the URL and the represented file are unchanged, and the data
+plane re-opens at the same byte offset on another route.
+
+`src/scripts/playback-latency.mjs` measures this path end to end (resolve hop, first byte, and
+optionally mpv's first frame) and fails loudly if any response in the chain exposes a provider
+host or a provider URL.
 
 ## 8. Observability
 
