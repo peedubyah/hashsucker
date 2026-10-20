@@ -2896,11 +2896,11 @@ place (five nullable columns added).
 
 | cohort | observation | result |
 |---|---|---|
-| movie re-request (City Lights, `tt0021749`) | the reuse path | 15 ms, HTTP 200 |
+| movie re-request (City Lights, `tt0021749`) | the reuse path | **13 ms**, HTTP 200 — no metadata call (the identity is committed) |
 | | the artifacts for that media id | 1 before, **1 after** — no duplicate |
 | | the committed identity | unchanged (same commit time, same paths) |
 | | the read | 206, 65536 B, sha256 `ae83cd8c…` (the pre-slice baseline) |
-| TV republication (Ted Lasso S01E02, `tt10986410`) | the operator republication path | 321 ms, HTTP 200 |
+| TV republication (Ted Lasso S01E02, `tt10986410`) | the operator republication path | 386 ms, HTTP 200 |
 | | the artifacts for that episode | 1 before, **1 after** |
 | | the committed identity | unchanged |
 | Plex projection (City Lights) | the library item | title `City Lights`, year 1931, **ratingKey 423** — the same rating key as before the slice |
@@ -2908,7 +2908,7 @@ place (five nullable columns added).
 
 ### THE FULL SUITE
 
-3487 tests, 3483 pass, 1 fail, 3 skipped (exit 1). The one failure is the
+3483 tests, 3479 pass, 1 fail, 3 skipped (exit 1). The one failure is the
 pre-existing baseline `vfs-collection-resilience` C1/C2/C3. The focused
 presentation/VFS/publication suites: 34/34.
 
@@ -2919,6 +2919,8 @@ presentation/VFS/publication suites: 34/34.
 | `eec42af` | feat(presentation): one durable presentation identity per media intent |
 | `af23a96` | feat(presentation): every surface consumes the committed identity |
 | `40ea543` | feat(presentation): the operator surface reports the identity, and the audit adopts it |
+| `770bf8a` | fix(presentation): the catalog type follows the media kind, and the writer does not race |
+| `e2bfcf9` | fix(presentation): one resolution, two paths, and a deterministic catalog seam |
 
 ### WHAT REMAINS UNPROVEN
 
