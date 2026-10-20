@@ -98,6 +98,20 @@ export function _resetCinemetaCacheForTests() {
   failureCache.clear();
 }
 
+/**
+ * Replace the catalog transport. Test seam.
+ *
+ * The presentation identity consults the catalog only when the request
+ * did not name the media, so a test that exercises the fallback path
+ * would otherwise depend on the network — and on which film a made-up
+ * media id happens to name today.
+ */
+let catalogFetchOverride = null;
+export function setCatalogFetchForTests(fetchImpl) {
+  catalogFetchOverride = fetchImpl ?? null;
+  failureCache.clear();
+}
+
 function failureCacheGet(key) {
   const hit = failureCache.get(key);
   if (!hit) return null;
@@ -124,13 +138,14 @@ function failureCacheSet(key, error, ttlMs) {
  * @param {Function} [fetchImpl]
  * @param {{timeoutMs?: number}} [options]
  */
-async function getJson(pathname, fetchImpl = fetch, { timeoutMs = CINEMETA_TIMEOUT_MS } = {}) {
-  const key = `${transportId(fetchImpl)}:${pathname}`;
+async function getJson(pathname, fetchImpl = null, { timeoutMs = CINEMETA_TIMEOUT_MS } = {}) {
+  const transport = fetchImpl ?? catalogFetchOverride ?? fetch;
+  const key = `${transportId(transport)}:${pathname}`;
   const remembered = failureCacheGet(key);
   if (remembered) throw remembered.error;
   let response;
   try {
-    response = await fetchImpl(`${baseUrl()}${pathname}`, {
+    response = await transport(`${baseUrl()}${pathname}`, {
       headers: { accept: 'application/json', 'user-agent': 'media-search/0.1.0' },
       // Abortable: a stalled catalog is cancelled, not merely abandoned.
       signal: AbortSignal.timeout(timeoutMs),
@@ -214,7 +229,7 @@ export async function searchCatalog(query, fetchImpl = fetch) {
     .slice(0, 40);
 }
 
-export async function getMedia(type, id, fetchImpl = fetch) {
+export async function getMedia(type, id, fetchImpl = null) {
   if (!['series', 'movie'].includes(type)) throw new Error('Invalid media type');
   if (!/^[a-z0-9:_-]+$/i.test(String(id || ''))) throw new Error('Invalid media ID');
   const payload = await getJson(`/meta/${type}/${encodeURIComponent(id)}.json`, fetchImpl);

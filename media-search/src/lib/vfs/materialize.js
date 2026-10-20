@@ -398,6 +398,7 @@ async function resolvePresentationIdentity(handoff) {
     // MOVIE catalog for a series id answers with a DIFFERENT film — which
     // is how a published episode ended up named after an unrelated movie.
     const type = (handoff.mediaType === 'movie') ? 'movie' : 'series';
+    if (process.env.HS_TRACE_CATALOG) console.log(`[catalog] ${type}/${handoff.mediaId}`);
     const meta = await getMedia(type, handoff.mediaId);
     perfTrace('provider.cinemeta', {
       provider: 'cinemeta', endpoint: 'meta', action: 'title',
@@ -723,6 +724,22 @@ async function materializeVfsEntryInner(
   };
   const finalize = (entry, reason) => {
     if (!entry) return entry;
+    // The resolved presentation travels with the entry: the `.strm`
+    // publisher derives the consumer path from the SAME resolution, so the
+    // two paths cannot disagree about the name (two metadata answers would
+    // otherwise be two names).
+    if (entry && !entry.presentation) {
+      const committed = committedPresentationFor(controlPlaneStore, handoff);
+      if (committed) {
+        entry.presentation = {
+          title: committed.title,
+          year: committed.year,
+          canonicalPath: committed.canonicalPath,
+          strmPath: committed.strmPath,
+          committed: true,
+        };
+      }
+    }
     // Replaying an old VFS row must refresh route evidence at the current
     // observation time; using the row's historical updated_at would create an
     // immediately stale exposure and prevent Binding activation.
@@ -897,7 +914,9 @@ async function materializeVfsEntryInner(
       }
     }
     console.log(`[vfs] materialized media=${created.mediaId} path="${created.canonicalPath}" release=${created.releaseKey} torrentFileId=${created.torrentFileId}`);
-    return finalize(created, 'vfs-movie-materialize');
+    const finalized = finalize(created, 'vfs-movie-materialize');
+    if (finalized && presentation) finalized.presentation = presentation;
+    return finalized;
   }
 
   if (!['series', 'tv'].includes(handoff.mediaType)
@@ -1059,5 +1078,7 @@ async function materializeVfsEntryInner(
     }
   }
   console.log(`[vfs-tv] materialized media=${created.mediaId} S${created.season}E${created.episode} path="${created.canonicalPath}" release=${created.releaseKey} torrentFileId=${created.torrentFileId}`);
-  return finalize(created, 'vfs-tv-materialize');
+  const finalizedTv = finalize(created, 'vfs-tv-materialize');
+  if (finalizedTv && presentation) finalizedTv.presentation = presentation;
+  return finalizedTv;
 }

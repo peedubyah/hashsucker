@@ -87,6 +87,10 @@ function assertVfsEntry({ handoff, vfsEntry }) {
  */
 async function publishStrmConverged({ handoff, selection, vfsEntry, controlPlaneStore = null }) {
   const identity = committedIdentityFor(controlPlaneStore, handoff);
+  // The materializer resolved the name ONCE and carried it here: the
+  // consumer path is derived from the SAME resolution as the byte path, so
+  // two metadata answers cannot produce two names.
+  const resolved = vfsEntry?.presentation ?? null;
   const verify = () => verifyPublishedStrm({
     vfsCanonicalPath: vfsEntry?.canonicalPath,
     mediaType: handoff.mediaType,
@@ -110,10 +114,10 @@ async function publishStrmConverged({ handoff, selection, vfsEntry, controlPlane
   if (vfsEntry?.canonicalPath) {
     const adopted = await verify();
     if (adopted) {
-      await commitIdentity(controlPlaneStore, handoff, vfsEntry, adopted, selection);
+      await commitIdentity(controlPlaneStore, handoff, vfsEntry, adopted, selection, resolved);
       return { path: adopted, adopted: true };
     }
-    const published = await runPublishStrm({ handoff, selection });
+    const published = await runPublishStrm({ handoff, selection, presentation: resolved });
     if (published?.path) {
       const verified = await verify();
       if (verified !== published.path) {
@@ -122,13 +126,13 @@ async function publishStrmConverged({ handoff, selection, vfsEntry, controlPlane
         } catch {
           // Already gone; republishing recreates it.
         }
-        const repaired = await runPublishStrm({ handoff, selection });
+        const repaired = await runPublishStrm({ handoff, selection, presentation: resolved });
         if (repaired?.path) {
-          await commitIdentity(controlPlaneStore, handoff, vfsEntry, repaired.path, selection);
+          await commitIdentity(controlPlaneStore, handoff, vfsEntry, repaired.path, selection, resolved);
           return { path: repaired.path, adopted: false, repaired: true };
         }
       }
-      await commitIdentity(controlPlaneStore, handoff, vfsEntry, published.path, selection);
+      await commitIdentity(controlPlaneStore, handoff, vfsEntry, published.path, selection, resolved);
     }
     return { path: published?.path ?? null, adopted: false };
   }
@@ -164,11 +168,14 @@ function committedIdentityFor(controlPlaneStore, handoff) {
  * title and year are resolved through the shared precedence, so the
  * identity describes the same name every surface uses.
  */
-async function commitIdentity(controlPlaneStore, handoff, vfsEntry, strmPath, selection) {
+async function commitIdentity(controlPlaneStore, handoff, vfsEntry, strmPath, selection, resolved = null) {
   if (!controlPlaneStore || typeof controlPlaneStore.commitPresentationIdentity !== 'function') return null;
   if (!strmPath) return null;
   const relative = path.relative(strmOutputRoot(), strmPath);
-  const title = await resolveTitleForIdentity(handoff, selection);
+  // The name the byte path already used — one resolution, two paths.
+  const title = resolved?.title
+    ? { title: resolved.title, year: resolved.year ?? null }
+    : await resolveTitleForIdentity(handoff, selection);
   const mediaType = handoff.mediaType === 'movie' ? 'movie' : 'episode';
   try {
     // The media intent must exist before it can carry an identity. The

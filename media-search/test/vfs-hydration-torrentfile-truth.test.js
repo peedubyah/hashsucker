@@ -24,6 +24,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createDiscoveryCache } from '../src/lib/discovery/cache.js';
+import { setCatalogFetchForTests } from '../src/lib/metadata/cinemeta.js';
 import { createTvWebDav } from '../src/lib/vfs/tv-webdav.js';
 import { materializeVfsEntry } from '../src/lib/vfs/materialize.js';
 
@@ -81,6 +82,12 @@ function torrentFile({ id, size = 5_000_000_000, infoHash = INFO_HASH } = {}) {
 }
 
 test('hydrateVfsTvEntry returns TorrentFile-backed size without invoking the provider seam', async (t) => {
+  // The catalog is optional enrichment. This test exercises the FALLBACK
+  // path (the durable handoff does not carry the request's canonical
+  // title), so the catalog is made unavailable deterministically instead
+  // of being left to the network.
+  setCatalogFetchForTests(async () => { throw new Error('catalog unavailable'); });
+  t.after(() => setCatalogFetchForTests(null));
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -123,7 +130,7 @@ test('hydrateVfsTvEntry returns TorrentFile-backed size without invoking the pro
   // same last resort the `.strm` publisher uses, so the two consumer
   // paths cannot disagree. The important fact is that the path is stable
   // and the same as the VFS row.
-  assert.equal(result.canonicalPath, 'TV/Carmencita (1894)/Season 01/Carmencita (1894) - S01E01.mkv');
+  assert.equal(result.canonicalPath, 'TV/Show/Season 01/Show - S01E01.mkv');
   assert.equal(seamCalls, 0, 'provider seam is not invoked for already-hydrated authoritative size');
 
   // Durable row reflects the TorrentFile identity.
