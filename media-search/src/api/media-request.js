@@ -16,6 +16,7 @@
  */
 
 import { isPlayableVideoTorrentFile } from '../lib/resolver/tv-episode-resolver.js';
+import { getServiceability } from '../lib/vfs/byte-health.js';
 import { publishStrm } from '../lib/requests/strm-publisher.js';
 import { createLibraryIdentityKey } from '../lib/control-plane/canonical-path.js';
 import { notifyJellyfin } from '../lib/requests/jellyfin-notifier.js';
@@ -305,6 +306,12 @@ async function tryReuseHealthyPublication({
       reason: 'reused-healthy-publication',
     });
 
+    // The DELIVERY fact, read from the in-process byte-health registry.
+    // It costs no provider work and it is never authority: it says whether
+    // the exact bound TorrentFile can deliver bytes right now, which is a
+    // different question from "is this the authoritative representation".
+    const deliveryState = () => getServiceability(torrentFileId);
+
     const confirmReuseFulfillment = async () => {
       if (!isEpisode || !controlPlaneStore) return { fulfilled: false, retryOwned: true, unfulfilled: true, published: true, vfsPublished: true, plex: null };
       try {
@@ -411,6 +418,10 @@ async function tryReuseHealthyPublication({
         demandPromotion: { enrichmentPromoted: 0, probePromoted: 0 },
         ...fulfillment,
         reuseMode: 'noop',
+        // The representation is authoritative (the Binding); the delivery
+        // state is reported separately, so "published" never hides a route
+        // that just proved it cannot serve bytes.
+        serviceability: deliveryState(),
       };
     }
 
@@ -462,6 +473,7 @@ async function tryReuseHealthyPublication({
       demandPromotion: { enrichmentPromoted: 0, probePromoted: 0 },
       ...fulfillment,
       reuseMode: 'republish',
+      serviceability: deliveryState(),
     };
   } catch (error) {
     console.error(`Reuse fast path failed, falling back to discovery: ${error.message}`);
@@ -1024,9 +1036,11 @@ function publishedOrPendingResponse({ ctx, base, handoff, selection, explainable
     retryOwned: !ctx.prepareOnly,
     reason: !ctx.prepareOnly ? 'plex-confirmation-pending' : undefined,
     // Execution-quality tranche: runtime byte serviceability of the selected
-    // representation. {state:'serviceable'|'blocked', reason, provider} when a
-    // selection probe ran; null otherwise. A 'blocked' selection still
-    // publishes (visible) but reports the exact route blocker.
+    // representation. {state:'serviceable'|'unserviceable'|'unknown', reason,
+    // provider, source, retryInMs} when a selection probe ran; null otherwise.
+    // An unserviceable selection still publishes (visible) but reports the
+    // exact route blocker. This is DELIVERY truth, never representation
+    // authority: the Binding is unchanged either way.
     serviceability: selection?.serviceability ?? null,
     ...skippedCandidatesOf(selection ?? { selected: null }),
   };

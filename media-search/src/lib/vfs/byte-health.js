@@ -120,16 +120,25 @@ export function recordUnserviceable(tfId, { reason = 'provider-route-failure', p
  */
 export function getServiceability(tfId, nowMs = Date.now()) {
   const entry = tfId ? registry.get(tfId) : null;
-  if (!entry) return { state: 'unknown', reason: null, provider: null, retryInMs: null };
+  if (!entry) {
+    return { state: 'unknown', reason: null, provider: null, source: null, failures: 0, retryInMs: null };
+  }
   if (entry.state === 'serviceable' && nowMs - entry.observedAt > SERVICEABLE_TTL_MS) {
     // Stale positive: re-verify rather than claim serviceable forever.
-    return { state: 'unknown', reason: 'stale-positive', provider: entry.provider, retryInMs: 0 };
+    return {
+      state: 'unknown', reason: 'stale-positive', provider: entry.provider,
+      source: 'byte-path', failures: entry.failures, retryInMs: 0,
+    };
   }
   const retryInMs = entry.until > nowMs ? entry.until - nowMs : 0;
   return {
     state: entry.state,
     reason: entry.reason,
     provider: entry.provider,
+    // Where the evidence came from: a real byte read against the exact
+    // TorrentFile. `source` is the shared vocabulary with the selection-time
+    // probe, so every surface reports the same fact the same way.
+    source: 'byte-path',
     failures: entry.failures,
     retryInMs,
   };

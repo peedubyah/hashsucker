@@ -301,7 +301,13 @@ export async function selectBindableCandidate(results, options = {}) {
       reason: probe?.reason ?? null,
     });
     if (probe?.serviceable) {
-      serviceability = { state: 'serviceable', source: probe.source ?? 'probe' };
+      serviceability = {
+        state: 'serviceable',
+        reason: null,
+        provider: binding?.provider ?? null,
+        source: probe.source ?? 'probe',
+        retryInMs: null,
+      };
       return true;
     }
     // Remember the best-ranked unserviceable bind as the publish fallback, and
@@ -375,9 +381,13 @@ export async function selectBindableCandidate(results, options = {}) {
         selected = serviceabilityFallback.selection;
         reason = serviceabilityFallback.reason;
         serviceability = {
-          state: 'blocked',
+          // The SAME vocabulary the runtime byte-health registry uses:
+          // 'serviceable' | 'unserviceable' | 'unknown'.
+          state: 'unserviceable',
           reason: serviceabilityFallback.probe?.reason ?? 'unknown',
           provider: serviceabilityFallback.binding?.provider ?? null,
+          source: serviceabilityFallback.probe?.source ?? 'probe',
+          retryInMs: null,
         };
         break;
       }
@@ -847,14 +857,21 @@ export async function selectBindableCandidate(results, options = {}) {
     selected = serviceabilityFallback.selection;
     reason = serviceabilityFallback.reason;
     serviceability = {
-      state: 'blocked',
+      // The SAME vocabulary the runtime byte-health registry uses:
+      // 'serviceable' | 'unserviceable' | 'unknown'. A delivery failure is
+      // not a representation failure; it never changes the Binding.
+      state: 'unserviceable',
       reason: serviceabilityFallback.probe?.reason ?? 'unknown',
       provider: serviceabilityFallback.binding?.provider ?? null,
+      source: serviceabilityFallback.probe?.source ?? 'probe',
+      retryInMs: null,
     };
   }
 
   // `serviceability` is null when no probe seam was supplied (exact pre-change
-  // behavior); otherwise {state:'serviceable'|'blocked', ...} describes the
-  // winning representation's runtime byte serviceability.
+  // behavior); otherwise {state:'serviceable'|'unserviceable'|'unknown', ...}
+  // describes the winning representation's runtime byte serviceability — the
+  // DELIVERY fact, distinct from the representation authority the Binding
+  // records.
   return { selected, reason, alternates, skipped, serviceability };
 }

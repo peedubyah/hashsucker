@@ -101,7 +101,7 @@ test('all candidates blocked -> precise bounded failure, best-ranked fallback', 
   // The best-ranked (first) unserviceable bind is retained so the request still
   // publishes, but the state is explicit.
   assert.equal(r.selected.infoHash, H1, 'best-ranked bind retained as fallback');
-  assert.equal(r.serviceability.state, 'blocked');
+  assert.equal(r.serviceability.state, 'unserviceable');
   assert.equal(r.serviceability.reason, 'unmapped');
 });
 
@@ -118,7 +118,7 @@ test('alternate search is bounded (never probes the world)', async () => {
   // First bind (1 probe) + at most 3 alternates inspected -> bounded binds.
   assert.ok(binds.length <= 4, `binds bounded, got ${binds.length}`);
   assert.ok(probes.length <= 4, `probes bounded, got ${probes.length}`);
-  assert.equal(r.serviceability.state, 'blocked');
+  assert.equal(r.serviceability.state, 'unserviceable');
 });
 
 test('no probe seam -> exact pre-change behavior (first bind wins, no serviceability)', async () => {
