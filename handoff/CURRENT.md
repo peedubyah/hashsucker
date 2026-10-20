@@ -52,6 +52,24 @@ trust old containers or historical HY4 handoffs.
 - Evidence: `docs/BUILD-LOG.md` 2026-10-19; retrospective
   `docs/retrospectives/2026-10-19-route-resilience.md`.
 
+## Live session state (2026-10-19, durable route failure authority)
+
+- Production `media-search` AND `data-plane` RUN the local builds of
+  `044568b` and `c3be499` (both recreated, both healthy). The data plane
+  was rebuilt because it now reports which provider route failed and
+  whether it DIED (404/410, protocol-invalid, wrong-size) or merely did
+  not answer (throttle, timeout, 5xx).
+- Route death is now durable: it is recorded in the EXISTING
+  `provider_delivery_evidence` (capability tuple, terminal vs temporary),
+  it survives a Node restart, and a route that delivers again clears the
+  negative evidence. A throttled route is never recorded as death.
+- Replacing the authoritative representation is a POLICY decision now
+  (durable terminal evidence for every failed route + a one-switch-per-
+  window budget), not a side effect of a read. A transient exhaustion
+  leaves the representation authoritative and the delivery degraded.
+- Evidence: `docs/BUILD-LOG.md` 2026-10-19; retrospective
+  `docs/retrospectives/2026-10-19-durable-route-failure.md`.
+
 ## Architecture boundaries (frozen)
 
 Non-authoritative session-local summary. Canonical:

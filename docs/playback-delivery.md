@@ -209,6 +209,21 @@ The delivery state has ONE vocabulary everywhere it is reported:
 `serviceable` / `unserviceable` / `unknown` (unknown = nobody has read from that TorrentFile
 yet). It is reported next to — never merged into — the representation authority.
 
+Route death is DURABLE. The byte path reports the exact routes that failed and
+whether each one DIED (`terminal`: 404/410, a protocol-invalid resolution, a
+provider file whose size or identity does not match the authoritative
+TorrentFile) or merely did not answer (`temporary`: throttle, timeout, 5xx,
+malformed payload). The VFS records that in `provider_delivery_evidence`
+(keyed on the capability tuple), so the fact survives a restart; a route that
+delivers again clears the negative evidence. A throttled route is never
+recorded as death.
+
+Replacing the authoritative representation is a POLICY decision, not a read
+side effect: it requires durable terminal evidence for EVERY failed route and
+is budgeted (at most one switch per media intent per window), so a transient
+exhaustion leaves the representation authoritative and the delivery degraded,
+and a flapping route cannot churn the representation.
+
 ## 6. Physical acquisition
 
 The secondary policy: download the bytes locally and let the Arr apps import them.

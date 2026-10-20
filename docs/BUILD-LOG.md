@@ -2311,3 +2311,112 @@ mechanism the reconciler already uses.
   Rust path. The authoritative path's failure evidence is runtime-only
   (Rust's breaker + the byte-health registry), so a restart forgets which
   route died until the reconciler re-probes it.
+
+## 2026-10-19 — Durable route failure authority — CLOSED
+
+Slice: when the authoritative byte path proves a provider route dead, that
+fact must survive a restart and drive recovery from the failure event
+instead of being forgotten until the 6-hourly sweep; and representation
+authority must never be ACCIDENTALLY derived from route evidence.
+
+### WHAT THE EVIDENCE SHOWED
+
+- The durable model already existed. `provider_delivery_evidence` is keyed
+  on the capability tuple (provider, account scope, placement, provider
+  file) with states usable/temporary/terminal, and the
+  terminal-delivery-evidence store already distinguishes "provider said
+  wait" from "this mapping is dead". **No new table was needed or
+  created.**
+- The AUTHORITATIVE path never wrote it. Only the legacy Node provider
+  path did. So a route that died on the authoritative path was forgotten
+  on restart, and recovery waited for the 6-hourly reconciler.
+- The data plane KNEW and THREW AWAY the information. `acquire_for_read`
+  walks the slots and knows exactly which (provider, scope, resource id,
+  file id) failed and why, but the class-D error carried only a code.
+- The failure taxonomy was already mostly right but not expressible: the
+  capability error had no way to say "this route is DEAD" as opposed to
+  "this route did not answer right now".
+- The byte path switched the REPRESENTATION as a raw read side effect, and
+  the inert reconciler planner planned 'mark-degraded' on the Binding for
+  route facts (unmappable route, vanished provider file, unusable
+  exposure).
+
+### WHAT CHANGED
+
+| commit | change |
+|---|---|
+| `c3be499` | data-plane: the capability error carries its durability class (terminal vs temporary), and the class-D error carries the failed routes: provider, account scope, provider resource id, provider file id, kind, detail |
+| `044568b` | media-search: the VFS records the failed routes in the EXISTING evidence store, clears the negative evidence when a route delivers again, and replaces the raw representation switch with an explicit, evidence-backed, budgeted policy decision; the reconciler no longer plans 'mark-degraded' for route facts |
+
+Dead vs not-dead is now decided at the source, where the HTTP status is
+known: 404/410, a protocol-invalid resolution (the requestdl did not
+resolve to a CDN, a missing data URL), an unsupported provider, a missing
+credential, a torrent the account does not hold, and a provider file
+whose size or identity does not match the authoritative TorrentFile are
+TERMINAL. Throttling (429), 5xx, network failures, timeouts, malformed
+payloads and a slot with no usable capability are TEMPORARY — and a
+throttled route is never recorded as death.
+
+### THE FINAL FALLBACK, DETERMINED FROM THE PRODUCT SEMANTICS
+
+The question: no known route for the authoritative TorrentFile → a
+persisted candidate with a different TorrentFile. Three options were on
+the table; the current semantics were traced first:
+
+- the architecture doc sanctions the switch in one place ("Node may select
+  a persisted alternate only after classified provider exhaustion") and
+  forbids reacting to playback outcomes in another;
+- the candidate is not arbitrary: it must be an already-ranked, already
+  eligible persisted candidate whose bytes are validated before the
+  switch, so the alternative is a representation the household's own
+  request already approved;
+- it has never fired in production (0 handoffs carry an alternate
+  selection reason) and every bound item in production currently has a
+  live route;
+- "delivery-degraded until policy acts" was REJECTED on evidence: no
+  policy owner reacts to "the current representation is undeliverable"
+  today (the upgrade-watch triggers on quality, not on deadness), so that
+  option would leave items dead indefinitely;
+- "immediately, as today" was REJECTED because a transient exhaustion (a
+  throttle, a timeout) would re-decide the representation.
+
+**Determination: the switch stays, but it is no longer a decision the
+read makes.** It is a policy decision: it requires DURABLE evidence that
+EVERY failed route is terminal AND that the evidence for each was
+recorded, and it is BUDGETED (at most one switch per media intent per
+window, 6 h by default) so a flapping route cannot churn the
+representation. A transient exhaustion now leaves the representation
+authoritative and the delivery degraded, and the request fails closed
+with the typed provider failure.
+
+### MEASURED / VERIFIED
+
+- Full suite: 3439 tests, 3435 pass, 1 fail, 3 skipped (exit 1). The one
+  failure is the pre-existing baseline `vfs-collection-resilience`
+  C1/C2/C3.
+- data-plane: `cargo build --release` clean, `cargo test --release --lib`
+  153 passed, `serve_layer_coalescing` 9 passed. The integration test
+  `same_tf_route_recovery::r2e_malformed_provider_payload_fails_over`
+  hangs on the BASELINE as well (verified by stashing the change) and is
+  pre-existing, not caused here.
+- Focused VFS/binding/reconcile/route suites: 127/127.
+- Restart durability: a provably dead route's evidence survives a store
+  reopen AND a media-search restart; a throttled route never becomes
+  death; a route that delivers again clears the negative evidence.
+- Production after the deploy: 4 sampled items serve 206/65536 B with
+  their exact binding sizes; the reuse path is unchanged (19 ms); the
+  authority survived the restart (174 active bindings before and after).
+
+### WHAT REMAINS
+
+- The recovery trigger is the failing request plus the 6-hourly
+  reconciler. A dead route with no further request is noticed by the
+  reconciler, not by a durable watcher: the evidence is durable, but
+  nothing yet polls it.
+- The durable evidence is written by the authoritative path now, but the
+  route reconciler still re-probes the provider instead of reading the
+  evidence it wrote.
+- The `provider_delivery_evidence` key is the Node-side capability tuple
+  (placement id + provider file id), so the north must map the provider
+  resource id to the placement id on every write. The mapping is exact
+  (the durable index), but it is a mapping.

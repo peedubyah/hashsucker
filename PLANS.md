@@ -57,6 +57,20 @@ delivery failure no longer re-decides representation authority. The
 delivery state also got ONE vocabulary and is now reported next to the
 authority on the reuse path.
 
+Completed product slice: **durable route failure authority** — **CLOSED**
+(`c3be499`, `044568b`; evidence in `docs/BUILD-LOG.md` 2026-10-19). The
+durable model already existed (`provider_delivery_evidence`, capability
+tuple, usable/temporary/terminal) and was never written by the
+authoritative path; the data plane also threw away the information of
+WHICH route died and why. The byte path now reports the failed routes
+with their durability class (404/410/protocol-invalid/wrong-size are
+DEAD; throttle/timeout/5xx are not), the VFS records them in the
+existing store, a route that delivers again clears the negative evidence,
+and replacing the authoritative representation is an explicit policy
+decision (durable terminal evidence for EVERY failed route, plus a
+one-switch-per-window budget) instead of a side effect of a read. The
+inert reconciler no longer plans 'mark-degraded' for route facts.
+
 Next earned slice: **one presentation identity for the `.strm` and the
 VFS path**. They are two resolvers with different year handling, so a
 published item can present two different paths to Plex and to Jellyfin,
