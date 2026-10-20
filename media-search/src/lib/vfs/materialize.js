@@ -398,7 +398,6 @@ async function resolvePresentationIdentity(handoff) {
     // MOVIE catalog for a series id answers with a DIFFERENT film — which
     // is how a published episode ended up named after an unrelated movie.
     const type = (handoff.mediaType === 'movie') ? 'movie' : 'series';
-    if (process.env.HS_TRACE_CATALOG) console.log(`[catalog] ${type}/${handoff.mediaId}`);
     const meta = await getMedia(type, handoff.mediaId);
     perfTrace('provider.cinemeta', {
       provider: 'cinemeta', endpoint: 'meta', action: 'title',
