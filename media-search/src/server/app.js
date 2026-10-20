@@ -131,6 +131,8 @@ import { isWithinRoot as isWithinDownloadRoot } from '../lib/download/paths.js';
 import { getRdResolutionCache } from '../lib/providers/realdebrid/rd-resolution-cache.js';
 import { createMovieWebDav } from '../lib/vfs/movie-webdav.js';
 import { createRouteResurrector } from '../lib/vfs/route-resurrection.js';
+import { createRouteFailureRecorder } from '../lib/vfs/route-failure-evidence.js';
+import { createRepresentationPolicy } from '../lib/vfs/representation-policy.js';
 import { createTvWebDav } from '../lib/vfs/tv-webdav.js';
 import { createSecondPlacementEnsurer } from '../lib/control-plane/second-placement.js';
 import { createRouteProviderSurfaces } from '../lib/control-plane/route-providers.js';
@@ -1033,6 +1035,22 @@ export function createRequestHandler(dependencies = {}) {
   // existing cache-only second-placement machinery (the same mechanism the
   // periodic route reconciler uses), so there is one recovery mechanism, not
   // two. The Binding is never re-pointed here.
+  // Durable route-failure evidence: a route the data plane proved dead is
+  // remembered per capability tuple, so the fact survives a restart and
+  // recovery can be driven by the failure instead of by the 6-hourly sweep.
+  const routeFailureRecorder = createRouteFailureRecorder({
+    controlPlaneStore,
+    evidenceStore: terminalEvidenceStore,
+    now: clock,
+    log: (msg) => console.log(`media-search: ${msg}`),
+  });
+
+  // Representation policy: the one decision that may replace the
+  // authoritative representation because of a delivery failure. It needs
+  // durable evidence and it is budgeted, so a flapping route cannot churn
+  // the representation.
+  const representationPolicy = createRepresentationPolicy({ now: clock });
+
   const routeResurrection = createRouteResurrector({
     ensureSecondPlacementFn: coverageEnsurer
       ? (params) => coverageEnsurer.ensureSecondPlacementCoalesced({
@@ -1054,6 +1072,8 @@ export function createRequestHandler(dependencies = {}) {
     resolveTorBoxDeliverySeam,
     torBoxDownloadUrlCache,
     routeResurrection,
+    routeFailureRecorder,
+    representationPolicy,
     // P5: reuse the EXISTING persisted-candidate fallback seam in the VFS
     // (tfId-present class-D exhaustion → alternate TorrentFile → re-forward to Rust).
     alternateFallback,
@@ -1077,6 +1097,8 @@ export function createRequestHandler(dependencies = {}) {
     resolveTorBoxDeliverySeam,
     torBoxDownloadUrlCache,
     routeResurrection,
+    routeFailureRecorder,
+    representationPolicy,
     // P5: reuse the EXISTING persisted-candidate fallback seam in the VFS
     // (tfId-present class-D exhaustion → alternate TorrentFile → re-forward to Rust).
     alternateFallback,

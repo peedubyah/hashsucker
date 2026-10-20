@@ -284,6 +284,16 @@ export function createTvWebDav({
   // means the VFS behaves exactly as before (the persisted-candidate
   // fallback is then the only recovery step).
   routeResurrection = null,
+  // Durable route-failure evidence seam: a route the data plane proved
+  // dead is remembered (per capability tuple) so the fact survives a
+  // restart and recovery can be driven by the failure instead of by the
+  // 6-hourly sweep.
+  routeFailureRecorder = null,
+  // Representation policy seam: the ONE decision that may replace the
+  // authoritative representation because of a delivery failure. It is
+  // evidence-backed and budgeted; a missing policy means the VFS never
+  // replaces the representation from a read.
+  representationPolicy = null,
   now = () => Date.now(),
   fetchFn = fetch,
   dataPlaneBaseUrl = 'http://data-plane:3001',
@@ -325,6 +335,22 @@ export function createTvWebDav({
         playbackRedundancy?.reportServingPrimary({ torrentFileId, ...(attribution ?? {}) });
       } catch {
         // Attribution delivery must never break primary playback.
+      }
+      // A route that just delivered bytes is not a dead route: clear the
+      // negative evidence so a later failure is judged on fresh proof.
+      try {
+        if (attribution?.provider && attribution?.providerResourceId && attribution?.providerFileId) {
+          routeFailureRecorder?.clearRouteFailure({
+            provider: attribution.provider,
+            accountScope: 'default',
+            providerResourceId: attribution.providerResourceId,
+            providerFileId: attribution.providerFileId,
+            infoHash: attribution.infoHash ?? null,
+            fileIndexKey: -1,
+          });
+        }
+      } catch {
+        // Evidence hygiene must never break primary playback.
       }
     };
   }
@@ -1213,6 +1239,22 @@ export function createTvWebDav({
         // The class-D error is emitted before any 206 is committed, so the
         // response has not started and a re-forward is still possible.
         if (error?.class === 'D' && state.entry.torrentFileId) {
+          // The route deaths are durable facts: record them BEFORE the
+          // repair attempt, so a crash between the two still leaves the
+          // evidence behind. A throttled or timed-out route is recorded as
+          // temporary — never as death.
+          let evidenceSummary = null;
+          try {
+            evidenceSummary = routeFailureRecorder?.recordRouteFailures({
+              routes: error?.routes ?? [],
+              infoHash: state.entry.infoHash ?? null,
+              fileIndexKey: state.entry.fileIndex ?? -1,
+            }) ?? null;
+          } catch (evidenceError) {
+            console.warn(
+              `[vfs] route-failure evidence write failed for release=${state.entry.releaseKey}: ${evidenceError?.message ?? evidenceError}`,
+            );
+          }
           const resurrection = await routeResurrection?.resurrect({
             torrentFileId: state.entry.torrentFileId,
           });
@@ -1240,14 +1282,35 @@ export function createTvWebDav({
             }
           }
         }
-        const recovered = await attemptPersistedAlternateFallback({
-          error,
-          state,
-          request,
-          response,
-          metadata,
-        });
-        if (recovered) return;
+        // Replacing the AUTHORITATIVE REPRESENTATION is a policy decision,
+        // not a side effect of a read. It requires durable evidence that
+        // the representation has no live route, and it is budgeted. A
+        // transient exhaustion (a throttle, a timeout) leaves the
+        // representation authoritative and the delivery degraded.
+        const policyDecision = representationPolicy?.decide({
+          mediaId: state.entry.mediaId,
+          routes: error?.routes ?? [],
+          evidence: evidenceSummary,
+          hasAuthoritativeBinding: true,
+        }) ?? { allow: false, reason: 'no-representation-policy' };
+        if (policyDecision.allow) {
+          const recovered = await attemptPersistedAlternateFallback({
+            error,
+            state,
+            request,
+            response,
+            metadata,
+          });
+          if (recovered) {
+            representationPolicy?.noteSwitch({ mediaId: state.entry.mediaId });
+            return;
+          }
+        } else {
+          console.warn(
+            `[vfs] representation kept for media=${state.entry.mediaId} `
+            + `release=${state.entry.releaseKey} reason=${policyDecision.reason}`,
+          );
+        }
         // Terminal: emit the classified Rust failure verbatim. NO legacy escape.
         sendError(response, error, { size: metadata.size });
         return;

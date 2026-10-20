@@ -91,7 +91,7 @@ test('fresh provider inventory maps exact provider-confirmed file index', () => 
   assert.equal(plan.actions[0].providerFileId, 'file-900');
 });
 
-test('duplicate basename inventory fails closed when exact mapping is unavailable', () => {
+test('duplicate basename inventory asks for another observation and never degrades the representation', () => {
   const inventory = [
     file({ providerFileId: 'a', path: '/One/movie.mkv', corpusFileIndex: null }),
     file({ providerFileId: 'b', path: '/Two/movie.mkv', corpusFileIndex: null }),
@@ -104,19 +104,27 @@ test('duplicate basename inventory fails closed when exact mapping is unavailabl
     desired: desired(), placements: [placement()], providerFiles: inventory,
     mappings: [], exposures: [],
   }, { now: NOW });
-  assert.equal(plan.actions[0].action, 'mark-degraded');
+  // An unmappable route is a ROUTE fact. The plan asks for another
+  // observation of that route; it must never degrade the authoritative
+  // representation (a route problem is not a representation problem).
+  assert.equal(plan.actions[0].action, 'observe-again');
+  assert.equal(plan.actions[0].target, 'provider-file-mapping');
   assert.equal(plan.failures[0].category, 'provider-file-ambiguous');
   assert.equal(plan.actions.some((action) => action.action === 'bind'), false);
+  assert.equal(plan.actions.some((action) => action.action === 'mark-degraded'), false);
 });
 
-test('mapped provider file missing from refreshed inventory is degraded, not guessed by basename', () => {
+test('mapped provider file missing from refreshed inventory is re-observed, never degraded, not guessed by basename', () => {
   const plan = planReconciliation({
     desired: desired(), placements: [placement()],
     providerFiles: [file({ providerFileId: 'different' })],
     mappings: [mapping()], exposures: [exposure()],
   }, { now: NOW });
   assert.equal(plan.failures[0].category, 'mapped-provider-file-missing');
-  assert.equal(plan.actions[0].action, 'mark-degraded');
+  assert.equal(plan.actions[0].action, 'observe-again');
+  assert.equal(plan.actions[0].target, 'provider-file-inventory');
+  assert.equal(plan.actions.some((action) => action.action === 'mark-degraded'), false,
+    'a vanished provider file is a ROUTE fact, never a representation fact');
 });
 
 test('stale or absent exposure requests observation and does not bind', () => {
@@ -134,13 +142,16 @@ test('stale or absent exposure requests observation and does not bind', () => {
   assert.equal(absent.actions[0].reason, 'exposure-not-observed');
 });
 
-test('writable exposure fails closed', () => {
+test('writable exposure fails closed and is re-observed, never degraded', () => {
   const plan = planReconciliation({
     desired: desired(), placements: [placement()], providerFiles: [file()],
     mappings: [mapping()], exposures: [exposure({ readOnly: false })],
   }, { now: NOW });
   assert.equal(plan.failures[0].category, 'exposure-not-read-only');
-  assert.equal(plan.actions[0].action, 'mark-degraded');
+  // The exposure is a ROUTE fact: the plan asks for another observation of
+  // it. The authoritative representation is not invalidated.
+  assert.equal(plan.actions[0].action, 'observe-exposure');
+  assert.equal(plan.actions.some((action) => action.action === 'mark-degraded'), false);
 });
 
 test('usable exact mapping binds once; repeated plan remains deterministic', () => {

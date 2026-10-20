@@ -68,12 +68,15 @@ export class DataPlaneError extends Error {
    *   D — provider exhaustion. The ONLY fallback-eligible class: the caller may
    *       switch to a persisted alternate TorrentFile and re-forward to Rust.
    */
-  constructor(message, status = 502, code = 'DATA_PLANE_ERROR', errorClass = 'C') {
+  constructor(message, status = 502, code = 'DATA_PLANE_ERROR', errorClass = 'C', routes = []) {
     super(message);
     this.name = 'DataPlaneError';
     this.status = status;
     this.code = code;
     this.class = errorClass;
+    // The exact routes that failed, as reported by the data plane. Empty
+    // when the upstream did not say (a non-classified failure).
+    this.routes = Array.isArray(routes) ? routes : [];
   }
 }
 
@@ -306,10 +309,18 @@ export async function streamFromDataPlane({
   } catch {
     // ignore body read errors; fall back to status-derived code
   }
+  // The failed ROUTES travel with the error: provider, account scope,
+  // provider resource id, provider file id, and whether the route is
+  // provably dead ('terminal') or merely did not answer ('temporary').
+  // The north needs them to record durable route-failure evidence.
+  let routes = [];
   if (bodyText) {
     try {
       const parsed = JSON.parse(bodyText);
       if (parsed?.error?.code) code = parsed.error.code;
+      if (Array.isArray(parsed?.error?.routes)) {
+        routes = parsed.error.routes.filter((r) => r && typeof r === 'object');
+      }
     } catch {
       // non-JSON body; keep the status-derived code
     }
@@ -331,5 +342,6 @@ export async function streamFromDataPlane({
     status,
     code,
     errorClass,
+    routes,
   );
 }

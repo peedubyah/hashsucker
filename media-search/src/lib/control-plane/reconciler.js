@@ -144,11 +144,17 @@ export function planReconciliation(input, options = {}) {
         });
       } else {
         failures.push(failure(mapResult.failureCategory, false, placement.id, mapResult.evidence));
+        // A route that cannot be mapped is a ROUTE problem, not a
+        // representation problem: the authoritative TorrentFile is
+        // unchanged. The plan asks for another observation of that route
+        // instead of degrading the Binding.
         actions.push({
-          action: 'mark-degraded',
+          action: 'observe-again',
+          target: 'provider-file-mapping',
           reason: mapResult.failureCategory,
           placementId: placement.id,
-          libraryItemId: desired.libraryItemId,
+          attempt: 1,
+          notBefore: now,
         });
       }
       continue;
@@ -157,11 +163,15 @@ export function planReconciliation(input, options = {}) {
     const providerFile = inventory.find((file) => file.providerFileId === mapping.providerFileId);
     if (!providerFile) {
       failures.push(failure('mapped-provider-file-missing', false, placement.id));
+      // The provider file disappeared: a ROUTE fact. Re-observe the
+      // route's inventory; the representation is not invalidated.
       actions.push({
-        action: 'mark-degraded',
+        action: 'observe-again',
+        target: 'provider-file-inventory',
         reason: 'mapped-provider-file-missing',
         placementId: placement.id,
-        libraryItemId: desired.libraryItemId,
+        attempt: 1,
+        notBefore: now,
       });
       continue;
     }
@@ -184,11 +194,14 @@ export function planReconciliation(input, options = {}) {
         exposure.retryable === true,
         placement.id,
       ));
+      // An unusable exposure is a ROUTE fact (the mount/exposure), not a
+      // representation fact. Re-observe the exposure; the authoritative
+      // TorrentFile is unchanged.
       actions.push({
-        action: 'mark-degraded',
+        action: 'observe-exposure',
         reason: exposure.readOnly === false ? 'exposure-not-read-only' : 'exposure-not-visible',
         placementId: placement.id,
-        libraryItemId: desired.libraryItemId,
+        providerFileId: providerFile.providerFileId,
       });
       continue;
     }

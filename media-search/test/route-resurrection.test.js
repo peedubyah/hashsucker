@@ -314,6 +314,79 @@ test('the representation-changing fallback is not reached when the same TorrentF
     'a route that was repaired for the SAME TorrentFile must not reach the representation-changing fallback');
 });
 
+test('the class-D failure records durable route evidence and a transient route never switches the representation', async (t) => {
+  const cache = createDiscoveryCache({ dbPath: ':memory:' });
+  const store = createControlPlaneStore();
+  t.after(() => { cache.close(); store.close(); });
+  const mediaId = 'tt9000004';
+  const seeded = seedBoundMovie(cache, store, { mediaId, infoHash: HASH });
+  const tfId = seeded.torrentFileId;
+
+  const recorded = [];
+  const routeFailureRecorder = {
+    recordRouteFailures: ({ routes, infoHash }) => {
+      recorded.push({ routes, infoHash });
+      return { recorded: routes.length, terminal: 0, temporary: routes.length, skipped: 0 };
+    },
+    clearRouteFailure: () => false,
+  };
+  const representationPolicy = {
+    decide: () => ({ allow: false, reason: 'transient-route' }),
+    noteSwitch: () => {},
+  };
+  let alternateLookups = 0;
+
+  const fetchFn = async () => providerResponse(502, {
+    body: JSON.stringify({
+      error: {
+        code: 'PROVIDER_EXHAUSTED',
+        torrent_file_id: tfId,
+        routes: [{
+          provider: 'torbox', accountScope: 'default',
+          providerResourceId: 'TB-1', providerFileId: 'pf-1',
+          kind: 'temporary', detail: 'rate-limited',
+        }],
+      },
+    }),
+    extra: { 'content-type': 'application/json' },
+  });
+
+  const handler = createMovieWebDav({
+    searchCache: cache,
+    controlPlaneStore: store,
+    rdClient: null,
+    rdResolutionCache: { get: () => null, getOrInFlight: () => { throw new Error('unused'); }, clear() {}, size: () => 0 },
+    resolveTorBoxDeliverySeam: async () => { throw new Error('no legacy delivery seam expected'); },
+    torBoxDownloadUrlCache: { delete() {}, get() { return null; }, getOrInFlight() { throw new Error('unused'); } },
+    alternateFallback: {
+      findUsableAlternate: async () => { alternateLookups += 1; return null; },
+      promoteAlternate: async () => { throw new Error('the representation must not be replaced'); },
+      buildFallbackTelemetry: () => ({}),
+    },
+    routeFailureRecorder,
+    representationPolicy,
+    routeResurrection: createRouteResurrector({
+      ensureSecondPlacementFn: async () => ({ status: 'unavailable' }),
+      now: () => 1_000,
+    }),
+    fetchFn,
+  });
+
+  const response = collectingResponse();
+  await handler(request('GET'), response, { pathname: '/vfs/Movies/Movie (2024)/Movie (2024).mkv' });
+
+  assert.equal(recorded.length, 1, 'the failed routes are recorded durably');
+  assert.equal(recorded[0].routes.length, 1);
+  assert.equal(recorded[0].routes[0].kind, 'temporary');
+  assert.equal(recorded[0].infoHash, HASH);
+  assert.equal(alternateLookups, 0,
+    'a transient route failure must not reach the representation-changing fallback');
+  const item = store.getLibraryItemByIdentityKey('movie:tt9000004:default');
+  const active = store.getActiveBindingForLibraryItem(item.id);
+  assert.equal(active.torrentFile.id, tfId, 'the representation is unchanged');
+  assert.equal(active.binding.status, 'active');
+});
+
 test('when no route can be found the request fails closed and the representation is untouched', async (t) => {
   const cache = createDiscoveryCache({ dbPath: ':memory:' });
   const store = createControlPlaneStore();
