@@ -26,6 +26,10 @@ import {
 } from './bytes-route.js';
 import { servePlaybackObject, PlaybackObjectError } from './playback-route.js';
 import {
+  resolvePlaybackIntent,
+  PlaybackObjectApiError,
+} from '../api/playback-object.js';
+import {
   mintPlaybackToken,
   playbackObjectPath,
   readPlaybackSecret,
@@ -3385,6 +3389,60 @@ export function createRequestHandler(dependencies = {}) {
             timings: { totalMs: Math.round(performance.now() - startedAt) },
           });
         } catch (err) {
+          return sendJson(response, 400, { error: err.message });
+        }
+      }
+      // The playback object: one step from a media intent to a stable,
+      // HashSucker-owned playback URL. A thin adapter over the authority that
+      // already exists — the warm path reads the active Binding and mints the
+      // object (no discovery, no provider inventory); the cold path runs the
+      // same request pipeline a Seerr request runs, then mints the object.
+      if (request.method === 'POST' && url.pathname === '/api/playback-object') {
+        const startedAt = performance.now();
+        const body = await readBody(request);
+        try {
+          const requestEnsureFn = buildRequestScopedEnsureFn({
+            fallbackFn: ensureTorBoxFileIdentityFn,
+            explicitFn: hasExplicitEnsureFn,
+            controlPlaneStore,
+            torBoxProvider,
+            apiKey: env.TORBOX_API_KEY,
+            apiBase: env.TORBOX_API_URL,
+            clock,
+            scope: 'playback-object',
+          });
+          const result = await resolvePlaybackIntent({
+            controlPlaneStore,
+            cache: searchCache,
+            env,
+            mediaId: body.mediaId ?? null,
+            mediaType: body.mediaType ?? body.type ?? null,
+            season: Number.isSafeInteger(Number(body.season)) && body.season != null ? Number(body.season) : null,
+            episode: Number.isSafeInteger(Number(body.episode)) && body.episode != null ? Number(body.episode) : null,
+            query: body.query ?? body.q ?? null,
+            now: clock,
+            extraRequest: {
+              ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
+              ...rdEnsureForRequest({ rdClient, controlPlaneStore, clock }),
+            },
+            prepareFn: async (cache, request) => searchByMedia(cache, {
+              ...request,
+              source: 'playback-object',
+              sourceType: 'client',
+            }),
+          });
+          return sendJson(response, 200, {
+            ...result,
+            timings: { ...result.timings, totalMs: Math.round(performance.now() - startedAt) },
+          });
+        } catch (err) {
+          if (err instanceof PlaybackObjectApiError) {
+            return sendJson(response, err.status, {
+              error: err.message,
+              code: err.code,
+              candidates: err.candidates,
+            });
+          }
           return sendJson(response, 400, { error: err.message });
         }
       }
