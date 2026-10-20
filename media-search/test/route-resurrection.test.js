@@ -387,6 +387,66 @@ test('the class-D failure records durable route evidence and a transient route n
   assert.equal(active.binding.status, 'active');
 });
 
+test('the class-D failure surfaces the TYPED failure, not an internal error', async (t) => {
+  // The evidence summary and the discovery outcome are read by the
+  // policy decision, which lives OUTSIDE the class-D block. When they were
+  // declared inside it, every class-D failure with a representation policy
+  // configured died with "evidenceSummary is not defined" — a 500
+  // INTERNAL_ERROR where the caller must see the typed provider failure.
+  const cache = createDiscoveryCache({ dbPath: ':memory:' });
+  const store = createControlPlaneStore();
+  t.after(() => { cache.close(); store.close(); });
+  const mediaId = 'tt9000005';
+  const seeded = seedBoundMovie(cache, store, { mediaId, infoHash: HASH });
+  const tfId = seeded.torrentFileId;
+
+  const routeFailureRecorder = {
+    recordRouteFailures: () => ({ recorded: 1, terminal: 1, temporary: 0, skipped: 0 }),
+    clearRouteFailure: () => false,
+  };
+  const representationPolicy = {
+    decide: () => ({ allow: false, reason: 'transient-route' }),
+    noteSwitch: () => {},
+  };
+  const fetchFn = async () => providerResponse(502, {
+    body: JSON.stringify({
+      error: {
+        code: 'PROVIDER_EXHAUSTED',
+        torrent_file_id: tfId,
+        routes: [{
+          provider: 'torbox', accountScope: 'default',
+          providerResourceId: 'TB-1', providerFileId: 'pf-1',
+          kind: 'terminal', detail: 'gone',
+        }],
+      },
+    }),
+    extra: { 'content-type': 'application/json' },
+  });
+
+  const handler = createMovieWebDav({
+    searchCache: cache,
+    controlPlaneStore: store,
+    rdClient: null,
+    rdResolutionCache: { get: () => null, getOrInFlight: () => { throw new Error('unused'); }, clear() {}, size: () => 0 },
+    resolveTorBoxDeliverySeam: async () => { throw new Error('no legacy delivery seam expected'); },
+    torBoxDownloadUrlCache: { delete() {}, get() { return null; }, getOrInFlight: () => { throw new Error('unused'); } },
+    routeFailureRecorder,
+    representationPolicy,
+    routeResurrection: createRouteResurrector({
+      ensureSecondPlacementFn: async () => ({ status: 'unavailable' }),
+      now: () => 1_000,
+    }),
+    fetchFn,
+  });
+
+  const response = collectingResponse();
+  await handler(request('GET'), response, { pathname: '/vfs/Movies/Movie (2024)/Movie (2024).mkv' });
+
+  assert.equal(response.status, 502, 'the typed provider failure is surfaced');
+  assert.ok(!response.body().includes('INTERNAL_ERROR'),
+    `the failure is not an internal error: ${response.body().slice(0, 200)}`);
+});
+
 test('when no route can be found the request fails closed and the representation is untouched', async (t) => {
   const cache = createDiscoveryCache({ dbPath: ':memory:' });
   const store = createControlPlaneStore();

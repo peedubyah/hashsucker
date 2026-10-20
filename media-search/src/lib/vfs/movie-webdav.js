@@ -1218,6 +1218,13 @@ export function createMovieWebDav({
         });
         return;
       } catch (error) {
+        // The evidence summary and the discovery outcome are read AFTER the
+        // class-D block (the policy decision needs them), so they live in
+        // the enclosing scope. Declaring them inside the block left the
+        // policy decision with an undefined binding and turned every
+        // class-D failure into an INTERNAL_ERROR.
+        let evidenceSummary = null;
+        let discoveryOutcome = null;
         // A dead ROUTE must not re-decide the REPRESENTATION. Before any
         // consideration of a different TorrentFile, try to find another
         // route to the SAME one: the authoritative Binding keeps naming the
@@ -1230,7 +1237,6 @@ export function createMovieWebDav({
           // repair attempt, so a crash between the two still leaves the
           // evidence behind. A throttled or timed-out route is recorded as
           // temporary — never as death.
-          let evidenceSummary = null;
           try {
             evidenceSummary = routeFailureRecorder?.recordRouteFailures({
               routes: error?.routes ?? [],
@@ -1247,7 +1253,7 @@ export function createMovieWebDav({
           });
           // The discovery outcome IS the route-set completeness proof: the
           // provider account was searched for this exact release.
-          const discoveryOutcome = resurrection
+          discoveryOutcome = resurrection
             ? { completed: resurrection.discoveryCompleted === true, status: resurrection.status }
             : null;
           if (resurrection?.recovered) {
