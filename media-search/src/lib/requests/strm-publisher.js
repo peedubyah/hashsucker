@@ -18,6 +18,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 import { getMedia } from '../metadata/cinemeta.js';
 import {
@@ -302,9 +303,11 @@ export async function publishStrm({ handoff, selection, presentation = null }) {
   const queryString = params.toString();
   const resolverUrl = `${RESOLVER_BASE_URL}/stream/${mediaType}/${mediaId}${queryString ? `?${queryString}` : ''}`;
 
-  // Atomic write: temp file → rename
+  // Atomic write: temp file → rename. The temp name is unique per writer:
+  // two concurrent publications of the same item would otherwise race on
+  // one temp file, and the loser's rename would fail with ENOENT.
   await fs.mkdir(dir, { recursive: true });
-  const tmpFile = path.join(dir, `.${file}.tmp`);
+  const tmpFile = path.join(dir, `.${file}.${randomUUID()}.tmp`);
   try {
     await fs.writeFile(tmpFile, `${resolverUrl}\n`, { encoding: 'utf8' });
     await fs.rename(tmpFile, destFile);

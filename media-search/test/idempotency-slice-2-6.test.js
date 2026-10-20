@@ -386,7 +386,7 @@ test('B4: materializeVfsEntry converges on a single row across 4 concurrent firs
   assert.equal(count, 1, 'only one durable VFS row survives concurrent writes');
 });
 
-test('B4: materializeVfsEntry serial duplicate insert is a no-op (already idempotent)', (t) => {
+test('B4: materializeVfsEntry serial duplicate insert is a no-op (already idempotent)', async (t) => {
   const cache = createDiscoveryCache();
   t.after(() => cache.close());
 
@@ -398,8 +398,10 @@ test('B4: materializeVfsEntry serial duplicate insert is a no-op (already idempo
   }]);
   const handoff = tedE02Handoff({ requestId: 1 });
 
-  const first = materializeVfsEntry(cache, handoff, controlPlane, () => 1_788_270_000_000, { allowLegacy: false });
-  const second = materializeVfsEntry(cache, handoff, controlPlane, () => 1_788_270_500_000, { allowLegacy: false });
+  // The materializer resolves the presentation identity asynchronously
+  // (the name may come from the catalog), so the replay is awaited.
+  const first = await materializeVfsEntry(cache, handoff, controlPlane, () => 1_788_270_000_000, { allowLegacy: false });
+  const second = await materializeVfsEntry(cache, handoff, controlPlane, () => 1_788_270_500_000, { allowLegacy: false });
 
   assert.equal(second.canonicalPath, first.canonicalPath);
   assert.equal(second.torrentFileId, first.torrentFileId);

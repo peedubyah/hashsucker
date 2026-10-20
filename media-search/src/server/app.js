@@ -3294,6 +3294,57 @@ export function createRequestHandler(dependencies = {}) {
           claimCalibration: searchCache.listEvidenceClaimCalibration?.({ from, to }) ?? [],
         });
       }
+      // PRESENTATION IDENTITY: the committed consumer-visible name and the
+      // paths it is reached through, per media intent. Read-only: it
+      // reports what is committed and what the consumer trees actually
+      // contain, and it never renames anything.
+      if (request.method === 'GET' && url.pathname === '/api/operator/presentation') {
+        const identities = controlPlaneStore?.listPresentationIdentities?.({ limit: 2000 }) ?? [];
+        const byMediaId = new Map();
+        for (const identity of identities) {
+          byMediaId.set(
+            identity.mediaType === 'movie'
+              ? identity.mediaId
+              : `${identity.mediaId}:${identity.season ?? ''}:${identity.episode ?? ''}`,
+            identity,
+          );
+        }
+        const vfsRows = [
+          ...(searchCache.listVfsMovieEntries?.() ?? []).map((entry) => [entry.mediaId, entry.canonicalPath]),
+          ...(searchCache.listVfsTvEntries?.() ?? []).map((entry) => [
+            `${entry.mediaId}:${entry.season}:${entry.episode}`, entry.canonicalPath,
+          ]),
+        ];
+        const vfsPaths = new Map(vfsRows);
+        const rows = identities.map((identity) => {
+          const key = identity.mediaType === 'movie'
+            ? identity.mediaId
+            : `${identity.mediaId}:${identity.season ?? ''}:${identity.episode ?? ''}`;
+          const vfsPath = vfsPaths.get(key) ?? null;
+          return {
+            mediaId: identity.mediaId,
+            mediaType: identity.mediaType,
+            season: identity.season,
+            episode: identity.episode,
+            title: identity.title,
+            year: identity.year,
+            canonicalPath: identity.canonicalPath,
+            strmPath: identity.strmPath,
+            committedAt: identity.committedAt,
+            // The byte path and the committed path must be the same string:
+            // a difference means the VFS row moved under a committed
+            // identity, which is exactly the drift this reports.
+            vfsPathAgrees: vfsPath == null ? null : vfsPath === identity.canonicalPath,
+          };
+        });
+        const summary = { total: rows.length, aligned: 0, drifted: 0, noVfsRow: 0 };
+        for (const row of rows) {
+          if (row.vfsPathAgrees === true) summary.aligned += 1;
+          else if (row.vfsPathAgrees === false) summary.drifted += 1;
+          else summary.noVfsRow += 1;
+        }
+        return sendJson(response, 200, { generatedAt: clock(), summary, identities: rows });
+      }
       // Corpus control-room snapshot: lifecycle revision plus existing
       // enrichment/hygiene diagnostics, without creating a second state model.
       if (request.method === 'GET' && url.pathname === '/api/operator/corpus') {

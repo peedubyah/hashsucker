@@ -169,21 +169,35 @@ async function commitIdentity(controlPlaneStore, handoff, vfsEntry, strmPath, se
   if (!strmPath) return null;
   const relative = path.relative(strmOutputRoot(), strmPath);
   const title = await resolveTitleForIdentity(handoff, selection);
+  const mediaType = handoff.mediaType === 'movie' ? 'movie' : 'episode';
   try {
-    const result = controlPlaneStore.commitPresentationIdentity(
-      stableLibraryItemId(createLibraryIdentityKey({
-        mediaType: handoff.mediaType === 'movie' ? 'movie' : 'episode',
+    // The media intent must exist before it can carry an identity. The
+    // library item is normally created by the binding activation; a
+    // publication whose binding could not be activated yet (no route
+    // coordinates yet) still has a consumer-visible name, so the intent
+    // is ensured here.
+    const item = controlPlaneStore.getLibraryItemByIdentityKey
+      ? (controlPlaneStore.getLibraryItemByIdentityKey(createLibraryIdentityKey({
+        mediaType,
         mediaId: handoff.mediaId,
         season: handoff.season ?? undefined,
         episode: handoff.episode ?? undefined,
-      })),
-      {
+      })) ?? controlPlaneStore.ensureLibraryItem({
+        mediaType,
+        mediaId: handoff.mediaId,
         title: title.title,
-        year: title.year,
-        canonicalPath: vfsEntry?.canonicalPath ?? null,
-        strmPath: relative,
-      },
-    );
+        season: handoff.season ?? null,
+        episode: handoff.episode ?? null,
+        desiredState: 'present',
+      }))
+      : null;
+    if (!item) return null;
+    const result = controlPlaneStore.commitPresentationIdentity(item.id, {
+      title: title.title,
+      year: title.year,
+      canonicalPath: vfsEntry?.canonicalPath ?? null,
+      strmPath: relative,
+    });
     return result?.identity ?? null;
   } catch (error) {
     console.warn(`[publication] presentation identity commit failed for ${handoff.mediaId}: ${error?.message ?? error}`);

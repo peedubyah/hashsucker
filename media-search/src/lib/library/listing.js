@@ -122,6 +122,12 @@ export function listLibrary({ cache, controlPlaneStore, promotionStore = null, l
     const tf = activeBinding?.torrentFile ?? torrentFileFor(controlPlaneStore, tfId);
     const desiredAbsent = item.desiredState === 'absent';
     const storage = storageFor(promotionStore, item, episodeScoped);
+    // The PRESENTATION identity is a third thing than the media identity
+    // and the representation identity: it is the consumer-visible name
+    // and the paths it is reached through, committed once. It is reported
+    // separately so an operator can tell "this is a different release"
+    // from "this is the same release under a different name".
+    const presentation = controlPlaneStore?.getPresentationIdentity?.(item.id) ?? null;
     return {
       mediaId: item.mediaId,
       mediaType: episodeScoped ? 'episode' : 'movie',
@@ -129,6 +135,13 @@ export function listLibrary({ cache, controlPlaneStore, promotionStore = null, l
       episode: item.episode ?? null,
       title: item.title ?? null,
       year: item.year ?? null,
+      presentation: presentation ? {
+        title: presentation.title,
+        year: presentation.year,
+        canonicalPath: presentation.canonicalPath,
+        strmPath: presentation.strmPath,
+        committedAt: presentation.committedAt,
+      } : null,
       desiredState: item.desiredState,
       state: desiredAbsent ? 'absent' : (vfs ? 'published' : 'incomplete'),
       publicationMode: item.publicationMode ?? 'permanent',
