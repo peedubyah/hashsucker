@@ -419,6 +419,11 @@ export async function selectBindableCandidate(results, options = {}) {
         const sizeResult = await ensureTorBoxFileIdentityFn({
           infoHash: candidate.infoHash,
           selectedFileSize,
+          // The candidate's own file path, when it has one. A candidate
+          // that knows its file's canonical path may bind that file
+          // exactly; one that knows only a byte count falls back to the
+          // size match (which fails closed on a shared size).
+          internalPath: candidate.internalPath ?? null,
           releaseKey: candidate.release?.key || null,
         });
         perfTrace('selection.ensure', {

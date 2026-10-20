@@ -3734,3 +3734,139 @@ state is the byte count — and a byte count is a weaker identity than a
 path. Carrying the corpus's per-file path would let the provider match on
 path AND size everywhere, and would make the release-level classification
 dispensable.
+
+## 2026-10-20 — THE CORPUS KNOWS THE FILE: exact discovery identity — CLOSED
+
+Slice: the downstream identity boundary was closed (a provider route may
+carry a TorrentFile only when the provider's path AND exact size are the
+TorrentFile's). One weaker boundary remained UPSTREAM: the discovery
+corpus often knows the release and the candidate file's byte count, but
+not the candidate file's canonical torrent-relative path — which forced
+some early selection logic to use the byte count as its strongest
+per-file discriminator.
+
+### PHASE 1/2/3 — THE AUDIT (from the real corpus and the real parsers)
+
+| corpus fact | measured |
+|---|---|
+| `release_attributes` rows | **1 593 141** |
+| rows that carry a FILE-level index | **0** (every row is `file_index_key = -1`, i.e. release-level) |
+| rows whose `filename` is the RELEASE's name (`.torrent`) | 40 |
+| rows whose `filename` looks like a media file | 1 063 041 (the regex source's parse of the RELEASE's name) |
+| rows whose `filename` contains a directory | 103 — and every one is a SCRAPE artifact (`xxxadulttorrent.org_[…]/…`), not a torrent-relative path |
+| `candidates` rows (the discovery cache) | **0** file-level rows — the cache is release-level too |
+| per-file facts the chain actually carries | the stremio stream's exact byte count (`behaviorHints.videoSize`), in memory as `exactFileSize` |
+| per-file CANONICAL PATHS anywhere upstream | **none** |
+
+The corpus is a release-level FILENAME PARSER: it parses the release's name
+into resolution, codec, S/E and group. It has never had a per-file path,
+and the parsers discard nothing — the path was never there.
+
+**So the premise "the corpus knows the file" is only half true: the corpus
+knows the file's BYTE COUNT (from the stream), not its path.** The only
+place a per-file canonical path exists is the provider's own inventory —
+which is the control plane, and which the previous slice already made
+authoritative.
+
+### PHASE 5 — THE SCHEMA DECISION
+
+The corpus's per-file record (`release_attributes`) gains two nullable
+columns — `file_path` and `file_size` — so a source that CAN supply a
+per-file identity can, and so a pathless row is visibly pathless instead of
+silently release-level. No parallel identity table ✓, no rewrite of the
+existing rows ✓, no fabricated path ✓ (a release's name is not a file's
+path). The migration is additive, nullable, idempotent and applied on every
+open (the corpus is safe to use before it finishes ingesting ✓).
+
+### PHASE 9 — THE CANDIDATE EVIDENCE MODEL
+
+`lib/discovery/candidate-identity.js` gives every candidate an explicit
+identity STRENGTH, and the strength travels with the candidate:
+
+| strength | the candidate states | what it may do |
+|---|---|---|
+| `exact-file` | hash + canonical path + exact size | name a TorrentFile; authorize a route |
+| `size-corroborated` | hash + exact size, no path | DISCOVER a provider resource and select within it; may not authorize a route on its own |
+| `release-only` | the release | discover a release; nothing per-file |
+
+A weaker candidate never masquerades as an exact one ✓.
+
+### PHASE 12 — THE SIZE-ONLY AMBIGUITY (quantified)
+
+`node src/scripts/size-ambiguity-audit.mjs` over the live provider
+inventories:
+
+| | count |
+|---|---|
+| mapped provider files | 4099 |
+| the file's byte count is UNIQUE within its resource | 3675 (89.7 %) |
+| the file's byte count is SHARED with another file of the same resource | **424 (10.3 %)** — 30 resources, the largest with 153 files of one size |
+
+So a byte count is not a file identifier for a tenth of the mapped files ✓ —
+which is exactly why the exact path matters, and why a size-only match
+inside a resource fails closed when the size is shared ✓.
+
+### PHASE 13 — TORBOX
+
+The file-identity helper now takes the candidate's `internalPath` ✓:
+when the candidate states a path, the provider file must be THAT file
+(path + exact size ✓) and the result is labelled `exact-file` ✓; when it
+does not, the size match stands and a shared size fails closed ✓.
+
+### PHASE 14 — REAL-DEBRID
+
+Unchanged from the previous slice, and deliberately asymmetric ✓: Real-Debrid
+lists files relative to the torrent root, so the corpus's release name is
+not comparable to the provider's path; the comparable per-file fact is the
+byte count, and the authorization requires it ✓. The release-level
+classification stays the discovery's job ✓; only the route authorization is
+exact ✓.
+
+### PHASE 15/18 — THE HANDOFF AND THE CACHE
+
+The exact identity survives the handoff through the TorrentFile id ✓
+(the handoff's `torrent_file_id` resolves to the path + size ✓), and the
+candidate's strength and path ride the ranking input ✓. Old cached
+candidates without a path deserialize as `size-corroborated` ✓ — weaker
+evidence, labelled ✓, never a silent default to exact ✓.
+
+### PHASE 25 — THE TESTS
+
+`test/corpus-file-identity.test.js`: the identity strength is explicit ✓; a
+per-file path survives ingest → read → restart ✓; a pathless row stays a
+valid release-level row ✓; the same basename in two directories stays two
+files ✓; an exact path selects that provider file and not another of the
+same size ✓; a shared size without a path fails closed ✓.
+
+### THE FULL SUITE
+
+3544 tests, 3540 pass, 1 fail, 3 skipped (exit 1). The one failure is the
+pre-existing baseline `vfs-collection-resilience` C1/C2/C3. The focused
+corpus/exact-file/provider suites: 74/74.
+
+### COMMITS
+
+| commit | change |
+|---|---|
+| `c2a5f0a` | feat(corpus): the corpus's per-file identity, and the candidate's evidence strength |
+| `5f1c9d2` | test(corpus): the per-file identity chain |
+
+### WHAT REMAINS UNPROVEN
+
+- The corpus's per-file path coverage is **0** today ✓ — the plumbing is
+  proven (the schema, the ingest, the candidate, the handoff, the
+  selection ✓) but no current source supplies a path ✓. A source that
+  supplies one (or the provider's inventory ✓) flows through unchanged ✓.
+- The TorBox helper's size-only selection remains for pathless candidates ✓
+  (the corpus's own coverage ✓); it fails closed on a shared size ✓.
+- The 424 size-ambiguous provider files are mostly extras and artwork ✓
+  (the big "IMDB合集" packs ✓); the ones that matter for playback are
+  already bound by exact path ✓.
+
+### NEXT SMALLEST EARNED SLICE
+
+Give the discovery a per-file path from a source that HAS one. The
+provider's inventory has it ✓; the corpus does not ✓. A torrent-metadata
+sidecar (the .torrent's own file list) for the releases the corpus already
+holds would give the corpus the per-file path at a fraction of the cost of
+a provider scan — and would make the size-only selection disappear.

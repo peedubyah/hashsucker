@@ -326,6 +326,13 @@ CREATE TABLE IF NOT EXISTS release_attributes (
   release_group TEXT,
   evidence TEXT,
   parsed_at INTEGER NOT NULL,
+  -- The per-file identity a source may supply: the canonical
+  -- torrent-relative path and the exact byte count of the FILE this row
+  -- names. NULL for the release-level rows the corpus actually holds:
+  -- a release's name is not a file's path, and fabricating one would be
+  -- worse than admitting the row is release-level.
+  file_path TEXT,
+  file_size INTEGER,
   PRIMARY KEY (info_hash, file_index_key, source)
 );
 
@@ -1278,14 +1285,18 @@ const INSERT_RELEASE_ATTRIBUTES = `
 INSERT INTO release_attributes (
   info_hash, file_index, file_index_key, source, filename, confidence,
   title, year, media_type, season, episode, episode_range, resolution, source_type,
-  codec, hdr, audio, language, release_group, evidence, parsed_at
+  codec, hdr, audio, language, release_group, evidence, parsed_at,
+  file_path, file_size
 ) VALUES (
   @info_hash, @file_index, @file_index_key, @source, @filename, @confidence,
   @title, @year, @media_type, @season, @episode, @episode_range, @resolution, @source_type,
-  @codec, @hdr, @audio, @language, @release_group, @evidence, @parsed_at
+  @codec, @hdr, @audio, @language, @release_group, @evidence, @parsed_at,
+  @file_path, @file_size
 )
 ON CONFLICT(info_hash, file_index_key, source) DO UPDATE SET
   filename = EXCLUDED.filename,
+  file_path = COALESCE(EXCLUDED.file_path, release_attributes.file_path),
+  file_size = COALESCE(EXCLUDED.file_size, release_attributes.file_size),
   confidence = EXCLUDED.confidence,
   title = EXCLUDED.title,
   year = EXCLUDED.year,
@@ -1839,6 +1850,26 @@ function migrateMediaIntents(db) {
 // behaviorHints.videoSize on the selected candidate. Survives selection so
 // the pre-publication identity helper can match provider files by exact size.
 // Corpus rows that pre-date this migration keep NULL — legacy behavior.
+/**
+ * The corpus's per-file identity columns.
+ *
+ * Additive and nullable: the corpus's rows are release-level (the audit:
+ * 1 593 141 rows, none with a file-level path), and this migration
+ * gives the table the ability to carry a per-file path and size for the
+ * sources that can supply one. It never fabricates a path for a
+ * release-level row.
+ */
+function migrateReleaseAttributesFileIdentity(db) {
+  const info = db.prepare('PRAGMA table_info(release_attributes)').all();
+  if (info.length === 0) return;
+  if (!info.some((col) => col.name === 'file_path')) {
+    db.exec('ALTER TABLE release_attributes ADD COLUMN file_path TEXT');
+  }
+  if (!info.some((col) => col.name === 'file_size')) {
+    db.exec('ALTER TABLE release_attributes ADD COLUMN file_size INTEGER');
+  }
+}
+
 function migrateMediaRequestResultsSelectedFileSize(db) {
   const applied = db.prepare(
     'SELECT 1 FROM schema_migrations WHERE name = ?',
@@ -2225,6 +2256,7 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
   migrateMediaRequestResultsIdentityUnique(db);
   migrateMediaRequestResultsEvidenceSnapshot(db);
   migrateMediaRequestResultsQualityFeatures(db);
+  migrateReleaseAttributesFileIdentity(db);
   // Slice 1.75: the torrent_file_id index can only be created once the
   // column is present. For legacy prod databases, the column is added by
   // migratePlaybackHandoffsTorrentFileId above. For fresh installs the
@@ -3813,6 +3845,11 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       release_group: attrs.releaseGroup ?? null,
       evidence: attrs.evidence != null ? JSON.stringify(attrs.evidence) : null,
       parsed_at: attrs.parsedAt,
+      // The per-file identity, when the source supplied one. A
+      // release-level row keeps NULL: a release's name is not a file's
+      // path.
+      file_path: attrs.filePath ?? null,
+      file_size: attrs.fileSize ?? null,
     });
   }
 
@@ -3837,6 +3874,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
       audio: row.audio,
       language: row.language,
       releaseGroup: row.release_group,
+      filePath: row.file_path ?? null,
+      fileSize: row.file_size ?? null,
       evidence: row.evidence ? JSON.parse(row.evidence) : null,
       parsedAt: row.parsed_at,
     };

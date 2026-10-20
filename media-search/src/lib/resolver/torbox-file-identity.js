@@ -29,6 +29,7 @@
  */
 
 import { PROVIDER_CAPABILITIES } from '../providers/capabilities.js';
+import { canonicalProviderPath } from '../providers/exact-file-identity.js';
 import { ProviderOperationError } from '../providers/errors.js';
 import { getServiceability } from '../vfs/byte-health.js';
 import { perfTrace, perfTraceSync } from '../perf-trace.js';
@@ -72,6 +73,7 @@ export class TorBoxFileIdentityError extends Error {
 export async function ensureTorBoxFileIdentity({
   infoHash,
   selectedFileSize,
+  internalPath = null,
   controlPlaneStore,
   torBoxInventoryProvider,
   torBoxProvider,
@@ -452,6 +454,69 @@ export async function ensureTorBoxFileIdentity({
       // Return all TorrentFiles for TV S/E resolution by the caller.
       torrentFiles: tfs,
     };
+  }
+
+  // EXACT FILE IDENTITY, when the candidate can state the file's path.
+  //
+  // A candidate that carries the canonical torrent-relative path names a
+  // TorrentFile; the provider file must then be THAT file — path and
+  // exact size. A candidate that carries only a byte count names a file by
+  // its count, which is a weaker fact: it may DISCOVER the resource and
+  // select within it, but a size that another file of the same resource
+  // shares is ambiguous and fails closed below.
+  const exactPath = internalPath ? canonicalProviderPath(internalPath) : null;
+  if (exactPath) {
+    const pathMatches = files.filter((f) => (
+      canonicalProviderPath(f.path) === exactPath && f.size === selectedFileSize
+    ));
+    if (pathMatches.length === 1) {
+      const matched = pathMatches[0];
+      if (!matched.torrentFileId || matched.mappingState !== 'mapped') {
+        throw new TorBoxFileIdentityError(
+          `Matched provider file ${matched.providerFileId} has no mapped torrent_file_id`,
+          MISSING_TORRENT_FILE,
+          {
+            infoHash: normalizedHash,
+            placementId: placement.id,
+            providerFileId: matched.providerFileId,
+            torrentFileId: matched.torrentFileId ?? null,
+            mappingState: matched.mappingState ?? null,
+            exactPath,
+          },
+        );
+      }
+      return {
+        placementId: placement.id,
+        providerFileId: matched.providerFileId,
+        torrentFileId: matched.torrentFileId,
+        size: matched.size,
+        identityStrength: 'exact-file',
+      };
+    }
+    if (pathMatches.length === 0) {
+      throw new TorBoxFileIdentityError(
+        `No provider file at ${exactPath} (${selectedFileSize} bytes) on ${normalizedHash}`,
+        NO_FILE_SIZE_MATCH,
+        {
+          infoHash: normalizedHash,
+          placementId: placement.id,
+          selectedFileSize,
+          exactPath,
+          presentFileCount: files.length,
+        },
+      );
+    }
+    throw new TorBoxFileIdentityError(
+      `Multiple (${pathMatches.length}) provider files match ${exactPath} on ${normalizedHash}`,
+      AMBIGUOUS_FILE_SIZE,
+      {
+        infoHash: normalizedHash,
+        placementId: placement.id,
+        exactPath,
+        matchCount: pathMatches.length,
+        conflictingProviderFileIds: pathMatches.map((m) => m.providerFileId),
+      },
+    );
   }
 
   const matches = files.filter((f) => f.size === selectedFileSize);

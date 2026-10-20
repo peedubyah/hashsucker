@@ -7,6 +7,7 @@
  */
 
 import { createReleaseIdentity } from '../../api/release-contract.js';
+import { classifyCandidateIdentity } from '../discovery/candidate-identity.js';
 
 const RESOLUTION_ORDER = {
   '2160p': 4,
@@ -364,6 +365,14 @@ export function normalizeStream(raw, addonMeta = {}) {
 
   return {
     key,
+    // The identity strength: this candidate names a file by PATH and exact
+    // size, or only by its byte count. The strength travels with the
+    // candidate so no consumer has to guess it.
+    identityStrength: classifyCandidateIdentity({
+      infoHash,
+      internalPath: null,
+      exactFileSize,
+    }).strength,
     addonId: addonMeta.addonId || null,
     addonName: addonMeta.addonName || null,
     observer: addonMeta.provider || addonMeta.addonId || null,

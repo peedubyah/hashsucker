@@ -638,6 +638,10 @@ export function toRankingInput(candidate) {
     // provider evidence. Folded into providerAvailability by rankHit()
     // only when fresh evidence is absent. Defaults to 0 (no influence).
     historicalPrior: candidate.historicalPrior || 0,
+    // The candidate's canonical file path, when a source supplied one.
+    // Together with the exact size this is a TorrentFile identity; without
+    // it the candidate names a file by its byte count only.
+    internalPath: candidate.internalPath ?? null,
     // Slice 7: exact per-file byte size. Threaded through ranking so it
     // survives into persisted results. Null when unknown.
     selectedFileSize:

@@ -55,7 +55,15 @@
 export function storeReleaseAttributes(cache, attributes) {
   if (!cache || !attributes) return false;
 
-  const { infoHash, fileIndex = null, filename, source, confidence, parsed = {}, evidence = [] } = attributes;
+  const {
+    infoHash, fileIndex = null, filename, source, confidence,
+    parsed = {}, evidence = [],
+    // The per-file identity, when the source supplied one: the canonical
+    // torrent-relative path and the exact byte count of the file this row
+    // names. A release-level source supplies neither, and the row then
+    // says so rather than inventing a path.
+    filePath = null, fileSize = null,
+  } = attributes;
 
   if (!infoHash || !filename || !source) return false;
 
@@ -90,6 +98,8 @@ export function storeReleaseAttributes(cache, attributes) {
     language: parsed.language ?? null,
     releaseGroup: parsed.releaseGroup ?? null,
     evidence: Array.isArray(evidence) ? evidence : (evidence ? [evidence] : []),
+    filePath,
+    fileSize,
     parsedAt: Date.now(),
   });
 
