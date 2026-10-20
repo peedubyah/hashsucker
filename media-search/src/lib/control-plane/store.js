@@ -10,6 +10,7 @@ import {
   normalizeCanonicalPath,
   stableLibraryItemId,
 } from './canonical-path.js';
+import { normalizePresentationYear } from './presentation-identity.js';
 import { createLifecycleEvent, projectLifecycle } from './lifecycle.js';
 import { perfTrace } from '../perf-trace.js';
 
@@ -35,6 +36,15 @@ CREATE TABLE IF NOT EXISTS library_items (
   profile TEXT NOT NULL DEFAULT 'balanced',
   intent TEXT NOT NULL DEFAULT 'library',
   upgrade_policy TEXT NOT NULL DEFAULT 'auto',
+  -- PRESENTATION IDENTITY (one per media intent). Written once, at the
+  -- commit point, and never rewritten: the consumer-visible name and the
+  -- paths it is reached through. Optional metadata may enrich the
+  -- descriptive title above; it may never touch these columns.
+  presentation_title TEXT,
+  presentation_year INTEGER,
+  presentation_path TEXT,
+  presentation_strm_path TEXT,
+  presentation_committed_at INTEGER,
   CHECK ((media_type = 'movie' AND season IS NULL AND episode IS NULL)
     OR (media_type = 'episode' AND season IS NOT NULL AND episode IS NOT NULL))
 );
@@ -431,6 +441,21 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     if (libraryColumns.length > 0 && !libraryColumns.includes('upgrade_policy')) {
       db.exec("ALTER TABLE library_items ADD COLUMN upgrade_policy TEXT NOT NULL DEFAULT 'auto'");
     }
+    // PRESENTATION IDENTITY columns. Additive and nullable: an existing
+    // library has no committed identity yet, and the adoption path fills
+    // it from the paths that are already published.
+    for (const col of [
+      'presentation_title TEXT',
+      'presentation_year INTEGER',
+      'presentation_path TEXT',
+      'presentation_strm_path TEXT',
+      'presentation_committed_at INTEGER',
+    ]) {
+      const name = col.split(' ')[0];
+      if (libraryColumns.length > 0 && !libraryColumns.includes(name)) {
+        db.exec(`ALTER TABLE library_items ADD COLUMN ${col}`);
+      }
+    }
   } catch {}
   db.exec(CONTROL_PLANE_SCHEMA);
   db.exec(CONSUMER_OBSERVATIONS_SCHEMA);
@@ -464,7 +489,14 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
         season, episode, desired_state, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(identity_key) DO UPDATE SET
-        title = EXCLUDED.title,
+        -- The descriptive title is not clobbered by a placeholder. A
+        -- republication that carries no title used to overwrite a real
+        -- title with the bare media id, so the operator surface showed
+        -- "tt1234567" for a published movie.
+        title = CASE
+          WHEN EXCLUDED.title = library_items.media_id THEN library_items.title
+          ELSE EXCLUDED.title
+        END,
         year = COALESCE(EXCLUDED.year, library_items.year),
         desired_state = EXCLUDED.desired_state,
         updated_at = EXCLUDED.updated_at
@@ -543,6 +575,95 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
       ) VALUES (?, ?, ?, ?, ?, 1, ?)
     `).run(id, libraryItemId, canonicalPath, preferredPath, item.identityKey, timestamp);
     return rowToLibraryPath(db.prepare('SELECT * FROM library_paths WHERE id = ?').get(id));
+  }
+
+  /**
+   * COMMIT the presentation identity of a media intent.
+   *
+   * The identity is written ONCE. A second commit is ignored, not merged:
+   * a published name is not something a later metadata fetch, a retry, or
+   * a reselection may move. Changing a committed identity is a migration
+   * (there is none today) and must go through an explicit policy, never
+   * through an incidental recomputation.
+   *
+   * @param {string} libraryItemId
+   * @param {Object} identity
+   * @param {string} identity.title
+   * @param {number|null} identity.year
+   * @param {string|null} identity.canonicalPath - the VFS path, relative to the VFS root
+   * @param {string} identity.strmPath - the `.strm` path, relative to the strm root
+   * @param {number} [identity.committedAt]
+   * @returns {{committed: boolean, identity: Object}}
+   */
+  function commitPresentationIdentity(libraryItemId, identity = {}) {
+    const item = requireLibraryItem(libraryItemId);
+    const existing = getPresentationIdentity(libraryItemId);
+    if (existing) return { committed: false, identity: existing };
+    const title = requireString(identity.title ?? item.title, 'title');
+    const year = identity.year == null ? null : normalizePresentationYear(identity.year);
+    const canonicalPath = identity.canonicalPath == null
+      ? null
+      : normalizeCanonicalPath(identity.canonicalPath);
+    const strmPath = requireString(identity.strmPath ?? '', 'strmPath');
+    const committedAt = Number.isSafeInteger(identity.committedAt) ? identity.committedAt : now();
+    db.prepare(`
+      UPDATE library_items
+      SET presentation_title = ?, presentation_year = ?, presentation_path = ?,
+          presentation_strm_path = ?, presentation_committed_at = ?, updated_at = ?
+      WHERE id = ? AND presentation_committed_at IS NULL
+    `).run(title, year, canonicalPath, strmPath, committedAt, now(), libraryItemId);
+    return { committed: true, identity: getPresentationIdentity(libraryItemId) };
+  }
+
+  /**
+   * The committed presentation identity of a media intent, or null when the
+   * intent has never been published under one.
+   */
+  function getPresentationIdentity(libraryItemId) {
+    if (!libraryItemId) return null;
+    const row = db.prepare('SELECT * FROM library_items WHERE id = ?').get(libraryItemId);
+    if (!row || row.presentation_committed_at == null) return null;
+    return {
+      libraryItemId: row.id,
+      identityKey: row.identity_key,
+      mediaType: row.media_type,
+      mediaId: row.media_id,
+      season: row.season ?? null,
+      episode: row.episode ?? null,
+      title: row.presentation_title ?? null,
+      year: row.presentation_year ?? null,
+      canonicalPath: row.presentation_path ?? null,
+      strmPath: row.presentation_strm_path ?? null,
+      committedAt: row.presentation_committed_at,
+    };
+  }
+
+  /**
+   * Every committed presentation identity, for the operator surface and
+   * the drift audit. Never a source of authority for a decision: it only
+   * reports what is already committed.
+   */
+  function listPresentationIdentities({ limit = 500, offset = 0 } = {}) {
+    const bounded = Math.min(Math.max(1, Math.trunc(Number(limit) || 500)), 5000);
+    const start = Math.max(0, Math.trunc(Number(offset) || 0));
+    return db.prepare(`
+      SELECT * FROM library_items
+      WHERE presentation_committed_at IS NOT NULL
+      ORDER BY identity_key
+      LIMIT ? OFFSET ?
+    `).all(bounded, start).map((row) => ({
+      libraryItemId: row.id,
+      identityKey: row.identity_key,
+      mediaType: row.media_type,
+      mediaId: row.media_id,
+      season: row.season ?? null,
+      episode: row.episode ?? null,
+      title: row.presentation_title ?? null,
+      year: row.presentation_year ?? null,
+      canonicalPath: row.presentation_path ?? null,
+      strmPath: row.presentation_strm_path ?? null,
+      committedAt: row.presentation_committed_at,
+    }));
   }
 
   function recordPlacement(input) {
@@ -2268,6 +2389,9 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     listLibraryItems,
     getActiveCanonicalPath,
     ensureCanonicalPath,
+    commitPresentationIdentity,
+    getPresentationIdentity,
+    listPresentationIdentities,
     recordPlacement,
     findPlacement,
     findPlacementByInfoHash,
@@ -2339,6 +2463,11 @@ function rowToLibraryItem(row) {
     profile: row.profile ?? 'balanced',
     intent: row.intent ?? 'library',
     upgradePolicy: row.upgrade_policy ?? 'auto',
+    presentationTitle: row.presentation_title ?? null,
+    presentationYear: row.presentation_year ?? null,
+    presentationPath: row.presentation_path ?? null,
+    presentationStrmPath: row.presentation_strm_path ?? null,
+    presentationCommittedAt: row.presentation_committed_at ?? null,
   };
 }
 function rowToLibraryPath(row) {

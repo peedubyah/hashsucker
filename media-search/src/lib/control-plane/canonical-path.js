@@ -97,7 +97,7 @@ export function sanitizePathSegment(value, fallback = null) {
   return safe;
 }
 
-function normalizeExtension(value) {
+export function normalizeExtension(value) {
   if (typeof value !== 'string' || !/^\.[a-z0-9]{1,10}$/i.test(value.trim())) {
     throw new TypeError('extension must be a dot-prefixed alphanumeric file extension');
   }
