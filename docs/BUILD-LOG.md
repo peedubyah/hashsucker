@@ -4103,3 +4103,150 @@ Not selected — a human disposes. The three falsifiers recorded in
 `PLANS.md` are the honest next step, and each is answered by a product test
 on the resolver surface (intent → playable source, callable by any client),
 not by more architecture.
+
+## 2026-10-20 — PSYCHEDELIC MOONSHOT RECON: what if HashSucker owned the experience? — CLOSED
+
+Slice: recon + product architecture only. No code, no client, no BitTorrent
+integration, no roadmap change. Four parallel external research streams
+(player substrates; torrent engines; VPN isolation + cold-start latency;
+representation equivalence + semantic front door) plus a grounding read of
+the sealed local model. The question: if HashSucker owned both source
+resolution and the playback client, what parts of the traditional
+media-server model become unnecessary?
+
+### WHAT CHANGED
+
+- `docs/recon/2026-10-psychedelic-moonshot-recon.md` — the report.
+- `PLANS.md`, `handoff/CURRENT.md` — the recommendation and the four facts a
+  next session needs.
+
+### WHAT WAS PROVEN
+
+- **The resolver surface already exists.** `/stream/:type/:id` is derived from
+  content identity and is "stable forever"; the `.strm` file is one line
+  containing it. The gap is not the surface but its *transport*: `/stream`
+  answers `307` to the provider, so the client leaves HashSucker's boundary
+  and the route can no longer be changed under it, while the proxying paths
+  (`/vfs`, `/media`) can fail over transparently. **Proxying instead of
+  redirecting is the single highest-value small change this recon found.**
+- **The client does not need a server-side time→byte index.** Measured on mpv
+  0.41 against an instrumented Range server: a seek to 12 s on MKV requested
+  `bytes=1106860-` — the client derived the offset from the container's own
+  index (2 requests for faststart MP4, 4 for moov-at-end MP4, 3 for MKV).
+  The existing Range contract is already correct.
+- **mpv is the only substrate with an invisible in-flight route swap.**
+  `mpv_stream_cb_add_ro` (own the byte layer) was built and measured: the
+  backing HTTP origin was swapped mid-playback with zero `START_FILE`/
+  `END_FILE` events and monotonic `time-pos`. mpv also auto-resumes after a
+  mid-body truncation, which is more forgiving than our documented contract
+  assumes. AVFoundation, ExoPlayer, libVLC and GStreamer all lose position
+  or require glue on a source swap; Dolby Vision is native only on Apple.
+- **Direct BitTorrent is feasible but not worth building now.** rqbit's HTTP
+  Range endpoint is a drop-in `runtime_url` for the existing
+  `DeliveryCapability`; librqbit exposes exactly the file-tree facts
+  HashSucker needs (`{name, components, length}`). Against that: swarm
+  metadata has a 2–3 minute tail (rqbit #441) and an unbounded one; a swarm
+  stall looks like a slow CDN, so the current breaker would kill a healthy
+  route; `disable-upload` does not suppress tracker announces; and the
+  "advertise bytes we already hold" feature (rqbit #705) is unmerged.
+- **VPN isolation has a clean answer.** A network namespace owned by a VPN
+  process whose firewall is unconditional (gluetun's model), a health
+  endpoint as the honest tunnel signal (`/v1/vpn/status` reflects the
+  reconnect loop, not the tunnel), a fail-closed capability gate
+  (tunnel up ∧ egress IP matches ∧ leak probe passes), and the VPN state as
+  a route property that never enters the identity tuple. The failure mode to
+  design around: a dead WireGuard tunnel silently drops packets, so a
+  connection *hangs* rather than resetting — route failure must be driven off
+  the health endpoint, not off the socket error.
+- **Cross-representation continuity stays research.** The prior
+  temporal-correspondence experiment is stronger than it looked: 0 false
+  positives on the scored negatives, one real positive (Matrix, corr
+  1.000/0.968/0.985), one ambiguous pair, four negatives rejected at 0/10
+  coverage. Its ingredients are now mature and permissively licensed
+  (Chromaprint MIT 2.0 ms/s; vPDQ/TMK BSD; ISCC Video-Code Apache-2.0;
+  ffmpeg `ssim`/`libvmaf`; ffsubsync), but the confidence model is
+  uncalibrated, the cost is off the play path, and metadata is a reject-only
+  gate.
+- **Press-play latency is a corpus decision.** HashSucker's own measurement:
+  request→206 p50 1052 ms / p95 1532 ms on cached TorBox. The path is
+  strictly sequential only at metadata→exact-file→availability→materialise;
+  everything else can race. The uncached-debrid and direct-swarm cases cannot
+  be made to feel immediate because the bytes do not exist yet.
+- **Nobody in the client-first ecosystem owns route authority.** Debrify
+  re-resolves expired links in Dart; VortX carries the playhead across a
+  source swap; MovieBox-TUI proves a client can be a CLI that hands mpv a URL
+  and headers; Slate proves a watchlist is a complete product. Nobody owns
+  "which exact file is this, and what happens when that route dies".
+
+### WHAT REMAINS UNPROVEN
+
+- Whether a resolver-first shape can *show* its value. Exact identity, stable
+  representation and autonomous repair are invisible in a generic player.
+- ExoPlayer's and AVFoundation's runtime behaviour (source-level evidence
+  only — no Android or Apple hardware here).
+- The cold-start latency of a direct swarm: no credible public benchmark
+  exists; the only figure (6–10 s) is blog-grade.
+- The corpus's MP4-faststart-vs-MKV ratio, which decides whether the
+  moov-at-end extra round-trip matters at all.
+- Whether gluetun's WireGuard path rejects or drops on tunnel loss (both
+  exist in source; the call site was not traced) — so "fail fast vs hang" is
+  not established and our own socket timeouts must not assume it.
+- The semantic front door's licence position: TMDB's terms forbid use in
+  connection with an AI-based application without written permission.
+
+### WHAT WAS LEARNED
+
+- **A pivot can move the product edge without touching the architecture.**
+  The durable chain, the exact identity model, the Binding, the route
+  separation, the delivery evidence, the representation policy and the
+  autonomous recovery all survive every plausible shape.
+- **The interesting object is the route, not the file.** A stable URL that
+  survives route changes is the real primitive; the VFS is one transport for
+  it, and a redirect is the one transport that destroys it.
+- **A proxy versus a redirect is the difference between transparent failover
+  and none.** This was invisible until the client was imagined.
+- **Deferring a backend is free when the seam is right.** `DeliveryCapability`
+  is already provider-agnostic, so the swarm decision can be deferred without
+  re-architecting anything — which is exactly the property the recon needed
+  to make "defer" a safe recommendation rather than a dodge.
+- **The industry resolves "same content, different version" by IDs and
+  policy, never by proof** (SMPTE IMF deltas; NAGRAVISION's IMDb-ID plus a
+  policy score). That is the gap HashSucker is in — and it is a gap nobody
+  is paying to close.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- "The client needs the server to expose a seek index" → false; the client
+  derives it from the container.
+- "A route swap interrupts the player" → false for mpv with an owned byte
+  layer; true for every mainstream substrate's public API.
+- "A swarm route could be a first-class route" → it must be a fallback with
+  its own health semantics; the availability semantics invert.
+- "Our mid-body truncation contract matches the player's" → the player is
+  more forgiving than the contract assumes.
+- "The presentation identity's pain is duplicate versions" → largely
+  historical (round two); the live pains are freshness, availability and
+  metadata correctness.
+
+### WHAT SHOULD BE UPDATED
+
+- `docs/recon/2026-10-psychedelic-moonshot-recon.md` (new), `PLANS.md`,
+  `handoff/CURRENT.md` — done in this slice.
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing was deleted from the code; this slice changed no source file.
+- The conceptual cut is recorded: Plex/Jellyfin publication, the `.strm`
+  tree and the WebDAV VFS become a compatibility layer; the provider
+  abstraction and corpus ingestion are re-shaped; the requested-season
+  scheduler and Cinemeta become client-side or proposal-only.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The candidates the recon leaves standing,
+in order of information per cost: (1) a `hashsucker://` mpv custom protocol
+plus a one-command CLI against the proxying path, proving the resolver
+contract from a real player and making same-TorrentFile failover invisible;
+(2) a resolver API in the Stremio-addon shape; (3) speculative resolution on
+item focus; (4) a direct-swarm capability, whose only required outcome is
+the measured cold-start number.

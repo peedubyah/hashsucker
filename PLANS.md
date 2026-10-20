@@ -102,6 +102,52 @@ exact, identity-stable, self-repairing resolver. None has happened; the
 cheapest way to learn which is falsified is a product test on the resolver
 surface, not more architecture.
 
+**Psychedelic moonshot recon (2026-10-20) — the "own the experience"
+question.** `docs/recon/2026-10-psychedelic-moonshot-recon.md` asks what
+HashSucker would own if it owned both the resolver and a client. The
+recommendation, for a human to dispose of, is **PIVOT TO RESOLVER, KEEP
+CLIENT EXTERNAL**:
+
+- **The resolver surface already exists** — `/stream/:type/:id` is a stable,
+  identity-derived URL, "stable forever" ✓. What is missing is that it
+  answers with a **307 redirect to the provider**, which hands the client to
+  the provider and makes transparent failover impossible; the proxying paths
+  (`/vfs`, `/media`) can fail over transparently ✓. **One small change —
+  proxying instead of redirecting — converts "same-TorrentFile failover is
+  invisible" from false to true** ✓.
+- **The new primitive is the resolvable item**: durable identity + durable
+  representation, addressed by a stable URL whose route may change
+  underneath it ✓, plus a **session-scoped** projection (live route,
+  alternates, position, preferences, continuity state) that is derived and
+  never authoritative ✓.
+- **A player is a commodity of execution** — mpv/libmpv is the only substrate
+  with a measured, invisible in-flight route swap (`mpv_stream_cb_add_ro`
+  ✓), and the first proving ground is **Linux desktop** ✓, not tvOS ✓
+  (Dolby Vision is only native on Apple ✓; tvOS sideloading is a re-sign
+  treadmill ✓).
+- **Direct BitTorrent is feasible, low-value and deferred** ✓ — the
+  capability seam is already provider-agnostic (`runtime_url` ✓) and rqbit's
+  HTTP Range endpoint is a drop-in ✓, but swarm availability has an unbounded
+  tail ✓, the existing breaker would mis-classify a swarm stall as a dead
+  provider ✓, and the exposure is structural ✓. The VPN isolation model is
+  characterised ✓ (netns-owned firewall ✓, health-endpoint gating ✓, route
+  property not identity ✓).
+- **Cross-representation continuity stays research** ✓ — the prior
+  temporal-correspondence primitive is credible (0 false positives on the
+  negatives ✓, n=1 real positive ✓) and its ingredients are now mature
+  (Chromaprint ✓ MIT ✓, vPDQ/TMK ✓ BSD ✓, ffmpeg ssim/libvmaf ✓), but the
+  confidence model is uncalibrated ✓ and the cost is off the play path ✓.
+- **The uncomfortable finding**: in a resolver-first shape, the three things
+  HashSucker is best at (exact identity, stable representation, autonomous
+  repair) are **invisible to a user in a generic player** ✓ — the advantage
+  only shows in the rare cases where something would otherwise have broken ✓.
+  That is the pivot's real risk ✓, and it is why the smallest product test
+  (press-play → first frame under 2 s, zero manual actions, same
+  representation across a forced mid-session route kill ✓) is the next thing
+  worth doing.
+
+Nothing here is a selected slice ✓; the roadmap is unchanged ✓.
+
 
 Completed final slice: **bound stale-inventory binding retry churn** —
 **CLOSED**. The host-only canary passed clean E01 plus the full E01/E05/MobLand

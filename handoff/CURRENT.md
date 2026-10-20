@@ -65,6 +65,30 @@ uncomfortable commercial fact: nobody is observed paying for a library, a
 scanner, an identity layer, an exact-file identity, or autonomous repair.
 No slice is selected; the three falsifiers are recorded in `PLANS.md`.
 
+**Psychedelic moonshot recon (2026-10-20) — "what if HashSucker owned the
+experience?"** `docs/recon/2026-10-psychedelic-moonshot-recon.md`. The
+recommendation, for a human to dispose of, is **PIVOT TO RESOLVER, KEEP CLIENT
+EXTERNAL**. Four things a next session must know:
+
+- **The resolver already exists** (`/stream/:type/:id` ✓ — stable forever ✓)
+  but it **307-redirects to the provider** ✓, which makes transparent failover
+  impossible on that path ✓; the proxying paths (`/vfs`, `/media`) can fail
+  over transparently ✓. Making the resolver proxy is the single highest-value
+  small change this recon found ✓.
+- **Player substrate**: mpv/libmpv, Linux desktop first ✓ — the only one with
+  a *measured* invisible in-flight route swap (`mpv_stream_cb_add_ro` ✓).
+  tvOS is last (DV only native on Apple ✓; sideloading is a re-sign
+  treadmill ✓).
+- **Direct BitTorrent: deferred** ✓ — feasible ✓ (rqbit's HTTP Range endpoint
+  is a drop-in `runtime_url` ✓) but the availability tail is unbounded ✓, the
+  existing breaker would mis-classify a swarm stall ✓, and the VPN isolation
+  model is a separate trust domain ✓. The capability seam is already paid
+  for ✓, so deferring costs nothing ✓.
+- **Cross-representation continuity**: research ✓ — the prior
+  temporal-correspondence primitive is credible ✓ and its ingredients are
+  mature now ✓ (Chromaprint ✓, vPDQ/TMK ✓, ffmpeg ssim ✓), but the
+  confidence model is uncalibrated ✓ and the cost is off the play path ✓.
+
 One recovery note: a `git stash -u` during the merge was dropped with the
 pre-existing untracked user files inside it
 (`artifacts/ab-baseline-off.jsonl`, `artifacts/ab-off-vs-on.json`,
