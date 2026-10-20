@@ -616,6 +616,23 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   }
 
   /**
+   * EVERY non-removed placement a provider holds for one infoHash.
+   *
+   * `findPlacementByInfoHash` returns one placement per provider, which
+   * hides a replaced resource: when a provider re-creates a release under a
+   * new resource id, the old (dead) row is what the singular lookup returns
+   * and the replacement is invisible. Route decisions need the whole set.
+   */
+  function listPlacementsByInfoHash(provider, infoHash) {
+    const rows = db.prepare(`
+      SELECT * FROM provider_placements
+      WHERE provider = ? AND info_hash = ? AND state != 'removed'
+      ORDER BY observed_at ASC, id ASC
+    `).all(normalizeIdentifier(provider), normalizeInfoHash(infoHash));
+    return rows.map((row) => rowToPlacement(row));
+  }
+
+  /**
    * Resolve one current provider coordinate for a TorrentFile. This is a
    * legacy Binding-enrollment helper, not the serving path. It deliberately
    * starts from TorrentFile X and never from Binding route history.
@@ -1059,8 +1076,48 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
         observedAt, options.expiresAt ?? null, files.length,
         options.evidence == null ? null : JSON.stringify(options.evidence),
       );
+      supersedeTerminalRouteEvidence(placementId, files, observedAt);
       return listProviderFiles(placementId);
     });
+  }
+
+  /**
+   * RE-OBSERVATION: a fresh provider inventory that still lists a file
+   * supersedes that route's terminal delivery observation.
+   *
+   * The terminal record said "this route answered gone". A newer
+   * authoritative inventory from the same provider that still lists the
+   * file contradicts it, and the newer observation wins — the route is no
+   * longer known dead. The record is NOT erased: it is superseded by a
+   * newer usable record, so the causal history (this route died, and was
+   * seen again) stays readable.
+   *
+   * A route replaced by a NEW resource id is a different route: it has no
+   * evidence of its own and nothing to supersede.
+   */
+  function supersedeTerminalRouteEvidence(placementId, files, observedAt) {
+    const placement = requirePlacement(placementId);
+    const rows = db.prepare(`
+      SELECT provider_file_id FROM provider_delivery_evidence
+      WHERE provider = ? AND account_scope = ? AND placement_id = ?
+        AND provider_file_id IN (${files.map(() => '?').join(',') || "''"})
+        AND state = 'terminal' AND expires_at > ?
+    `).all(
+      placement.provider, placement.accountScope, placement.id,
+      ...files.map((file) => requireString(file.providerFileId, 'providerFileId')),
+      observedAt,
+    );
+    for (const row of rows) {
+      db.prepare(`
+        UPDATE provider_delivery_evidence
+        SET state = 'usable', reason = 'superseded-by-fresh-provider-inventory',
+            failure_category = NULL, observed_at = ?, expires_at = ?, recorded_at = ?
+        WHERE provider = ? AND account_scope = ? AND placement_id = ? AND provider_file_id = ?
+      `).run(
+        observedAt, observedAt + 10 * 60 * 1000, now(),
+        placement.provider, placement.accountScope, placement.id, row.provider_file_id,
+      );
+    }
   }
 
   // Slice 1.5: durable mapping conflict. The provider_files row is the
@@ -1276,6 +1333,15 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
   // response prettier.
   function listDataPlaneCoordinates(torrentFileId) {
     requireString(torrentFileId, 'torrentFileId');
+    // The route set the byte path is offered. A route with a FRESH TERMINAL
+    // delivery observation (the provider answered "gone") is NOT offered:
+    // the route set is a delivery decision, and offering a proven-dead
+    // route only spends a capability attempt on it. The placement row is
+    // kept — the record is history, not a licence to serve.
+    //
+    // The evidence's own horizon bounds the exclusion: a terminal record
+    // that is not superseded expires and the route is offered again, so a
+    // stale or wrong verdict cannot un-serve a title forever.
     return db.prepare(`
       SELECT
         pl.provider             AS provider,
@@ -1287,12 +1353,22 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
         pf.size                 AS size
       FROM provider_files pf
       JOIN provider_placements pl ON pl.id = pf.placement_id
-      WHERE pf.torrent_file_id = ?
+      LEFT JOIN provider_delivery_evidence ev
+        ON ev.provider = pl.provider
+        AND ev.account_scope = pl.account_scope
+        AND ev.placement_id = pl.id
+        AND ev.provider_file_id = pf.provider_file_id
+      WHERE pf.torrent_file_id = @torrentFileId
         AND pf.present = 1
         AND pf.mapping_state = 'mapped'
         AND pl.state != 'removed'
+        AND NOT (
+          ev.state IS NOT NULL
+          AND ev.state = 'terminal'
+          AND ev.expires_at > @now
+        )
       ORDER BY pl.provider, pl.account_scope, pf.provider_file_id
-    `).all(torrentFileId);
+    `).all({ torrentFileId, now: now() });
   }
 
   function getProviderInventorySnapshot(placementId) {
@@ -2194,6 +2270,7 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     recordPlacement,
     findPlacement,
     findPlacementByInfoHash,
+    listPlacementsByInfoHash,
     resolveDeliveryCoordinates,
     findFileMapping,
     recordDeliveryEvidence,
