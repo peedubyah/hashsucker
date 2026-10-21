@@ -3,6 +3,34 @@
 Active phase: **Core playback reliability & recovery — CLOSED**.
 → [`docs/phases/phase-core-playback-reliability.md`](docs/phases/phase-core-playback-reliability.md)
 
+**Latency slice (2026-10-21) — DONE. VERDICT: FAST PLAYBACK — INTERNAL
+BOTTLENECK FIXED.** The 8-90 s first-frame tail was ONE internal defect: a
+client demand that joined a chunk another reader's plan had claimed but not
+started waited, unbounded, behind that plan's in-order fill queue. The
+player's whole-file request claimed 518 chunks; the player's own metadata
+request joined one of them and waited **132 s for 0 bytes**. Repaired with a
+bounded takeover (one per demand); the same three fixtures went
+**90 090 / 90 081 / 90 089 ms -> 4 105 / 5 639 / 4 901 ms**. The provider's
+own cold TTFB is **88 ms** (p50) and HashSucker adds **0 ms** after the
+provider's first byte. Full report: `docs/recon/2026-10-21-fast-playback.md`.
+
+**Ranking is not the latency target** and was not touched: the candidates that
+won were serviceable, exact and within the quality floor; the time was not
+spent choosing them.
+
+**Not fixed here, deliberately:** the player asks for the WHOLE file, the byte
+path honours it, and the player's own demux of that stream is the largest
+remaining cold bucket (p50 4.2 s), with the provider traffic and the
+eviction storm (1 040 evictions, 524 of 994 chunk fills failed) behind it. A
+demand-driven fill instead of a range-driven one is the next question, and it
+is a cache-policy question, not a latency bug.
+
+**Kept separate from speed:** Rear Window (tt0089883) does not PLAY right now
+— every candidate is uncached at TorBox, RealDebrid refuses the add, and the
+binding fails with `NO_PLACEMENT` before any size comparison. A supply
+failure, not a latency one.
+→ [`docs/phases/phase-core-playback-reliability.md`](docs/phases/phase-core-playback-reliability.md)
+
 Core graduation decision: **READY**. Request → exact representation →
 publication → real Plex playback → runtime recovery is proven sufficiently for
 product evolution. Continued hardening requires a newly observed defect; no
@@ -23,7 +51,7 @@ a product decision, not a consequence of a known defect.
 | environmental | the appliance's Jellyfin API key is rejected (HTTP 401): Jellyfin's live projection cannot be proven end to end until the credential is replaced |
 | operational | the routine reconciler's executor is not wired in production (only a shadow plan runs); the failed-activation retry map is process-local, so a restart loses it (the deterministic reconciliation covers the projection) |
 | optimization | a byte count is ambiguous for 424 of 4099 mapped provider files (10.3 %); the corpus holds no per-file path, so file selection still leans on the byte count |
-| correctness | the corpus path presents the RELEASE-level byte count as a candidate's "exact file size" (`media-request-stages.js:227`); for every multi-file release the provider holds (112 of 354) that number matches **no** file, so the exact-size proof cannot succeed — the upstream's per-file size proves one in 93.7 % vs the corpus count's 45.1 % |
+| correctness | **CLOSED 2026-10-21** — the corpus path no longer presents the RELEASE-level byte count as a candidate's "exact file size"; the total is release-level evidence and the per-file size is unknown. The upstream's number is scoped by the SOURCE's own shape (measured: a stream that names a file carries that file's exact size 100 % of the time; one that names only the release, per-file 0 % of the time). 27 of the 28 production bindings that used the corpus's total rebind to the SAME TorrentFile through PATH B; the remaining cases are provider-inventory states, not proof failures |
 | speculative | a per-file path for the corpus from a source that has one (torrent-metadata sidecar) — the plumbing exists and is proven; the SOURCE does not |
 
 **Ecosystem reconnaissance (2026-10-20) — done, no moonshot selected.**

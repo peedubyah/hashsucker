@@ -340,6 +340,59 @@ recovered from the dropped stash's untracked commit (`b4d12bd`) and restored
 untracked. A dropped stash is still recoverable while its object survives —
 look in `git fsck --unreachable` before assuming a loss.
 
+## Live session state (2026-10-21, fast playback — the first-frame tail, named and repaired)
+
+**What is now true.** The 8-90 s first-frame tail on the direct resolver path
+was ONE internal defect, and it is fixed. A client demand that joined a chunk
+another reader's PLAN had claimed but not started waited, unbounded, behind
+that plan's in-order fill queue. The player asks for the whole file; the data
+plane claims all 518 chunks of it; the player's own SECOND request (the
+container's metadata, at the END of the file) joins one of those claims and
+waits **132 s for 0 bytes**. The demand consume loop now takes that chunk
+over after a 3 s grace, at most once per demand.
+
+**Measured, same fixtures, same session, production stack:**
+tt0053291 **90 090 -> 4 105 ms**; tt0075686 **90 081 -> 5 639 ms**;
+tt0468569 **90 089 -> 4 901 ms**. The provider's own cold TTFB is **88 ms**
+(p50) and HashSucker adds **0 ms** between the provider's first byte and the
+client's. Warm first frame is now ~0.5 s; cold-body 2.4-8.7 s.
+
+**How to measure it again.** One session id crosses all three processes: the
+client mints it, the server reads it and forwards it to the data plane, and
+the data plane records it as its stage-report correlation id. The canonical
+waterfall lives in `media-search/src/lib/measurement/playback-waterfall.js`
+(stage list, monotonic recorder, cross-process assembler) and the server's
+per-request marks in `media-search/src/lib/measurement/session-store.js`.
+The client is `media-search/tools/hs/main.mjs` (add `--json`); the cohort
+runner is `media-search/tools/hs/cohort.mjs --runs N --fixture "label=intent"`.
+The full report: `docs/recon/2026-10-21-fast-playback.md`.
+
+**Two things the next session must not re-litigate.**
+1. **The corpus does not present a release total as an exact file size any
+   more** (Part 0, `8ae3528`). The corpus holds 1 593 139 candidate rows
+   and 1 593 141 release-attribute rows and NOT ONE carries a file_index, a
+   file_path or a file_size. The upstream's number is scoped by the SOURCE's
+   own shape. Ranking is untouched.
+2. **Rear Window (tt0089883) does not PLAY right now** — every candidate is
+   uncached at TorBox, RealDebrid refuses the add, and the binding fails with
+   `NO_PLACEMENT` before any size comparison. It has never been bound in
+   production. That is a SUPPLY failure and it is not a latency finding; do
+   not read the cohort's `0/3 played` as a slow start.
+
+**The next open question, deliberately not taken here:** the player asks for
+the WHOLE file, the byte path honours the range, and the player's own demux
+of that stream is the largest remaining cold bucket (p50 4.2 s) — with the
+provider traffic (8.34 GB for 6 requests), 1 040 evictions and 524 of 994
+failed chunk fills behind it. Whether the fill should be demand-driven rather
+than range-driven is a cache-policy question.
+
+**State of the trees.** `main` carries Part 0 (`8ae3528`), the waterfall
+(`6df1163`) and the data-plane takeover. Production runs the rebuilt
+images: media-search and data-plane were rebuilt and recreated during this
+session, both healthy. The 7 untracked user files (ab-*.jsonl, ab-*.json,
+.env.example, bench-core-latency.mjs, ab-*-driver.sh) are preserved and
+untouched.
+
 ## Live session state (2026-10-19, critical-path independence audit)
 
 - `main` is AHEAD of `github/main` (local commits, unpushed). The header

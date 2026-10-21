@@ -66,6 +66,20 @@ use crate::throughput::{
 };
 use crate::transport::{Faults, OpenError, ReaderCapability, ResilientRangeReader, Step};
 
+/// How long a demand waits for a chunk another reader's PLAN claimed before
+/// it fetches that chunk itself.
+///
+/// The plan that claimed it is filling a range in order, so a chunk far from
+/// that range's start can be hundreds of fetches away. A demand that needs
+/// it now would otherwise wait behind the whole queue — measured: a player
+/// asking for a whole file and then for its container's metadata at the END
+/// waited 132 s for 0 bytes and gave up before the queue reached it.
+///
+/// The grace is long enough that a chunk the owner is ACTIVELY filling
+/// completes first (one 8 MiB chunk), so the common case does not
+/// duplicate a fetch.
+const JOIN_GRACE: Duration = Duration::from_secs(3);
+
 pub const SUPPORTED_SCHEMA_VERSION: u64 = 1;
 
 /// Request-scoped
@@ -1236,6 +1250,11 @@ async fn stripe_worker(
                 continue;
             }
         };
+        // The owner is ON this chunk now. A demand that joined it must
+        // not fetch a duplicate: it waits for the owner's fill.
+        for rec in cache.inflight().records_for(&key, &[idx]) {
+            rec.started.store(true, Ordering::SeqCst);
+        }
         let ws = run_start.max(cs);
         let we = run_end.min(ce);
         let sink = chunk_sinks.get(&idx).cloned();
@@ -2786,6 +2805,10 @@ else if stripe_wanted(sub.len())
                     // workers and publishes the waterfall with its
                     // termination -- cancelled, wedged, failed, or complete
                     // demands are all visible instead of only the clean path.
+                    // At most one chunk takeover per demand (see the Waiter
+                    // arm): a demand must not re-fetch a whole range behind
+                    // the fill owner's back.
+                    let mut took_over = false;
                     'consume: for item in items {
                         match item {
                             FetchItem::Owned { mut rx } => loop {
@@ -2901,8 +2924,80 @@ else if stripe_wanted(sub.len())
                                 // Check the flags BEFORE awaiting.
                                 let finished = record.success.load(Ordering::SeqCst)
                                     || record.failed.load(Ordering::SeqCst);
-                                if !finished {
-                                    record.done.notified().await;
+                                if !finished && !took_over {
+                                    // A demand that joined a chunk another
+                                    // reader's PLAN claimed must not wait
+                                    // behind that plan's queue forever.
+                                    //
+                                    // Measured (byte-cold 4.3 GB file): a
+                                    // player asks for the whole file, then
+                                    // asks for the container's metadata at
+                                    // the END of it. That second demand
+                                    // joined the first demand's claim for a
+                                    // chunk 258 fetches away in the owner's
+                                    // queue and waited 132 s for 0 bytes —
+                                    // longer than the player's patience. The
+                                    // player gave up and the first frame
+                                    // arrived at 90 s.
+                                    //
+                                    // So the wait is bounded: if the owner has
+                                    // not even STARTED the chunk by then, this
+                                    // demand fetches the chunk ITSELF. The
+                                    // duplicate is at most one chunk, and the
+                                    // owner's later read of the same chunk
+                                    // finds it already durable.
+                                    let grace = tokio::time::timeout(
+                                        JOIN_GRACE,
+                                        record.done.notified(),
+                                    )
+                                    .await;
+                                    if grace.is_err()
+                                        && !record.success.load(Ordering::SeqCst)
+                                        && !record.failed.load(Ordering::SeqCst)
+                                        && !record.started.load(Ordering::SeqCst)
+                                    {
+                                        // Take the chunk over: fetch it here,
+                                        // now, for THIS demand.
+                                        let cs = grid.chunk_start(index);
+                                        let ce = match grid.chunk_end(index) {
+                                            Some(e) => e,
+                                            None => {
+                                                outcome = ResponseOutcome::Error;
+                                                break 'consume;
+                                            }
+                                        };
+                                        let s = run.start.max(cs);
+                                        let e = run.end.min(ce);
+                                        metrics.record_demand_chunk_takeover();
+                                        // At most ONE takeover per demand: a
+                                        // demand whose window spans many
+                                        // chunks must not re-fetch the whole
+                                        // range behind the owner's back. The
+                                        // chunk taken over is the FIRST one
+                                        // this demand is blocked on, which
+                                        // is also the first byte its client
+                                        // is waiting for.
+                                        took_over = true;
+                                        fill_chunk_run(
+                                            cache.clone(),
+                                            metrics.clone(),
+                                            manager_clone.clone(),
+                                            client_clone.clone(),
+                                            priority,
+                                            tf_id.clone(),
+                                            vec![index],
+                                            cs,
+                                            ce,
+                                            s,
+                                            e,
+                                            faults,
+                                            None,
+                                            Some(stage.clone()),
+                                            cold,
+                                            None,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 if record.failed.load(Ordering::SeqCst) {
                                     // T19: terminal-chunk truncation joins
@@ -4666,6 +4761,10 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
         "bytes_streamed": m.bytes_streamed.load(Ordering::SeqCst),
         "client_cancellations": m.client_cancellations.load(Ordering::SeqCst),
         "upstream_errors": m.upstream_errors.load(Ordering::SeqCst),
+        // Demands that took over a chunk another reader's plan had claimed
+        // but not started. Before the takeover, such a demand waited behind
+        // that plan's fill queue — and lost.
+        "demand_chunk_takeovers": m.demand_chunk_takeovers.load(Ordering::SeqCst),
         // Layer A — requestdl / TorBox API acquisition (the only legitimate provider API call)
         "layer_A_api": {
             "requests": m.api_requests.load(Ordering::SeqCst),

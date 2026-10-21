@@ -4,6 +4,148 @@ Format per entry: date / phase-slice / status / observed changes /
 verification / production evidence / unproven / artifacts / next gate.
 No planned work as completed. No vague "healthy." No speculative causes.
 
+## 2026-10-21 — FAST PLAYBACK, NOT PERFECT RANKING — Part 0: the false exact-size fact, corrected
+
+- Changed: the corpus path no longer presents its release TOTAL as an exact
+  per-file size. `media-search/src/api/media-request-stages.js` (the corpus
+  title-index stage) now carries the total as release-level evidence in
+  `releaseAttributes.size` and leaves the per-file size unknown (null). The
+  upstream's number is scoped where it enters the system:
+  `media-search/src/lib/stremio/normalize.js` decides per-file vs
+  release-level from the STREAM'S OWN SHAPE, and
+  `media-search/src/lib/discovery/file-size-evidence.js` (new) owns that
+  decision. `media-search/src/lib/discovery/live-bridge.js` carries both
+  channels; only the per-file one reaches the exact-file proof.
+- Verification: the corpus is release-level by construction — 1 593 139
+  `candidates` rows and 1 593 141 `release-attribute` rows, and NOT ONE
+  carries a `file_index`, a `file_path` or a `file_size`. The upstream's
+  number was measured on a 19 706-stream raw sample with the provider's
+  authoritative file list as the referee: a stream that names a FILE
+  (`fileIdx`, or a published filename carrying a media extension) carries
+  that file's exact size 100 % of the time (21 of 21 judgeable); a stream
+  that names only the RELEASE carries a release-level number 94 % of the
+  time (2 of 36 per-file). A release total can only ever bind a
+  SINGLE-FILE release: 0 of 221 multi-file releases in the durable
+  inventory have a total equal to any file's size.
+- Production evidence: none. The fix is NOT deployed for measurement
+  traffic; it was committed separately (`8ae3528`) before the latency work
+  began, and the image rebuild for the waterfall (below) carries it.
+- Unproven: the 4 production exact-size handoffs whose corpus-presented
+  total does not rebind via PATH B today (3 releases whose inventory holds
+  one file under two path spellings, 1 whose only file is a non-playable
+  `.exe`). The provider's file list is EPHEMERAL, so a replay against
+  today's inventory cannot separate "the proof would still work" from "the
+  provider's listing changed" — the honest statement is that 27 of the 28
+  corpus-total-bound handoffs rebind to the SAME TorrentFile via PATH B
+  today, and the remaining 4 are inventory states, not proof failures.
+- Artifacts: `media-search/test/file-size-scope.test.js` (11 tests:
+  single-file release, multi-file pack, upstream per-file size, no per-file
+  size, a release total never satisfying the exact-file proof).
+  Full suite: 3 625 tests, 3 621 pass, 3 skipped, 1 fail — the known
+  pre-existing `vfs-collection-resilience` C1/C2/C3 baseline.
+- Next gate: the latency instrument, below.
+
+## 2026-10-21 — FAST PLAYBACK, NOT PERFECT RANKING — Phase 1: one session id, one timeline, one waterfall
+
+- Changed: the playback session now has ONE correlation id that crosses all
+  three processes. The client mints it (`media-search/tools/hs/main.mjs`),
+  the server reads it and forwards it to the data plane
+  (`media-search/src/lib/vfs/data-plane-forward.js`), and the data plane
+  records it as the correlation id of its stage report
+  (`data-plane/src/serve.rs`, `data-plane/src/metrics.rs`). The canonical
+  stage list, the monotonic recorder and the cross-process assembler live
+  in `media-search/src/lib/measurement/playback-waterfall.js`; the server's
+  marks across requests share one monotonic origin in
+  `media-search/src/lib/measurement/session-store.js`.
+- Verification: every process measures with a MONOTONIC clock
+  (`process.hrtime` in Node, `Instant` in Rust) and reports the wall
+  instant of its own anchor, which is the alignment point. The data
+  plane's stage report gained `T0_wall_ms` for exactly this. 11 unit tests
+  pin the stage list, the ordering, the bucket rule and the session id's
+  shape.
+- Production evidence: a live warm playback (tt10986410) through the
+  rebuilt image, with the session id observed in the data plane's own
+  `corr_id`:
+
+      +     0ms  binding_resolved            server
+      +     1ms  playback_object_minted      server
+      +     6ms  player_launched             client
+      +    84ms  first_http                  server
+      +     4ms  first_rust_byte_request     data-plane
+      +  1213ms  first_byte_to_client        data-plane   <- a bucket
+      +  1875ms  player_file_loaded          client       <- a bucket
+      +   325ms  first_frame                 client
+
+  The 1213 ms bucket is INSIDE the data plane with NO provider request at
+  all (T1..T4 null, `cache_hit` true, `cdn_requests_delta` 0). The
+  previous instrumentation could not say that: the seconds were simply
+  somewhere between the request and the picture.
+- Unproven: WHERE the 1213 ms went inside the data plane. The waterfall
+  says it was not a provider request; it does not yet say what it was.
+  That is the next question, not an answer.
+- Artifacts: `media-search/test/playback-waterfall.test.js` (11 tests).
+  Full suite: 3 625 tests, 3 621 pass, 3 skipped, 1 fail — the known
+  pre-existing baseline.
+- Next gate: the fast/slow cohort — the same instrument across warm and
+  byte-cold reads, movies and episodes, a dual-route file and a large one,
+  so the tail can be characterised before anything is changed.
+
+## 2026-10-21 — FAST PLAYBACK, NOT PERFECT RANKING — Phases 1-13: the 8-90 s tail, named and repaired
+
+- Changed: the byte path's demand consume loop no longer waits unboundedly
+  behind another reader's fill queue. A demand that joins a chunk another
+  reader's PLAN claimed but has not started now takes that chunk over after a
+  3 s grace (`data-plane/src/serve.rs`, the Waiter arm; `JOIN_GRACE`). The
+  takeover is limited to ONE per demand, so a demand spanning many chunks
+  cannot re-fetch a range behind the fill owner's back. The data plane also
+  records a chunk's body span and byte count per attempt
+  (`data-plane/src/metrics.rs`), and the client's session id now reaches the
+  data plane as its stage-report correlation id.
+- Verification: the canonical cross-process waterfall (Phase 1) put the tail
+  in ONE bucket — `first_byte_to_client -> player_file_loaded` — and the
+  byte-request trace named the mechanism: the player asks for the whole file,
+  the data plane claims all 518 chunks of it, and the player's SECOND request
+  (the container's metadata at the END of the file) joins that claim for a
+  chunk 258 fetches away and waits **132 s for 0 bytes**, then asks again and
+  waits 72 s. The player gave up at ~90 s.
+- Before/after, same fixtures, same session, production stack:
+  tt0053291 (10.5 GB) **90 090 -> 4 105 ms**; tt0075686 (4.3 GB)
+  **90 081 -> 5 639 ms**; tt0468569 (4.4 GB) **90 089 -> 4 901 ms**.
+  All three pre-fix numbers landed within 9 ms of each other — the signature
+  of a timeout, not of a slow provider.
+- Production evidence: a post-fix cohort of 8 fixtures x 3 runs on the live
+  stack: warm-movie p50 552 ms, warm-episode 309 ms, byte-cold-movie
+  2 608 ms, byte-cold-episode 320 ms, dual-route 609 ms, large-file 764 ms,
+  season-pack 421 ms; 21/21 successful runs split into body-hot (14 runs,
+  total p50 523 ms) and body-cold (7 runs, total p50 5 069 ms, max 8 664 ms).
+  The provider's own TTFB on a cold read is **88 ms** (p50) and **HashSucker
+  adds 0 ms** between the provider's first byte and the client's.
+- Unproven: the remaining cold bucket is the PLAYER's own container work over
+  a whole-file request (the player asks for 0..size; the byte path honours it;
+  ~1 040 evictions, 524 of 994 chunk fills failed, 8.34 GB fetched for 6
+  requests). A demand-driven fill instead of a range-driven one would cut that
+  traffic, but it changes the cache's warming contract and was NOT taken here.
+  Also unproven: whether the alternate provider route would have been faster
+  for the dual-route fixture — it was never tried, and the TorBox reads were
+  fast, so route choice is not implicated.
+- A RELIABILITY finding, kept separate from speed: the previously slow
+  fixture **Rear Window (tt0089883) does not play at all** right now. Every
+  candidate is `uncached` at TorBox, RealDebrid refuses/times out on the add,
+  and the binding fails with `NO_PLACEMENT` BEFORE any size comparison. It has
+  never been bound in production (no handoff, no library item). This is a
+  supply failure, not a latency one.
+- Artifacts: `docs/recon/2026-10-21-fast-playback.md` (the full report and
+  the verdict), `media-search/tools/hs/cohort.mjs` (the cohort runner),
+  `media-search/test/playback-waterfall.test.js` (11 tests),
+  `media-search/test/file-size-scope.test.js` (11 tests). Suites: media-search
+  3 625 tests / 3 621 pass / 1 pre-existing baseline fail; data-plane 153
+  passed / 0 failed.
+- Next gate: the whole-file range. The player's initial read asks for the
+  entire file and the byte path fills all of it, which is the largest
+  remaining cold cost (the provider traffic, the eviction storm, and the
+  player's own demux wait). Whether the fill should be demand-driven is the
+  next question, and it is a cache-policy question, not a latency bug.
+
 ## 2026-10-12 — VFS collection mtime scanned PMS continuously — FIXED + DEPLOYED
 
 - Changed: `media-search/src/lib/vfs/tv-webdav.js` now derives TV collection

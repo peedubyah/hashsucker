@@ -131,6 +131,14 @@ pub struct ResilientRangeReader {
     stage: Option<StageClock>,
     /// Instant when the most recent CDN response headers were received.
     last_headers_at: Option<Instant>,
+    /// The headers instant of the CURRENT attempt, kept (not consumed) so the
+    /// attempt's body span can be closed at the body's end. `last_headers_at`
+    /// is consumed by the first-byte stamp; this one is not.
+    attempt_headers_at: Option<Instant>,
+    /// Bytes delivered by the CURRENT attempt. Reset when a new attempt
+    /// opens, so the per-attempt byte count is that attempt's own, not the
+    /// request's running total.
+    attempt_bytes: u64,
     /// Reactive same-TF failover arming: when true, an objective hard
     /// failure (429/5xx/transport-doom/dead-link) first tries a warm
     /// usable FREE cap from a different provider slot for the same
@@ -275,6 +283,8 @@ impl ResilientRangeReader {
             on_chunk,
             stage: None,
             last_headers_at: None,
+            attempt_headers_at: None,
+            attempt_bytes: 0,
             failover_allowed: false,
         }
     }
@@ -337,6 +347,8 @@ impl ResilientRangeReader {
             on_chunk,
             stage: None,
             last_headers_at: None,
+            attempt_headers_at: None,
+            attempt_bytes: 0,
             failover_allowed: false,
         }
     }
@@ -494,7 +506,9 @@ impl ResilientRangeReader {
                     }
                     self.response = Some(Box::new(resp));
                     // Stamp headers receipt instant for T4/body timing.
-                    self.last_headers_at = Some(Instant::now());
+                    let headers_at = Instant::now();
+                    self.last_headers_at = Some(headers_at);
+                    self.attempt_headers_at = Some(headers_at);
                     return Ok(());
                 }
             }
@@ -572,6 +586,8 @@ impl ResilientRangeReader {
                     from, to,
                 );
                 self.recovery.attempt += 1;
+                self.attempt_bytes = 0;
+                self.attempt_headers_at = None;
                 self.recovery.failovers += 1;
                 // Old reservation drops on assignment (permit freed) only
                 // after the replacement is fully constructed; the failed
@@ -636,6 +652,8 @@ impl ResilientRangeReader {
             s.set_attempt_recovery_path(self.recovery.attempt, "generic_transient_cooldown");
         }
         self.recovery.attempt += 1;
+        self.attempt_bytes = 0;
+        self.attempt_headers_at = None;
         if self.recovery.same_cap_retries <= MAX_SAME_CAP_RETRIES {
             if !effective.is_zero() {
                 self.metrics.add_limiter_wait_ms(applied_ms);
@@ -799,6 +817,7 @@ impl ResilientRangeReader {
                     let n = b.len() as u64;
                     let chunk_offset = self.pos; // bytes start at the previous self.pos
                     self.pos += n;
+                    self.attempt_bytes += n;
                     self.metrics
                         .bytes_streamed
                         .fetch_add(n, Ordering::SeqCst);
@@ -886,7 +905,30 @@ impl ResilientRangeReader {
         }
     }
 
+    /// Close the current attempt's body span: how long the body ran after the
+    /// headers, and how many bytes it delivered.
+    ///
+    /// The attempt's `ttfb_ms` says when the body's FIRST byte arrived; this
+    /// says how long the body took and how much of the range it covered. A
+    /// provider that sends its first byte instantly and then trickles is a
+    /// DIFFERENT fault from a slow first byte, and only these two numbers
+    /// tell them apart.
+    fn close_attempt_body(&mut self) {
+        let Some(headers_at) = self.attempt_headers_at.take() else {
+            return;
+        };
+        if let Some(s) = self.stage.as_ref() {
+            s.record_attempt_body_end(
+                self.recovery.attempt,
+                headers_at,
+                Instant::now(),
+                self.attempt_bytes,
+            );
+        }
+    }
+
     fn finalize(&mut self, success: bool) {
+        self.close_attempt_body();
         // Close the recovery wall-time window (if open) BEFORE recording the summary so the
         // value is a true wall-clock elapsed inside internal recovery, not a sum of cooldown
         // durations. The window spans the whole recovery path: first recoverable failure ->

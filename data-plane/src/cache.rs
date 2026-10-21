@@ -399,6 +399,13 @@ pub struct ChunkInFlightRecord {
     pub success: AtomicBool,
     pub failed: AtomicBool,
     pub error: Mutex<Option<String>>,
+    /// True once a fill has actually BEGUN reading this chunk upstream.
+    ///
+    /// A chunk is CLAIMED when a reader plans it, but the fill that will
+    /// read it may be hundreds of chunks away in the owner's queue. A
+    /// second demand that needs this chunk must therefore be able to tell
+    /// "the owner is on it" from "the owner merely promised it".
+    pub started: AtomicBool,
 }
 
 impl ChunkInFlightRecord {
@@ -410,6 +417,7 @@ impl ChunkInFlightRecord {
             success: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             error: Mutex::new(None),
+            started: AtomicBool::new(false),
         })
     }
 }

@@ -186,6 +186,11 @@ pub struct Metrics {
     pub limiter_wait_ms_total: AtomicU64,
     // Cumulative time spent in internal retry recovery — distinct from limiter wait.
     pub internal_recovery_ms_total: AtomicU64,
+    /// Demands that took over a chunk another reader's plan had claimed but not
+    /// yet started. The count is the fix's own evidence: before it, a demand
+    /// for a chunk far from the client's window waited behind that window's
+    /// fill queue, and could be outlasted by the client's patience.
+    pub demand_chunk_takeovers: AtomicU64,
 
     // ---- Slice 4 cache metrics ----
     pub cache: CacheMetrics,
@@ -567,6 +572,17 @@ pub struct CdnAttempt {
     /// For the final successful attempt, this is send→headers (same as headers_ms).
     /// Terminal outcome of this attempt. `Pending` until body/retry/failure resolves it.
     pub outcome: AttemptOutcome,
+    /// Milliseconds from the response HEADERS to the END of this attempt's body
+    /// (the body ended, or the attempt failed). This is the BODY's duration,
+    /// which is the part `ttfb_ms` does not cover: a provider can send its
+    /// first byte instantly and then crawl. Without this, "slow first byte"
+    /// and "slow body" are indistinguishable, and the whole point of the
+    /// byte-path question is to tell them apart.
+    /// None while the attempt is still open.
+    pub body_ms: Option<u64>,
+    /// Bytes this attempt delivered from the provider. Compared against the
+    /// request's byte range, it says whether the attempt ended early.
+    pub bytes: u64,
     /// Recovery path label for this attempt. Set when this attempt triggered a retry/recovery
     /// decision. None for the first attempt and for attempts that succeeded without recovery.
     /// Bounded, sanitized, safe for /metrics. Distinguishes:
@@ -766,7 +782,32 @@ impl StageClock {
                 outcome,
                 recovery_path: None,
                 span_kind,
+                body_ms: None,
+                bytes: 0,
             });
+        }
+    }
+
+    /// Record the END of an attempt's body: how long the body took after the
+    /// headers, and how many bytes it delivered.
+    ///
+    /// `ttfb_ms` says when the body's FIRST byte arrived. This says how long
+    /// the body ran and how much of the range it covered. A provider that
+    /// answers headers in 200 ms, sends its first byte in 1 ms and then
+    /// trickles 400 KB/s is the case that a latency waterfall must be able
+    /// to NAME, and only these two numbers can name it.
+    pub fn record_attempt_body_end(
+        &self,
+        attempt: u32,
+        headers_at: Instant,
+        body_end_at: Instant,
+        bytes: u64,
+    ) {
+        let body_ms = body_end_at.saturating_duration_since(headers_at).as_millis() as u64;
+        let mut g = self.attempts.lock().unwrap();
+        if let Some(a) = g.iter_mut().find(|a| a.attempt == attempt) {
+            a.body_ms = Some(body_ms);
+            a.bytes = bytes;
         }
     }
 
@@ -899,9 +940,13 @@ pub struct StageReport {
     /// Used to answer: is stalled demand blocked behind prefetch work?
     pub work_class: WorkClass,
     /// Per-attempt CDN telemetry. One entry per CDN request made during this fill.
-    /// Each entry has its own headers_ms, ttfb_ms, retry_decision_ms, and same_cap.
+    /// Each entry has its own headers_ms, ttfb_ms, body_ms, bytes, retry_decision_ms,
+    /// and same_cap.
     /// This decomposes the T3→T4 upstream phase into individual attempts so we can
     /// answer: was the ~55s stall ONE bad request, a retry chain, or something else?
+    /// `body_ms` and `bytes` are what separate "the provider's first byte was
+    /// slow" from "the provider's BODY was slow" — the two have identical
+    /// `ttfb_ms` but completely different causes.
     pub cdn_attempts: Vec<CdnAttempt>,
     /// Observability-only: the provider that owned the capability used for this request.
     /// Provider is execution metadata, NOT part of TorrentFile/cache byte identity.
@@ -1190,6 +1235,10 @@ impl Metrics {
     // ---- §15 cumulative timing ----
     pub fn add_limiter_wait_ms(&self, ms: u64) {
         self.limiter_wait_ms_total.fetch_add(ms, Ordering::SeqCst);
+    }
+    /// Record a demand that took over a chunk another reader had claimed.
+    pub fn record_demand_chunk_takeover(&self) {
+        self.demand_chunk_takeovers.fetch_add(1, Ordering::SeqCst);
     }
     pub fn add_internal_recovery_ms(&self, ms: u64) {
         self.internal_recovery_ms_total.fetch_add(ms, Ordering::SeqCst);

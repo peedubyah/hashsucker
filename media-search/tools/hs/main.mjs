@@ -125,9 +125,16 @@ function disambiguate(candidates) {
 }
 
 async function resolveIntent(base, args, measurement, sessionId = null) {
-  const body = MEDIA_ID.test(String(args.target).trim())
+  // An episode intent says so. The server resolves a media id's type from
+  // the media itself, and a movie id with episode coordinates is not a
+  // thing: sending season/episode WITHOUT the type made the server treat
+  // the request as a MOVIE, so the episode cohort was measuring the cold
+  // movie path and failing to find the episode's binding at all.
+  const isEpisode = args.season != null && args.episode != null;
+  const base_ = MEDIA_ID.test(String(args.target).trim())
     ? { mediaId: String(args.target).trim(), season: args.season, episode: args.episode }
     : { query: String(args.target).trim(), season: args.season, episode: args.episode };
+  const body = isEpisode ? { ...base_, mediaType: 'series' } : base_;
 
   measurement.resolverAttempts += 1;
   let response = await ask(base, body, sessionId);
@@ -191,7 +198,41 @@ async function collectWaterfall({ base, sessionId, clientMarks }) {
   const dataPlane = await readDataPlaneStages(sessionId);
   if (dataPlane) sources.push(dataPlane);
 
-  return assembleWaterfall({ sessionId, sources });
+  const waterfall = assembleWaterfall({ sessionId, sources });
+  // EVERY byte request the player made, not just the first. A player issues
+  // several (a probe, then ranges, then the container's metadata), and the
+  // tail can live in any of them. The canonical waterfall keeps the FIRST
+  // as its stage; the rest are the detail under it.
+  if (dataPlane?.requests?.length) {
+    waterfall.byteRequests = dataPlane.requests.map((r) => ({
+      t0WallMs: r.T0_wall_ms ?? null,
+      range: { start: r.request?.start ?? null, end: r.request?.end ?? null },
+      cacheHit: r.cache_hit ?? null,
+      cdnRequests: r.cdn_requests_delta ?? null,
+      apiRequests: r.api_requests_delta ?? null,
+      provider: r.provider || null,
+      t3DispatchedMs: r.T3_cdn_dispatched_ms ?? null,
+      t4FirstUpstreamByteMs: r.T4_first_upstream_byte_ms ?? null,
+      t5FirstClientByteMs: r.T5_first_client_byte_ms ?? null,
+      totalOpenTtfbMs: r.total_open_ttfb_ms ?? null,
+      termination: r.termination ?? null,
+      bytesDelivered: r.bytes_delivered ?? null,
+      attempts: (r.cdn_attempts ?? []).map((a) => ({
+        attempt: a.attempt,
+        host: a.host,
+        status: a.status,
+        headersMs: a.headers_ms,
+        ttfbMs: a.ttfb_ms,
+        bodyMs: a.body_ms,
+        bytes: a.bytes,
+        sameCap: a.same_cap,
+        provider: a.provider,
+        startedAtMs: a.started_at_ms,
+        outcome: a.outcome,
+      })),
+    }));
+  }
+  return waterfall;
 }
 
 async function readServerSession(base, sessionId) {
@@ -253,7 +294,7 @@ async function readDataPlaneStages(sessionId) {
     { stage: 'first_byte_to_client', atMs: off(report.T5_first_client_byte_ms) },
   ].filter((m) => m.atMs != null);
   if (marks.length === 0) return null;
-  return { process: 'data-plane', anchorWallMs, marks };
+  return { process: 'data-plane', anchorWallMs, marks, requests: mine };
 }
 
 async function main() {
