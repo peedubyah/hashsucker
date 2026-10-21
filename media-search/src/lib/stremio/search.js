@@ -256,7 +256,7 @@ export async function searchStremio({
     let normalized;
     try {
       normalized = streams
-        .map((raw) =>
+        .map((raw, sourceOrdinal) =>
           normalizeStream(raw, {
             addonId: addon.addon_id,
             addonName: addon.name,
@@ -264,6 +264,9 @@ export async function searchStremio({
             sourceClass: 'stremio',
             sortOrder: addon.sort_order ?? index,
             streamType: type,
+            // The position WITHIN this addon's response. It is source-local:
+            // it is never a global rank and never compared across addons.
+            sourceOrdinal,
           })
         )
         .filter(Boolean);

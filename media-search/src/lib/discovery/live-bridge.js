@@ -92,6 +92,16 @@ export async function runLiveDiscovery(mediaId, options = {}) {
       codec: r.codec,
       hdr: r.hdr,
       audio: r.audio,
+      // The upstream's evidence, carried forward rather than dropped:
+      // the source-local ordinal, the upstream's own reading of the release,
+      // which attributes filled each normalized fact, and the upstream's
+      // provider-cache hint (scoped to the provider the ADDON is configured
+      // with — it is not our own provider observation).
+      sourceOrdinal: r.sourceOrdinal ?? null,
+      sourceId: r.sourceId ?? null,
+      upstreamFacts: r.upstreamFacts ?? null,
+      attributeOrigin: r.attributeOrigin ?? null,
+      upstreamCachedHint: r.upstreamCachedHint === true,
       releaseGroup: r.releaseGroup,
       providers: r.providers || {},
       confidence: r.confidence ?? 0.5,

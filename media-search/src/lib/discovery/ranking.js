@@ -971,6 +971,13 @@ export function evaluateIdentityEligibility(hit, queryIntent = {}) {
 
 // Quality tiers for resolution
 const RESOLUTION_QUALITY = {
+  // 8K/16K are the top of the ladder. They were missing, so a correctly
+  // parsed 4320p release scored ZERO for the resolution component (40% of the
+  // quality score) and a 480p release outranked it. The score is capped at
+  // 1.0, so 4320p and 2160p both saturate the resolution term — the
+  // difference between them is not one this score is allowed to express.
+  '8640p': 1.0,
+  '4320p': 1.0,
   '2160p': 1.0,
   '1080p': 0.9,
   '720p': 0.7,

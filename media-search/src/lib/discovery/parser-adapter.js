@@ -199,6 +199,11 @@ function extractPattern(text, pattern) {
  */
 function normalizeResolution(res) {
   const lower = res.toLowerCase();
+  // 8K/16K first: the ladder must not top out at 2160p, or a correctly
+  // parsed 4320p release is normalised into something the ordering does not
+  // know and ends up ranked below ordinary 1080p releases.
+  if (lower.includes('8640') || lower === '16k') return '8640p';
+  if (lower.includes('4320') || lower === '8k') return '4320p';
   if (lower.includes('2160') || lower === '4k' || lower === '4kuhd' || lower === 'uhd') return '2160p';
   if (lower.includes('1080')) return '1080p';
   if (lower.includes('720')) return '720p';

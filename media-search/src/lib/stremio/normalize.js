@@ -10,6 +10,8 @@ import { createReleaseIdentity } from '../../api/release-contract.js';
 import { classifyCandidateIdentity } from '../discovery/candidate-identity.js';
 
 const RESOLUTION_ORDER = {
+  '8640p': 6,
+  '4320p': 5,
   '2160p': 4,
   '1080p': 3,
   '720p': 2,
@@ -116,6 +118,88 @@ export function parseMetadata(text) {
     quality: parseQuality(s),
     language: parseLanguage(s),
   };
+}
+
+/**
+ * The upstream addon's own parse, read as source evidence.
+ *
+ * The addons publish their interpretation in three places, with different
+ * shapes per media kind:
+ *
+ *   - `behaviorHints.bingeGroup` — structured for movies
+ *     ("torrentio|4k|BluRay|x265|10bit|HDR") but for a series it is usually
+ *     just the infoHash, with no quality at all;
+ *   - `name` (the second line) — the quality tag list
+ *     ("4k DV | HDR10+ | HDR"), the only shape present for BOTH kinds;
+ *   - `title` — the human title plus the seeders ("👤 186") and a human size
+ *     string ("💾 6.91 GB"). Those are DISPLAY strings, not structured
+ *     fields; the seeder count is carried as a display-derived hint and is
+ *     never treated as a provider observation.
+ *
+ * Everything here is EVIDENCE about the upstream's reading of the release.
+ * It may fill a fact our own parse missed. It never overwrites a fact our
+ * parse established, and it never becomes schema authority: the local parser
+ * remains the normalizer, for every source (the addons, the DMM corpus,
+ * Torznab, and anything heterogeneous that comes later).
+ */
+export function readUpstreamFacts(stream) {
+  const facts = {
+    tags: null,
+    sourceLabel: null,
+    bitDepth: null,
+    seeders: null,
+    sizeText: null,
+    resolution: null,
+    source: null,
+    codec: null,
+    hdr: null,
+  };
+  if (!stream || typeof stream !== 'object') return facts;
+
+  // Read a quality group with OUR vocabulary. The groups are the upstream's
+  // own units ("4k DV", "BluRay REMUX", "1080p"), and a group may hold
+  // several facts, so the local parsers run over the WHOLE group. The
+  // upstream's tokens are read the way we read a filename — never with a
+  // second vocabulary.
+  const absorbGroup = (group) => {
+    const text = String(group || '').trim();
+    if (!text) return;
+    if (facts.resolution == null) facts.resolution = parseResolution(text) || null;
+    if (facts.source == null) facts.source = parseQuality(text) || null;
+    if (facts.codec == null) facts.codec = parseCodec(text) || null;
+    if (facts.hdr == null) facts.hdr = parseHdr(text) || null;
+    // The bit depth has no local parser field; it is matched per token.
+    if (facts.bitDepth == null) {
+      const bit = /\b(\d{1,2}bit)\b/i.exec(text);
+      if (bit) facts.bitDepth = bit[1].toLowerCase();
+    }
+  };
+
+  // The bingeGroup: "label|resolution|source|codec|bitDepth|hdr" for movies.
+  // For a series it is usually just the infoHash, which is not a quality
+  // token and is ignored by the classifier.
+  const group = stream.behaviorHints?.bingeGroup;
+  if (typeof group === 'string' && group.includes('|')) {
+    const parts = group.split('|').map((part) => part.trim());
+    facts.sourceLabel = parts[0] || null;
+    for (const part of parts.slice(1)) absorbGroup(part);
+  }
+
+  // The name's tag list — the only shape both media kinds publish.
+  const nameLines = String(stream.name ?? '').split('\n');
+  const tagLine = nameLines.slice(1).join(' ').trim();
+  if (tagLine) {
+    facts.tags = tagLine;
+    for (const group of tagLine.split('|')) absorbGroup(group);
+  }
+
+  // Display-only extras from the human title.
+  const seeders = /👤\s*([\d,]+)/.exec(String(stream.title ?? ''));
+  if (seeders) facts.seeders = Number(seeders[1].replace(/,/g, ''));
+  const sizeText = /💾\s*([\d.]+\s*[KMGT]?B)/.exec(String(stream.title ?? ''));
+  if (sizeText) facts.sizeText = sizeText[1].trim();
+
+  return facts;
 }
 
 /**
@@ -313,6 +397,15 @@ export function normalizeStream(raw, addonMeta = {}) {
   const fromFilename = parseMetadata(filename || '');
   const parsed = mergeParsedMetadata(fromLabels, fromFilename);
 
+  // The upstream's own reading of the release, as EVIDENCE. It may fill a
+  // fact our parse missed; it never overwrites one our parse established, and
+  // the local parsers keep our vocabulary even for upstream tokens.
+  const upstream = readUpstreamFacts(raw);
+  const upstreamResolution = upstream.resolution ? parseResolution(upstream.resolution) : null;
+  const upstreamQuality = upstream.source ? parseQuality(upstream.source) : null;
+  const upstreamCodec = upstream.codec ? parseCodec(upstream.codec) : null;
+  const upstreamHdr = upstream.hdr ? parseHdr(upstream.hdr) : null;
+
   const infoHash =
     normalizeInfoHash(raw.infoHash) ||
     extractInfoHashFromMagnetUrl(raw.url) ||
@@ -349,7 +442,13 @@ export function normalizeStream(raw, addonMeta = {}) {
       ? behaviorHints.videoSize
       : null;
 
-  const cached = behaviorHints.cached === true;
+  // The upstream's cache hint is scoped to the provider THE ADDON is
+  // configured with, at the time of the addon's response. It is not our own
+  // provider observation (that is `providerAvailabilityScore`, computed from
+  // our provider observations) and it is not the addon's response cache. It
+  // is therefore named for what it is and never promoted to a universal
+  // "cached" fact.
+  const upstreamCachedHint = behaviorHints.cached === true;
   const sourceFileIndex = Object.hasOwn(raw, 'fileIdx') ? raw.fileIdx : null;
   const identity = infoHash
     ? createReleaseIdentity(infoHash, sourceFileIndex)
@@ -363,6 +462,20 @@ export function normalizeStream(raw, addonMeta = {}) {
 
   if (!key) return null;
 
+  // Fill ONLY the gaps our own parse left. The local parse stays
+  // authoritative; the upstream's evidence is a fallback, and every filled
+  // field says where it came from.
+  const resolution = parsed.resolution || upstreamResolution || null;
+  const quality = parsed.quality || upstreamQuality || null;
+  const codec = parsed.codec || upstreamCodec || null;
+  const hdr = parsed.hdr || upstreamHdr || null;
+  const attributeOrigin = {
+    resolution: parsed.resolution ? 'local' : (upstreamResolution ? 'upstream' : null),
+    quality: parsed.quality ? 'local' : (upstreamQuality ? 'upstream' : null),
+    codec: parsed.codec ? 'local' : (upstreamCodec ? 'upstream' : null),
+    hdr: parsed.hdr ? 'local' : (upstreamHdr ? 'upstream' : null),
+  };
+
   return {
     key,
     // The identity strength: this candidate names a file by PATH and exact
@@ -373,6 +486,23 @@ export function normalizeStream(raw, addonMeta = {}) {
       internalPath: null,
       exactFileSize,
     }).strength,
+    // The candidate's position WITHIN ITS OWN SOURCE'S RESPONSE. It is a
+    // source-local ordinal, never a global rank: position 1 from one addon
+    // and position 1 from another are not calibrated equivalents and are
+    // never compared numerically across sources.
+    sourceOrdinal: Number.isSafeInteger(addonMeta.sourceOrdinal) ? addonMeta.sourceOrdinal : null,
+    sourceId: addonMeta.addonId || null,
+    // The upstream's own reading of the release, kept as source evidence.
+    upstreamFacts: {
+      tags: upstream.tags,
+      sourceLabel: upstream.sourceLabel,
+      bitDepth: upstream.bitDepth,
+      seeders: upstream.seeders,
+      sizeText: upstream.sizeText,
+    },
+    // Which normalized attributes came from our parse and which were filled
+    // from the upstream's evidence.
+    attributeOrigin,
     addonId: addonMeta.addonId || null,
     addonName: addonMeta.addonName || null,
     observer: addonMeta.provider || addonMeta.addonId || null,
@@ -385,14 +515,14 @@ export function normalizeStream(raw, addonMeta = {}) {
     title: title || description || 'Stream',
     description,
     filename,
-    quality: parsed.quality,
-    resolution: parsed.resolution,
-    codec: parsed.codec,
-    hdr: parsed.hdr,
+    quality,
+    resolution,
+    codec,
+    hdr,
     audio: parsed.audio,
     language: parsed.language,
     size,
-    cached,
+    upstreamCachedHint,
     filename,
     ...identity,
     nzbUrl,
@@ -419,7 +549,7 @@ function richness(stream) {
   if (stream.url) score += 2;
   if (stream.size != null) score += 1;
   if (stream.resolution) score += 1;
-  if (stream.cached) score += 1;
+  if (stream.upstreamCachedHint) score += 1;
   return score;
 }
 
@@ -461,7 +591,7 @@ export function mergeStreams(existing, incoming) {
       audio: keep.audio || other.audio,
       language: keep.language || other.language,
       size: keep.size ?? other.size,
-      cached: keep.cached || other.cached,
+      upstreamCachedHint: keep.upstreamCachedHint || other.upstreamCachedHint,
       infoHash: keep.infoHash || other.infoHash,
       fileIndex: keep.fileIndex,
       releaseKey: keep.releaseKey || other.releaseKey,
@@ -485,7 +615,7 @@ function resolutionRank(resolution) {
  */
 export function sortStreams(streams) {
   return [...(streams || [])].sort((a, b) => {
-    if (Boolean(b.cached) !== Boolean(a.cached)) return a.cached ? -1 : 1;
+    if (Boolean(b.upstreamCachedHint) !== Boolean(a.upstreamCachedHint)) return a.upstreamCachedHint ? -1 : 1;
     const resDiff = resolutionRank(b.resolution) - resolutionRank(a.resolution);
     if (resDiff !== 0) return resDiff;
     const sizeA = a.size ?? -1;
@@ -493,6 +623,16 @@ export function sortStreams(streams) {
     if (sizeB !== sizeA) return sizeB - sizeA;
     const orderDiff = (a.addonSortOrder ?? 0) - (b.addonSortOrder ?? 0);
     if (orderDiff !== 0) return orderDiff;
+    // The source-local ordinal: a WEAK tiebreak, and only WITHIN one source.
+    // Position 1 from Torrentio and position 1 from Comet are not calibrated
+    // equivalents, so they are never compared numerically across sources.
+    // Within one source the upstream's own order is better evidence than an
+    // alphabetical comparison of display titles.
+    if (a.sourceId && a.sourceId === b.sourceId
+      && Number.isSafeInteger(a.sourceOrdinal) && Number.isSafeInteger(b.sourceOrdinal)
+      && a.sourceOrdinal !== b.sourceOrdinal) {
+      return a.sourceOrdinal - b.sourceOrdinal;
+    }
     return String(a.title || '').localeCompare(String(b.title || ''));
   });
 }
