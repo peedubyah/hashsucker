@@ -319,6 +319,41 @@ The next earned slice is not selected ✓; the candidates are in the build log
 ✓), a measured stall distribution ✓ ✓, and the uncached execution capability
 as the explicit product-policy decision it is ✓ ✓ ✓✓.
 
+**Recon — the Stremio / Torrentio / Comet execution model (2026-10-20).**
+`docs/recon/2026-10-stremio-addon-execution-model.md`. The comparison target
+is **not** Stremio ✓ ✓ — Stremio is a client and a URL format ✓ ✓: it
+preserves the addon's order ✓ ✓, hands the chosen URL to mpv ✓ ✓, and
+performs **no** stream-URL retry ✓ ✓, **no** provider failover ✓ ✓ and **no**
+re-resolution ✓ ✓ (the human picking another row **is** the failover ✓ ✓).
+
+The findings that change the product conversation ✓ ✓:
+
+- **The competitor is the resolver stack** ✓ ✓ — Torrentio ✓ ✓ and Comet ✓ ✓
+  — and both already discover ✓ ✓, parse quality ✓ ✓, rank ✓ ✓, check the
+  debrid cache ✓ ✓ and hand the client a URL ✓ ✓. Comet's **unreleased**
+  newest branch already mints a signed ✓ ✓, TTL'd ✓ ✓, multi-provider ✓ ✓
+  playback capability ✓ ✓ — the closest thing to our shape ✓ ✓ ✓✓.
+- **A "click title → first frame" cook-off is benchmark theatre** ✓ ✓: with
+  both stacks fed the same addons ✓ ✓ it would measure our *duplication* ✓ ✓
+  and Stremio's client startup ✓ ✓ — not the architecture ✓ ✓ ✓✓.
+- **We duplicate work the addons already did** ✓ ✓: we re-parse the
+  filename for quality ✓ ✓ and re-sort the addon's ranked list ✓ ✓, while
+  keeping the raw object ✓ ✓ and the addon's own `bingeGroup` ✓ ✓ — and not
+  using either ✓ ✓ ✓✓.
+- **Our distinct layer is the exact file** ✓ ✓: `TorrentFile = infoHash +
+  canonical path + exact size` ✓ ✓. Torrentio knows a file *index* ✓ ✓;
+  Comet knows an index that degrades when the torrent is uncached ✓ ✓ and
+  re-scores the episode file heuristically on every playback ✓ ✓ ✓✓.
+- **Our advantage is a lead, not a moat** ✓ ✓: Comet's newest branch is most
+  of the way to a stable URL plus a chosen file ✓ ✓; erasing the URL
+  advantage is a modest extension ✓ ✓, erasing the *identity* advantage
+  additionally needs a protocol field ✓ ✓ ✓✓.
+
+**The recommendation is NO COOK-OFF YET** ✓ ✓ — the meaningful comparisons
+are narrower ✓ ✓: route death ✓ ✓ and season-pack exact-file correctness ✓ ✓,
+both on a naturally dual-route corpus ✓ ✓, and the *first* action is to stop
+re-deriving what the addon already computed ✓ ✓ ✓✓.
+
 
 Completed final slice: **bound stale-inventory binding retry churn** —
 **CLOSED**. The host-only canary passed clean E01 plus the full E01/E05/MobLand
