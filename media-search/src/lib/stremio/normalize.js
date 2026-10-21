@@ -8,6 +8,7 @@
 
 import { createReleaseIdentity } from '../../api/release-contract.js';
 import { classifyCandidateIdentity } from '../discovery/candidate-identity.js';
+import { namesAFile, splitSizeEvidence } from '../discovery/file-size-evidence.js';
 
 const RESOLUTION_ORDER = {
   '8640p': 6,
@@ -448,10 +449,25 @@ export function normalizeStream(raw, addonMeta = {}) {
   // but is NEVER exact enough to bind a TorBox provider file. We surface the
   // exact integer (or null) under a distinct field so downstream consumers
   // can require the strict value and ignore the rounded one.
-  const exactFileSize =
+  //
+  // Part 0 (size scope): the upstream's number is the FILE's size ONLY when
+  // the stream identifies a file. When the stream names the RELEASE (no
+  // fileIdx, and the published name carries no media extension), the number
+  // is the release's TOTAL — measured against the provider's authoritative
+  // file list, a release-named stream's number was per-file 0 % of the time
+  // and the release total ~52 % of the time. A release total can never
+  // prove a file, so it must not be offered as one. The scope decision is
+  // the SOURCE's own shape, never the number.
+  const upstreamVideoSize =
     Number.isSafeInteger(behaviorHints.videoSize) && behaviorHints.videoSize > 0
       ? behaviorHints.videoSize
       : null;
+  const sourceFileIndex = Object.hasOwn(raw, 'fileIdx') ? raw.fileIdx : null;
+  const upstreamNamesFile = sourceFileIndex !== null || namesAFile(filename);
+  const { exactFileSize, releaseSizeBytes } = splitSizeEvidence({
+    size: upstreamVideoSize,
+    namesFile: upstreamNamesFile,
+  });
 
   // The upstream's cache hint is scoped to the provider THE ADDON is
   // configured with, at the time of the addon's response. It is not our own
@@ -460,7 +476,6 @@ export function normalizeStream(raw, addonMeta = {}) {
   // is therefore named for what it is and never promoted to a universal
   // "cached" fact.
   const upstreamCachedHint = behaviorHints.cached === true;
-  const sourceFileIndex = Object.hasOwn(raw, 'fileIdx') ? raw.fileIdx : null;
   const identity = infoHash
     ? createReleaseIdentity(infoHash, sourceFileIndex)
     : { infoHash: null, fileIndex: null, releaseKey: null };
@@ -522,6 +537,9 @@ export function normalizeStream(raw, addonMeta = {}) {
     addonSortOrder: addonMeta.sortOrder ?? 0,
     streamType: addonMeta.streamType || null,
     exactFileSize,
+    // Part 0 (size scope): the upstream's number when the stream names the
+    // RELEASE rather than a file. Release-level evidence, never an identity.
+    releaseSizeBytes,
     role: addonMeta.role || 'discovery',
     title: title || description || 'Stream',
     description,

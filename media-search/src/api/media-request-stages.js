@@ -223,8 +223,22 @@ export async function collectTitleIndexInputs(ctx) {
         selectedMediaId: mediaId,
         hasLiveDiscovery: false,
         hasTitleIndex: true,
-        exactFileSize: row.size,
-        selectedFileSize: row.size,
+        // The corpus is release-level by construction: 1 593 139 candidate
+        // rows and 1 593 141 release-attribute rows, and NOT ONE of them
+        // carries a file_index, a file_path, or a file_size. Its byte count
+        // is the release's TOTAL, so it is release-level evidence and can
+        // never prove a file. Presenting it as an exact file size made
+        // every multi-file corpus candidate burn a provider round-trip on
+        // a size match that could not succeed (0 of 112 provider-held
+        // multi-file releases matched any file).
+        //
+        // The total is still carried, as release-level evidence, in
+        // releaseAttributes.size — which is where quality features read a
+        // release's byte count from. The per-file size stays UNKNOWN
+        // (null), because for this release it is unknown.
+        releaseAttributes: { ...releaseAttrs, size: row.size ?? undefined },
+        exactFileSize: null,
+        selectedFileSize: null,
         historicalPrior: 0,
       });
     }
@@ -306,6 +320,14 @@ export async function runLiveDiscoveryStage(ctx, { wantedIdentity, withHistorica
         hdr: live.hdr,
         audio: live.audio,
         releaseGroup: live.releaseGroup,
+        // Part 0 (size scope): the upstream's release-level byte count (the
+        // stream named the RELEASE, not a file). Release-level evidence,
+        // never an exact file size. Kept available so quality features see
+        // the same number they saw before, under a name that says what it
+        // is.
+        ...(Number.isSafeInteger(live.releaseSizeBytes) && live.releaseSizeBytes > 0
+          ? { size: live.releaseSizeBytes }
+          : {}),
       };
 
       // Identity gate uses the resolved wanted title (Cinemeta/caller),

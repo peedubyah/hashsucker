@@ -111,9 +111,19 @@ export async function runLiveDiscovery(mediaId, options = {}) {
       // round (GiB*1024^3) or torrent total size. Survives into
       // media_request_results so the pre-publication TorBox identity helper
       // can match by exact integer byte count.
+      //
+      // Part 0: `exactFileSize` is non-null ONLY when the upstream's stream
+      // names a file, so the value here is always a per-file size.
       selectedFileSize:
         Number.isSafeInteger(r.exactFileSize) && r.exactFileSize > 0
           ? r.exactFileSize
+          : null,
+      // Part 0: when the upstream's stream names the RELEASE, its number is
+      // the release's total. Release-level evidence: it stays available, and
+      // it never reaches the exact-file proof.
+      releaseSizeBytes:
+        Number.isSafeInteger(r.releaseSizeBytes) && r.releaseSizeBytes > 0
+          ? r.releaseSizeBytes
           : null,
     }));
 }
@@ -230,9 +240,18 @@ export async function runLiveDiscoveryWithCounts(mediaId, options = {}) {
     // Slice 1.75: prefer the strict `exactFileSize` (behaviorHints.videoSize
     // only, safe integer > 0) over `size`, which may be a parseSizeFromText
     // round. Identity helper needs an exact integer byte count.
+    //
+    // Part 0: `exactFileSize` is non-null ONLY when the upstream's stream
+    // names a file, so this is always a per-file size.
     selectedFileSize:
       Number.isSafeInteger(r.exactFileSize) && r.exactFileSize > 0
         ? r.exactFileSize
+        : null,
+    // Part 0: the upstream's release-level number (stream names the
+    // RELEASE, not a file). Release-level evidence only.
+    releaseSizeBytes:
+      Number.isSafeInteger(r.releaseSizeBytes) && r.releaseSizeBytes > 0
+        ? r.releaseSizeBytes
         : null,
   }));
 
@@ -299,7 +318,7 @@ export function mergeBloodhoundRows(lists) {
   const byKey = new Map();
   const FIELDS = ['filename', 'title', 'year', 'season', 'episode', 'episodeRange',
     'seasonOnly', 'mediaType', 'resolution', 'source', 'quality', 'codec', 'hdr',
-    'audio', 'language', 'releaseGroup', 'size', 'exactFileSize', 'cached',
+    'audio', 'language', 'releaseGroup', 'size', 'exactFileSize', 'releaseSizeBytes', 'cached',
     'confidence', 'parserConfidence', 'relevance', 'providers', 'observer',
     'sourceClass', 'addonId', 'addonName', 'nzbUrl', 'url', 'seeders', 'publishDate'];
   const sourceId = (s) => [s?.origin, s?.addonId, s?.observer, s?.indexer, s?.provider]
@@ -398,6 +417,9 @@ export function toBloodhoundRelease(r) {
     // Slice 1.75: the RAW byte size from behaviorHints.videoSize only.
     // Survives into media_request_results so the pre-publication TorBox
     // identity helper can match by exact integer byte count.
+    //
+    // Part 0: `exactFileSize` is non-null ONLY when the upstream's stream
+    // names a file, so this is always a per-file size.
     exactFileSize:
       Number.isSafeInteger(r.exactFileSize) && r.exactFileSize > 0
         ? r.exactFileSize
@@ -405,6 +427,12 @@ export function toBloodhoundRelease(r) {
     selectedFileSize:
       Number.isSafeInteger(r.exactFileSize) && r.exactFileSize > 0
         ? r.exactFileSize
+        : null,
+    // Part 0: the upstream's release-level number (stream names the
+    // RELEASE, not a file). Release-level evidence only.
+    releaseSizeBytes:
+      Number.isSafeInteger(r.releaseSizeBytes) && r.releaseSizeBytes > 0
+        ? r.releaseSizeBytes
         : null,
   };
 }
