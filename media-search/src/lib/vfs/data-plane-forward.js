@@ -176,6 +176,7 @@ export async function streamFromDataPlane({
   contentType,
   onServingAttribution = null,
   headerTimeoutMs = DATA_PLANE_HEADER_TIMEOUT_MS,
+  sessionId = null,
 }) {
   // NOTE: this layer deliberately does NOT short-circuit a "known-bad" route.
   // Route health is per (provider, placement, file), and the exact TorrentFile
@@ -188,6 +189,10 @@ export async function streamFromDataPlane({
   // Forward the client Range verbatim. The data plane owns Range parsing,
   // satisfiability (416), and Content-Range construction.
   if (request.headers.range) upstreamHeaders.range = request.headers.range;
+  // The session id is forwarded so the data plane's byte stages are
+  // correlated with the server's and the player's under one id. It is a
+  // correlation handle only: it grants no authority and names no identity.
+  if (sessionId) upstreamHeaders['x-hs-session'] = sessionId;
   // Mirror the client method so a forwarded HEAD/GET both behave; VFS HEAD is
   // handled in Node and never reaches here, but be defensive.
   const method = (request.method || 'GET').toUpperCase();

@@ -15,6 +15,15 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Wall-clock instant in epoch milliseconds. The alignment point between a
+/// process's monotonic stage offsets and another process's marks.
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Monotonic correlation-ID counter. Each StageClock gets a unique corr_id at
 /// construction so a single demand/fill can be followed through its StageReport
 /// and every CdnAttempt. Runtime-only: never persisted, never part of cache identity.
@@ -580,12 +589,21 @@ pub struct CdnAttempt {
 #[derive(Clone)]
 pub struct StageClock {
     t0: Instant,
+    /// Wall-clock instant of T0, in epoch milliseconds. The stage offsets are
+    /// monotonic (Instant), but a mark from THIS process has to be placed on
+    /// the same timeline as marks from the Node server and the player, which
+    /// are measured in their own processes. The wall instant of the anchor is
+    /// the alignment point between them.
+    t0_wall_ms: u64,
     inner: Arc<Mutex<StageInstants>>,
     /// Per-attempt CDN telemetry. Pushed by the transport layer on every CDN request.
     /// Bounded to avoid unbounded growth on pathological retry chains.
     attempts: Arc<Mutex<Vec<CdnAttempt>>>,
     /// Runtime correlation id. Generated at construction so every StageReport and
     /// CdnAttempt sharing this clock carries the same id. Not persisted.
+    /// When the caller supplies a session id, THAT id is used instead, so the
+    /// byte stages line up with the server's and the player's stages under one
+    /// handle.
     corr_id: String,
     /// Demand kind of the span currently executing on this clock ("serve" or
     /// "backfill"). Stamped onto each CdnAttempt at record time so a later
@@ -605,17 +623,36 @@ impl Default for StageClock {
 
 impl StageClock {
     pub fn new(t0: Instant) -> Self {
-        Self {
+        Self::with_session(t0, None)
+    }
+
+    /// Build a clock whose correlation id is the caller's session id, when
+    /// there is one. The session id is a correlation handle: it names a
+    /// measurement run, grants no authority, and is not part of byte or
+    /// cache identity.
+    pub fn with_session(t0: Instant, session_id: Option<&str>) -> Self {
+        let corr_id = match session_id {
+            Some(id) if !id.trim().is_empty() && id.len() <= 64 => id.trim().to_string(),
+            _ => format!("corr-{}", CORR_ID_COUNTER.fetch_add(1, Ordering::SeqCst)),
+        };
+        StageClock {
             t0,
+            t0_wall_ms: now_epoch_ms(),
             inner: Arc::new(Mutex::new(StageInstants {
                 t0_received: Some(t0),
                 ..Default::default()
             })),
             attempts: Arc::new(Mutex::new(Vec::with_capacity(8))),
-            corr_id: format!("corr-{}", CORR_ID_COUNTER.fetch_add(1, Ordering::SeqCst)),
+            corr_id,
             span_kind: Arc::new(Mutex::new("serve".to_string())),
             failovers: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Wall-clock instant of T0 in epoch milliseconds. The alignment point
+    /// between this process's monotonic offsets and another process's.
+    pub fn t0_wall_ms(&self) -> u64 {
+        self.t0_wall_ms
     }
 
     /// Demand kind of the span about to execute ("serve" or "backfill").
@@ -845,6 +882,11 @@ impl Default for WorkClass {
 #[derive(Clone)]
 pub struct StageReport {
     pub instants: StageInstants,
+    /// Wall-clock instant of T0 in epoch milliseconds. The byte stages are
+    /// measured with a monotonic clock; this is the alignment point that
+    /// places them on the same timeline as the server's and the player's
+    /// stages, which are measured in other processes.
+    pub t0_wall_ms: u64,
     pub request: (u64, u64),
     pub cache_hit: bool,
     /// Provider API (requestdl/unrestrict) calls made by THIS request. Zero means
@@ -901,6 +943,7 @@ impl StageReport {
         };
         serde_json::json!({
             "request": {"start": self.request.0, "end": self.request.1},
+            "T0_wall_ms": self.t0_wall_ms,
             "cache_hit": self.cache_hit,
             "api_requests_delta": self.api_requests_delta,
             "cdn_requests_delta": self.cdn_requests_delta,
@@ -1035,7 +1078,6 @@ impl Metrics {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
     }
-
     /// Remember that `provider` throttled right now (called on the 429 /
     /// recovery path). Lets a later fill ask whether the provider is hot
     /// without any new shared machinery.

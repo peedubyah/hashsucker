@@ -28,6 +28,7 @@ import {
   readPlaybackSecret,
   readPlaybackTtlSeconds,
 } from '../lib/resolver/playback-object.js';
+import { markSession } from '../lib/measurement/session-store.js';
 
 /**
  * A typed, client-facing failure. `status` is the HTTP status, `code` the
@@ -125,6 +126,7 @@ async function resolveTitle(query, searchFn) {
  * @param {object} [args.cache]
  * @param {object} [args.extraRequest]   extra fields for the pipeline request
  * @param {Function} [args.now]
+ * @param {string|null} [args.sessionId]   the cross-process session id
  * @returns {Promise<object>}
  */
 export async function resolvePlaybackIntent({
@@ -140,8 +142,12 @@ export async function resolvePlaybackIntent({
   extraRequest = {},
   searchFn = searchTitles,
   now = () => Date.now(),
+  sessionId = null,
 }) {
   const startedAt = now();
+  // The intent is accepted: the server has the request and knows what it is
+  // for. Everything after this is the cost of answering it.
+  markSession(sessionId, 'intent_accepted');
   const secret = readPlaybackSecret(env);
   if (!secret) {
     throw new PlaybackObjectApiError(
@@ -204,6 +210,7 @@ export async function resolvePlaybackIntent({
     controlPlaneStore, mediaType: resolvedType, mediaId: resolvedMediaId, season, episode,
   });
   const warm = binding != null;
+  markSession(sessionId, 'binding_resolved', { warm });
 
   // ── COLD PATH ──────────────────────────────────────────────────────────
   // No authoritative Binding: run the existing request pipeline — the same
@@ -248,6 +255,7 @@ export async function resolvePlaybackIntent({
     ttlSeconds,
     now: now(),
   });
+  markSession(sessionId, 'playback_object_minted');
 
   const resolvedAt = now();
   return {

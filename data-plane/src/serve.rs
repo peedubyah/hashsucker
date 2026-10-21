@@ -1465,7 +1465,17 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     // Shared stage clock for this request. T1/T2 are stamped here; T3/T4 are
     // stamped inside the transport, where the CDN request is actually dispatched
     // and the first body byte actually arrives.
-    let stage = StageClock::new(t0);
+    //
+    // The session id (when the caller supplies one) becomes this clock's
+    // correlation id, so the byte stages carry the SAME handle as the server's
+    // and the player's stages. It is a measurement handle: no authority, no
+    // identity, no cache key.
+    let session_id = headers
+        .get("x-hs-session")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty() && v.len() <= 64);
+    let stage = StageClock::with_session(t0, session_id);
     // Per-request provider-activity deltas. These are what let the benchmark tell
     // "the capability was reused" apart from "we paid for a fresh requestdl" —
     // the entire distinction between process-warm and process-cold.
@@ -1705,6 +1715,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             .await;
             metrics.record_stage_report(StageReport {
                 instants: stage.snapshot(),
+                t0_wall_ms: stage.t0_wall_ms(),
                 request: (start, end),
                 cache_hit: false,
                 api_requests_delta: metrics.api_requests.load(Ordering::SeqCst) - api_before,
@@ -1755,6 +1766,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             .await;
                 metrics.record_stage_report(StageReport {
                     instants: stage.snapshot(),
+                    t0_wall_ms: stage.t0_wall_ms(),
                     request: (start, end),
                     cache_hit: false,
                     api_requests_delta: metrics.api_requests.load(Ordering::SeqCst) - api_before,
@@ -1932,6 +1944,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     // a stalled demand can be correlated against in-flight prefetch work.
                     m.record_stage_report(StageReport {
                         instants: pf_stage.snapshot(),
+                        t0_wall_ms: pf_stage.t0_wall_ms(),
                         request: (f_start, f_end),
                         cache_hit: false,
                         api_requests_delta: 0,
@@ -2859,6 +2872,7 @@ else if stripe_wanted(sub.len())
                                 let join_stage = join_clock.snapshot();
                                 let join_report = StageReport {
                                     instants: join_stage,
+                                    t0_wall_ms: join_clock.t0_wall_ms(),
                                     // The client Range this demand read needed (approximate from run).
                                     request: (run.start, run.end),
                                     cache_hit: false,
@@ -3155,6 +3169,7 @@ else if stripe_wanted(sub.len())
         let cache_hit = plan.is_full_hit();
         metrics.record_stage_report(StageReport {
             instants: stage.snapshot(),
+            t0_wall_ms: stage.t0_wall_ms(),
             request: (start, end),
             cache_hit,
             api_requests_delta: metrics.api_requests.load(Ordering::SeqCst) - api_before,

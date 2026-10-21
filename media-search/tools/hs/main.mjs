@@ -32,6 +32,11 @@
 import { createInterface } from 'node:readline';
 
 import { playWithMpv } from './mpv.mjs';
+import {
+  WATERFALL_SESSION_HEADER,
+  assembleWaterfall,
+  newSessionId,
+} from '../../src/lib/measurement/playback-waterfall.js';
 
 const USAGE = `hs — the tiny resolver client
 
@@ -77,11 +82,15 @@ function parseArgs(argv) {
 // process.hrtime is nanoseconds; this is milliseconds since an arbitrary origin.
 const nowMs = () => Number(process.hrtime.bigint() / 1_000_000n);
 
-async function ask(base, body) {
+async function ask(base, body, sessionId = null) {
   const started = nowMs();
   const response = await fetch(`${base}/api/playback-object`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json',
+      ...(sessionId ? { [WATERFALL_SESSION_HEADER]: sessionId } : {}),
+    },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(600_000),
   });
@@ -115,13 +124,13 @@ function disambiguate(candidates) {
   });
 }
 
-async function resolveIntent(base, args, measurement) {
+async function resolveIntent(base, args, measurement, sessionId = null) {
   const body = MEDIA_ID.test(String(args.target).trim())
     ? { mediaId: String(args.target).trim(), season: args.season, episode: args.episode }
     : { query: String(args.target).trim(), season: args.season, episode: args.episode };
 
   measurement.resolverAttempts += 1;
-  let response = await ask(base, body);
+  let response = await ask(base, body, sessionId);
   if (response.status === 409 && response.json?.code === 'AMBIGUOUS_INTENT') {
     const chosen = await disambiguate(response.json.candidates ?? []);
     if (!chosen) {
@@ -136,7 +145,7 @@ async function resolveIntent(base, args, measurement) {
       mediaType: chosen.mediaType,
       season: args.season,
       episode: args.episode,
-    });
+    }, sessionId);
   }
   if (response.status !== 200) {
     const error = new Error(`${response.json?.code ?? `HTTP_${response.status}`}: ${response.json?.error ?? 'the intent could not be resolved'}`);
@@ -145,6 +154,106 @@ async function resolveIntent(base, args, measurement) {
     throw error;
   }
   return { result: response.json, resolveMs: response.elapsedMs };
+}
+
+/**
+ * Collect the data plane's byte stages for this session and assemble the
+ * canonical waterfall.
+ *
+ * The data plane keeps a bounded ring of stage reports and exposes them at
+ * its /metrics endpoint. The stage report carries the session id (the
+ * correlation id the server forwarded) and the wall instant of its T0, which
+ * is what places its monotonic offsets on the same timeline as the server's
+ * and the player's.
+ */
+async function collectWaterfall({ base, sessionId, clientMarks }) {
+  const sources = [];
+
+  // The server's stages for this session. They live in the server's session
+  // store because the intent and the player's byte request are DIFFERENT
+  // HTTP requests; the store keeps one monotonic origin across them.
+  const serverRecord = await readServerSession(base, sessionId);
+  if (serverRecord?.marks?.length) {
+    sources.push({
+      process: 'server',
+      anchorWallMs: serverRecord.anchorWallMs,
+      marks: serverRecord.marks,
+    });
+  }
+  if (clientMarks?.marks?.length) {
+    sources.push({
+      process: 'client',
+      anchorWallMs: clientMarks.anchorWallMs,
+      marks: clientMarks.marks,
+    });
+  }
+
+  const dataPlane = await readDataPlaneStages(sessionId);
+  if (dataPlane) sources.push(dataPlane);
+
+  return assembleWaterfall({ sessionId, sources });
+}
+
+async function readServerSession(base, sessionId) {
+  try {
+    const res = await fetch(`${base}/api/measurement/session/${encodeURIComponent(sessionId)}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the data plane's stage report for one session.
+ *
+ * The data plane is an internal service (it is not published on the host),
+ * so it is read the way the other diagnostics read it: from inside the
+ * container. The data plane's own URL may also be provided directly.
+ */
+async function readDataPlaneStages(sessionId) {
+  const direct = process.env.HS_DATA_PLANE_URL;
+  const container = process.env.HS_DATA_PLANE_CONTAINER ?? 'hashsucker-data-plane-1';
+  let payload = null;
+  if (direct) {
+    try {
+      const res = await fetch(`${direct.replace(/\/$/, '')}/metrics`, { signal: AbortSignal.timeout(10_000) });
+      if (res.ok) payload = await res.json();
+    } catch { /* fall through to the container read */ }
+  }
+  if (!payload) {
+    try {
+      const { execFileSync } = await import('node:child_process');
+      const raw = execFileSync('docker', ['exec', container, 'sh', '-lc', 'wget -qO- http://127.0.0.1:3001/metrics'], {
+        encoding: 'utf8',
+        timeout: 20_000,
+      });
+      payload = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  const reports = Array.isArray(payload?.stages_recent) ? payload.stages_recent : [];
+  const mine = reports
+    .filter((r) => r?.corr_id === sessionId)
+    .sort((a, b) => (a?.T0_wall_ms ?? 0) - (b?.T0_wall_ms ?? 0));
+  if (mine.length === 0) return null;
+  // The FIRST byte request for this session is the canonical one: the
+  // player issues several (a probe, then ranges), and the waterfall is
+  // about the first.
+  const report = mine[0];
+  const off = (v) => (Number.isFinite(v) ? Number(v) : null);
+  const anchorWallMs = Number.isFinite(report?.T0_wall_ms) ? report.T0_wall_ms : null;
+  const marks = [
+    { stage: 'first_rust_byte_request', atMs: off(report.T0_received_ms) },
+    { stage: 'provider_request_start', atMs: off(report.T3_cdn_dispatched_ms) },
+    { stage: 'provider_first_byte', atMs: off(report.T4_first_upstream_byte_ms) },
+    { stage: 'first_byte_to_client', atMs: off(report.T5_first_client_byte_ms) },
+  ].filter((m) => m.atMs != null);
+  if (marks.length === 0) return null;
+  return { process: 'data-plane', anchorWallMs, marks };
 }
 
 async function main() {
@@ -163,6 +272,10 @@ async function main() {
   }
 
   const base = (args.server ?? process.env.HS_SERVER_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
+  // One session id for the whole session: the server's stages, the data
+  // plane's byte stages, and the player's stages. It is minted here because
+  // the client is the only party that sees all three.
+  const sessionId = newSessionId();
   const measurement = {
     command: 'play',
     target: args.target,
@@ -170,10 +283,11 @@ async function main() {
     resolverAttempts: 0,
     firstSourceSuccess: false,
     startedAt: new Date().toISOString(),
+    sessionId,
   };
 
   try {
-    const resolved = await resolveIntent(base, args, measurement);
+    const resolved = await resolveIntent(base, args, measurement, sessionId);
     measurement.resolverMs = resolved.resolveMs;
     measurement.mediaId = resolved.result.mediaId;
     measurement.mediaType = resolved.result.mediaType;
@@ -193,7 +307,7 @@ async function main() {
     const renew = async (positionSeconds) => {
       measurement.resolverAttempts += 1;
       measurement.renewals = (measurement.renewals ?? 0) + 1;
-      const again = await resolveIntent(base, args, measurement);
+      const again = await resolveIntent(base, args, measurement, sessionId);
       measurement.torrentFileId = again.result.torrentFileId;
       const fresh = new URL(again.result.playbackUrl, base).toString();
       measurement.playbackUrl = fresh;
@@ -210,6 +324,7 @@ async function main() {
       measureSeconds: args.measure,
       renew,
       renewAfterMs,
+      sessionId,
     });
     measurement.playerStartupMs = marks.mediaLoadedMs ?? null;
     measurement.firstFrameMs = marks.firstFrameMs ?? null;
@@ -221,6 +336,15 @@ async function main() {
     measurement.renewals = marks.renewals ?? 0;
     measurement.renewedAtPositionSeconds = marks.renewedAt ?? null;
     measurement.error = marks.error ?? null;
+
+    // The canonical cross-process waterfall: the server's stages (from the
+    // playback-object response), the player's stages (from here), and the
+    // data plane's byte stages (fetched from its metrics by session id).
+    measurement.waterfall = await collectWaterfall({
+      base,
+      sessionId,
+      clientMarks: marks.waterfall,
+    });
 
     if (args.json) {
       process.stdout.write(`${JSON.stringify(measurement, null, 2)}\n`);

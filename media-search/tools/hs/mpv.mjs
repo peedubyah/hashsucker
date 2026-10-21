@@ -11,6 +11,11 @@ import { spawn } from 'node:child_process';
 import { unlinkSync } from 'node:fs';
 
 import { connectMpvIpc } from '../../src/lib/plex-htpc/mpv-ipc.js';
+import {
+  WATERFALL_SESSION_HEADER,
+  createWaterfallRecorder,
+  newSessionId,
+} from '../../src/lib/measurement/playback-waterfall.js';
 
 // process.hrtime is nanoseconds; this is milliseconds since an arbitrary origin.
 const nowMs = () => Number(process.hrtime.bigint() / 1_000_000n);
@@ -22,9 +27,10 @@ const nowMs = () => Number(process.hrtime.bigint() / 1_000_000n);
  * @param {string} args.url          the stable playback URL
  * @param {string} args.socketPath   the JSON IPC socket path
  * @param {boolean} args.headless    true when there is no display (no VO, no audio)
+ * @param {string} [args.sessionId]  the cross-process session id, if any
  * @returns {string[]}
  */
-export function buildMpvArgs({ url, socketPath, headless }) {
+export function buildMpvArgs({ url, socketPath, headless, sessionId = null }) {
   const args = [
     '--no-config',
     '--input-ipc-server=' + socketPath,
@@ -32,6 +38,10 @@ export function buildMpvArgs({ url, socketPath, headless }) {
     '--term-playing-msg=PLAYING ${path}',
     '--msg-level=term-playing-msg=info',
   ];
+  // The session id travels on the player's own HTTP request, so the byte
+  // request the server forwards to the data plane carries it too. It is a
+  // correlation handle: it names a measurement run and grants nothing.
+  if (sessionId) args.push(`--http-header-fields=${WATERFALL_SESSION_HEADER}:${sessionId}`);
   if (headless) args.push('--vo=null', '--no-audio');
   args.push(url);
   return args;
@@ -49,24 +59,31 @@ export function buildMpvArgs({ url, socketPath, headless }) {
  */
 export async function playWithMpv(url, {
   resume = null, keepOpen = false, measureSeconds = null, socketPath = null,
-  renew = null, renewAfterMs = null,
+  renew = null, renewAfterMs = null, sessionId = null,
 } = {}) {
   const sock = socketPath ?? `/tmp/hs-mpv-${process.pid}-${Date.now()}.sock`;
   const headless = !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
-  const args = buildMpvArgs({ url, socketPath: sock, headless });
+  const args = buildMpvArgs({ url, socketPath: sock, headless, sessionId });
 
   const startedAt = nowMs();
+  // The player's own marks, on the same monotonic clock as every other
+  // process, so the waterfall can place them on one timeline.
+  const waterfall = createWaterfallRecorder({ sessionId });
   const child = spawn('mpv', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  waterfall.mark('player_launched');
   const marks = {
     launchedAt: startedAt, firstFrameMs: null, exitCode: null,
     playheadSeconds: null, renewals: 0, renewedAt: null, playerExited: null,
     lifecycleEvents: {},
+    waterfall,
   };
   let stderr = '';
   child.stderr.on('data', (chunk) => {
     stderr += chunk.toString();
     if (marks.firstFrameMs == null && stderr.includes('PLAYING')) {
       marks.firstFrameMs = nowMs() - startedAt;
+      // The player's own "playing" message: a frame is on screen.
+      waterfall.mark('first_frame');
     }
   });
   child.stdout.on('data', () => {});
@@ -89,10 +106,16 @@ export async function playWithMpv(url, {
       // EVENT, not a property — polling it waits for the full timeout.)
       await ipc.waitForProperty('duration', (v) => Number(v) > 0, { timeoutMs: 60_000, intervalMs: 20 });
       marks.mediaLoadedMs = nowMs() - startedAt;
+      // "file-loaded" is the player's own fact: the media is in and its
+      // container has been read.
+      waterfall.mark('player_file_loaded');
       if (marks.firstFrameMs == null) {
         try {
           await ipc.waitForProperty('playback-time', (v) => Number(v) > 0, { timeoutMs: 30_000, intervalMs: 20 });
           marks.firstFrameMs = nowMs() - startedAt;
+          // A progressing playhead is a rendered frame: the decoder produced
+          // picture, not just a decoded buffer.
+          waterfall.mark('first_frame');
         } catch { /* the term-playing-msg is the primary signal */ }
       }
       if (resume != null && Number.isFinite(resume)) {

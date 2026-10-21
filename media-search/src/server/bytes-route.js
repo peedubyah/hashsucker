@@ -22,6 +22,8 @@
 
 import { createLibraryIdentityKey } from '../lib/control-plane/canonical-path.js';
 import { streamFromDataPlane, DataPlaneError } from '../lib/vfs/data-plane-forward.js';
+import { WATERFALL_SESSION_HEADER, readSessionId } from '../lib/measurement/playback-waterfall.js';
+import { markSession } from '../lib/measurement/session-store.js';
 
 export class ByteRouteError extends Error {
   constructor(status, code, message) {
@@ -108,6 +110,14 @@ export async function serveAuthoritativeBytes({
       'a TorrentFile id is required');
   }
 
+  // The session id rides on to the data plane so its byte stages (first
+  // byte request, provider request, provider first byte, first byte to
+  // client) land on the SAME timeline as the server's and the player's.
+  const sessionId = readSessionId(request.headers);
+  // The player's first HTTP request has reached the server. Everything
+  // after this is the byte path's cost.
+  markSession(sessionId, 'first_http');
+
   try {
     await streamFromDataPlane({
       fetchFn,
@@ -117,6 +127,7 @@ export async function serveAuthoritativeBytes({
       response,
       contentType,
       onServingAttribution,
+      ...(sessionId ? { sessionId } : {}),
     });
   } catch (error) {
     if (error instanceof DataPlaneError) {

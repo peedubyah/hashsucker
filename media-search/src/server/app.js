@@ -150,6 +150,8 @@ import { createRouteProviderSurfaces } from '../lib/control-plane/route-provider
 import { createPrewarmCaller } from '../lib/control-plane/prewarm.js';
 import { createPlaybackRedundancy, isPlaybackRedundancyEnabled } from '../lib/control-plane/playback-redundancy.js';
 import { PERF_TRACE_ENABLED, perfTrace, runPerfTrace } from '../lib/perf-trace.js';
+import { readSessionId } from '../lib/measurement/playback-waterfall.js';
+import { openSession, readSession } from '../lib/measurement/session-store.js';
 
 // S-1 wire schema version for the Rust data-plane control contract.
 //
@@ -3400,6 +3402,12 @@ export function createRequestHandler(dependencies = {}) {
       if (request.method === 'POST' && url.pathname === '/api/playback-object') {
         const startedAt = performance.now();
         const body = await readBody(request);
+        // The session id is the one handle that ties the whole playback
+        // session together: the server's own stages, the data plane's byte
+        // stages, and the player's. It is echoed back so the measuring
+        // client can place every stage on one timeline.
+        const sessionId = readSessionId(request.headers);
+        if (sessionId) openSession(sessionId);
         try {
           const requestEnsureFn = buildRequestScopedEnsureFn({
             fallbackFn: ensureTorBoxFileIdentityFn,
@@ -3417,10 +3425,11 @@ export function createRequestHandler(dependencies = {}) {
             env,
             mediaId: body.mediaId ?? null,
             mediaType: body.mediaType ?? body.type ?? null,
-            season: Number.isSafeInteger(Number(body.season)) && body.season != null ? Number(body.season) : null,
-            episode: Number.isSafeInteger(Number(body.episode)) && body.episode != null ? Number(body.episode) : null,
+            season: Number.isInteger(Number(body.season)) && body.season != null ? Number(body.season) : null,
+            episode: Number.isInteger(Number(body.episode)) && body.episode != null ? Number(body.episode) : null,
             query: body.query ?? body.q ?? null,
             now: clock,
+            sessionId,
             extraRequest: {
               ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
               ...rdEnsureForRequest({ rdClient, controlPlaneStore, clock }),
@@ -3434,6 +3443,9 @@ export function createRequestHandler(dependencies = {}) {
           return sendJson(response, 200, {
             ...result,
             timings: { ...result.timings, totalMs: Math.round(performance.now() - startedAt) },
+            // The session id, so the measuring client can pull this session's
+            // stages (and the data plane's byte stages) onto one timeline.
+            ...(sessionId ? { sessionId } : {}),
           });
         } catch (err) {
           if (err instanceof PlaybackObjectApiError) {
@@ -3446,10 +3458,22 @@ export function createRequestHandler(dependencies = {}) {
           return sendJson(response, 400, { error: err.message });
         }
       }
+      // Measurement: the server's stages for one playback session.
+      //
+      // DIAGNOSTIC ONLY. Nothing in the product path reads this, and a
+      // session id names a measurement run: it grants no authority and is
+      // not part of any identity, routing or cache key.
+      const sessionMatch = request.method === 'GET'
+        && url.pathname.match(/^\/api\/measurement\/session\/([A-Za-z0-9._:-]{1,64})$/);
+      if (sessionMatch) {
+        const record = readSession(sessionMatch[1]);
+        if (!record) return sendJson(response, 404, { error: 'no such measurement session' });
+        return sendJson(response, 200, record);
+      }
+
       // Playback handoff: retrieve handoff by request ID
       const handoffMatch = request.method === 'GET'
-        && url.pathname.match(/^\/api\/media-request\/(\d+)\/handoff$/);
-      if (handoffMatch) {
+        && url.pathname.match(/^\/api\/media-request\/(\d+)\/handoff$/);      if (handoffMatch) {
         const requestId = parseInt(handoffMatch[1], 10);
         const row = searchCache.getPlaybackHandoffByRequestId(requestId);
         const handoff = searchCache.rowToPlaybackHandoff(row);
