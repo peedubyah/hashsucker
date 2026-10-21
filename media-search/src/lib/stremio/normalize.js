@@ -65,10 +65,21 @@ function parseCodec(s) {
 }
 
 function parseAudio(s) {
+  // The codec, optionally followed by a channel count. The scene forms
+  // "AAC5.1", "DD+5.1" and "DTS-X" all failed the word boundary before:
+  // the channel suffix made the boundary fail, so "AAC5.1" produced NO audio
+  // at all and "DDP5.1" produced "DDP5". The channel count is not the codec
+  // — the codec is what the quality tiers reason about — so the suffix is
+  // read and dropped.
   const match = s.match(
-    /\b(TrueHD(?:[\s.-]*Atmos)?|DTS(?:-?HD(?:[\s.-]*MA)?|-?X)?|Atmos|DD(?:P|Plus)?(?:[\s.-]*Atmos)?(?:[\s.-]*\d+(?:\.\d+)?)?|EAC3|E-AC-?3|AC-?3|AAC|FLAC|Opus|LPCM|PCM)\b/i
+    /\b(TrueHD(?:[\s.-]*Atmos)?|DTS(?:-?HD(?:-?MA)?|-?X)?|Atmos|DD(?:\+|P|Plus)(?:[\s.-]*Atmos)?|EAC3|E-AC-?3|AC-?3|AAC|FLAC|Opus|LPCM|PCM)(?:[\s.-]*\d+(?:\.\d+)?)?\b/i
   );
-  return match ? match[1] : null;
+  if (!match) return null;
+  const token = match[1];
+  // "DD+", "DDP" and "DD Plus" are one codec; keep one spelling so the
+  // quality tiers see one value.
+  if (/^DD/i.test(token)) return 'DD+';
+  return token;
 }
 
 function parseQuality(s) {
