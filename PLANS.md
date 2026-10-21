@@ -269,6 +269,56 @@ The next earned slice is not selected ✓; the candidates are in the build log
 ✓ ✓ — the cold path's materialization gap ✓ ✓, the session contract ✓ ✓,
 and a player comparison ✓ ✓ ✓✓.
 
+**Pivot slice 4 — KEEP IT PLAYING: continuity for the same exact TorrentFile
+— CLOSED** (evidence in `docs/BUILD-LOG.md` 2026-10-20). The continuity
+levels were defined separately and measured independently ✓ ✓:
+
+| level | verdict | evidence |
+|---|---|---|
+| L1 the next Range uses another route | **exists** ✓ ✓ | the Rust suite (13/13 ✓) + the Node continuity tests (9/9 ✓) ✓ ✓ |
+| L2 a seek after a failure succeeds automatically | **exists** ✓ ✓ | `r2g` ✓ ✓, `C3` ✓ ✓ — one request ✓ ✓, the exact bytes ✓ ✓ ✓✓ |
+| L3 an in-flight failure is retried behind the same playback object | **exists** ✓ ✓ | `r2f`: the route commits the 206 ✓ ✓, delivers 8 bytes ✓ ✓, then errors ✓ ✓ — the SAME request completes **byte-for-byte exact** ✓ ✓ (no duplicate ✓ ✓ no gap ✓ ✓) ✓✓ ✓✓ |
+| L4 the player stays in the same media/file lifecycle | **exists for a route failure** ✓ ✓; **breaks at a token renewal** ✗ ✗ | `file-loaded: 1` across a failover ✓ ✓; `file-loaded: 2` across a renewal ✗ ✗ ✓✓ |
+| L5 the interruption is imperceptible / under a stall budget | **exists, bounded** ✓ ✓ | the first frame moved 403 → 749 ms with a 400 ms injected stall ✓ ✓ and 403 → 319 ms with none ✓ ✓ ✓✓ |
+
+- **Zero user action** ✓ ✓ in every proven case ✓ ✓: the failover ✓ ✓, the
+  seek ✓ ✓, and the token renewal ✓ ✓ (the client re-resolves the same
+  authoritative media ✓ ✓, takes a fresh URL ✓ ✓ and moves the player onto it
+  at its recorded position ✓ ✓ — `renewedAtPositionSeconds` ✓ ✓,
+  `seek: 1` ✓ ✓, **0 manual actions** ✓ ✓ ✓✓).
+- **The client stays in charge of the session state** ✓ ✓: the playhead ✓ ✓,
+  the decoder state ✓ ✓ and the tracks stay client-owned ✓ ✓ — the Binding ✓
+  ✓, the TorrentFile ✓ ✓ and the route authority are untouched ✓ ✓ ✓✓.
+- **No second route-health system** ✓ ✓: the Rust reader classifies the
+  failure and records the event ✓ ✓ (`record_provider_failover` ✓ ✓), the
+  Node side records what actually arrived ✓ ✓ ✓✓.
+- **Correctness beats continuity** ✓ ✓: when every route is dead the request
+  **fails closed** with the upstream's own typed status ✓ ✓
+  (`502 PROVIDER_EXHAUSTED` ✓ ✓) — never a fake seamless recovery ✓ ✓ ✓✓.
+- **Production (no sabotage)** ✓ ✓: City Lights (dual route) ✓ ✓ — the
+  resolver 30 ms ✓ ✓, the **first frame 776 ms** ✓ ✓, `file-loaded: 1` ✓ ✓,
+  0 manual actions ✓ ✓, a clean stop ✓ ✓; Rear Window (dual route) ✓ ✓ and
+  Lanterns S01E02 ✓ ✓ both played ✓ ✓ with 0 manual actions ✓ ✓ ✓✓.
+  The first-frame variance (0.8 s → ~90 s) is the **cold provider read**
+  ✓ ✓ (the fixed-grid cache evicts 434.9 GB against 911.9 GB held ✓ ✓) ✓✓.
+- **Player compatibility** ✓ ✓: the reference player is mpv **0.41.0** ✓ ✓
+  (libavformat 63.1.101 ✓ ✓ / FFmpeg n9.0.1 ✓ ✓); the Plex HTPC bundles
+  **mpv 0.38.0** ✓ ✓ with **libavformat 59** ✓ ✓ — an **isolated
+  malformed-file tolerance difference** ✓ ✓ (the Lanterns S01E05 MP4 plays on
+  the Plex HTPC ✓ ✓ and not on the system mpv ✓ ✓, over HTTP **and** from the
+  local mount ✓ ✓ — so not a transport problem ✓ ✓) ✓✓ ✓✓.
+- **Cold acquisition was not touched** ✓ ✓: the two cold fixtures still fail
+  with the typed `NO_AUTHORITATIVE_REPRESENTATION` ✓ ✓, which is **correct**
+  under the cache-only policy ✓ ✓ ✓✓.
+- **Tests**: 9 new Node continuity tests ✓ ✓ + 2 new Rust scenarios ✓ ✓; the
+  full suite is 3584/3580/1/3 ✓ ✓ — the one failure is the pre-existing
+  `vfs-collection-resilience` C1/C2/C3 ✓ ✓ ✓✓.
+
+The next earned slice is not selected ✓; the candidates are in the build log
+✓ ✓ — a lifecycle-preserving renewal (a client that owns the byte layer ✓
+✓), a measured stall distribution ✓ ✓, and the uncached execution capability
+as the explicit product-policy decision it is ✓ ✓ ✓✓.
+
 
 Completed final slice: **bound stale-inventory binding retry churn** —
 **CLOSED**. The host-only canary passed clean E01 plus the full E01/E05/MobLand

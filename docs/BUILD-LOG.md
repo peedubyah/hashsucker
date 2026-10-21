@@ -4731,3 +4731,206 @@ Not selected — a human disposes. The candidates this slice leaves standing:
   can resume across a token expiry ✓; (3) a **player comparison** (mpv vs
   mpv-android vs a Jellyfin client) on the same fixtures, since the demuxer
   ceiling is now the binding constraint ✓.
+
+## 2026-10-20 — KEEP IT PLAYING: continuity for the same exact TorrentFile — CLOSED
+
+Slice: **PIVOT SLICE 4**. Once playback starts, a routine source/route failure
+must not require the user to back out, pick another stream, or restart. Scope:
+the **same exact TorrentFile**. No uncached acquisition, no representation
+switching, no direct BitTorrent, no GUI, no cross-encode correspondence.
+
+### WHAT CHANGED
+
+- `data-plane/tests/same_tf_route_recovery.rs` — two new deterministic
+  scenarios: `r2f_midbody_failure_resumes_on_the_alternate_with_exact_bytes`
+  (the failing route **commits a valid 206, delivers a few bytes, then the
+  body errors**) and `r2g_seek_after_route_failure_succeeds_automatically`.
+- `media-search/test/playback-continuity.test.js` (new, 9 tests) — the
+  continuity contract through the **real** byte-serving code.
+- `media-search/src/api/playback-object.js` — the response now carries
+  `playbackUrlExpiresInSeconds`, so a client can renew **before** the expiry
+  instead of discovering it as a failed request.
+- `media-search/src/lib/plex-htpc/mpv-ipc.js` — the IPC client counts the
+  player's lifecycle events (`start-file`, `end-file`, `file-loaded`, …).
+  Measured, never acted on.
+- `media-search/tools/hs/mpv.mjs` — the client tracks the playhead, records
+  the lifecycle events, and can **renew the playback object underneath the
+  player** (re-resolve → fresh URL → `loadfile … start=<position>`).
+- `media-search/tools/hs/main.mjs` — the renewal path: re-resolve the same
+  authoritative media, keep the playhead, no user action.
+
+### WHAT WAS PROVEN
+
+**Continuity levels, before and after.** The levels were kept separate and
+measured independently:
+
+| level | claim | evidence |
+|---|---|---|
+| **L1** the next Range request uses another route | **EXISTS** | `r1`/`r2a`/`r2b`/`r2c`/`r2d` (Rust, 13/13) and `C1`/`C3`/`C4` (Node) |
+| **L2** a seek after a route failure succeeds automatically | **EXISTS** | `r2g` (Rust) and `C3` (Node): one request, exact bytes, no manual retry |
+| **L3** a failed **in-flight** byte request is retried behind the same playback object | **EXISTS** | `r2f`: the route commits the 206, delivers 8 bytes, then the body errors — the SAME client request completes with the **byte-for-byte exact** range (no duplicated boundary byte, no skipped byte) |
+| **L4** the player stays in the same media/file lifecycle | **EXISTS for a route failure**; **BREAKS at a token renewal** | the player proof: `file-loaded: 1` across a failover — but `file-loaded: 2` when the playback URL is renewed (the media is reloaded) |
+| **L5** the interruption is imperceptible / under a stall budget | **EXISTS, bounded** | the failover costs the alternate-acquire + the chunk re-fetch: the first frame moved 403 ms → 749 ms with a 400 ms injected stall, and 403 ms → 319 ms with none |
+
+**In-flight failover semantics (Phase 4).** Safe, and already implemented in
+the Rust reader: the exact range offsets are known, the alternate route maps to
+the same exact TorrentFile, the chunk is re-fetched **whole** on the alternate
+route, and the client receives one correct byte stream. `r2f` asserts the
+bytes against the expected pattern and the Node-level `C2` asserts the same
+through the real byte-serving code. Bytes are never concatenated from
+different TorrentFiles.
+
+**Player lifecycle (Phase 5).** A tiny libmpv host is **not necessary**: the
+JSON IPC already exposes the lifecycle events, and the failover happens
+*below* the player, so the player never learns that the route changed. The
+proof (a scratch harness serving the real `/play/<token>` against an upstream
+whose route A fails):
+
+| case | resolver | player startup | first frame | lifecycle | result |
+|---|---|---|---|---|---|
+| no fault | 29 ms | 79 ms | 403 ms | `file-loaded: 1` | played, clean stop, 0 user actions |
+| route A terminal, 400 ms stall | 28 ms | 476 ms | 749 ms | `file-loaded: 1` | played, clean stop, 0 user actions, **no reopen** |
+| route A terminal, no stall | 28 ms | 74 ms | 319 ms | `file-loaded: 1` | played, clean stop, 0 user actions |
+
+**Measured stall.** The failover's cost is the alternate acquire plus the
+chunk re-fetch: with a 400 ms stall injected on the alternate route, the first
+frame moved by 346 ms; with no stall it moved by **−84 ms** (noise). The
+player never saw an error, never re-opened the media, and the user did
+nothing.
+
+**Token renewal (Phase 6).** The server now tells the client how long the
+playback URL lives, so the client renews **before** the expiry. With a
+deliberately short-lived (8 s) token: the client re-resolved the same
+authoritative media (`resolverAttempts` grew), received a fresh URL, moved the
+player onto it at its recorded position (`renewedAtPositionSeconds: 0.6`,
+`seek: 1` in the lifecycle events), and the session continued with **0 manual
+actions** and a clean exit. **The ceiling is honest**: the renewal reloads the
+media (`file-loaded: 2`, `end-file: 2`), so L4 does **not** survive a renewal
+with an external player. A renewal that preserves the media lifecycle needs
+the client to own the byte layer (libmpv + a custom protocol) — that is the
+next slice, not this one.
+
+**Exact-byte correctness (Phase 9).** `r2f`, `r2g`, `C1`–`C4` and `C9` all
+compare the delivered bytes against the authoritative expected pattern: the
+whole range, no duplicate, no gap, the exact `Content-Range`, the exact final
+length. Correctness was preferred over continuity: when every route is dead
+the request **fails closed** with the upstream's own typed status
+(`502 PROVIDER_EXHAUSTED`), never a fake seamless recovery.
+
+**Representation invariant (Phase 11).** The playback-object TorrentFile, the
+Binding's TorrentFile and the served TorrentFile are asserted identical at
+every step: `C6` checks the upstream path across every failure shape, and the
+production proof names the same TorrentFile the resolver named
+(`tf_c0656148…`, `tf_149c41e9…`, `tf_1355e37f…`). Cross-representation
+fallback was not attempted.
+
+**Route evidence (Phase 10).** No second, client-specific route-health system
+was created. The existing model is reused end to end: the Rust reader
+classifies the failure (`try_failover` is one-way and per-read; the failed
+lane keeps its real throttled/dead state — failover never clears it) and
+records the event (`metrics.record_provider_failover(from, to)`,
+`note_failover`); the Node side records serviceability from what actually
+arrived (`recordServiceable` on a completed body, `recordUnserviceable` with
+a reason on a provider body truncation). The production data plane's
+`failovers.total` is **0** — no failover has occurred in production, so the
+production claim rests on the deterministic suite and the harness, not on an
+observed production event.
+
+**No provider leakage.** `C7` asserts the response headers contain no
+`location`, no `x-torrent-id`/`x-file-id`, no `x-hashsucker-serving-*`, no
+absolute URL, no provider name and no secret. The client prints only the
+title, the media id, the timings and a typed error code.
+
+**Production proof (no sabotage).** Real items through the
+continuity-capable path, with naturally occurring route state only: City
+Lights (dual route) — resolver 30 ms, **first frame 776 ms**, `file-loaded:
+1`, 0 manual actions, clean stop; Rear Window (dual route) — played, clean
+stop, 0 manual actions; Lanterns S01E02 — played, clean stop, 0 manual
+actions. The first-frame latency varied from 0.8 s to ~90 s: that is the
+**cold provider read**, not a continuity failure — the data plane's fixed-grid
+cache is small relative to the volume it serves (434.9 GB evicted against
+911.9 GB held locally), so most reads are cold.
+
+**Player compatibility (Phase 12).** The reference player is mpv **0.41.0**
+(libplacebo 7.360.1) linked against **FFmpeg n9.0.1 / libavformat 63.1.101**.
+The Plex HTPC bundles **mpv 0.38.0** with **libavformat 59** (FFmpeg
+`46f74ab`). The `UDTA parsing failed retrying raw` message exists in **both**
+libavformat builds, so the message is not the differentiator — the newer
+mov demuxer's recovery differs. The Lanterns S01E05 MP4 plays on the Plex
+HTPC and not on the system mpv, **over HTTP and from the local mount
+alike**, so it is not a transport problem. Verdict: an **isolated
+malformed-file tolerance difference between two ffmpeg generations**, not a
+general substrate deficiency — the same player plays the rest of the corpus.
+No player migration was started.
+
+**Cold acquisition was NOT touched (Phase 13).** The two cold fixtures from
+the previous slice still fail with the typed `NO_AUTHORITATIVE_REPRESENTATION`,
+which is **correct** under the current cache-only policy: the provider does
+not hold the selected release, and making it hold it is a product-policy
+decision, not this slice's work. No magnet was added, no provider resource
+was acquired, no torrent was executed.
+
+### WHAT REMAINS UNPROVEN
+
+- **No observed production failover.** The data plane's `failovers.total` is
+  0. Every failover claim rests on the deterministic Rust suite and on the
+  scratch harness, both using the real byte-serving code.
+- **L4 does not survive a token renewal with an external player** — the
+  renewal reloads the media. A lifecycle-preserving renewal needs a client
+  that owns the byte layer.
+- The stall distribution is a **single harness configuration** (one injected
+  stall size, one fixture); there is no large-sample distribution yet.
+- The production first-frame latency is dominated by cold provider reads, so
+  the continuity path is rarely exercised by real traffic.
+- The route-evidence semantics are unchanged and reused, but no production
+  evidence shows a failover *superseding* a prior route-health observation.
+
+### WHAT WAS LEARNED
+
+- **The failover was already there, and the interesting part was the
+  composition.** The Rust reader has failed over for a long time; what was
+  missing was proof that the *playback object* in front of it does not break
+  the property, and a player-level observation that the player never notices.
+- **A mid-body failure is safe to recover, because the chunk is refetched
+  whole.** The reader does not splice bytes: it reopens the chunk on the
+  alternate route. That is why "already-delivered byte count" is not actually
+  a precondition — the unit of recovery is the chunk, not the byte.
+- **The JSON IPC is enough.** No libmpv host was needed to observe the
+  lifecycle: `file-loaded`/`start-file`/`end-file`/`seek` are all on the wire.
+  A libmpv host is needed only for the *byte-layer* renewal.
+- **A renewal is a lifecycle boundary.** Renewing the URL changes the URL
+  the player holds, and an external player cannot swap it without reopening
+  the media. Whether that is acceptable is a product decision; the honest
+  ceiling is recorded rather than papered over.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- "A failed in-flight request cannot be recovered without duplicating or
+  skipping bytes" → false ✓: the chunk is refetched whole ✓ ✓.
+- "Proving continuity needs a custom player" → false ✓: the JSON IPC already
+  exposes the lifecycle ✓ ✓ ✓✓.
+- "A token renewal can be seamless" → not with an external player ✓ ✓; it
+  reloads the media ✓ ✓ ✓✓.
+- "The uncached cold path is broken" → not broken ✓ — it is *correct* under
+  the cache-only policy ✓ ✓ ✓✓.
+
+### WHAT SHOULD BE UPDATED
+
+- `docs/BUILD-LOG.md` ✓, `PLANS.md` ✓, `handoff/CURRENT.md` ✓ — done in this
+  slice.
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing was deleted. One simplification is recorded for later: the
+  `/bytes/:tfId` route is now a second public door onto the same byte path as
+  `/play/:token` ✓.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The candidates this slice leaves standing:
+(1) a **lifecycle-preserving renewal** — a client that owns the byte layer
+  (libmpv + a custom protocol), so the playback URL can change underneath a
+  playing file without reopening it; (2) a **stall distribution** over many
+  deterministic repetitions, so L5 becomes a measured budget rather than one
+  sample; (3) the **uncached execution capability** as the explicit
+  product-policy decision it is (currently a typed refusal, correctly).

@@ -91,6 +91,7 @@ export function connectMpvIpc({ socketPath, expectedExe, timeoutMs = 5000 } = {}
 function createMpvIpcClient({ socketPath, owner, timeoutMs }) {
   const socket = net.connect(socketPath);
   let requestId = 0;
+  const eventCounts = Object.create(null);
   const pending = new Map();
   let buffer = '';
   let closed = false;
@@ -107,6 +108,12 @@ function createMpvIpcClient({ socketPath, owner, timeoutMs }) {
         msg = JSON.parse(line);
       } catch {
         continue;
+      }
+      // The player's lifecycle events arrive on the same socket. They are
+      // counted, never acted on: the client measures them, the server does
+      // not know they exist.
+      if (msg && typeof msg.event === 'string') {
+        eventCounts[msg.event] = (eventCounts[msg.event] ?? 0) + 1;
       }
       const waiter = pending.get(msg.request_id);
       if (waiter) {
@@ -152,6 +159,10 @@ function createMpvIpcClient({ socketPath, owner, timeoutMs }) {
     owner,
     get,
     command,
+    /** The player's lifecycle events seen so far (start-file, end-file, …). */
+    events() {
+      return { ...eventCounts };
+    },
     /** Numeric mpv value in milliseconds, or null when the property is absent. */
     async ms(name) {
       const msg = await get(name);

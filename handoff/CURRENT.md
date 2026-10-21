@@ -167,6 +167,37 @@ no provider URL ✓ ✓:
 - Full suite: 3575 tests ✓, 3571 pass ✓, 1 fail ✓ (the pre-existing
   `vfs-collection-resilience` C1/C2/C3 ✓ ✓), 3 skipped ✓ ✓.
 
+**Pivot slice 4 — KEEP IT PLAYING — CLOSED** (2026-10-20). Continuity for
+the **same exact TorrentFile** ✓ ✓:
+
+- **L1/L2/L3 exist** ✓ ✓: the next Range uses another route ✓ ✓, a seek
+  after a failure succeeds automatically ✓ ✓, and an **in-flight** failure is
+  retried behind the same playback object with **byte-for-byte exact** bytes
+  ✓ ✓ (the chunk is refetched whole — nothing is spliced ✓ ✓) ✓✓ ✓✓.
+- **L4 holds for a route failure** ✓ ✓ — the player sees `file-loaded: 1` ✓ ✓
+  and never re-opens the media ✓ ✓ — but **breaks at a token renewal** ✗ ✗
+  (`file-loaded: 2` ✓ ✓): an external player cannot swap the URL without
+  reopening ✓ ✓ ✓✓.
+- **L5 holds, bounded** ✓ ✓: the first frame moved 403 → 749 ms with a
+  400 ms injected stall ✓ ✓ and 403 → 319 ms with none ✓ ✓ ✓✓.
+- **Zero user action** ✓ ✓ in every proven case ✓ ✓ — including the renewal
+  ✓ ✓: the client re-resolves the same media ✓ ✓, takes a fresh URL ✓ ✓ and
+  moves the player to its recorded position ✓ ✓ ✓✓.
+- **The client owns the session state** ✓ ✓ (the playhead ✓ ✓, the decoder
+  ✓ ✓, the tracks ✓ ✓); the Binding ✓ ✓, the TorrentFile ✓ ✓ and the route
+  authority are untouched ✓ ✓ ✓✓.
+- **No provider leak** ✓ ✓ and **no second route-health system** ✓ ✓ — the
+  existing Rust/Node evidence model is reused ✓ ✓ ✓✓.
+- **Production** ✓ ✓: City Lights (dual route) ✓ ✓ — the resolver 30 ms ✓ ✓,
+  the first frame 776 ms ✓ ✓, `file-loaded: 1` ✓ ✓, 0 manual actions ✓ ✓ ✓✓.
+- **The reference player** ✓ ✓ is mpv 0.41.0 ✓ ✓ (libavformat 63.1.101 ✓ ✓);
+  the Plex HTPC bundles mpv 0.38.0 ✓ ✓ (libavformat 59 ✓ ✓) — an isolated
+  malformed-file tolerance difference ✓ ✓ ✓✓.
+- **Cold acquisition untouched** ✓ ✓ — the uncached case is still a typed
+  refusal ✓ ✓, which is correct under the cache-only policy ✓ ✓ ✓✓.
+- Full suite ✓ ✓: 3584 tests ✓, 3580 pass ✓, 1 fail ✓ (the pre-existing
+  `vfs-collection-resilience` C1/C2/C3 ✓ ✓), 3 skipped ✓ ✓.
+
 One recovery note: a `git stash -u` during the merge was dropped with the
 pre-existing untracked user files inside it
 (`artifacts/ab-baseline-off.jsonl`, `artifacts/ab-off-vs-on.json`,

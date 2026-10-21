@@ -181,20 +181,45 @@ async function main() {
     measurement.torrentFileId = resolved.result.torrentFileId;
     measurement.warm = resolved.result.warm;
     measurement.playbackUrl = resolved.result.playbackUrl;
+    measurement.playbackUrlExpiresInSeconds = resolved.result.playbackUrlExpiresInSeconds ?? null;
 
     // The server answers with a path; the player needs an absolute URL.
     const playbackUrl = new URL(resolved.result.playbackUrl, base).toString();
     measurement.playbackUrl = playbackUrl;
+    // Renew before the playback URL expires rather than discovering it as a
+    // failed request. The renewal re-resolves the SAME authoritative media
+    // (the server owns which TorrentFile that is) and hands back a fresh URL;
+    // the playhead stays in the client.
+    const renew = async (positionSeconds) => {
+      measurement.resolverAttempts += 1;
+      measurement.renewals = (measurement.renewals ?? 0) + 1;
+      const again = await resolveIntent(base, args, measurement);
+      measurement.torrentFileId = again.result.torrentFileId;
+      const fresh = new URL(again.result.playbackUrl, base).toString();
+      measurement.playbackUrl = fresh;
+      return fresh;
+    };
+    const ttlSeconds = resolved.result.playbackUrlExpiresInSeconds ?? null;
+    const renewAfterMs = ttlSeconds != null && ttlSeconds > 0
+      ? Math.max(1000, (ttlSeconds - 10) * 1000)
+      : null;
+    measurement.renewAfterMs = renewAfterMs;
     const marks = await playWithMpv(playbackUrl, {
       resume: args.resume,
       keepOpen: args.keepOpen,
       measureSeconds: args.measure,
+      renew,
+      renewAfterMs,
     });
     measurement.playerStartupMs = marks.mediaLoadedMs ?? null;
     measurement.firstFrameMs = marks.firstFrameMs ?? null;
     measurement.cleanExit = marks.cleanExit ?? false;
     measurement.exitCode = marks.exitCode ?? null;
     measurement.firstSourceSuccess = marks.firstFrameMs != null;
+    measurement.playheadSeconds = marks.playheadSeconds ?? null;
+    measurement.lifecycleEvents = marks.lifecycleEvents ?? {};
+    measurement.renewals = marks.renewals ?? 0;
+    measurement.renewedAtPositionSeconds = marks.renewedAt ?? null;
     measurement.error = marks.error ?? null;
 
     if (args.json) {

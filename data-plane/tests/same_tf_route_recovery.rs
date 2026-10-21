@@ -659,6 +659,71 @@ async fn r2e_malformed_provider_payload_fails_over() {
 }
 
 // ===========================================================================
+// R2f — the route commits the response, then the body dies mid-stream
+// ===========================================================================
+
+#[tokio::test]
+async fn r2f_midbody_failure_resumes_on_the_alternate_with_exact_bytes() {
+    // The hardest shape: the failing route ANSWERS. It commits a valid 206
+    // with the correct range metadata, delivers a few bytes, and then the
+    // body errors. The client has already received response headers, so the
+    // only correct outcome is that the SAME request completes with the
+    // exact bytes — no duplicated boundary byte, no skipped byte, and the
+    // bytes must come from the same exact TorrentFile.
+    let st = build_stack(FILE_SIZE, None).await;
+    let served_by = lane_that_serves(&st).await;
+    let losing = if served_by == "torbox" { &st.primary } else { &st.alternate };
+    let other = if served_by == "torbox" { &st.alternate } else { &st.primary };
+    losing.fault(MODE_MIDBODY_ERROR);
+    let other_before = other.range_requests();
+
+    let (status, body, _p) = read(&st, CHUNK, 2 * CHUNK - 1).await;
+    assert_eq!(status, 206, "one request, transparently recovered");
+    assert_eq!(
+        body.len(),
+        CHUNK as usize,
+        "the client received the WHOLE range — no skipped tail"
+    );
+    assert_eq!(
+        body,
+        expected(CHUNK, CHUNK as usize),
+        "the recovered bytes are byte-for-byte exact: no duplicated boundary byte, no gap"
+    );
+    assert!(
+        other.range_requests() > other_before,
+        "the healthy alternate actually delivered the read"
+    );
+}
+
+// ===========================================================================
+// R2g — a seek after a route failure succeeds with no user action
+// ===========================================================================
+
+#[tokio::test]
+async fn r2g_seek_after_route_failure_succeeds_automatically() {
+    let st = build_stack(FILE_SIZE, None).await;
+    let served_by = lane_that_serves(&st).await;
+    let losing = if served_by == "torbox" { &st.primary } else { &st.alternate };
+    let other = if served_by == "torbox" { &st.alternate } else { &st.primary };
+    losing.fault(MODE_404);
+    let other_before = other.range_requests();
+
+    // A seek into the file: a fresh Range the player asked for.
+    let start = 2 * CHUNK;
+    let (status, body, _p) = read(&st, start, start + CHUNK - 1).await;
+    assert_eq!(status, 206, "the seek is served without a manual retry");
+    assert_eq!(
+        body,
+        expected(start, CHUNK as usize),
+        "the seeked bytes are byte-for-byte exact"
+    );
+    assert!(
+        other.range_requests() > other_before,
+        "the alternate route served the seek"
+    );
+}
+
+// ===========================================================================
 // R3 — every route failing: honest failure, nothing poisoned
 // ===========================================================================
 

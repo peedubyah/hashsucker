@@ -241,10 +241,11 @@ export async function resolvePlaybackIntent({
     }
   }
 
+  const ttlSeconds = readPlaybackTtlSeconds(env);
   const { token } = mintPlaybackToken({
     torrentFileId: binding.torrentFileId,
     secret,
-    ttlSeconds: readPlaybackTtlSeconds(env),
+    ttlSeconds,
     now: now(),
   });
 
@@ -258,6 +259,9 @@ export async function resolvePlaybackIntent({
     year: resolvedYear,
     torrentFileId: binding.torrentFileId,
     playbackUrl: playbackObjectPath(token),
+    // How long the playback URL lives. The client needs this to renew
+    // BEFORE the expiry instead of discovering it as a failed request.
+    playbackUrlExpiresInSeconds: ttlSeconds > 0 ? ttlSeconds : null,
     warm,
     alreadyPrepared: prepareResult?.alreadyPrepared === true,
     published: prepareResult?.published === true,

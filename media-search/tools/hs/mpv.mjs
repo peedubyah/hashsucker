@@ -47,14 +47,21 @@ export function buildMpvArgs({ url, socketPath, headless }) {
  * @param {string} [options.socketPath]   the JSON IPC socket path
  * @returns {Promise<object>} the marks
  */
-export async function playWithMpv(url, { resume = null, keepOpen = false, measureSeconds = null, socketPath } = {}) {
+export async function playWithMpv(url, {
+  resume = null, keepOpen = false, measureSeconds = null, socketPath = null,
+  renew = null, renewAfterMs = null,
+} = {}) {
   const sock = socketPath ?? `/tmp/hs-mpv-${process.pid}-${Date.now()}.sock`;
   const headless = !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
   const args = buildMpvArgs({ url, socketPath: sock, headless });
 
   const startedAt = nowMs();
   const child = spawn('mpv', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-  const marks = { launchedAt: startedAt, firstFrameMs: null, exitCode: null };
+  const marks = {
+    launchedAt: startedAt, firstFrameMs: null, exitCode: null,
+    playheadSeconds: null, renewals: 0, renewedAt: null, playerExited: null,
+    lifecycleEvents: {},
+  };
   let stderr = '';
   child.stderr.on('data', (chunk) => {
     stderr += chunk.toString();
@@ -92,6 +99,42 @@ export async function playWithMpv(url, { resume = null, keepOpen = false, measur
         ipc.seekMs(Math.round(resume * 1000));
         marks.resumedToSeconds = resume;
       }
+
+      // Track the playhead in the CLIENT. The player position, the decoder
+      // state and the selected tracks are client/session state; HashSucker
+      // is told nothing and the Binding, the TorrentFile and the route
+      // authority are untouched by any of this.
+      const trackPlayhead = setInterval(() => {
+        ipc.get('playback-time').then((msg) => {
+          if (msg?.error === 'success' && msg.data != null) {
+            marks.playheadSeconds = Number(msg.data);
+          }
+        }).catch(() => {});
+      }, 500);
+
+      // Renew the playback object BEFORE it expires: the same authoritative
+      // media, a fresh URL, and the player is moved onto it at its current
+      // position. The URL changes; the represented TorrentFile does not.
+      if (renew && renewAfterMs != null) {
+        const timer = setTimeout(async () => {
+          try {
+            const position = marks.playheadSeconds ?? 0;
+            const fresh = await renew(position);
+            if (!fresh) return;
+            marks.renewals += 1;
+            marks.renewedAt = position;
+            // mpv's loadfile takes per-file options: "start=<seconds>" puts
+            // the reopened media at the position the player had reached.
+            await ipc.command('loadfile', fresh, 'replace', '0', `start=${position}`);
+          } catch (error) {
+            // A failed renewal is recorded, not hidden: the player itself
+            // will report a broken stream, but the client must be able to
+            // say WHY the renewal did not happen.
+            marks.renewalError = error?.message ?? String(error);
+          }
+        }, renewAfterMs);
+        marks.renewalTimer = timer;
+      }
       if (measureSeconds != null && Number.isFinite(measureSeconds)) {
         // The measurement run: play for a bounded time, then stop cleanly.
         await new Promise((r) => setTimeout(r, Math.max(0, measureSeconds * 1000)));
@@ -104,6 +147,9 @@ export async function playWithMpv(url, { resume = null, keepOpen = false, measur
         marks.exitCode = child.exitCode;
         marks.cleanCode = child.exitCode === 0;
       }
+      clearInterval(trackPlayhead);
+      marks.renewalTimer && clearTimeout(marks.renewalTimer);
+      marks.lifecycleEvents = ipc.events ? ipc.events() : {};
     } catch (error) {
       marks.error = error?.message ?? String(error);
       marks.playerStderr = stderr.split('\n').filter((l) => l.trim()).slice(-4);
