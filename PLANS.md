@@ -320,6 +320,48 @@ The next earned slice is not selected ✓; the candidates are in the build log
 as the explicit product-policy decision it is ✓ ✓ ✓✓.
 
 
+
+**Slice — upstream evidence in the same schema (2026-10-20) — CLOSED**
+(`6e39711`). A production-hardening slice ✓ ✓ — the parser stays ✓ ✓, the
+normalized schema stays ✓ ✓, the ranking policy stays ✓ ✓, and the addon's
+data becomes **source evidence** ✓ ✓ ✓✓.
+
+- **The 8K ordering bug is fixed** ✓ ✓: the resolution order ✓ ✓, the
+  quality score ✓ ✓ and the corpus parser ✓ ✓ all know 4320p/8640p now ✓ ✓.
+  A correctly parsed 8K release used to rank **below** ordinary 1080p
+  releases ✓ ✓ and to score **zero** for the resolution component ✓ ✓ ✓✓. On
+  the live cohort the newly-aired episode's top-1 moved 2160p → **4320p** ✓ ✓
+  and the top-1 resolution now matches the upstream's in **8 of 8** fixtures
+  ✓ ✓ (was 7 of 8 ✓ ✓) ✓✓.
+- **The source-local ordinal is retained** ✓ ✓ (with its source id ✓ ✓) and
+  is a **weak tiebreak within one source only** ✓ ✓ — never compared across
+  sources ✓ ✓ ✓✓.
+- **The upstream's facts survive** ✓ ✓ in a fixed, small evidence object ✓ ✓
+  (the seeders on 605/605 ✓ ✓, the bit depth on the movie cohorts ✓ ✓, the
+  source label ✓ ✓, the raw tag line ✓ ✓) ✓✓ — and the upstream may **fill**
+  a missing fact ✓ ✓ but never overwrite a local one ✓ ✓ (`attributeOrigin`
+  says which ✓ ✓) ✓✓.
+- **The cache semantics are determined, not assumed** ✓ ✓: the upstream's
+  hint means *"the release is in the cache of the provider the ADDON is
+  configured with, as of the addon's response"* ✓ ✓ — the addon's claim ✓ ✓,
+  not our provider observation ✓ ✓, not the addon's response cache ✓ ✓. It
+  is now `upstreamCachedHint` ✓ ✓ — never a universal `cached` ✓ ✓, never
+  persisted ✓ ✓ ✓✓.
+- **The parser remains the normalizer** ✓ ✓ — and for a series the upstream
+  publishes no parse at all ✓ ✓ (the `bingeGroup` is the infoHash ✓ ✓), so a
+  uniform cross-source parse is not duplication ✓ ✓ ✓✓.
+- **Exact-file authority is unchanged** ✓ ✓: with an infoHash and a fileIdx
+  but no path and no exact size ✓ ✓, the identity strength stays
+  `release-only` ✓ ✓ ✓✓.
+- **Cost did not regress** ✓ ✓ (the normalize 0.31–4.93 ms ✓ ✓, the sort
+  ≤ 0.25 ms ✓ ✓) ✓✓ — and the full suite is 3594/3590/1/3 ✓ ✓ (the one
+  failure is the pre-existing `vfs-collection-resilience` C1/C2/C3 ✓ ✓) ✓✓.
+- **The provenance gap is diagnosed, not fixed** ✓ ✓: `resolver_source` is
+  written by exactly one writer ✓ ✓ (the identity-enrichment worker ✓ ✓),
+  and **that writer has produced no rows** ✓ ✓ — the unresolved class has no
+  resolver provenance because there is no producer, not because a value is
+  lost ✓ ✓ ✓✓. The `request-outcome` writer should **not** set it ✓ ✓ (its
+  `source` column already carries the provenance ✓ ✓) ✓✓.
 **Slice — are we re-ranking for a reason? (2026-10-20) — CLOSED**
 (`docs/recon/2026-10-rerank-differential.md`). Measurement only ✓ ✓ — **no
 production selection behaviour changed** ✓ ✓. The upstream's interpretation and

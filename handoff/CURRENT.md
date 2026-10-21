@@ -242,6 +242,37 @@ debrid key ✓ ✓ so no provider API was called ✓ ✓):
 addon's richer facts become features ✓ ✓ and its order a tiebreak ✓ ✓ ✓✓.
 The four candidate changes are recorded ✓ ✓ and **not applied** ✓ ✓ ✓✓.
 
+**Slice — upstream evidence in the same schema (2026-10-20) — CLOSED**
+(`6e39711`). The addon's reading of a release is now carried as **source
+evidence** ✓ ✓ — the parser stays ✓ ✓, the schema stays ✓ ✓, the ranking
+policy stays ✓ ✓:
+
+- **The 8K ordering bug is fixed** ✓ ✓ (the resolution order ✓ ✓, the
+  quality score ✓ ✓, the corpus parser ✓ ✓). A correctly parsed 4320p
+  release used to rank below ordinary 1080p releases ✓ ✓ and to score zero
+  for the resolution component ✓ ✓. On the live cohort the newly-aired
+  episode's top-1 moved 2160p → **4320p** ✓ ✓ ✓✓.
+- The candidate now carries `sourceOrdinal` (its position **within its own
+  source's response** ✓ ✓), `sourceId` ✓ ✓, `upstreamFacts` ✓ ✓ (the
+  seeders ✓ ✓, the bit depth ✓ ✓, the source label ✓ ✓, the raw tag line
+  ✓ ✓) and `attributeOrigin` ✓ ✓ (local vs upstream-filled ✓ ✓) ✓✓.
+- The ordinal is a **weak tiebreak within one source only** ✓ ✓ ✓✓.
+- The upstream's cache hint is now **`upstreamCachedHint`** ✓ ✓ — it means
+  "in the cache of the provider the ADDON is configured with, as of the
+  addon's response" ✓ ✓, it is the addon's claim and not our provider
+  observation ✓ ✓, and it is never persisted ✓ ✓ ✓✓.
+- The upstream may fill a missing fact ✓ ✓ but never overwrite a local one
+  ✓ ✓; a file index still cannot authorize an exact file ✓ ✓ (the strength
+  stays `release-only` ✓ ✓) ✓✓.
+- Cost did not regress ✓ ✓ (the normalize 0.31–4.93 ms ✓ ✓, the sort
+  ≤ 0.25 ms ✓ ✓) ✓✓; the full suite is 3594/3590/1/3 ✓ ✓ (the one failure
+  is the pre-existing `vfs-collection-resilience` C1/C2/C3 ✓ ✓) ✓✓.
+- The **provenance gap is diagnosed, not fixed** ✓ ✓: `resolver_source` has
+  exactly one writer ✓ ✓ (the identity-enrichment worker ✓ ✓) and that
+  writer has produced **no rows** ✓ ✓ — the unresolved class has no resolver
+  provenance because there is no producer ✓ ✓, not because a value is lost
+  ✓ ✓ ✓✓.
+
 One recovery note: a `git stash -u` during the merge was dropped with the
 pre-existing untracked user files inside it
 (`artifacts/ab-baseline-off.jsonl`, `artifacts/ab-off-vs-on.json`,

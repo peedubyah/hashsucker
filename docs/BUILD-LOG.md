@@ -5056,3 +5056,165 @@ machinery so their effect is measured before it is trusted ✓; (2) record the
 `resolver_source` provenance on candidate associations ✓; (3) the debrid-form
 differential, run against a scratch copy of the control plane so no live
 provider API is called ✓.
+
+## 2026-10-20 — UPSTREAM EVIDENCE INTEGRATION: the addon's reading, as evidence — CLOSED
+
+Slice: a small production-hardening slice, not a ranking redesign. **Keep the
+parser. Keep the normalized schema. Keep HashSucker's ranking policy. Treat
+addon data as source evidence only.** No provider acquisition, no direct
+torrent, no client work, no schema rewrite, no Binding semantics change.
+
+### WHAT CHANGED
+
+- `media-search/src/lib/stremio/normalize.js`
+  - **The 4320p/8K ordering gap is fixed.** `RESOLUTION_ORDER` topped out at
+    2160p and an unknown key ranked **0**, so a correctly parsed 4320p
+    release ranked BELOW ordinary 1080p releases. The order now knows 8K and
+    16K.
+  - `readUpstreamFacts(stream)` — the upstream's own reading, as a fixed,
+    small evidence object: the tag line, the source label, the bit depth, the
+    seeder count and the display size text. The upstream's tokens are read
+    **with our vocabulary** (`parseResolution`/`parseQuality`/`parseCodec`/
+    `parseHdr` over each quality group), because the upstream omits fields
+    (a missing bit depth shifts the rest along) and its groups may hold
+    several facts ("4k DV", "BluRay REMUX").
+  - The normalized candidate now carries: `sourceOrdinal` (the position
+    **within its own source's response**), `sourceId`, `upstreamFacts`, and
+    `attributeOrigin` — which normalized attribute came from the local parse
+    and which was filled from the upstream's evidence.
+  - The upstream may **fill** a missing normalized fact and may **never
+    overwrite** one the local parse established.
+  - `cached` → `upstreamCachedHint` (see the semantics note below).
+  - `sortStreams` — the source-local ordinal is a **weak tiebreak, and only
+    within one source**. Position 1 from Torrentio and position 1 from Comet
+    are not calibrated equivalents and are never compared across sources.
+- `media-search/src/lib/stremio/search.js` — the caller passes the position
+  within its own response.
+- `media-search/src/lib/discovery/ranking.js` — `RESOLUTION_QUALITY` knows
+  8K/16K. A correctly parsed 4320p release previously scored **zero** for
+  the resolution component (40 % of the quality score) and a 480p release
+  outranked it.
+- `media-search/src/lib/discovery/parser-adapter.js` — the corpus parser
+  normalizes 4320p/8640p instead of leaving them unrecognized.
+- `media-search/src/lib/discovery/live-bridge.js` — the upstream evidence is
+  carried forward instead of being dropped at that boundary.
+- `media-search/test/upstream-evidence.test.js` — 10 focused tests.
+
+### WHAT WAS PROVEN
+
+- **The 8K fix is real and observable.** On the live cohort the newly-aired
+  episode's top-1 moved from **2160p to 4320p** — and it now **matches the
+  upstream's own top-1 resolution in every fixture (8 of 8**, previously 7 of
+  8). The other seven fixtures' top-1 resolutions are unchanged, and no
+  episode identity moved.
+- **The ordinal is weak and stays inside its source.** A tie inside one
+  source is decided by the ordinal; a tie across two sources is not — the
+  candidates fall through to the title comparison, and neither side's ordinal
+  leaks (test U4).
+- **The upstream's facts survive.** The seeder count survives on **605 of
+  605** candidates; the bit depth on the movie cohorts (21/96, 17/101,
+  19/88); the source label and the raw tag line everywhere it is published.
+- **The parser still supplies what it can** (U6/U8): the local parse reads
+  the resolution, the codec, the HDR and the source from the filename, and
+  where it finds nothing, the upstream fills the gap and `attributeOrigin`
+  says so. An upstream disagreement never overwrites a local fact (U7).
+- **A file index still cannot authorize an exact file** (U9): with an
+  infoHash and a `fileIdx` but no torrent-internal path and no exact size,
+  the identity strength stays `release-only` — unchanged.
+- **The cache semantics are now determined, not assumed.** The upstream's
+  `behaviorHints.cached` means *"the release is present in the cache of the
+  provider THE ADDON is configured with, at the time of the addon's
+  response"*. In our configuration the addon is configured with our own
+  TorBox/Real-Debrid key, so the hint is about our provider — but it is the
+  **addon's claim**, not our own observation (ours is
+  `providerAvailabilityScore`, computed from our provider observations), and
+  it is not the addon's response cache. It is therefore named
+  `upstreamCachedHint`, it is never persisted, and it is not promoted to a
+  universal `cached` fact. No new durable boolean was created.
+- **Cost did not regress**: normalization **0.31–4.93 ms** (the previous
+  measurement: 0.3–3.9 ms), the sort **≤ 0.25 ms**. No provider call was
+  added, no Binding behaviour changed, and the production resolver and the
+  direct client are unchanged (the resolver still answers
+  `playback-object`; the direct client still reaches a first frame in 880 ms
+  with `file-loaded: 1` and zero manual actions).
+- **Full suite**: 3594 tests, 3590 pass, 1 fail, 3 skipped (exit 1) — the one
+  failure is the pre-existing baseline `vfs-collection-resilience` C1/C2/C3.
+
+### THE PROVENANCE GAP — inspected, and it is NOT a one-line bug
+
+`candidate_media.resolver_source` is empty across all 8 751 unresolved
+associations. The write path was inspected:
+
+- `cache.associateMedia` / `upsertMediaAssociation` **accept**
+  `resolverSource` / `resolverVersion` ✓✓.
+- `identity-enrichment-worker.js` **passes** them ✓✓ — so the column is
+  supported and one writer populates it ✓✓. That writer has produced **no
+  rows** ✓✓ (every row is `source = 'request-outcome'`,
+  `match_method = 'request-ranked'`) ✓✓.
+- The `request-outcome` writer (`media-request-stages.js`) does **not** pass
+  them ✓✓ — and it should not: its `source` column already says
+  `request-outcome` ✓✓, and `resolver_source` means *"the identity resolver
+  that produced this match"* ✓✓, which a ranking association does not have
+  ✓✓. Passing it would be semantically wrong ✓✓.
+
+**Verdict: not an accidental loss ✓ — the gap is that the *identity
+enrichment* path, the only writer that records resolver provenance, has never
+produced a row ✓.** The unresolved class therefore has no resolver provenance
+at all ✓. This is **not** a trivial bounded bug (there is no wrong value to
+fix — there is a missing producer ✓), so it is **documented, not fixed**
+✓✓ ✓✓.
+
+### WHAT REMAINS UNPROVEN
+
+- The differential was measured on the **public, no-debrid** Torrentio
+  deployment ✓✓; the debrid form (which adds `behaviorHints.videoSize`)
+  could not be exercised without a live provider API ✓✓.
+- The ranking comparison is at the Stremio-side sort ✓✓; the full corpus
+  ranking (`rankHitsTiered`) over a live cohort was not re-run ✓✓.
+- Comet's live responses remain unobtainable (both public deployments reject
+  a bare or legacy config) ✓✓, so the evidence path is Torrentio-only ✓✓.
+- The "upstream may fill a missing fact" path is rare: it fired on 8/96,
+  6/101 and 10/88 candidates of the movie cohorts and on **none** of the
+  series cohorts ✓✓ — because for a series the upstream publishes no parse at
+  all (the `bingeGroup` is the infoHash there ✓✓) ✓✓.
+- A **local-parse gap** was found and left alone (out of scope ✓): the audio
+  regex does not read the scene form "AAC5.1" (the word boundary fails on
+  the digit ✓✓), and the upstream's tag list never carries an audio token
+  ✓✓, so the audio stays empty for such candidates ✓✓ ✓✓.
+
+### WHAT WAS LEARNED
+
+- **The upstream's parse is less uniform than the differential suggested.**
+  For movies it is structured; for a series the `bingeGroup` is the infoHash
+  and carries **no** quality at all ✓✓ — so a *uniform* cross-source parse is
+  not pure duplication ✓✓: it is what makes heterogeneous sources
+  comparable ✓✓ ✓✓.
+- **The upstream's tag groups are space-separated** ("4k DV", "BluRay
+  REMUX" ✓✓) and the `bingeGroup` **omits fields** ✓✓ — so a positional
+  read of the upstream's parse mislabels the HDR ✓✓. The reader classifies
+  tokens through our own parsers ✓✓ ✓✓.
+- **The local parser already reads the upstream's tag list** (it is part of
+  the labels ✓✓), so the upstream's tags are mostly *confirming* evidence
+  rather than new information ✓✓ — the value is in the disagreement
+  diagnostics ✓✓ and the gap-filling ✓✓ ✓✓.
+- **A "cached" flag with a real meaning is still a misleading name** when
+  three different cache semantics meet in one candidate ✓✓ ✓✓.
+
+### WHAT SHOULD BE UPDATED
+
+- `docs/BUILD-LOG.md` ✓, `PLANS.md` ✓, `handoff/CURRENT.md` ✓ — done in this
+  slice.
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing was deleted ✓. The `cached` field was **renamed** rather than
+  duplicated ✓✓ — one name, one meaning ✓✓ ✓✓.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The candidates this slice leaves standing:
+(1) the **identity-enrichment producer** — the one writer that would record
+  `resolver_source` has produced no rows, so the unresolved class has no
+  resolver provenance ✓✓; (2) the **local audio-parse gap** ("AAC5.1",
+  "DTS-X", "DD+") ✓✓; (3) the **debrid-form differential**, run against a
+  scratch copy of the control plane so no live provider API is called ✓✓.
