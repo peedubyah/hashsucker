@@ -4934,3 +4934,125 @@ Not selected — a human disposes. The candidates this slice leaves standing:
   deterministic repetitions, so L5 becomes a measured budget rather than one
   sample; (3) the **uncached execution capability** as the explicit
   product-policy decision it is (currently a typed refusal, correctly).
+
+## 2026-10-20 — ARE WE RE-RANKING FOR A REASON? — the upstream differential — CLOSED
+
+Slice: measurement only. **No production selection behaviour changed.** The
+recon had established that HashSucker keeps the raw Stremio-addon result and
+its `behaviorHints`, then independently re-parses the filename and re-sorts.
+This slice ran the upstream interpretation and HashSucker's own
+interpretation **side by side** on a live cohort and quantified the difference.
+
+Method: eight fixtures fetched from the public Torrentio deployment (no debrid
+key, so no provider API was touched and the addon answered in the magnet
+form), each raw candidate run through the **production** normalizer and
+**production** sort, then compared field-for-field with the addon's own parse.
+`docs/recon/2026-10-rerank-differential.md` has the full tables.
+
+### WHAT WAS PROVEN
+
+- **The upstream publishes its parse in two shapes**, and the first comparison
+  got this wrong: `behaviorHints.bingeGroup` is structured only for movies
+  (`torrentio|4k|BluRay|x265|10bit|HDR`) and is mostly **the infoHash** for
+  series; the name's second line (`4k DV | HDR10+ | HDR`) is the only
+  comparable shape for both kinds. A comparison that assumes the movie shape
+  manufactures 253 spurious conflicts.
+- **The parser agreement is 84.1 %** (509 of 605 candidates agree on the
+  resolution and the HDR). 92 candidates (15.2 %) are "HashSucker knows
+  more" — but in every one the upstream had the same fact in **another field**
+  (its title: `2160p BluRay`). HashSucker's re-parse is a **re-derivation
+  of the addon's facts, not an addition to them**.
+- **What the upstream carries that HashSucker's normalizer has no field
+  for**: the bit depth and the **seeders** (605 of 605 candidates) and the
+  size text. What HashSucker carries that the upstream's tag list never does:
+  the **audio** track (254 candidates) and the episode→file mapping (which
+  the addon protocol cannot express at all).
+- **The ranking models**: M1 (the current HashSucker order) differs from M2
+  (the raw upstream order) on the top-1 in 7 of 8 fixtures, but the top-1
+  **quality** is identical in 7 of 8 — the re-sort reorders equal-quality
+  rows more often than it changes the choice. **M3** (HashSucker's order with
+  the upstream's parse as features and the upstream's position as a tiebreak)
+  changes **no** top-1 and makes the **top-3 identical to the upstream's**
+  (the top-10 overlap becomes 10/10). The upstream's order is a good
+  tiebreak and a bad authority.
+- **One real gap found**: the upstream's first row for the newly aired
+  episode is a **4320p** release; HashSucker's parse read "4320p" correctly
+  but the resolution **ordering** does not know 4320p, so the candidate is
+  ranked last. A genuine 8K release would be demoted by our sort.
+- **Exact-file outcomes**: in the magnet form the identity strength of
+  **every one of the 613 candidates is `release-only`** — the addon publishes
+  an infoHash and a file index, never a torrent-internal path and (without a
+  debrid key) never the exact file size. HashSucker's binding cannot be built
+  from an addon's answer. In the debrid form the addon *does* publish
+  `behaviorHints.videoSize` (the exact file size) — but never the path.
+- **Newly aired**: the upstream's coverage was **good** (120 streams, 115 of
+  them naming the requested episode), so the *upstream* is not the gap. In the
+  persisted corpus the show has 254 associated candidates, but every
+  association is `resolution_state = unresolved` and `resolver_source` is
+  **empty on all 8751 rows** — the provenance of an association is not
+  recorded. The control plane has an active Binding for the newly aired
+  episode, so the historical concern is resolved for this show.
+- **Cost**: the production normalizer is **0.3–3.9 ms** and the production
+  sort **0–4.3 ms** for the largest fixture — under 8 ms total. The
+  duplication is not a latency problem.
+- **DB churn from the addon path: zero.** The persisted `candidates` table is
+  100 % `dmm.hashlist` ingestion (1 480 584 + 112 543 rows); **no addon
+  candidate is ever persisted** — the addon results are transient.
+- **The upstream's ordering encodes someone else's policy** (Torrentio's sort
+  is a config option; its filters are per-user). It must not become durable
+  HashSucker ranking policy.
+
+### WHAT REMAINS UNPROVEN
+
+- The comparison used the **public, no-debrid** Torrentio deployment. The
+  debrid form (which adds `behaviorHints.videoSize`) could not be exercised
+  without calling a live provider API, which the repo rules forbid for
+  confidence. Its shape is known from the addon's source and from the
+  normalizer's existing consumption of `videoSize`.
+- The *final* production order for these candidates is produced by
+  `rankHitsTiered` (the corpus ranking), not by `sortStreams`; running the
+  full corpus ranking over a live cohort was out of scope here, so the
+  ranking comparison is at the Stremio-side sort.
+- Comet's live responses could not be obtained (both public deployments
+  reject a bare or legacy config), so the differential is Torrentio-only.
+- The "upstream's order as a tiebreak" result (M3) is measured on the
+  Stremio-side sort; its effect through the full corpus ranking is unmeasured.
+
+### WHAT WAS LEARNED
+
+- **"We re-parse the filename" is the wrong description.** The upstream
+  publishes a *parsed* result; HashSucker re-derives the same facts from a
+  different field of the same object. 84 % of it is re-derivation.
+- **The upstream's structured parse is not uniform** — for series the
+  `bingeGroup` is an infoHash — so a uniform cross-source parse is *not*
+  pure duplication: it is what makes heterogeneous sources comparable.
+- **A tiebreak is the right way to use another system's policy.** M3 kept
+  HashSucker's top-1 and adopted the upstream's top-3.
+- **The cost is not CPU** — it is that the addon's richer facts (seeders,
+  bit depth, its own cached flag) are dropped while its poorer ones are
+  re-derived.
+- **The provenance of an association is not recorded** (`resolver_source` is
+  empty across `candidate_media`), which is a real observability gap.
+
+### WHAT SHOULD BE UPDATED
+
+- `docs/recon/2026-10-rerank-differential.md` (new), `docs/BUILD-LOG.md` ✓,
+  `PLANS.md` ✓, `handoff/CURRENT.md` ✓ — done in this slice.
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing was deleted and **no production behaviour changed** ✓. The four
+  candidate changes are recorded in the recon doc (carry the upstream's parsed
+  tags as features ✓; carry the upstream's position as a tiebreak ✓; stop
+  dropping the addon's `cached` flag at the live-bridge boundary ✓; teach
+  the resolution ordering about 4320p ✓) — and **none of them is applied
+  here** ✓ ✓.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The candidates this slice leaves standing:
+(1) the four changes above, applied behind the existing shadow-ranking
+machinery so their effect is measured before it is trusted ✓; (2) record the
+`resolver_source` provenance on candidate associations ✓; (3) the debrid-form
+differential, run against a scratch copy of the control plane so no live
+provider API is called ✓.

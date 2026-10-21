@@ -215,6 +215,33 @@ work ✓ ✓, and the first thing to fix ✓ ✓; (3) our advantage is a **lead,
 a moat** ✓ ✓ — Comet's unreleased branch already mints a signed ✓ ✓,
 multi-provider playback capability ✓ ✓ ✓✓.
 
+**Slice — are we re-ranking for a reason? (2026-10-20) — CLOSED**
+(`docs/recon/2026-10-rerank-differential.md`). Measurement only ✓ ✓ — **no
+production selection behaviour changed** ✓ ✓. The upstream's interpretation
+and ours were run side by side on a live cohort ✓ ✓ (613 candidates ✓ ✓, no
+debrid key ✓ ✓ so no provider API was called ✓ ✓):
+
+- The parser agreement is **84.1 %** ✓ ✓; the rest is the upstream's own
+  facts recovered from a different field ✓ ✓ (a re-derivation ✓ ✓) ✓✓.
+- The upstream carries facts we have no field for ✓ ✓ (the **seeders** ✓ ✓,
+  the bit depth ✓ ✓); we carry facts it never publishes ✓ ✓ (the **audio**
+  ✓ ✓, the episode→file mapping ✓ ✓) ✓✓.
+- **M3** (our order + the upstream's parse as features + the upstream's
+  position as a tiebreak ✓ ✓) changes **no** top-1 ✓ ✓ and makes the top-3
+  identical to the upstream's ✓ ✓ ✓✓ — the upstream's order is evidence ✓ ✓,
+  never authority ✓ ✓ (its sort is a config option ✓ ✓) ✓✓.
+- A real gap ✓ ✓: the resolution **ordering** does not know `4320p` ✓ ✓ ✓✓.
+- The cost is not CPU ✓ ✓ (≤ 8 ms ✓ ✓) and the addon path's DB churn is
+  **zero** ✓ ✓ — but the addon's `cached` flag **is** dropped at the
+  live-bridge boundary ✓ ✓ ✓✓.
+- The upstream's newly-aired coverage was **good** ✓ ✓ (115 of 120 streams
+  named the episode ✓ ✓) — the gap is not upstream ✓ ✓; the gap is that
+  `candidate_media.resolver_source` is empty ✓ ✓ everywhere ✓ ✓ ✓✓.
+
+**Verdict: USE UPSTREAM AS FEATURES** ✓ ✓ — the normalization stays ✓ ✓; the
+addon's richer facts become features ✓ ✓ and its order a tiebreak ✓ ✓ ✓✓.
+The four candidate changes are recorded ✓ ✓ and **not applied** ✓ ✓ ✓✓.
+
 One recovery note: a `git stash -u` during the merge was dropped with the
 pre-existing untracked user files inside it
 (`artifacts/ab-baseline-off.jsonl`, `artifacts/ab-off-vs-on.json`,

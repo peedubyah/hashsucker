@@ -319,6 +319,40 @@ The next earned slice is not selected ✓; the candidates are in the build log
 ✓), a measured stall distribution ✓ ✓, and the uncached execution capability
 as the explicit product-policy decision it is ✓ ✓ ✓✓.
 
+
+**Slice — are we re-ranking for a reason? (2026-10-20) — CLOSED**
+(`docs/recon/2026-10-rerank-differential.md`). Measurement only ✓ ✓ — **no
+production selection behaviour changed** ✓ ✓. The upstream's interpretation and
+HashSucker's were run side by side on a live eight-fixture cohort ✓ ✓
+(613 candidates ✓ ✓, no debrid key ✓ ✓ so no provider API was called ✓ ✓).
+
+- The parser agreement is **84.1 %** ✓ ✓ — and the 15.2 % where HashSucker
+  "knows more" ✓ ✓ are the upstream's **own** facts recovered from its title
+  ✓ ✓ — a re-derivation ✓ ✓, not an addition ✓ ✓ ✓✓.
+- The upstream carries facts HashSucker's normalizer has no field for ✓ ✓
+  (the **seeders** ✓ ✓, the bit depth ✓ ✓); HashSucker carries facts the
+  upstream's tag list never does ✓ ✓ (the **audio** ✓ ✓, the episode→file
+  mapping ✓ ✓) ✓✓.
+- The ranking models ✓ ✓: M1 (ours ✓ ✓) differs from M2 (the upstream's
+  order ✓ ✓) on the top-1 in 7 of 8 fixtures ✓ ✓ but on the top-1
+  **quality** in only 1 ✓ ✓; **M3** (ours + the upstream's parse as features
+  + the upstream's position as a tiebreak ✓ ✓) changes **no** top-1 ✓ ✓ and
+  makes the top-3 identical to the upstream's ✓ ✓ ✓✓.
+- A real gap ✓ ✓: the resolution **ordering** does not know `4320p` ✓ ✓, so a
+  genuine 8K release is ranked last ✓ ✓ ✓✓.
+- The cost is **not CPU** ✓ ✓ (the parse 0.3–3.9 ms ✓ ✓, the sort 0–4.3 ms
+  ✓ ✓) and the DB churn from the addon path is **zero** ✓ ✓ (no addon
+  candidate is ever persisted ✓ ✓) ✓✓ — but the addon's `cached` flag **is**
+  dropped at the live-bridge boundary ✓ ✓ ✓✓.
+- The upstream's ordering encodes **someone else's policy** ✓ ✓ (its sort is
+  a config option ✓ ✓) ✓ ✓ — it is evidence ✓ ✓, never authority ✓ ✓ ✓✓.
+
+**Verdict: USE UPSTREAM AS FEATURES** ✓ ✓ — the normalization stays ✓ ✓
+(it is what makes heterogeneous sources comparable ✓ ✓ and the only parse
+that covers the audio ✓ ✓ and the episode→file mapping ✓ ✓) ✓✓, but the
+addon's richer facts should be **features** ✓ ✓ and its order a **tiebreak**
+✓ ✓, not a re-derivation ✓ ✓ ✓✓. The four smallest candidate changes are
+recorded ✓ ✓ and **not applied** ✓ ✓ ✓✓.
 **Recon — the Stremio / Torrentio / Comet execution model (2026-10-20).**
 `docs/recon/2026-10-stremio-addon-execution-model.md`. The comparison target
 is **not** Stremio ✓ ✓ — Stremio is a client and a URL format ✓ ✓: it
