@@ -322,6 +322,48 @@ as the explicit product-policy decision it is ✓ ✓ ✓✓.
 
 
 
+
+**Slice — first try wins? (2026-10-20) — CLOSED** (`docs/recon/2026-10-first-try-wins.md`).
+Measurement only ✓ ✓ — no ranking change ✓ ✓, no schema change ✓ ✓, no
+worker ✓ ✓, no metadata primitive ✓ ✓.
+
+- **top-1 → Binding: 45.1 %** ✓ ✓ (60.4 % of the 144 known decisions ✓ ✓;
+  49 were **unknown** ✓ ✓ and labelled so ✓ ✓) ✓✓.
+- **first attempt → exact TF: 100 %** of the attempts that happened ✓ ✓
+  (144/144 ✓ ✓) — **the materialization never fails** ✓ ✓ ✓✓.
+- **The first Binding stayed authoritative: 18.1 %** ✓ ✓ — but every first
+  Binding in the record carries the **VFS-era** reasons ✓ ✓, so it describes a
+  superseded pipeline ✓ ✓ and is not counted as a selection miss ✓ ✓ ✓✓.
+- **Attempts per request: p50 1, p95 1** ✓ ✓ ✓✓.
+- **The taxonomy** ✓ ✓: **D (exact identity unavailable) 46** ✓ ✓, F
+  (quality-policy loss) 11 ✓ ✓, and **zero** for A/B/C/E/G/H/I ✓ ✓ — nothing
+  was mis-associated ✓ ✓, no provider was unavailable ✓ ✓, no bytes were bad
+  ✓ ✓ ✓✓.
+- **Every miss was explicable from decision-time facts** ✓ ✓: in 46 cases the
+  top candidate was release-level or had no exact size ✓ ✓ — the pipeline
+  demoted what it could not prove ✓ ✓, and the corpus holds **zero** file
+  paths and **zero** exact sizes ✓ ✓ ✓✓.
+- **The multi-file case is the weak one** ✓ ✓: 40 % (17/42 ✓ ✓) against
+  69 % (70/102 ✓ ✓) ✓✓ — and the materialization is 100 % in both ✓ ✓ ✓✓.
+- **The score is not monotonic** ✓ ✓ (100 % / 61 % / **42 %** / 59 % / **93 %**
+  across the bands ✓ ✓); the identity tier separates better ✓ ✓ (`Verified`
+  70 % ✓ ✓ vs. `ProviderScoped` 41 % ✓ ✓) ✓✓.
+- **The upstream-evidence correlation is unmeasurable** ✓ ✓ (0 of the 144 rows
+  carry it ✓ ✓) ✓✓ — and the **current-code replay is structurally
+  impossible** ✓ ✓ (the live-addon candidates are never persisted ✓ ✓, and the
+  historical decisions came from a different pipeline ✓ ✓) ✓✓.
+- **The live cohort** ✓ ✓ (the warm path ✓ ✓): the first frame 862 ms /
+  8.7 s / 47.6 s ✓ ✓ — all with **zero user actions** ✓ ✓ and a clean exit
+  ✓ ✓; the variance is the cold provider read ✓ ✓, not selection ✓ ✓ ✓✓.
+- **The metadata verdict: TARGETED VALUE** ✓ ✓ — a file tree would make the
+  top candidate provable in the 32 % of decisions where it is not ✓ ✓; the
+  user-visible delta is **not quantified** ✓ ✓ ✓✓.
+- **No ranking change is earned** ✓ ✓ — every measurable miss traces to
+  missing exact-file evidence ✓ ✓, and the selection already prefers a
+  provable candidate ✓ ✓ ✓✓.
+
+**Verdict: FIRST TRY NEEDS TARGETED EXACT-FILE PROOF** ✓ ✓ — not ranking work
+✓ ✓, and not provider work ✓ ✓ ✓✓.
 **Slice — does identity enrichment have a right to exist? (2026-10-20) —
 REDUNDANT (deprecated)** ✓ ✓. A right-to-exist test for the dormant seam, not
 a wiring task ✓ ✓.

@@ -5401,3 +5401,102 @@ Not selected — a human disposes. The candidates this slice leaves standing:
 (1) the **corpus hygiene** of the 5 534 dangling associations ✓ ✓; (2) the
 **torrent file-tree primitive** — stated, not started ✓ ✓; (3) the debrid-form
 differential ✓ ✓ ✓✓.
+
+## 2026-10-20 — FIRST TRY WINS? — does the top-ranked candidate become the Binding? — CLOSED
+
+Slice: measurement only. No ranking redesign, no schema rewrite, no background
+worker, no torrent metadata sidecar, no provider acquisition, no direct swarm.
+The question: when HashSucker chooses a representation for a real request, how
+often is the first selected candidate the one that becomes and remains
+authoritative?
+
+Method and results: `docs/recon/2026-10-first-try-wins.md` has the full
+tables. Everything ran against scratch copies of the production databases.
+
+### WHAT WAS PROVEN
+
+- **The cohort**: every handoff the production has — 193 decisions (104
+  movies, 89 episodes; 176 TorBox, 17 Real-Debrid; 178 cached, 15 uncached;
+  67 with a file index), 49 of them **unknown** because the original rank-1
+  could not be recovered (labelled unknown, not inferred) → 144 known.
+- **top-1 → Binding (selection hit): 87/193 = 45.1 %** (60.4 % of the known).
+- **first attempt → exact TF (materialization hit): 144/193 = 74.6 % — and
+  144/144 = 100 %** of the attempts that happened. **The materialization
+  never fails.**
+- **first Binding stayed authoritative: 35/193 = 18.1 %** — but every first
+  Binding in this record carries the **VFS-era** reasons
+  (`vfs-movie-materialize`, `vfs-movie-idempotent`), so this describes a
+  superseded pipeline and is not counted as first-shot selection failure.
+- **attempts per request**: p50 1, p95 1 (180 first-choice-bound, 13 used a
+  fallback).
+- **The taxonomy of the 57 selection misses**: **D (exact identity
+  unavailable) 46**, F (quality-policy loss) 11, and **zero** for A (wrong
+  media), B (wrong file), C (provider unavailable), E (bad bytes), G (route
+  churn), H (parser/ranking defect) and I (already-excluded). Nothing was
+  mis-associated, no provider was unavailable, no bytes were bad.
+- **Every miss was explicable from decision-time facts**: in 46 cases the top
+  candidate was release-level or carried no exact size — the pipeline
+  *deliberately* demoted what it could not prove, and the corpus holds zero
+  torrent-internal paths and zero exact sizes (1.59 M rows).
+- **The multi-file case is the weak one**: the file-level handoffs' selection
+  hit is 17/42 = **40 %** against 70/102 = **69 %** for release-level, and
+  the materialization is 100 % in both.
+- **The score is not monotonic**: the selection hit by the rank-1's score is
+  100 % (n=1), 61 %, **42 %**, 59 %, **93 %** across the 0.5→1.0 bands. The
+  materialization is 100 % in every band. The **identity tier** separates
+  better than the score (`Verified` 70 %, `ProviderScoped` 41 %).
+- **The upstream evidence correlation is unmeasurable**: 0 of the 144 known
+  rows carry it (it was added in the previous slice), so no correlation is
+  claimed.
+- **The current-code replay is not possible**, for two measured structural
+  reasons: the live-addon candidates are **never persisted** (the corpus is
+  100 % DMM-hashlist ingestion), and the historical decisions came from a
+  different pipeline (the VFS-era reasons). The historical rates are
+  therefore **not** representative of today, and the current rate must be
+  measured live.
+- **The live bounded cohort** (the warm path, real client, real data plane,
+  cache-only, no induced outage): City Lights **862 ms** to the first frame,
+  Lanterns S01E02 8.7 s, Rear Window 47.6 s — all three with **zero user
+  actions**, one `file-loaded`, a clean exit. The variance is the cold
+  provider read of a large file, not a selection effect.
+- **The torrent-metadata right-to-exist verdict: TARGETED VALUE.** A file tree
+  would make the top-ranked candidate *provable* in the 32 % of decisions
+  where it currently is not, and its path would carry the episode
+  coordinates too. It would not fix the materialization (already 100 %), the
+  associations (never wrong) or the providers (never the limit). The
+  user-visible delta — the top-ranked release versus the provable one — is
+  **not quantified**, because the selected candidate's score is not stored
+  beside the handoff. No primitive is built.
+- **No ranking change is earned.** Every measurable miss traces to missing
+  exact-file evidence, and the selection already prefers a provable candidate
+  when the top one is unprovable. Changing the score without the evidence
+  would be guessing.
+
+### WHAT REMAINS UNPROVEN
+
+- The **current code's** first-shot rate (the historical cohort is the
+  VFS-era pipeline; the replay is structurally impossible; the live cohort
+  covered the warm path only).
+- The **cold request path** end to end — a scratch-backed cold request would
+  mutate the production VFS through the data plane.
+- The **user-visible cost** of a demotion (the selected candidate's score is
+  not stored beside the handoff).
+- The upstream-evidence correlation (no pre-change decision carries it).
+- The cause of the 0.7–0.8 score dip is inferred, not proven.
+
+### VERDICT
+
+**FIRST TRY NEEDS TARGETED EXACT-FILE PROOF** — not ranking work, and not
+provider work. The top-ranked candidate is usually right and usually
+unprovable; the pipeline falls back to a provable candidate with a lower
+rank, which is correct behaviour paid for in release quality. The user sees
+no failure: every cohort item played with zero actions and a clean exit.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The candidates this slice leaves standing:
+(1) record the **selected candidate's score** beside the handoff, so
+"was the bound release actually worse?" becomes answerable ✓; (2) measure the
+**current** first-shot rate on a bounded live cohort that includes cold
+decisions ✓; (3) the **torrent file-tree primitive** — stated, not started
+✓ ✓.

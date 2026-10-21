@@ -298,6 +298,38 @@ REDUNDANT (deprecated)** ✓ ✓. The dormant seam was judged, not wired ✓ ✓
 - Also noted, not fixed: **5 534 dangling associations** whose candidate is
   gone ✓ ✓ (corpus hygiene ✓ ✓) ✓✓.
 
+**Slice — first try wins? (2026-10-20) — CLOSED**
+(`docs/recon/2026-10-first-try-wins.md`). Measurement only ✓ ✓:
+
+- **top-1 → Binding: 45.1 %** ✓ ✓ (60.4 % of the 144 known decisions ✓ ✓;
+  49 unknown ✓ ✓ and labelled so ✓ ✓) ✓✓.
+- **first attempt → exact TF: 100 %** of the attempts that happened ✓ ✓ ✓✓ —
+  **the materialization never fails** ✓ ✓.
+- **The taxonomy of the 57 misses** ✓ ✓: **D (exact identity unavailable)
+  46** ✓ ✓, F (quality-policy) 11 ✓ ✓, and **zero** for wrong-media ✓ ✓,
+  wrong-file ✓ ✓, provider-unavailable ✓ ✓, bad-bytes ✓ ✓, route-churn ✓ ✓ ✓✓.
+- **Every miss was explicable from decision-time facts** ✓ ✓ — the top
+  candidate was release-level or carried no exact size ✓ ✓, and the corpus
+  holds **zero** file paths and **zero** exact sizes ✓ ✓ ✓✓.
+- **The multi-file case is the weak one** ✓ ✓ (40 % ✓ ✓ vs. 69 % ✓ ✓), with
+  the materialization at 100 % in both ✓ ✓ ✓✓.
+- **The score is not monotonic** ✓ ✓ (42 % in the 0.7–0.8 band ✓ ✓ vs. 93 %
+  in the 0.9–1.0 band ✓ ✓); the identity tier separates better ✓ ✓ ✓✓.
+- **The upstream-evidence correlation is unmeasurable** ✓ ✓ (0 rows carry it
+  ✓ ✓), and the **current-code replay is structurally impossible** ✓ ✓ (the
+  live-addon candidates are never persisted ✓ ✓; the historical decisions
+  came from the VFS-era pipeline ✓ ✓) ✓✓.
+- **The live cohort** ✓ ✓ (the warm path ✓ ✓): the first frame 862 ms / 8.7 s
+  / 47.6 s ✓ ✓ — all with **zero user actions** ✓ ✓ and a clean exit ✓ ✓; the
+  variance is the cold provider read ✓ ✓ ✓✓.
+- **The metadata verdict: TARGETED VALUE** ✓ ✓ — a file tree would make the
+  top candidate provable in the 32 % of decisions where it is not ✓ ✓; the
+  user-visible delta is **not quantified** ✓ ✓ ✓✓.
+- **No ranking change is earned** ✓ ✓ ✓✓.
+
+**Verdict: FIRST TRY NEEDS TARGETED EXACT-FILE PROOF** ✓ ✓ — not ranking work
+✓ ✓, not provider work ✓ ✓ ✓✓.
+
 One recovery note: a `git stash -u` during the merge was dropped with the
 pre-existing untracked user files inside it
 (`artifacts/ab-baseline-off.jsonl`, `artifacts/ab-off-vs-on.json`,
