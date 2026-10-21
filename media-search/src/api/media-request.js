@@ -42,6 +42,7 @@ import {
   applyTorboxAvailability,
   selectCandidateForRequest,
   persistRequestAndBackfill,
+  recordSelectionDecision,
   buildHandoffForSelection,
   promoteDemandForRequest,
   requestResponseBase,
@@ -721,6 +722,12 @@ async function runLivePipeline(ctx, { titleIndex, titleInputs }) {
     status: selection.selected ? 'completed' : 'pending',
   });
 
+  // Diagnostic only: the decision + why the candidates above the winner
+  // were passed over. Never authority, never read back.
+  recordSelectionDecision({
+    cache: ctx.cache, ctx, requestId, selection, explainable,
+  });
+
   const base = requestResponseBase({
     ctx, requestId, total, tierMeta,
     liveDiscoveryTriggered: true, liveCandidates: liveCandidates.length, liveEligible: liveEligibleCount,
@@ -899,6 +906,13 @@ async function runCorpusPipeline(ctx, { titleIndex, titleInputs, candidates }) {
 
   // Stage 7: Binding selection.
   const selection = await selectCandidateForRequest({ explainable, ctx });
+
+  // Diagnostic only: the decision + why the candidates above the winner
+  // were passed over. Never authority, never read back. This path persists
+  // the request BEFORE selection, so the same request row is reused.
+  recordSelectionDecision({
+    cache: ctx.cache, ctx, requestId, selection, explainable,
+  });
 
   // Bloodhound fallback, identical to the live pipeline's: persisted rows can
   // be identity-valid yet impossible to bind, and a released request gets

@@ -239,7 +239,17 @@ export class AvailabilityChecker {
 
       return results;
     } catch (error) {
-      // Batch-level failure - mark all as unknown
+      // Batch-level failure - mark all as unknown.
+      //
+      // The error category MUST be a member of PROVIDER_ERROR_CATEGORIES
+      // (the observation layer rejects anything else). 'transient' is not
+      // one of them, so passing it here THREW out of this catch block and
+      // destroyed the whole availability result for the request: the caller
+      // saw an exception instead of the intended per-hash 'unknown' state,
+      // every candidate lost its cached/uncached state, and the uncached
+      // deferral never happened. The vocabulary member that means the same
+      // thing is 'temporarily-unavailable' — which is the category this
+      // very block already reports on the result rows below.
       const results = [];
       for (const hash of batch) {
         const observation = this._recordObservation(
@@ -247,7 +257,7 @@ export class AvailabilityChecker {
           'unknown',
           this.now() - batchStart,
           null,
-          'transient'
+          'temporarily-unavailable'
         );
 
         results.push({

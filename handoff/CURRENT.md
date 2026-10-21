@@ -625,6 +625,62 @@ look in `git fsck --unreachable` before assuming a loss.
   identity).
 - Evidence: `docs/BUILD-LOG.md` 2026-10-20.
 
+## Live session state (2026-10-21, the proof tax)
+
+- The slice was **measurement only**. No ranking, selection, binding,
+  provider or consumer behaviour changed. The production container is
+  **unchanged** — the code is committed and pushed but the image was not
+  rebuilt, so the running appliance still serves the previous build.
+- **The decision site is now observable.** A new append-only
+  `selection_decisions` table (discovery DB) records the winner, the
+  winner's reason, and every skipped candidate with its **verbatim**
+  reason. Until now the ranking (`media_request_results`) and the winner
+  (`playback_handoffs`) were persisted but the **losers were not**, so
+  "was rank-1 demoted because its exact identity was unprovable, or for
+  another reason?" was unanswerable after the fact. The write happens
+  after the decision, is never read by selection/binding/handoff, and
+  cannot change a Binding, a TorrentFile or a handoff. 5 new tests pin
+  the contract.
+- **The finding.** The corpus path presents the **release-level** byte
+  count as the candidate's "exact file size"
+  (`media-request-stages.js:227`, the title-index path). For a release
+  with more than one playable file that number matches **no** file, so the
+  exact-size proof cannot succeed and the candidate is demoted. Over the
+  releases the provider actually holds (TorBox, ready: 354 releases, 112
+  multi-file), the corpus's claimed size matches one of the files in
+  **0 of 112 (0.0 %)**. The decisive experiment, on one real release (11
+  files): the corpus count → `NO_FILE_SIZE_MATCH`; the true per-file size
+  → **BOUND**.
+- **The upstream already carries the fact.** The debrid-form addon
+  response publishes the real per-file byte count in
+  `behaviorHints.videoSize` (456 of 582 streams for `tt0108052`). Over 914
+  releases from historical production traffic: the corpus count proves one
+  file in **45.1 %**, the upstream size in **93.7 %**.
+- **A targeted provider lookup does NOT close it** — 29 of the 32
+  multi-file candidates that reach selection are **episode packs**, and a
+  pack's release name names the pack, not a file inside it. A per-file
+  path+size closes 32/32; a provider inventory call closes 4/32.
+- **Measured cost so far is small**: the one decision that bound demoted
+  rank 1–10 for rank 11 with a pairwise delta of Negligible 7 / Minor 3 /
+  Material 0 / Severe 0, and the user received 2160p every time. The tax
+  is a *proof* cost before it is a *quality* cost — but only because the
+  cohort's demotions were among near-equivalent candidates.
+- **A real defect was found and fixed**: the availability checker passed
+  the error category `'transient'`, which is not in
+  `PROVIDER_ERROR_CATEGORIES`, so the observation layer threw out of the
+  catch block. The intended degradation (every hash in a failed batch
+  marked `unknown`) never happened, the exception escaped
+  `checkAvailability`, and every candidate lost its cached/uncached
+  state — so the uncached-deferral traversal silently stopped deferring.
+  Fixed to `'temporarily-unavailable'` with a new test. **Not deployed
+  yet** (unit test only).
+- Measurement tools (in the repo, not product paths):
+  `media-search/src/scripts/proof-tax-cohort.mjs` (the shadow cohort
+  runner) and `media-search/src/scripts/proof-tax-probe.mjs` (the
+  decision-site probe). Both run against scratch copies of both DBs.
+- Evidence: `docs/recon/2026-10-proof-tax.md`, `docs/BUILD-LOG.md`
+  2026-10-21.
+
 ## Online recon tooling (this session)
 
 - Configured in `~/.config/opencode/opencode.jsonc` (outside the

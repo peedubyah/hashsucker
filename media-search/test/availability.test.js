@@ -186,6 +186,45 @@ test('availability: checkAvailability batches hashes', async () => {
   }
 });
 
+// Test: batch-level failure degrades to 'unknown', it does not throw
+// =============================================================================
+
+test('availability: a failing batch degrades to unknown instead of throwing', async () => {
+  setupMockFetch(async () => {
+    const error = new Error('TorBox cache check failed: HTTP 503');
+    error.status = 503;
+    throw error;
+  });
+
+  try {
+    const cache = createDiscoveryCache();
+    const checker = createAvailabilityChecker(cache, {
+      apiKey: 'test',
+      batchSize: 2,
+    });
+
+    const hashes = [
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'cccccccccccccccccccccccccccccccccccccccc',
+    ];
+
+    // The result must come back, every hash 'unknown', and the caller must
+    // not see an exception. A provider outage degrades the availability
+    // fact; it must never destroy the request.
+    const result = await checker.checkAvailability(hashes);
+    assert.equal(result.results.length, 3);
+    for (const row of result.results) {
+      assert.equal(row.state, 'unknown');
+      assert.equal(row.errorCategory, 'temporarily-unavailable');
+    }
+
+    cache.close();
+  } finally {
+    teardownMockFetch();
+  }
+});
+
 // =============================================================================
 // Test: freshness reuse
 // =============================================================================

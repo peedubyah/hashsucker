@@ -728,6 +728,78 @@ export async function selectCandidateForRequest({ explainable, ctx }) {
 }
 
 /**
+ * Append the selection decision to the diagnostic table.
+ *
+ * WHY: `media_request_results` records the RANKING and `playback_handoffs`
+ * records the WINNER, but neither records WHY the candidates above the
+ * winner were passed over. Without that, "was the top-ranked candidate
+ * skipped because its exact identity could not be proven, or for another
+ * reason?" is unanswerable after the fact — and that question is the whole
+ * subject of the proof-tax measurement.
+ *
+ * CONTRACT: this is a DIAGNOSTIC write, never authority.
+ *  - It runs AFTER the decision is made.
+ *  - Nothing in the selection, binding, or handoff path reads it back.
+ *  - It never changes the decision, the Binding, the TorrentFile, or the
+ *    handoff.
+ *  - It stores the raw skip reasons verbatim; it does not classify them.
+ *  - A failure here can never fail the request.
+ *
+ * The per-candidate quality facts (resolution, source, HDR, size, score)
+ * are NOT duplicated here: `media_request_results` already holds one row
+ * per rank for the same request, so the diagnostic joins to them by
+ * (request_id, rank). Only the decision and the reasons are new.
+ *
+ * @returns {number|null} the row id, or null when the write was skipped
+ */
+export function recordSelectionDecision({ cache, ctx, requestId, selection, explainable }) {
+  if (!cache || typeof cache.appendSelectionDecision !== 'function') return null;
+  if (!selection) return null;
+  try {
+    // The skipped entries carry the rank and the infoHash but not the
+    // file index; the file index is recovered from the ranked row of the
+    // same rank so the diagnostic can name the exact file that lost.
+    const byRank = new Map();
+    for (const row of explainable || []) {
+      if (row && Number.isFinite(row.rank)) byRank.set(row.rank, row);
+    }
+    const skipped = (selection.skipped || []).map((s) => {
+      const row = byRank.get(s.rank);
+      return {
+        rank: s.rank ?? null,
+        infoHash: s.infoHash ?? null,
+        fileIndex: row?.fileIndex ?? null,
+        reason: s.reason ?? null,
+        torboxState: s.torboxState ?? null,
+      };
+    });
+    return cache.appendSelectionDecision({
+      requestId: requestId ?? null,
+      mediaId: ctx.mediaId,
+      mediaType: ctx.mediaType,
+      season: ctx.season ?? null,
+      episode: ctx.episode ?? null,
+      selected: selection.selected
+        ? {
+          infoHash: selection.selected.infoHash,
+          fileIndex: selection.selected.fileIndex,
+          rank: selection.selected.rank,
+        }
+        : null,
+      reason: selection.reason ?? null,
+      serviceability: selection.serviceability ?? null,
+      skipped,
+      candidateCount: Array.isArray(explainable) ? explainable.length : skipped.length,
+      source: ctx.source ?? null,
+    });
+  } catch (error) {
+    // A diagnostic write must never break fulfillment.
+    console.error(`Selection decision diagnostic failed: ${error.message}`);
+    return null;
+  }
+}
+
+/**
  * Corpus backfill (corpus productization tranche): record request outcomes
  * as candidate→media associations so the corpus can serve future
  * discovery for previously-requested media without any external matching.

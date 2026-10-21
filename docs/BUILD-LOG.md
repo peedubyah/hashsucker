@@ -5500,3 +5500,136 @@ Not selected — a human disposes. The candidates this slice leaves standing:
 **current** first-shot rate on a bounded live cohort that includes cold
 decisions ✓; (3) the **torrent file-tree primitive** — stated, not started
 ✓ ✓.
+
+## 2026-10-21 — WHAT DOES EXACTNESS COST US? — the proof tax — CLOSED
+
+Slice: measurement only. No ranking, selection, binding, provider, or
+consumer behaviour changed. One product defect was found and fixed; one
+diagnostic was added so the question is answerable without a replay.
+The question: when HashSucker demotes the top-ranked candidate because its
+exact identity cannot be proven and picks a lower-ranked one instead, what
+quality does the user get, and what is the cheapest safe way to stop
+paying it?
+
+Method and results: `docs/recon/2026-10-proof-tax.md` has the full tables.
+Everything ran against scratch copies of both databases, in shadow mode
+(`prepareOnly`, no VFS/.strm/consumer work) through the production
+functions and the production provider seam.
+
+### WHAT WAS PROVEN
+
+- **The question was unanswerable from the persisted record**, and that is
+  why the diagnostic was built first: `media_request_results` holds the
+  ranking, `playback_handoffs` holds the winner, and **nothing held the
+  losers or the reasons they lost**. "Was rank-1 demoted because its
+  identity was unprovable, or for another reason?" was undecidable after
+  the fact. The new append-only `selection_decisions` table records the
+  winner, the winner's reason, and every skipped candidate with its
+  **verbatim** reason. It is written after the decision, never read by
+  selection/binding/handoff, and cannot change a Binding, a TorrentFile or
+  a handoff. Pinned by 5 new tests (append-only, verbatim, failure-
+  isolated, non-mutating).
+- **The causes of every skip, raw** (28 corpus media + 8 live media, 560
+  skips): **exactness 23 (4.1 %)**, provider-unavailable 537 (95.9 %).
+  A naive "the top candidate lost" read would overstate the problem by an
+  order of magnitude — the exclusion matters.
+- **The one decision that bound** (`tt10986410:1:2`): the winner was
+  **rank 11**; ten higher-ranked candidates were demoted for exactness. The
+  pairwise quality delta was **Negligible 7 / Minor 3 / Material 0 /
+  Severe 0**, and the resolution the user received was 2160p every time.
+  The demoted candidate was better than the chosen one in 3 of 10, equal in
+  5, worse in 2. **The measured cost of the tax is currently a proof cost,
+  not yet a quality cost** — the cohort's demotions were among
+  near-equivalent candidates.
+- **The mechanism, proven end to end.** The corpus path presents the
+  **release-level** byte count as the candidate's "exact file size"
+  (`media-request-stages.js:227`, the title-index path). For a release with
+  more than one playable file that number matches **no** file, so the
+  exact-size proof cannot succeed and the candidate is demoted. The
+  decisive experiment, on one real release at the provider (11 files):
+  the corpus release-level count → **NO_FILE_SIZE_MATCH**; the true
+  per-file size → **BOUND** (`tf_8fc7ec83-…`). Same release, same
+  provider, same code path.
+- **Over the releases the provider actually holds** (TorBox, ready, ≥1
+  playable file: 354 releases, 242 single-file, **112 multi-file**): the
+  corpus's claimed size matches one of the files in **0 of 112 (0.0 %)**,
+  and the corpus holds a per-file **path** in 0 and a per-file **size** in
+  0. **Every multi-file release the provider holds is unprovable by the
+  corpus's own number.** The corpus is not missing a fact it could have
+  had — it is presenting the wrong fact.
+- **The upstream already has the fact.** The debrid-form addon response
+  carries `behaviorHints.videoSize` (the real per-file byte count) on
+  **456 of 582** streams for `tt0108052`. Over 914 releases drawn from
+  **historical production traffic** (api/anticipation/seerr/upgrade-watch/
+  perf-bench) and joined to the provider's file list: the corpus's
+  release-level count proves exactly one file in **412 (45.1 %)**, the
+  upstream's per-file size in **856 (93.7 %)**. A live run of the
+  production ensure against the upstream's own size: of 25 candidates,
+  **9 bound** — every case where the provider held the release; 15 the
+  provider did not hold; 1 the size matched no file.
+- **The season-pack focus.** 29 of the 32 multi-file candidates that reach
+  selection are **episode packs**, not a movie with extras. That is
+  structural: a pack's corpus row is release-level (`file_index_key = -1`)
+  and carries the pack's **total** size, which equals no file inside it.
+- **What would close each event, priced** (32 multi-file candidates):
+  a **per-file path+size** closes **32/32 (100 %)**. A **targeted provider
+  lookup** on rank-1 — the inventory call the selection already makes for
+  the release it binds, made one release earlier — closes only **4/32
+  (12.5 %)**: it cannot name a file inside a pack, because the candidate's
+  release name names the **pack**, not a file. 22/32 (68.8 %) cannot be
+  closed by any provider inventory call.
+- **A real defect was found and fixed**: `src/lib/intents/availability.js`
+  passed the error category `'transient'` on the batch-failure path, which
+  is **not** in `PROVIDER_ERROR_CATEGORIES`. The observation layer
+  therefore **threw out of the catch block**: the intended degradation
+  (every hash in the failed batch marked `unknown`) never happened, the
+  exception escaped `checkAvailability`, and **every candidate lost its
+  cached/uncached state** — so the uncached-deferral traversal silently
+  stopped deferring. The category that means the same thing and *is* in the
+  vocabulary — `'temporarily-unavailable'` — is what the same block already
+  reported on its result rows. Fixed, with a new test pinning the
+  degradation.
+
+### WHAT REMAINS UNPROVEN
+
+- **The tax has not been priced on a large quality spread.** The cohort's
+  demotions were among near-equivalent candidates, so the measured delta is
+  small. A cohort where a 2160p REMUX pack outranks a 1080p WEB-DL would
+  price the Material/Severe cases; that cohort was not built.
+- **The live arm bound only once.** Most live candidates are releases the
+  TorBox account does not hold, so the live arm's decisions ended in
+  provider-unavailable. The live arm's *fact* is measured (93.7 %); its
+  *decisions* are not observed in bulk.
+- **The upstream's size was measured against TorBox only**; Real-Debrid's
+  inventory was not exercised for the size match.
+- **The 58 releases (6.3 %) where neither number proves a file** are
+  unexplained — candidates whose upstream size matches no file at the
+  provider.
+- **The availability fix was not deployed**; it is proven by a unit test
+  only and has not been through a production request.
+- **No production traffic was replayed.** The historical record still
+  cannot answer the question, which is why the diagnostic was added.
+
+### VERDICT
+
+**UPSTREAM ALREADY HAS THE FACT** — with the corpus path's release-level
+count as the specific defect. The tax is not a metadata gap and not a
+provider-lookup gap: the corpus path hands the selection a number that is
+not a file size, and for every multi-file release that number matches no
+file. The upstream publishes the real per-file size in the response the
+live path already receives, and it proves a file in 93.7 % of cases
+against the corpus's 45.1 %. The measured cost today is small (Negligible 7
+/ Minor 3 / Material 0 / Severe 0 over the cohort) because the demotions
+were among near-equivalent candidates — but the population where the tax
+becomes a quality tax is exactly the population the corpus path serves.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The candidates this slice leaves standing:
+(1) **carry the upstream's per-file size on the corpus path's candidates
+instead of the release-level count** — stated, not started ✓; (2) a
+cohort where the demotion is **quality-relevant** (a 2160p REMUX pack
+against a 1080p WEB-DL) so the Material/Severe cases are priced ✓; (3)
+**deploy and observe** the availability fix, which currently has a unit
+test but no production request ✓; (4) the **torrent file-tree primitive** —
+still stated, still not started ✓ ✓.

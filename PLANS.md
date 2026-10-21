@@ -23,6 +23,7 @@ a product decision, not a consequence of a known defect.
 | environmental | the appliance's Jellyfin API key is rejected (HTTP 401): Jellyfin's live projection cannot be proven end to end until the credential is replaced |
 | operational | the routine reconciler's executor is not wired in production (only a shadow plan runs); the failed-activation retry map is process-local, so a restart loses it (the deterministic reconciliation covers the projection) |
 | optimization | a byte count is ambiguous for 424 of 4099 mapped provider files (10.3 %); the corpus holds no per-file path, so file selection still leans on the byte count |
+| correctness | the corpus path presents the RELEASE-level byte count as a candidate's "exact file size" (`media-request-stages.js:227`); for every multi-file release the provider holds (112 of 354) that number matches **no** file, so the exact-size proof cannot succeed — the upstream's per-file size proves one in 93.7 % vs the corpus count's 45.1 % |
 | speculative | a per-file path for the corpus from a source that has one (torrent-metadata sidecar) — the plumbing exists and is proven; the SOURCE does not |
 
 **Ecosystem reconnaissance (2026-10-20) — done, no moonshot selected.**
@@ -364,6 +365,71 @@ worker ✓ ✓, no metadata primitive ✓ ✓.
 
 **Verdict: FIRST TRY NEEDS TARGETED EXACT-FILE PROOF** ✓ ✓ — not ranking work
 ✓ ✓, and not provider work ✓ ✓ ✓✓.
+**Slice — what does exactness cost us? the proof tax (2026-10-21) —
+CLOSED** ✓ ✓. Measurement only ✓ ✓; no ranking ✓ ✓, selection ✓ ✓, binding
+✓ ✓, provider ✓ ✓ or consumer behaviour changed ✓ ✓ ✓✓.
+
+- **The question was unanswerable from the persisted record** ✓ ✓ — the
+  ranking is persisted ✓ ✓, the winner is persisted ✓ ✓, and **nothing
+  persisted the losers or the reasons they lost** ✓ ✓ ✓✓. The decision
+  site now records it ✓ ✓ in an append-only `selection_decisions` table ✓ ✓
+  (the winner ✓ ✓, the winner's reason ✓ ✓, every skipped candidate with
+  its **verbatim** reason ✓ ✓), written **after** the decision ✓ ✓, never
+  read by selection/binding/handoff ✓ ✓, unable to change a Binding ✓ ✓, a
+  TorrentFile ✓ ✓ or a handoff ✓ ✓ ✓✓. Pinned by **5** new tests ✓ ✓
+  (append-only ✓ ✓, verbatim ✓ ✓, failure-isolated ✓ ✓, non-mutating ✓ ✓)
+  ✓✓.
+- **The causes of every skip, raw** ✓ ✓ (28 corpus + 8 live media ✓ ✓,
+  560 skips ✓ ✓): **exactness 23 (4.1 %)** ✓ ✓, provider-unavailable
+  **537 (95.9 %)** ✓ ✓ ✓✓. The exclusion matters ✓ ✓ ✓✓: a naive "the top
+  candidate lost" read overstates the problem by an order of magnitude ✓ ✓.
+- **The one decision that bound** ✓ ✓ (`tt10986410:1:2` ✓ ✓): the winner
+  was **rank 11** ✓ ✓; ten higher-ranked candidates were demoted ✓ ✓. The
+  pairwise delta was **Negligible 7 / Minor 3 / Material 0 / Severe 0** ✓ ✓
+  and the resolution the user received was 2160p every time ✓ ✓ ✓✓. The
+  tax is currently a **proof** cost, not yet a **quality** cost ✓ ✓ — the
+  cohort's demotions were among near-equivalent candidates ✓ ✓ ✓✓.
+- **The mechanism, proven end to end** ✓ ✓: the corpus path presents the
+  **release-level** byte count as the candidate's "exact file size" ✓ ✓
+  (`media-request-stages.js:227` ✓ ✓ — the title-index path ✓ ✓). For a
+  release with more than one playable file that number matches **no** file
+  ✓ ✓, so the exact-size proof cannot succeed ✓ ✓ ✓✓. The decisive
+  experiment ✓ ✓ — one real release at the provider ✓ ✓ (11 files ✓ ✓):
+  the corpus count → **NO_FILE_SIZE_MATCH** ✓ ✓, the true per-file size →
+  **BOUND** ✓ ✓ ✓✓.
+- **Over the releases the provider actually holds** ✓ ✓ (TorBox ✓ ✓,
+  ready ✓ ✓: 354 releases ✓ ✓, 242 single-file ✓ ✓, **112 multi-file** ✓ ✓):
+  the corpus's claimed size matches one of the files in **0 of 112 (0.0 %)**
+  ✓ ✓, and the corpus holds a per-file **path** in 0 ✓ ✓ and a per-file
+  **size** in 0 ✓ ✓ ✓✓. **Every multi-file release the provider holds is
+  unprovable by the corpus's own number** ✓ ✓ ✓✓.
+- **The upstream already has the fact** ✓ ✓: the debrid-form response
+  carries `behaviorHints.videoSize` ✓ ✓ (the real per-file byte count ✓ ✓)
+  on **456 of 582** streams ✓ ✓. Over 914 releases from **historical
+  production traffic** ✓ ✓: the corpus count proves one file in
+  **412 (45.1 %)** ✓ ✓, the upstream size in **856 (93.7 %)** ✓ ✓ ✓✓. A
+  live run of the production ensure against the upstream's own size ✓ ✓:
+  of 25 candidates **9 bound** ✓ ✓ — every case where the provider held
+  the release ✓ ✓ ✓✓.
+- **The season-pack focus** ✓ ✓: **29 of the 32** multi-file candidates
+  that reach selection are **episode packs** ✓ ✓ ✓✓.
+- **What would close each event, priced** ✓ ✓ (32 candidates ✓ ✓): a
+  **per-file path+size** closes **32/32 (100 %)** ✓ ✓; a **targeted provider
+  lookup** on rank#1 closes only **4/32 (12.5 %)** ✓ ✓ — it cannot name a
+  file inside a pack ✓ ✓ ✓✓. **22/32 (68.8 %)** no provider inventory
+  call can close ✓ ✓ ✓✓.
+- **A real defect found and fixed** ✓ ✓: the availability checker passed
+  the error category `'transient'` ✓ ✓, which is **not** in
+  `PROVIDER_ERROR_CATEGORIES` ✓ ✓, so the observation layer **threw out of
+  the catch block** ✓ ✓ — the intended degradation ✓ ✓ never happened ✓ ✓,
+  the exception escaped ✓ ✓, and **every candidate lost its
+  cached/uncached state** ✓ ✓, so the uncached-deferral traversal silently
+  stopped deferring ✓ ✓ ✓✓. Fixed to `'temporarily-unavailable'` ✓ ✓ (the
+  category the same block already reported ✓ ✓) with a new test ✓ ✓ ✓✓.
+
+**Verdict: UPSTREAM ALREADY HAS THE FACT** ✓ ✓ — with the corpus path's
+release-level count as the specific defect ✓ ✓. Not a metadata gap ✓ ✓ and
+not a provider-lookup gap ✓ ✓ ✓✓.
 **Slice — does identity enrichment have a right to exist? (2026-10-20) —
 REDUNDANT (deprecated)** ✓ ✓. A right-to-exist test for the dormant seam, not
 a wiring task ✓ ✓.

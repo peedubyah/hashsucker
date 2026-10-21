@@ -274,6 +274,46 @@ CREATE TABLE IF NOT EXISTS media_requests (
 
 CREATE INDEX IF NOT EXISTS idx_media_requests_media_id ON media_requests(media_id, created_at);
 
+-- Append-only selection-decision diagnostic.
+--
+-- WHY: the selection decision (which candidate won, and WHY each ranked
+-- candidate above it did not) is the fact that explains a representation
+-- choice. The media_request_results table records the RANKING;
+-- playback_handoffs records the WINNER. Neither records the losers or the
+-- reason, so the question "was the top-ranked candidate skipped because
+-- its exact identity could not be proven, or for another reason?" is
+-- unanswerable after the fact.
+--
+-- CONTRACT: this table is a DIAGNOSTIC, never authority. It is written
+-- after the decision is made, is never read by the selection path, and
+-- never changes a Binding, a TorrentFile, or a handoff. Rows are only
+-- appended; there is no update or delete path.
+--
+-- The skipped_json column holds the ranked candidates that lost, each with
+-- the reason the traversal recorded. The reasons are the raw facts a later
+-- analysis classifies (exact-identity-unproven vs provider-unavailable vs
+-- quality-policy vs other); they are stored verbatim, not pre-classified.
+CREATE TABLE IF NOT EXISTS selection_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id INTEGER,
+  media_id TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  season INTEGER,
+  episode INTEGER,
+  created_at INTEGER NOT NULL,
+  selected_info_hash TEXT,
+  selected_file_index INTEGER,
+  selected_rank INTEGER,
+  selected_reason TEXT,
+  serviceability TEXT,
+  skipped_json TEXT NOT NULL DEFAULT '[]',
+  candidate_count INTEGER NOT NULL DEFAULT 0,
+  source TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_selection_decisions_request ON selection_decisions(request_id);
+CREATE INDEX IF NOT EXISTS idx_selection_decisions_media ON selection_decisions(media_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS media_request_results (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   request_id INTEGER NOT NULL,
@@ -5073,6 +5113,91 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     return `INSERT OR IGNORE INTO media_request_results (${cols.join(', ')}) VALUES (${placeholders});`;
   };
 
+  /**
+   * Append one selection decision to the diagnostic table.
+   *
+   * This is a DIAGNOSTIC write, never authority: the selection path has
+   * already decided by the time this runs, and nothing in selection,
+   * binding, or handoff reads this table back. It exists so the question
+   * "which candidate won, and why did every candidate above it lose?" is
+   * answerable after the fact instead of being lost with the response.
+   *
+   * Append-only: there is deliberately no update or delete path.
+   *
+   * @param {Object} decision
+   * @param {number|null} [decision.requestId]
+   * @param {string} decision.mediaId
+   * @param {string} decision.mediaType
+   * @param {number|null} [decision.season]
+   * @param {number|null} [decision.episode]
+   * @param {Object|null} [decision.selected] - the winning candidate
+   * @param {string|null} [decision.reason] - why the winner was chosen
+   * @param {Object|null} [decision.serviceability] - delivery probe outcome
+   * @param {Array<Object>} [decision.skipped] - candidates that lost + reason
+   * @param {number} [decision.candidateCount]
+   * @param {string|null} [decision.source]
+   * @returns {number} the row id
+   */
+  function appendSelectionDecision(decision = {}) {
+    const skipped = Array.isArray(decision.skipped) ? decision.skipped : [];
+    const info = db.prepare(`
+      INSERT INTO selection_decisions (
+        request_id, media_id, media_type, season, episode, created_at,
+        selected_info_hash, selected_file_index, selected_rank, selected_reason,
+        serviceability, skipped_json, candidate_count, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      decision.requestId ?? null,
+      String(decision.mediaId ?? ''),
+      String(decision.mediaType ?? 'movie'),
+      decision.season ?? null,
+      decision.episode ?? null,
+      decision.createdAt ?? Date.now(),
+      decision.selected?.infoHash ?? null,
+      decision.selected?.fileIndex ?? null,
+      decision.selected?.rank ?? null,
+      decision.reason ?? null,
+      decision.serviceability == null ? null : JSON.stringify(decision.serviceability),
+      JSON.stringify(skipped.map((s) => ({
+        rank: s.rank ?? null,
+        infoHash: s.infoHash ?? null,
+        fileIndex: s.fileIndex ?? null,
+        reason: s.reason ?? null,
+        torboxState: s.torboxState ?? null,
+      }))),
+      Number.isFinite(decision.candidateCount) ? decision.candidateCount : skipped.length + (decision.selected ? 1 : 0),
+      decision.source ?? null,
+    );
+    return info.lastInsertRowid;
+  }
+
+  function listSelectionDecisions({ limit = 100, mediaId = null } = {}) {
+    const rows = mediaId
+      ? db.prepare(`SELECT * FROM selection_decisions WHERE media_id = ? ORDER BY created_at DESC LIMIT ?`).all(mediaId, limit)
+      : db.prepare(`SELECT * FROM selection_decisions ORDER BY created_at DESC LIMIT ?`).all(limit);
+    return rows.map((row) => ({
+      id: row.id,
+      requestId: row.request_id,
+      mediaId: row.media_id,
+      mediaType: row.media_type,
+      season: row.season,
+      episode: row.episode,
+      createdAt: row.created_at,
+      selected: row.selected_info_hash
+        ? {
+          infoHash: row.selected_info_hash,
+          fileIndex: row.selected_file_index,
+          rank: row.selected_rank,
+        }
+        : null,
+      reason: row.selected_reason,
+      serviceability: row.serviceability ? JSON.parse(row.serviceability) : null,
+      skipped: JSON.parse(row.skipped_json || '[]'),
+      candidateCount: row.candidate_count,
+      source: row.source,
+    }));
+  }
+
   function persistMediaRequest(intent, results) {
     const now = Date.now();
     const intentLength = results.length;
@@ -6416,6 +6541,8 @@ export function createDiscoveryCache({ dbPath = ':memory:', database = null } = 
     getMediaIntentStats,
     // Media request persistence
     persistMediaRequest,
+    appendSelectionDecision,
+    listSelectionDecisions,
     getMediaRequests,
     getMediaRequestsByMediaId,
     getMediaRequestResults,
