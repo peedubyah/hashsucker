@@ -198,6 +198,23 @@ the **same exact TorrentFile** ✓ ✓:
 - Full suite ✓ ✓: 3584 tests ✓, 3580 pass ✓, 1 fail ✓ (the pre-existing
   `vfs-collection-resilience` C1/C2/C3 ✓ ✓), 3 skipped ✓ ✓.
 
+**Recon — the Stremio / Torrentio / Comet execution model (2026-10-20).**
+`docs/recon/2026-10-stremio-addon-execution-model.md`. Stremio is not the
+competitor ✓ ✓ — it is a client and a URL format ✓ ✓ (no stream-URL retry ✓ ✓,
+no provider failover ✓ ✓, no re-resolution ✓ ✓ — the human picking another row
+is the failover ✓ ✓). The competitor is the **resolver stack** ✓ ✓, and the
+honest recommendation is **NO COOK-OFF YET** ✓ ✓: a "click title → first
+frame" race would measure our duplication of the addon's work ✓ ✓ and
+Stremio's client startup ✓ ✓ — not the architecture ✓ ✓ ✓✓.
+
+The three things a next session should hold ✓ ✓: (1) our distinct layer is
+the **exact file** ✓ ✓ (`infoHash` + canonical path + exact size ✓ ✓) — the
+addons know a file *index* ✓ ✓; (2) we currently **re-derive** the addon's
+quality parse and ordering ✓ ✓ while keeping its raw output ✓ ✓ — duplicated
+work ✓ ✓, and the first thing to fix ✓ ✓; (3) our advantage is a **lead, not
+a moat** ✓ ✓ — Comet's unreleased branch already mints a signed ✓ ✓,
+multi-provider playback capability ✓ ✓ ✓✓.
+
 One recovery note: a `git stash -u` during the merge was dropped with the
 pre-existing untracked user files inside it
 (`artifacts/ab-baseline-off.jsonl`, `artifacts/ab-off-vs-on.json`,
