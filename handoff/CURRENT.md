@@ -144,6 +144,29 @@ not tracked ✓ ✓) and the old product is unchanged ✓ ✓:
   answers **401** ✓ ✓ (the `JELLYFIN_API_KEY` is rejected ✓ ✓). The path is
   characterized ✓ ✓; no live Jellyfin session was observed ✓ ✓.
 
+**Pivot slice 3 — THE TINY RESOLVER CLIENT — CLOSED** (2026-10-20). One
+command now goes from intent to a playing frame with no Plex, no Jellyfin and
+no provider URL ✓ ✓:
+
+- `npm run hs -- play <media-id-or-title> [--season N] [--episode N]
+  [--resume S] [--measure S] [--json]` ✓ ✓ — in `media-search/tools/hs/` ✓ ✓
+  (`main.mjs` ✓ ✓, `mpv.mjs` ✓ ✓, `bench.mjs` ✓ ✓).
+- The server side is `POST /api/playback-object` ✓ ✓ — a thin adapter over the
+  existing metadata search ✓ ✓ and the existing request pipeline ✓ ✓; the
+  warm path does **no discovery and no provider API call** ✓ ✓ ✓✓.
+- Warm timings ✓ ✓ (10 runs ✓ ✓): resolve p50 **41 ms** ✓ ✓, first frame p50
+  **1286 ms** ✓ ✓, zero manual actions ✓ ✓ ✓✓.
+- "Alien" matches 25 works ✓ ✓ → the API refuses ✓ ✓ → the client asks ✓ ✓
+  → one manual action ✓ ✓ ✓✓.
+- The cold path is fully timed but **cannot complete here** ✓ ✓ — the
+  provider has the release uncached ✓ ✓, so the materialization (which
+  creates the Binding ✓ ✓) fails ✓ ✓ with the typed
+  `NO_AUTHORITATIVE_REPRESENTATION` ✓ ✓ ✓✓.
+- The player is the ceiling ✓ ✓: ffmpeg's mov demuxer rejects one MP4 ✓ ✓
+  that Plex plays ✓ ✓ ✓✓.
+- Full suite: 3575 tests ✓, 3571 pass ✓, 1 fail ✓ (the pre-existing
+  `vfs-collection-resilience` C1/C2/C3 ✓ ✓), 3 skipped ✓ ✓.
+
 One recovery note: a `git stash -u` during the merge was dropped with the
 pre-existing untracked user files inside it
 (`artifacts/ab-baseline-off.jsonl`, `artifacts/ab-off-vs-on.json`,

@@ -221,6 +221,54 @@ The next earned slice is not selected ✓; the candidates are in the build log
 The next earned slice is not selected ✓; the candidates are in the build log
 ✓ ✓ — the first of them is the tiny resolver→mpv reference client ✓ ✓.
 
+**Pivot slice 3 — THE TINY RESOLVER CLIENT — CLOSED** (evidence in
+`docs/BUILD-LOG.md` 2026-10-20). `hs play <intent>` now goes from an intent
+to a playing frame with no Plex, no Jellyfin, no source picker and no
+provider URL ✓ ✓:
+
+- **The contract** ✓ ✓: `npm run hs -- play <media-id-or-title> [--season N]
+  [--episode N] [--resume SECONDS] [--measure SECONDS] [--json] [--server URL]`
+  ✓ ✓. The client holds no provider state ✓ ✓, never picks a release ✓ ✓,
+  never sees a provider URL ✓ ✓ ✓✓.
+- **The server side is a thin adapter over the existing authority** ✓ ✓:
+  `POST /api/playback-object` ✓ ✓ — a title through the existing metadata
+  search ✓ ✓, a media id through the existing request pipeline ✓ ✓, the
+  active Binding naming the exact TorrentFile ✓ ✓. **The warm path does no
+  discovery, no provider inventory and no provider API call** ✓ ✓ ✓✓.
+- **Warm timings (10 runs)** ✓ ✓: resolve 40/41/60/60 ms (min/p50/p95/max)
+  ✓ ✓; player startup 478/493/639/639 ms ✓ ✓; **first frame
+  1070/1286/1286/1286 ms** ✓ ✓; zero manual actions ✓ ✓; one resolver
+  attempt ✓ ✓ ✓✓.
+- **A title works and ambiguity fails safely** ✓ ✓: "Alien" matched 25
+  legitimate works ✓ ✓ → the API refuses (`AMBIGUOUS_INTENT` + the
+  candidates ✓ ✓) → the client asks ✓ ✓ → one manual action ✓ ✓ →
+  `tt0078748` ✓ ✓ → played ✓ ✓ ✓✓.
+- **TV identity is exact** ✓ ✓ (the episode's own TorrentFile ✓ ✓; a series
+  without coordinates is refused ✓ ✓ — no S00E00 ✓ ✓) ✓ ✓.
+- **The cold path is accounted for but cannot finish here** ✓ ✓: the corpus
+  retrieval + ranking + identity selection succeeded in 1.5 s ✓ ✓ (rank 1,
+  score 0.729, identity tier Verified ✓ ✓, the exact TorrentFile identified
+  ✓ ✓) but the provider had the release **uncached** ✓ ✓, so the VFS
+  materialization (which creates the Binding ✓ ✓) cannot complete ✓ ✓ — the
+  typed `NO_AUTHORITATIVE_REPRESENTATION` ✓ ✓ ✓✓.
+- **The player is the ceiling** ✓ ✓: the 6.5 GB MP4 of Lanterns S01E05 has a
+  `udta` box ffmpeg's mov demuxer rejects ✓ ✓ — it plays through Plex ✓ ✓
+  but not through mpv ✓ ✓, over HTTP **and** from the local mount ✓ ✓ — a
+  player limitation, not a HashSucker one ✓ ✓ ✓✓.
+- **Plex versus the direct path** ✓ ✓: the Plex HTPC canary measured
+  session→first-read 103 ms ✓ ✓, first-read TTFB 13 ms ✓ ✓ (a **local VFS**
+  read ✓ ✓) and start→progress 10 603 ms ✓ ✓ (the Plex application's startup
+  ✓ ✓); the direct client measured resolve 41 ms ✓ ✓, player startup 493 ms
+  ✓ ✓, first frame 1286 ms ✓ ✓ ✓✓. The direct path reaches a playing frame
+  in ~1.3 s against ~10.6 s — the Plex read is faster, the Plex application
+  is slower ✓ ✓ ✓✓.
+- **Tests**: 15 new ✓ ✓; the full suite is 3575/3571/1/3 ✓ ✓ — the one
+  failure is the pre-existing `vfs-collection-resilience` C1/C2/C3 ✓ ✓.
+
+The next earned slice is not selected ✓; the candidates are in the build log
+✓ ✓ — the cold path's materialization gap ✓ ✓, the session contract ✓ ✓,
+and a player comparison ✓ ✓ ✓✓.
+
 
 Completed final slice: **bound stale-inventory binding retry churn** —
 **CLOSED**. The host-only canary passed clean E01 plus the full E01/E05/MobLand

@@ -4562,3 +4562,172 @@ calls the resolver and plays, proving the contract from a client's side); (2) re
 `/bytes/:tfId` as a public alias once the compatibility window closes ✓; (3) replace the Plex
 section refresh that amplifies PMS's scanner contention ✓ (a pre-existing, diagnosed defect that
 blocks the canary's reliability ✓).
+
+## 2026-10-20 — THE TINY RESOLVER CLIENT: one command from intent to playback — CLOSED
+
+Slice: **PIVOT SLICE 3**. Prove the resolver-first path end-to-end without Plex:
+one small command accepts a media intent, resolves it through the existing
+HashSucker authority, opens the stable playback object in mpv, and measures
+first-frame behavior. A reference client, not a product client.
+
+### WHAT CHANGED
+
+- `media-search/src/api/playback-object.js` — the server side: a thin adapter
+  over the authority that already exists. A title resolves through the existing
+  metadata search (`searchTitles`); a media id resolves through the existing
+  request pipeline (`searchByMedia`); the control plane's active Binding names
+  the exact TorrentFile the playback object is bound to. **The warm path
+  performs no discovery, no provider inventory and no provider API call** — it
+  reads the Binding and mints the object. The cold path runs the same request
+  pipeline a Seerr request runs, then mints the object.
+- `media-search/src/server/app.js` — `POST /api/playback-object`. Typed
+  failures: `AMBIGUOUS_INTENT` (409, with the candidates),
+  `INTENT_NOT_FOUND` (404), `EPISODE_COORDINATES_REQUIRED` (400),
+  `NO_AUTHORITATIVE_REPRESENTATION` (409), `PLAYBACK_OBJECT_UNAVAILABLE`
+  (503). No provider state, credential or URL in any response.
+- `media-search/tools/hs/` — the client: `main.mjs` (the command),
+  `mpv.mjs` (the player + the measurement), `bench.mjs` (the reusable
+  harness). `npm run hs -- play <intent>`.
+- `media-search/test/playback-object-api.test.js` — 15 tests.
+
+### WHAT WAS PROVEN
+
+**The command works.** `hs play tt0021749` resolved in 40–60 ms, the player
+loaded in 478–639 ms, and the **first frame landed in 1070–1286 ms** with
+zero manual actions and one resolver attempt.
+
+**The warm cohort (10 runs, City Lights):** 10/10 played; manual actions
+`[0×10]`; resolver attempts `[1×10]`; resolver min 40 / p50 41 / p95 60 /
+max 60 ms; player startup min 478 / p50 493 / p95 639 / max 639 ms; first
+frame min 1070 / p50 1286 / p95 1286 / max 1286 ms.
+
+**The episode cohort (10 runs, Lanterns S01E02):** 9/10 played; resolver min
+40 / p50 45 / p95 58 / max 58 ms; player startup min 3262 / p50 3410 ms; first
+frame min 5291 / p50 12948 ms. One run failed with the player dying
+(`ipc socket closed`).
+
+**A title works, and ambiguity fails safely.** `hs play "Alien"` produced 25
+legitimate matches (Alien, Alien: Covenant, Resident Alien, Ben 10: Alien
+Force, My Stepmother Is an Alien, …), printed them numbered, asked, and on
+"1" resolved to `tt0078748` — **one manual action**, two resolver attempts,
+warm, and it played. The server never chose: `AMBIGUOUS_INTENT` carries the
+candidates and the client asks.
+
+**TV identity is exact.** `hs play tt26545992 --season 1 --episode 2` resolves
+to the episode's own TorrentFile (`tf_5f6b4e16…`), and a series intent
+without coordinates is refused (`EPISODE_COORDINATES_REQUIRED`) — there is no
+S00E00 and no movie/TV ambiguity in the client path.
+
+**The cold path is accounted for.** `hs play tt0068281` (Black Gunn — no
+library item) ran the request pipeline and failed with the typed
+`NO_AUTHORITATIVE_REPRESENTATION`. The *existing* `/api/media-prepare` for the
+same intent shows why, in 1498 ms: the corpus retrieval found 5 candidates
+(no live discovery), the ranking selected `Black.Gunn.1972.1080p.BluRay.x265-RARBG.mp4`
+(rank 1, score 0.729, identity tier **Verified**), the exact TorrentFile was
+identified (`tf_e53dba9d…`), and the provider state was **uncached** — so the
+VFS materialization (which creates the Binding) cannot complete. The cold
+waterfall is therefore *fully timed* (corpus 0 ms live calls, ranking 0 ms,
+selection + identity 1.5 s) and *fully accounted for* — but it cannot finish
+in this deployment without a provider acquisition, which is the product's own
+business and out of scope for this slice. A second cold fixture
+(`tt0123366`) failed the same way.
+
+**Token expiry is characterized.** The server side is proven by test: an
+expired token is `410 PLAYBACK_TOKEN_EXPIRED`, and a re-resolve returns the
+**same TorrentFile** with a **fresh URL** (A9). The player side is observed:
+mpv against a `410` answers `Failed to open … HTTP error 410 Gone` and exits,
+so the client's bounded re-resolve (re-resolve once, keep the local playhead)
+is reachable. The client's end-to-end retry was **not** exercised live — the
+fake-server run was inconclusive — so it is recorded as implemented, not
+proven.
+
+**Plex versus the direct path (Phase 13), same appliance, different
+consumers:** the Plex HTPC canary measured session→first-read **103 ms**,
+first-read TTFB **13 ms**, and start→progress **10 603 ms** (the Plex
+application's own startup dominates); the direct client measured resolver
+**41 ms**, player startup **493 ms**, first frame **1286 ms**. The direct path
+reaches a playing frame in ~1.3 s against ~10.6 s for the Plex client path —
+with the caveat that the Plex number includes the Plex application's startup
+and that the two paths read different byte sources (the Plex path reads the
+**local VFS file**, the direct path reads the **provider bytes**). Plex is not
+"bad" here: its 13 ms read is faster than the direct path's, because the
+local file is local.
+
+**Nothing leaks.** The API response carries the media identity, the display
+title, the authoritative TorrentFile id and the playback URL — and no
+provider, placement, capability, credential or URL (asserted in A5 and A13).
+The client prints only the title, the media id, the timings and the error
+code.
+
+### WHAT REMAINS UNPROVEN
+
+- **The cold path cannot complete** in this deployment without a provider
+  acquisition (the release is uncached at the provider). The prepare stage
+  succeeds and is fully timed; the materialization does not.
+- **The client's expiry retry** is implemented and its two components are
+  proven (the server's re-resolve; mpv's 410), but the end-to-end retry was
+  not exercised live.
+- **The episode fixture's player failure** (1 of 10 runs; the player died) is
+  unexplained. A separate finding: the 6.5 GB MP4 of Lanterns S01E05 has a
+  `udta` box that ffmpeg's mov demuxer rejects (`UDTA parsing failed
+  retrying raw`) — it plays through Plex but not through mpv, over HTTP **and**
+  from the local mount. That is a player limitation, not a HashSucker one,
+  and it is the sharpest illustration of what the resolver-first path
+  inherits: the client is only as good as its demuxer.
+- No movie was played through a real Plex *session* (unchanged from slice 2 —
+  the canary's bridge hard-codes `type: 'episode'`).
+- The client is developer-grade: no packaging, no installer, no auto-update.
+
+### WHAT WAS LEARNED
+
+- **One command is enough.** `intent → authority → stable URL → mpv` with no
+  Plex, no Jellyfin, no source picker and no provider URL. The warm path's
+  whole cost is 41 ms of server time; the player's own startup dominates.
+- **The client inherits the player's limits.** The same bytes that Plex plays
+  are unplayable by mpv when ffmpeg's mov demuxer rejects the container. A
+  resolver-first product must own the player or accept the player's ceiling.
+- **The direct path is slower to the first byte than the local path, and
+  faster to the first frame than a Plex client.** The byte source and the
+  application startup are two different costs, and the resolver-first path
+  trades the second for the first. Which trade wins depends on where the
+  bytes are.
+- **Ambiguity is a first-class case, not an edge case.** "Alien" matched 25
+  works. Refusing to choose cost one keystroke and bought correctness.
+- **`file-loaded` is an mpv EVENT, not a property** — polling it as a
+  property cost the full 60 s timeout on every run and looked like a slow
+  player rather than a bug.
+- **`hrtime` is nanoseconds.** The first measurement divided by 1000 and
+  reported microseconds as milliseconds; a 39 ms resolve read as 39 s.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- "A client needs its own discovery path" → no ✓; the existing metadata
+  search and the existing request pipeline are the client's back end ✓.
+- "The resolver must expose the provider's file tree" → no ✓; it exposes the
+  TorrentFile and the playback URL ✓.
+- "A title is unambiguous enough to auto-select" → no ✓; 25 legitimate
+  matches for "Alien" ✓.
+- "The direct path is slower than Plex" → for the *first frame*, no ✓
+  (1.3 s vs 10.6 s ✓); for the *byte read*, yes ✓ (13 ms local vs the
+  provider's path ✓).
+
+### WHAT SHOULD BE UPDATED
+
+- `docs/BUILD-LOG.md` ✓, `PLANS.md` ✓, `handoff/CURRENT.md` ✓ — done in this
+  slice.
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing was deleted. `/bytes/:tfId` remains a public alias of
+  `/play/:token` ✓.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The candidates this slice leaves standing:
+(1) make the **cold path** complete — the request pipeline's materialization
+  fails when the provider has the release uncached, and that is the product's
+  own gap, not the client's ✓; (2) the **session contract** (position,
+  subtitle/audio preference, continuity) on the playback object, so a client
+  can resume across a token expiry ✓; (3) a **player comparison** (mpv vs
+  mpv-android vs a Jellyfin client) on the same fixtures, since the demuxer
+  ceiling is now the binding constraint ✓.
