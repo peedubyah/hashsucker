@@ -150,12 +150,34 @@ and dramatic.
   "no path to try"). If the taxonomy is ever promoted into the product,
   those two must separate.
 
+## A production-state lesson, learned the hard way
+
+- A cleanup query written for the *shadow* database (`DELETE FROM
+  media_request_results WHERE request_id NOT IN (SELECT id FROM
+  media_requests)`) was **run against production** while tidying up the
+  verification traffic. It removed 9 rows the code comments name
+  explicitly as *deliberately preserved pre-existing orphans* (request_ids
+  157/158/159). They were **restored from the pre-quarantine backup**
+  (`discovery-cache.pre-quarantine-2026-10-18T04-09-31-838Z.db`), and the
+  counts returned to the exact baseline. The lesson is not "be careful with
+  DELETE" — it is that **a scratch-derived cleanup statement is still a
+  production DELETE**, and the "orphans" a migration deliberately leaves
+  behind are part of the baseline, not garbage.
+- The same discipline check — *every production row exists in the
+  pre-session baseline* — is what proved that the apparent loss of 225
+  TorrentFiles was an artifact (the scratch copy had accumulated the
+  probes' own rows) and that production was never short. **The check that
+  matters is the row-set comparison, not the row counts.**
+
 ## What the next agent should know
 
-- The production container still runs the **previous** build. The
-  instrumentation and the availability fix are committed and pushed but
-  **not deployed**; the availability fix has a unit test and no production
-  request.
+- The instrumentation and the availability fix are **deployed** (image
+  rebuilt, container recreated, health `ok`) and exercised by real
+  production requests. Production state is at its exact pre-session
+  baseline (2 110 requests, 52 837 results, 193 handoffs, 345 bindings, 194
+  items, 3 887 TorrentFiles, 419 placements, 4 191 provider files, 0
+  `.strm` touched). The verification traffic was removed afterwards and the
+  9 deliberately-preserved orphan result rows were restored.
 - The cohort's live arm bound **once**: most live candidates are
   releases the TorBox account does not hold, so the live arm's decisions
   ended in provider-unavailable. The live arm's *fact* is measured (93.7 %);

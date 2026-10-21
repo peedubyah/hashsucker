@@ -628,9 +628,16 @@ look in `git fsck --unreachable` before assuming a loss.
 ## Live session state (2026-10-21, the proof tax)
 
 - The slice was **measurement only**. No ranking, selection, binding,
-  provider or consumer behaviour changed. The production container is
-  **unchanged** — the code is committed and pushed but the image was not
-  rebuilt, so the running appliance still serves the previous build.
+  provider or consumer behaviour changed. The image was rebuilt and the
+  container recreated so the **availability fix** and the **diagnostic** are
+  live; both are additive (a new empty table, and a batch-failure path that
+  now degrades instead of throwing).
+- **Production state is at its exact pre-session baseline**: 2 110 requests,
+  52 837 result rows, 193 handoffs, 345 bindings, 194 library items, 3 887
+  TorrentFiles, 419 placements, 4 191 provider files, 0 `.strm` touched.
+  The verification traffic was removed afterwards; the 9 pre-existing orphan
+  result rows (request_ids 157/158/159) were restored from the
+  pre-quarantine backup after a cleanup query removed them.
 - **The decision site is now observable.** A new append-only
   `selection_decisions` table (discovery DB) records the winner, the
   winner's reason, and every skipped candidate with its **verbatim**
@@ -672,8 +679,12 @@ look in `git fsck --unreachable` before assuming a loss.
   marked `unknown`) never happened, the exception escaped
   `checkAvailability`, and every candidate lost its cached/uncached
   state — so the uncached-deferral traversal silently stopped deferring.
-  Fixed to `'temporarily-unavailable'` with a new test. **Not deployed
-  yet** (unit test only).
+  Fixed to `'temporarily-unavailable'` with a new test. **Deployed** (image
+  rebuilt, container recreated, health `ok`) and exercised by real requests:
+  the diagnostic recorded live decisions (`tt10986410` / `tt0944947` bound at
+  rank 1 via `movie-cached-single-file bound`; `tt0123366` recorded
+  `no eligible candidates`), and zero `Availability check failed` messages
+  appeared.
 - Measurement tools (in the repo, not product paths):
   `media-search/src/scripts/proof-tax-cohort.mjs` (the shadow cohort
   runner) and `media-search/src/scripts/proof-tax-probe.mjs` (the

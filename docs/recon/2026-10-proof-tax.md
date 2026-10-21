@@ -374,8 +374,14 @@ reported.
 - **No production traffic was replayed.** The cohort is shadow runs over
   scratch copies; the historical record still cannot answer the question,
   which is why the diagnostic was added.
-- **The availability fix was not deployed.** It is proven by a unit test
-  only; it has not been through a production request.
+- **The availability fix was deployed and exercised.** The image was
+  rebuilt, the container recreated (health `ok`), and real production
+  requests ran through it: the diagnostic recorded live decisions
+  (`tt10986410` and `tt0944947` bound at rank 1 via
+  `movie-cached-single-file bound`; `tt0123366` recorded
+  `no eligible candidates`), with zero `Availability check failed` messages.
+  The verification traffic was removed afterwards; production is at its
+  exact pre-session baseline.
 
 ---
 

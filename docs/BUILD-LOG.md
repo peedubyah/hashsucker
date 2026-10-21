@@ -5605,10 +5605,21 @@ functions and the production provider seam.
 - **The 58 releases (6.3 %) where neither number proves a file** are
   unexplained — candidates whose upstream size matches no file at the
   provider.
-- **The availability fix was not deployed**; it is proven by a unit test
-  only and has not been through a production request.
+- **The availability fix WAS deployed** (image rebuilt, container
+  recreated, health `ok`) and exercised by real production requests: the
+  diagnostic recorded live decisions (`tt10986410` and `tt0944947` bound at
+  rank 1 via `movie-cached-single-file bound`; `tt0123366` recorded
+  `no eligible candidates`), and **zero** `Availability check failed`
+  messages appeared.
 - **No production traffic was replayed.** The historical record still
   cannot answer the question, which is why the diagnostic was added.
+- **The production verification traffic was removed afterwards**, so the
+  production state is at its exact pre-session baseline: 2 110 requests,
+  52 837 result rows, 193 handoffs, 345 bindings, 194 library items, 3 887
+  TorrentFiles, 419 placements, 4 191 provider files, 0 `.strm` touched.
+  (The 9 pre-existing orphan result rows — request_ids 157/158/159, which
+  the code comments name as deliberately left in place — were restored from
+  the pre-quarantine backup after a cleanup query removed them.)
 
 ### VERDICT
 
