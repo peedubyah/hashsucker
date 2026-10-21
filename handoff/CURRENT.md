@@ -273,6 +273,31 @@ policy stays ✓ ✓:
   provenance because there is no producer ✓ ✓, not because a value is lost
   ✓ ✓ ✓✓.
 
+**Slice — does identity enrichment have a right to exist? (2026-10-20) —
+REDUNDANT (deprecated)** ✓ ✓. The dormant seam was judged, not wired ✓ ✓:
+
+- The worker verifies a candidate's **media** identity through Cinemeta ✓ ✓ —
+  it never establishes exact-file identity ✓ ✓ and never touches a Binding ✓ ✓
+  ✓✓.
+- **It has no scheduler** ✓ ✓ (the queue holds 6 858 pending ✓ ✓; the only
+  caller is the manual script ✓ ✓) ✓✓ — and it would overwrite the
+  association's origin with its own name ✓ ✓ ✓✓.
+- The population ✓ ✓: **63 %** are stale ✓ ✓, **0** are locally resolvable ✓ ✓
+  (the corpus has zero file paths and zero file sizes ✓ ✓), and **97 %** of
+  the live ones are for media that **already has an active Binding** ✓ ✓ ✓✓.
+- A bounded run on scratch copies ✓ ✓: 6/20 resolved at 432 ms/item ✓ ✓
+  (~49 min for the queue ✓ ✓) ✓✓ — feeding a confidence term the ranking
+  barely weights ✓ ✓, for media already resolved ✓ ✓ ✓✓.
+- **Disposition** ✓ ✓: a **deprecation notice** on the worker and its CLI ✓ ✓
+  with the measurement attached ✓ ✓; **no producer, no schema change, no
+  sweep** ✓ ✓ ✓✓. The unlock for proactive exact-file knowledge would be a
+  **torrent file-tree source** ✓ ✓ — stated, not started ✓ ✓ ✓✓.
+- **Part 0 (`acf706e`)** ✓ ✓: the Stremio audio grammar reads the scene
+  channel suffix ✓ ✓ ("AAC5.1" → AAC ✓ ✓ — it produced no audio before ✓ ✓;
+  "DD+5.1"/"DDP5.1" → DD+ ✓ ✓) ✓✓.
+- Also noted, not fixed: **5 534 dangling associations** whose candidate is
+  gone ✓ ✓ (corpus hygiene ✓ ✓) ✓✓.
+
 One recovery note: a `git stash -u` during the merge was dropped with the
 pre-existing untracked user files inside it
 (`artifacts/ab-baseline-off.jsonl`, `artifacts/ab-off-vs-on.json`,

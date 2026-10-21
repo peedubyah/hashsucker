@@ -1,9 +1,36 @@
 /**
- * Identity Enrichment Worker
+ * Identity Enrichment Worker — DEPRECATED (2026-10-20), NOT SCHEDULED.
  *
  * Asynchronous worker that processes candidates through the identity
  * resolver pipeline. Dequeues candidates from the identity_enrichment_queue,
  * calls the resolver, and stores successful matches in candidate_media.
+ *
+ * DEPRECATION — why this must not simply be wired up:
+ *
+ *   - It has no scheduler. The only caller is the manual
+ *     `npm run enrichment -- process` script, so it has never run in
+ *     production: the queue has sat pending and `candidate_media` carries
+ *     zero `resolver_source` values.
+ *   - It verifies the MEDIA identity of a candidate (which media a release
+ *     belongs to) through Cinemeta. It does NOT establish exact-file
+ *     identity: `TorrentFile = infoHash + canonicalInternalPath + exact
+ *     positive size` still comes from the provider's file list, targeted,
+ *     at materialization time.
+ *   - The request path already learns the same media association on demand
+ *     (`source = 'request-outcome'`), and the ranking does not read this
+ *     worker's output: the eligibility gate judges the live parsed
+ *     attributes, and the identity-confidence term reads the association's
+ *     confidence, not its `resolution_state`.
+ *   - A bounded run (20 items) resolved 6 at 432 ms/item — roughly 49
+ *     minutes for the whole 6858-item queue, in exchange for a confidence
+ *     nudge on candidates for media the household has already bound.
+ *
+ * If this is ever revived it must first prove a downstream reuse: a real
+ * request that consumes the pre-resolved fact and measurably avoids work
+ * it would otherwise have done. A changed row is not evidence.
+ *
+ * See `docs/BUILD-LOG.md` 2026-10-20 ("does identity enrichment have a right
+ * to exist?") for the measurement.
  *
  * Pipeline:
  *   identity_enrichment_queue

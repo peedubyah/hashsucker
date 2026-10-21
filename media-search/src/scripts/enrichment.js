@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Enrichment Pipeline CLI
+ * Enrichment Pipeline CLI — DEPRECATED (2026-10-20).
  *
  * Commands:
  *   npm run enrichment -- seed [--limit N] [--offset N]
@@ -9,6 +9,13 @@
  *
  * Populates the identity enrichment queue from unresolved candidates,
  * then processes them through the CinemetaIdentityResolver.
+ *
+ * DEPRECATED: this path is not scheduled, has never run in production, and
+ * the analysis found no downstream reuse that justifies running it. See
+ * `src/lib/discovery/identity-enrichment-worker.js` for the full finding, and
+ * `docs/BUILD-LOG.md` 2026-10-20 for the measurement. Do not wire this up
+ * without first proving that a later real request consumes the pre-resolved
+ * fact and measurably avoids work it would otherwise have done.
  */
 
 import { createDiscoveryCache } from '../lib/discovery/cache.js';

@@ -5218,3 +5218,186 @@ Not selected — a human disposes. The candidates this slice leaves standing:
   resolver provenance ✓✓; (2) the **local audio-parse gap** ("AAC5.1",
   "DTS-X", "DD+") ✓✓; (3) the **debrid-form differential**, run against a
   scratch copy of the control plane so no live provider API is called ✓✓.
+
+## 2026-10-20 — DOES IDENTITY ENRICHMENT HAVE A RIGHT TO EXIST? — REDUNDANT (deprecated) — CLOSED
+
+Slice: a right-to-exist test for a dormant architectural seam. The recon had
+established that `resolver_source` is written by exactly one writer — the
+identity-enrichment worker — that this writer has produced **zero** rows, and
+that all ~8 750 current associations came through the request-outcome writer,
+which correctly uses its own source provenance. The question was **not** "how
+do we wire it up" but "does proactive identity enrichment create material
+product value over the existing on-demand request/materialization path".
+
+### PART 0 — the audio grammar (a small independent commit, `acf706e`)
+
+The corpus was checked first: its audio vocabulary is AAC / AC3 / DTS-HD / DTS
+/ Atmos / TrueHD / FLAC (371 727 rows), so no new vocabulary was needed. The
+**Stremio** normalizer's grammar was the broken one: "AAC5.1" failed the word
+boundary and produced **no audio at all**; "DD+5.1" produced "DD"; "DDP5.1"
+produced the codec with the channel count glued to it ("DDP5"). The suffix is
+now read and dropped — "AAC5.1" → AAC, "DD+5.1"/"DDP5.1" → DD+, "DTS-X"
+unchanged, and every form that already parsed is untouched. Three focused
+tests; no ranking-policy change (plain AAC still earns no bonus, which is a
+policy question and out of scope).
+
+### PART 1 — the intended contract, reconstructed
+
+- **Object entering the worker:** a row of `identity_enrichment_queue`
+  (infoHash + fileIndexKey), whose candidate and parsed release attributes are
+  read from the discovery cache.
+- **Known at entry:** the candidate (infoHash, file index, title, filename,
+  size, seeders), the parsed release attributes, and the association state.
+- **Sources it may consult:** exactly one — the `CinemetaIdentityResolver`
+  (a metadata lookup, not a provider call).
+- **The transition it is supposed to cause:** a *media identity* association
+  (which movie/show a release belongs to) recorded in `candidate_media` with a
+  confidence, a `resolution_state` and a `resolver_source`.
+- **"Resolved":** a non-empty match set from the resolver.
+- **What `resolver_source` means:** *what independent mechanism later
+  established the identity of this association* — as opposed to `source`,
+  which is *where the association originated*.
+- **Rows it may create/update:** `candidate_media` rows and the queue's status.
+  **It never creates a TorrentFile and never creates or changes a Binding** —
+  the worker's own contract says so, and the code confirms it: the only write
+  is `cache.associateMedia`.
+
+### PART 2 — why it has produced zero rows
+
+**There is no scheduler.** The queue is not empty — it holds **6 858 pending**
+items — but the only caller of `runIdentityEnrichmentWorker` is the manual
+`npm run enrichment -- process` script. The worker has therefore never run in
+production. (A second, subordinate reason: even when run by hand, it writes
+`source = 'enrichment'`, which would **overwrite** the association's
+`request-outcome` origin — the origin is not what the worker owns.)
+
+### PART 3 — what enrichment can actually learn
+
+| source | facts obtainable | exact-file identity? |
+|---|---|---|
+| the corpus / addon candidate | infoHash, file index, release name, size hint, episode coordinates | **no** — no torrent-internal path |
+| provider inventory (targeted) | the exact provider file path, the exact file size, the native provider file id | **yes** — but it is a provider call, and the materialization path already makes exactly that call, targeted, at demand (118–338 ms measured) |
+| torrent metainfo / a sidecar | the full file tree, exact paths, exact sizes | **yes** — but **no such mechanism exists locally today**: the corpus's 1 593 141 `release_attributes` rows carry **zero** file paths and **zero** file sizes |
+| existing durable state | the media id (it *is* the association), the confidence | **no** — the exact file is the Binding's, and the Binding already has it |
+
+### PART 4 — the population
+
+| bucket | count | share |
+|---|---|---|
+| **E — stale/dead** (the candidate no longer exists) | **5 534** | **63.2 %** |
+| **C — metainfo-dependent** (the candidate is live, but no local exact-file fact exists) | 3 120 | 35.6 % |
+| **A — locally resolvable now** | **0** | 0 % |
+| **B — provider-targeted resolvable** | 3 120 | 35.6 % |
+| **D — fundamentally ambiguous** | 0 | 0 % |
+
+And the demand weighting (Part 6): **3 120 of the 3 217 live candidates (97 %)
+belong to a media id that already has an active Binding** — the household
+already plays that media, and the request path already resolved it. There are
+**zero** future intents, so there is no "future demand" class to pre-resolve
+for. The remaining 97 live candidates (1.1 % of the population) are for media
+with no active binding.
+
+### PART 5 — proactive vs on-demand (the core experiment)
+
+A bounded run of the real worker on **scratch copies of both databases**
+(20 items, the live queue): 20 processed, **6 resolved**, 14 failed, **432 ms
+per item** (a Cinemeta lookup each), 8.6 s total. The row it wrote:
+`media_id=tt0133093`, `resolution_state=probable`, `resolver_source=cinemeta`,
+`source=enrichment`, `match_method=title_exact_match,year_close_match`.
+
+What that fact is worth downstream: the association's `resolution_state` is
+**not read** by the ranking or by the eligibility gate — the gate judges the
+live parsed attributes (`evaluateIdentityEligibility`), and the
+identity-confidence term reads the association's **confidence**, not its state.
+So the worker's output is a confidence nudge on a 15 %-weighted term, for
+media that is already bound and already resolved.
+
+What the request/materialization path already learns, at demand: the media
+association (8 751 rows, created per request) and the **exact file** (the
+provider's file list, via a targeted lookup — 118–338 ms, not an
+account-wide inventory).
+
+### PART 7 — the external-call budget
+
+Enabling the current worker at scale: 6 858 items × 1 Cinemeta lookup ≈
+**49 minutes** of serial metadata calls (and the 14/20 failure rate means
+roughly 4 800 of them are wasted). It is a metadata call, not a provider
+call ✓ — so it does not touch the provider budget, the account-wide inventory
+problem, or the healthy-rerequest rule ✓ — but it buys a confidence nudge,
+not an avoided request.
+
+### PART 8 — the authority audit
+
+The dormant implementation **does not** violate the authority rules: it writes
+only an association, never a TorrentFile and never a Binding; it cannot
+select a representation; and it has no file-index path to identity. So it does
+not need to be redesigned before being judged — it simply does not earn its
+existence. (The one thing it would have done **wrong** is overwrite
+`source`, the association's origin, with its own name.)
+
+### PART 9 — the provenance semantics
+
+- `source` — **where the association originated** (today: `request-outcome`).
+- `resolver_source` — **what independent mechanism later established the
+  identity** of the association (today: nothing — there is no such mechanism
+  in production).
+- The distinction is coherent, but the second field has no producer. Per the
+  rule "do not populate a column merely to make NULL counts disappear", the
+  column is left empty and the **producers** are named instead.
+
+### WHAT CHANGED
+
+- `src/lib/discovery/identity-enrichment-worker.js` and
+  `src/scripts/enrichment.js` — a **deprecation notice** carrying the
+  contract, the reason there is no scheduler, the measured cost, and the
+  condition for revival: a real request must consume the pre-resolved fact
+  and measurably avoid work it would otherwise have done. A changed row is not
+  evidence.
+- No producer was implemented: the analysis says there is no class that
+  earns one. No schema change, no queue change, no sweep.
+
+### WHAT REMAINS UNPROVEN
+
+- The stale 63 % (5 534 dangling associations whose candidate is gone) was
+  **not** cleaned up — that is a hygiene matter, not this slice's.
+- The debrid-form differential (with an exact `videoSize`) was not re-run.
+- The 97 live candidates for media with no active binding were not
+  individually classified — they are 1.1 % of the population, and the
+  demand analysis found no intent class behind them (zero future intents).
+
+### WHAT WAS LEARNED
+
+- **"Zero rows" was a symptom with two layers**: the worker has no scheduler
+  (the first cause), and the population it would have processed is 63 % dead
+  and 97 % already-bound.
+- **The worker's output is not the thing the product needs.** It verifies
+  *media* identity; the product's exact-file authority comes from the
+  provider's file list, targeted, at demand. The seam looked like the
+  missing piece and was not.
+- **No local exact-file fact exists** — 1.59 M attribute rows, zero file
+  paths, zero file sizes. If proactive exact-file knowledge were ever wanted,
+  the missing primitive is a **torrent file tree** (a metainfo source), not
+  an identity resolver. That is a metadata-sidecar question and is explicitly
+  not started here.
+- **A dormant backlog is a design smell, not a task.** The honest disposition
+  was to deprecate it with its measurement attached, not to switch it on.
+
+### VERDICT
+
+**IDENTITY ENRICHMENT — REDUNDANT.** The request/materialization path
+already learns the same facts at acceptable cost, and proactive work does not
+justify itself: no local closure class exists, 63 % of the population is dead,
+97 % of the rest is already bound, and the output feeds a term the ranking
+barely weights. The dormant concept is **deprecated with its measurement
+attached**, not revived and not expanded.
+
+If the product ever wants proactive exact-file knowledge, the unlock is a
+**torrent file-tree source** (exact paths and sizes per release), and it must
+still be demand-weighted. That is a separate decision.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The candidates this slice leaves standing:
+(1) the **corpus hygiene** of the 5 534 dangling associations ✓ ✓; (2) the
+**torrent file-tree primitive** — stated, not started ✓ ✓; (3) the debrid-form
+differential ✓ ✓ ✓✓.

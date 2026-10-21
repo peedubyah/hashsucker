@@ -321,6 +321,50 @@ as the explicit product-policy decision it is ✓ ✓ ✓✓.
 
 
 
+
+**Slice — does identity enrichment have a right to exist? (2026-10-20) —
+REDUNDANT (deprecated)** ✓ ✓. A right-to-exist test for the dormant seam, not
+a wiring task ✓ ✓.
+
+- **The contract, reconstructed** ✓ ✓: the worker reads a queued candidate ✓ ✓
+  and asks exactly one source — the **Cinemeta identity resolver** ✓ ✓ — to
+  establish which **media** a release belongs to ✓ ✓. It writes a
+  `candidate_media` association with a confidence, a `resolution_state` and a
+  `resolver_source` ✓ ✓. It **never** creates a TorrentFile and **never**
+  creates or changes a Binding ✓ ✓ ✓✓.
+- **Why zero rows** ✓ ✓: **there is no scheduler** ✓ ✓ — the queue holds
+  **6 858 pending** ✓ ✓ but the only caller is the manual
+  `npm run enrichment -- process` ✓ ✓ ✓✓. (It would also overwrite the
+  association's `source` — the origin — with its own name ✓ ✓ ✓✓.)
+- **The population** ✓ ✓: **5 534 (63.2 %)** are **stale** (the candidate is
+  gone ✓ ✓); the **3 217** live ones have **no local exact-file fact** (the
+  corpus's 1.59 M attribute rows carry **zero** file paths and **zero** file
+  sizes ✓ ✓) → they are metainfo-dependent or provider-targeted ✓ ✓; and
+  **3 120 of the 3 217 (97 %)** are for media that **already has an active
+  Binding** ✓ ✓ — already resolved ✓ ✓ ✓✓.
+- **The experiment** ✓ ✓: a bounded run of the real worker on scratch copies
+  of both DBs ✓ ✓ — 20 processed, **6 resolved**, 14 failed, **432 ms/item**
+  ✓ ✓ (~49 minutes for the whole queue ✓ ✓) ✓✓ — and its output is a
+  confidence nudge on a 15 %-weighted term ✓ ✓: the ranking reads the
+  association's **confidence** ✓ ✓, never its `resolution_state` ✓ ✓, and the
+  eligibility gate judges the live parsed attributes ✓ ✓ ✓✓.
+- **The exact-file identity is not what the worker produces** ✓ ✓ — it is the
+  provider's file list ✓ ✓, targeted ✓ ✓, at materialization time ✓ ✓
+  (118–338 ms ✓ ✓) ✓✓. There is **no local closure class** ✓ ✓ (bucket A is
+  empty ✓ ✓) ✓✓.
+- **The disposition** ✓ ✓: the worker and its CLI carry a **deprecation
+  notice** with the contract ✓ ✓, the cause ✓ ✓, the cost ✓ ✓ and the
+  condition for revival ✓ ✓ (a real request must consume the pre-resolved
+  fact and measurably avoid work ✓ ✓) ✓✓. **No producer was implemented** ✓ ✓
+  and no schema, queue or sweep was changed ✓ ✓ ✓✓.
+- **If proactive exact-file knowledge is ever wanted** ✓ ✓, the unlock is a
+  **torrent file-tree source** ✓ ✓ (exact paths and sizes per release ✓ ✓) ✓✓
+  — stated, **not started** ✓ ✓ ✓✓.
+- **Part 0 (its own commit, `acf706e`)** ✓ ✓: the Stremio audio grammar now
+  reads the scene channel suffix ✓ ✓ — "AAC5.1" → AAC ✓ ✓ (it produced **no
+  audio** before ✓ ✓), "DD+5.1"/"DDP5.1" → DD+ ✓ ✓, "DTS-X" unchanged ✓ ✓;
+  the corpus's vocabulary was checked first ✓ ✓ and no new vocabulary was
+  introduced ✓ ✓ ✓✓.
 **Slice — upstream evidence in the same schema (2026-10-20) — CLOSED**
 (`6e39711`). A production-hardening slice ✓ ✓ — the parser stays ✓ ✓, the
 normalized schema stays ✓ ✓, the ranking policy stays ✓ ✓, and the addon's

@@ -141,13 +141,13 @@ test('U6 — the local parser still supplies what it can', () => {
   assert.equal(out.attributeOrigin.resolution, 'local');
   assert.equal(out.codec, 'x265', 'the local parse read the codec');
   assert.equal(out.hdr, 'HDR');
-  // KNOWN LOCAL-PARSE GAP (recorded, not fixed here): the audio regex does
-  // not read the scene form "AAC5.1" (the word boundary fails on the digit),
-  // and the upstream's tag list never carries an audio token — so the audio
-  // stays empty for this candidate. It is a local-parser gap, not an
-  // upstream-evidence gap.
-  assert.equal(out.audio, null, 'the local parse does not read the scene form "AAC5.1"');
-  assert.equal(out.attributeOrigin.audio, undefined, 'the audio origin is not claimed');
+  // The scene form "AAC5.1" used to parse to nothing; the grammar fix
+  // reads the channel suffix and drops it, so the local parse supplies the
+  // codec. The upstream's tag list never carries an audio token, so the audio
+  // is a LOCAL fact — the upstream never supplies it.
+  assert.equal(out.audio, 'AAC', 'the local parse reads the scene form "AAC5.1"');
+  assert.equal(out.upstreamFacts.tags.includes('AAC'), false,
+    'the upstream never publishes an audio token');
 });
 
 test('U7 — an upstream disagreement never overwrites a stronger local fact', () => {
