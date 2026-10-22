@@ -340,6 +340,28 @@ recovered from the dropped stash's untracked commit (`b4d12bd`) and restored
 untracked. A dropped stash is still recoverable while its object survives —
 look in `git fsck --unreachable` before assuming a loss.
 
+## Live session state (2026-10-22, truncated same-TF route failover — CLOSED)
+
+**What is now true.** A provider lane that commits a 206 and then
+truncates mid-body no longer re-wins the same demand: the data plane
+fails over request-locally to an eligible same-TF alternate (exact
+`TorrentFile` by `durable_key` anchor) and resumes at the exact
+undelivered byte. Pre-fix causal baseline was deterministic:
+`loser_delta=8192, winner_delta=0` in 2.41 s; post-fix `1+1` in 0.01 s
+with byte-exact bytes. The L3 continuity claim is now class-pinned
+(clean-EOF truncation `r2e`, mid-body reset `r2f`/`r2j`, mid-body
+stall→timeout `r2i`, wrong-range 206 `r2h`, plus the pre-existing 5xx /
+timeout / 404 / seek classes) — no ceiling found; without an alternate
+the demand gets bounded same-lane retries then an honest Terminal. Two
+harness repairs ride along: the `r2e` mock (which panicked hyper instead
+of truncating) and the ignored real-time truncated test (which failed on
+the clean tree; it now stalls genuinely and proves the real 25 s timeout
+at 100.01 s = 4 attempts × 25 s). Production constants unchanged (25 s /
+30 s); production untouched and healthy; the fix rides the normal release
+path and is NOT deployed. The capability/permit startup slice is
+explicitly NOT started. Evidence: `docs/BUILD-LOG.md` 2026-10-22;
+`docs/retrospectives/2026-10-22-truncated-route-failover.md`.
+
 ## Live session state (2026-10-21, fast playback — the first-frame tail, named and repaired)
 
 **What is now true.** The 8-90 s first-frame tail on the direct resolver path

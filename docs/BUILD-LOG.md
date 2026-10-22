@@ -5975,3 +5975,130 @@ against a 1080p WEB-DL) so the Material/Severe cases are priced ✓; (3)
 **deploy and observe** the availability fix, which currently has a unit
 test but no production request ✓; (4) the **torrent file-tree primitive** —
 still stated, still not started ✓ ✓.
+
+## 2026-10-22 — TRUNCATED SAME-TF ROUTE FAILOVER — CLOSED
+
+### WHAT CHANGED
+
+- `data-plane/src/transport.rs` — the mid-body arms of
+  `ResilientRangeReader::next_chunk` now attempt request-local same-TF
+  failover (`try_failover`, the existing one-per-read one-way lane switch)
+  BEFORE reopening the just-failed lane:
+  - premature-EOF arm (`Ok(None)` with bytes still owed): fail over, else a
+    NEW bounded same-lane retry (this arm previously consumed no budget at
+    all — a truncating lane was reopened once per byte, a zero-byte
+    truncator forever);
+  - body-error arm (`Err`): fail over, else the existing bounded same-lane
+    retries;
+  - 206-with-wrong-`Content-Range` arm in `open_at`: fail over, else the
+    existing fatal `Client502`.
+  Failover reopens at the exact undelivered offset (`pos`); nothing
+  delivered is replayed. The failed lane keeps its real state (no durable
+  condemnation — a healed lane serves later reads). No ranking,
+  representation, Binding, acquisition, cache-policy, or client change.
+- `data-plane/tests/same_tf_route_recovery.rs` — `r2e` oracle corrected
+  (`expected(CHUNK, CHUNK)` for the `CHUNK..2*CHUNK-1` read; numerically
+  identical today since 8192 % 256 == 0, now correct by construction),
+  un-ignored; its mock replaced (it claimed a content-length it never sent,
+  which hyper rejects with a panic — the test never exercised a truncation)
+  with a true truncation (valid 206 + `Content-Range`, 1 byte, clean early
+  EOF). New: `t1` (healthy single-lane), `r2j` (T5 no-reopen pin, Err arm),
+  `r2i` (T6 mid-body stall at an injected 250 ms timeout), `r2h` (T7 wrong
+  range), `r3b` (T4 both-truncated fails closed + heal), `r2k` (T8 cache
+  authority). New mock modes `MODE_TIMEOUT_BODY`, `MODE_WRONG_RANGE`.
+- `data-plane/tests/adversarial_cache_fill.rs` — the same broken
+  header/body-mismatch mocks (`MODE_SHORT_BODY`, `MODE_DROP_MID`) replaced
+  with true chunked truncations; new `MODE_STALL_BODY` (206, a few bytes,
+  then silence) for the ignored real-time test, which previously FAILED
+  (verified on the clean tree: fill died in 7 ms on the mock's hyper panic,
+  so the `elapsed >= 25 s` assertion could never hold).
+
+### WHAT WAS PROVEN (tests + measurements)
+
+- Pre-fix causal baseline, deterministic: `loser_delta=8192`,
+  `winner_delta=0`, 2.41 s — the broken lane reopened once per byte, the
+  healthy alternate never consulted. First causal point:
+  `next_chunk`'s mid-body arms reopened the SAME capability without
+  consulting `try_failover` (which only the pre-header paths called).
+- Post-fix `r2e`: `loser_delta=1`, `winner_delta=1`, 0.01 s, byte-exact.
+- Matrix (all deterministic, all exact bytes, representation unchanged):
+  T1 healthy single-lane (`t1`); T2 clean-EOF truncation (`r2e`); T3
+  mid-body reset (`r2f`, `r2j` with `loser==1`/`winner==1`); T4 both dead →
+  honest 206-short-correct-prefix (or 502), bounded hits, no PRESENT
+  publication, healed lane recovers (`r3`, `r3b`); T5 no-reopen pin
+  (`r2j`); T6 stall→timeout failover at injected 250 ms in 0.26 s (`r2i`);
+  T7 wrong-range 206 failover, body never trusted (`r2h`); T8 recovered
+  chunk is the durable authoritative content (`r2k`, `r3b` tail).
+- Byte integrity: failover resumes at `pos` on the new lane; the stager
+  publishes PRESENT only for complete chunks and `abort()` discards partial
+  staging — partial lane-A bytes + lane-B remainder complete one chunk.
+- Same-TF invariant: `acquire_failover_lane` only considers slots whose
+  `durable_key` (infoHash + canonical path + exact size digest) equals the
+  failed lane's; the manager itself is per-TorrentFile. Fail closed
+  otherwise.
+- Suites: `cargo test` 154 lib + 14 adversarial + 19 recovery + 9
+  coalescing = 196 passed, 0 failed, 2 ignored, in ~36 s. Ignored
+  real-time suite: 5xx waits out the real 30 s backoff then recovers (ok);
+  mid-body stall detected at the real 25 s timeout per attempt, 100.01 s
+  for the bounded 4 attempts, fill fails, no poison (ok).
+- Production constants unchanged: `PROVIDER_CLIENT_TIMEOUT = 25 s`,
+  `RECOVERY_BACKOFF_DEFAULT = 30 s`, `MAX_SAME_CAP_RETRIES = 3`,
+  `MAX_REACQUIRES = 1` (verified by grep; no src constant edited).
+- Production health: all containers up, data-plane + media-search healthy;
+  production untouched (release images; no sabotage, no restarts, no PMS
+  touch).
+
+### WHAT REMAINS UNPROVEN
+
+- No production failover was provoked (forbidden for confidence): the claim
+  is deterministic local proof + healthy-production composition, not one
+  observed production failover. The fix rides the normal release path; it
+  is NOT deployed (production runs release images).
+
+### WHAT WAS LEARNED
+
+- A test asserting health is not health: `r2e` "passed" before this slice
+  for two wrong reasons at once (a panicking mock turned the truncation
+  into a pre-header connection failure, and 8192 % 256 == 0 hid the oracle
+  offset). The ignored real-time truncated test failed the same way on the
+  clean tree while the docs claimed a 190 s proof — the mock shape, not the
+  production wiring, was broken.
+- `r2f`'s prior pass was partly incidental: the mid-body Err arm had no
+  failover call; recovery then depended on pooled-connection reuse failing
+  the reopen. It is now deterministic by construction.
+- Claiming a content-length that is never sent is not a truncation test:
+  hyper panics instead of serving it. A truncation mock must be chunked
+  (early EOF) or a stall (timeout); the two exercise different arms.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- L3 ("in-flight same-TF failure recovers behind the same playback
+  object") now names its classes instead of leaning on one shape: 5xx
+  before body, connection failure, clean-EOF truncation, mid-body reset,
+  mid-body stall→client-timeout, wrong-range 206, route loss between
+  reads, route loss on seek — each pinned by a test. No ceiling found:
+  without an alternate the demand gets bounded same-lane retries then an
+  honest Terminal (never silent success, never poison).
+
+### WHAT SHOULD BE UPDATED
+
+- Done in-slice: this log, `docs/retrospectives/2026-10-22-truncated-route-failover.md`,
+  `PLANS.md` (slice entry), `handoff/CURRENT.md` (session section).
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing this slice. (Noted for later: the `Ok(None)` same-lane retry and
+  the `Err` same-lane retry now share a shape with `apply_transient`'s
+  failover-first structure — a future tidy could unify them; not taken.)
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. Explicitly NOT started: the
+capability/permit startup slice. Candidates left standing: (1) deploy +
+  observe this fix on the release path; (2) the ~540 ms dead-route
+  (RealDebrid-first 403) tax noted earlier — route health, untouched here.
+
+### VERDICT
+
+**TRUNCATED ROUTE FAILOVER — CLOSED.** Safe exact same-TF recovery now
+covers the exposed truncated-body case.

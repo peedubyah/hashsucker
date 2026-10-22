@@ -3,6 +3,21 @@
 Active phase: **Core playback reliability & recovery — CLOSED**.
 → [`docs/phases/phase-core-playback-reliability.md`](docs/phases/phase-core-playback-reliability.md)
 
+**Truncated same-TF route failover slice (2026-10-22) — DONE. VERDICT:
+CLOSED.** A lane that committed a 206 then truncated mid-body was reopened
+for the same demand 8192 times while the healthy alternate was never
+consulted (`r2e` pre-fix: loser_delta=8192, winner_delta=0) — the mid-body
+arms never attempted the existing request-local failover. Fixed in
+`data-plane/src/transport.rs` (failover-first in the premature-EOF,
+body-error, and wrong-range-206 arms; the EOF arm also gains the bounded
+same-lane budget it lacked). Post-fix `r2e`: 1+1 hits, 0.01 s, exact
+bytes. Matrix T1–T8 green; `cargo test` 196 passed; ignored real-time
+suite proves the real 25 s timeout (100.01 s = 4×25 s) and 30 s backoff.
+Production constants unchanged; production untouched and healthy. The
+capability/permit startup slice is explicitly NOT started. Evidence:
+`docs/BUILD-LOG.md` 2026-10-22; retrospective
+`docs/retrospectives/2026-10-22-truncated-route-failover.md`.
+
 **Latency slice (2026-10-21) — DONE. VERDICT: FAST PLAYBACK — INTERNAL
 BOTTLENECK FIXED.** The 8-90 s first-frame tail was ONE internal defect: a
 client demand that joined a chunk another reader's plan had claimed but not
