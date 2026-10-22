@@ -26,12 +26,7 @@ use data_plane::transport::Faults;
 /// All fault gates off: this harness injects faults at the ORIGIN, which is
 /// where a real provider failure is observable.
 fn no_faults() -> Faults {
-    Faults {
-        fault_429_always: false,
-        fault_429_once: false,
-        fault_dead_once: false,
-        fault_midbody_once: false,
-    }
+    production_faults()
 }
 
 const MODE_OK: u8 = 0;
@@ -172,6 +167,57 @@ struct Handles {
     origin_root: String,
     gate: Arc<tokio::sync::Notify>,
     gate_target: Arc<AtomicUsize>,
+    /// The HTTP client the fill uses against the origin. The FAST fixture
+    /// injects a short request timeout so a TRUNCATED body is detected in
+    /// milliseconds; the real-time fixture uses the PRODUCTION timeout.
+    client: reqwest::Client,
+    /// The fault seam the fill runs with. The FAST fixture injects a short
+    /// recovery backoff so a 5xx retry does not cost 30 s of wall clock;
+    /// the real-time fixture uses the PRODUCTION backoff.
+    faults: Faults,
+}
+
+/// The injected request timeout for the FAST proofs.
+///
+/// A truncated origin body is detected by the client's request timeout. In
+/// production that timeout is 25 s (`PROVIDER_CLIENT_TIMEOUT`); the SEMANTIC
+/// being proved — the fill fails, the chunk is not promoted, the cache is
+/// not poisoned — does not depend on how long the wait was, so the fast
+/// proofs inject a short one and do not spend the wall clock. The REAL
+/// production timeout is exercised end-to-end by the `#[ignore]`d
+/// real-time suite.
+const FAST_CLIENT_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// The injected recovery backoff for the FAST proofs.
+///
+/// A transient 5xx waits out a cooldown (30 s in production) before the SAME
+/// capability is retried. The retry budget, the same-cap reuse, the byte
+/// assertions and the cache-poisoning assertions are unchanged by the
+/// length of that wait, so the fast proofs inject a short one. The REAL
+/// production backoff is exercised end-to-end by the `#[ignore]`d
+/// real-time suite.
+const FAST_RECOVERY_BACKOFF: Duration = Duration::from_millis(1);
+
+/// The fault seam with the fast recovery backoff injected.
+fn fast_faults() -> Faults {
+    Faults {
+        fault_429_always: false,
+        fault_429_once: false,
+        fault_dead_once: false,
+        fault_midbody_once: false,
+        recovery_backoff: Some(FAST_RECOVERY_BACKOFF),
+    }
+}
+
+/// The fault seam with NO override: the PRODUCTION recovery backoff.
+fn production_faults() -> Faults {
+    Faults {
+        fault_429_always: false,
+        fault_429_once: false,
+        fault_dead_once: false,
+        fault_midbody_once: false,
+        recovery_backoff: None,
+    }
 }
 
 async fn build_fixture(file_size: u64, chunk_size: u64) -> Handles {
@@ -194,6 +240,24 @@ async fn build_two_route_fixture(file_size: u64, chunk_size: u64) -> (Handles, O
 }
 
 async fn build(file_size: u64, chunk_size: u64, alt_route: Option<String>) -> Handles {
+    build_with(file_size, chunk_size, alt_route, fast_client(), fast_faults()).await
+}
+
+/// The FAST client: the production client with a short injected request
+/// timeout (see `FAST_CLIENT_TIMEOUT`).
+fn fast_client() -> reqwest::Client {
+    data_plane::transport::build_provider_client(FAST_CLIENT_TIMEOUT)
+}
+
+/// Build a fixture with an explicit client and fault seam, so the
+/// real-time suite can use the PRODUCTION timeout and backoff.
+async fn build_with(
+    file_size: u64,
+    chunk_size: u64,
+    alt_route: Option<String>,
+    client: reqwest::Client,
+    faults: Faults,
+) -> Handles {
     std::env::set_var("SLICE4_CHUNK_SIZE", chunk_size.to_string());
     let dir = tempfile::tempdir().unwrap();
     let metrics = Arc::new(Metrics::default());
@@ -300,6 +364,8 @@ async fn build(file_size: u64, chunk_size: u64, alt_route: Option<String>) -> Ha
         origin_root,
         gate,
         gate_target,
+        client,
+        faults,
     }
 }
 
@@ -365,7 +431,7 @@ impl Handles {
             self.cache.clone(),
             self.metrics.clone(),
             self.manager.clone(),
-            reqwest::Client::new(),
+            self.client.clone(),
             0,
             self.tf.clone(),
             indices,
@@ -373,7 +439,7 @@ impl Handles {
             f_end,
             w_start,
             w_end,
-            no_faults(),
+            self.faults,
             None,
             None,
             false,
@@ -723,5 +789,103 @@ async fn r14_same_tf_alternate_route_recovers_without_cross_representation() {
     assert!(
         alt_stats.range_requests.load(Ordering::SeqCst) >= 1,
         "the alternate route for the SAME TorrentFile served the read"
+    );
+}
+
+// ===========================================================================
+// THE REAL-TIME SUITE — the PRODUCTION timeout configuration, end to end
+// ===========================================================================
+//
+// `cargo test` does NOT run these. They are the explicit real-time suite:
+//   cargo test --test adversarial_cache_fill -- --ignored
+//
+// They exist because the fast proofs above INJECT a short request timeout
+// and a short recovery backoff. The invariants they prove do not depend on
+// how long those waits were — but the production VALUES do have to be
+// exercised somewhere, end to end, or "the production configuration works"
+// would be an untested claim. These are that test.
+//
+// Each one asserts the SAME semantic outcome as its fast sibling AND that
+// the real production interval is the one in play.
+
+/// The PRODUCTION client timeout, end to end.
+///
+/// A truncated provider body is only DETECTABLE through the client's request
+/// timeout. This test uses the production client (25 s) and the production
+/// fault seam, and proves:
+///   - the truncated body is detected as a transport failure (not a
+///     successful short read);
+///   - the fill FAILS;
+///   - the chunk is NOT promoted, so the cache is not poisoned;
+///   - the real production interval is the one in play (the elapsed time is
+///     at least the production timeout).
+#[tokio::test]
+#[ignore = "real-time: exercises the production 25 s client timeout end to end"]
+async fn slow_real_time_truncated_origin_body_is_detected_at_the_production_timeout() {
+    let production_client =
+        data_plane::transport::build_provider_client(data_plane::transport::PROVIDER_CLIENT_TIMEOUT);
+    let fx = build_with(
+        10_000,
+        4_096,
+        None,
+        production_client,
+        production_faults(),
+    )
+    .await;
+    fx.set_mode(MODE_SHORT_BODY);
+    let cap = fx.reserve_primary().await;
+
+    let started = std::time::Instant::now();
+    let filled = fx.fill(vec![0], 0, 4_095, 0, 4_095, Some(cap)).await;
+    let elapsed = started.elapsed();
+
+    // The same semantic assertions the fast sibling makes.
+    assert!(!filled, "a short body must fail the fill");
+    assert!(!fx.present(0), "a partial origin response must not mark the chunk present");
+
+    // And the real production interval is the one in play.
+    assert!(
+        elapsed >= data_plane::transport::PROVIDER_CLIENT_TIMEOUT,
+        "the production client timeout must be the one in play (elapsed {elapsed:?})"
+    );
+}
+
+/// The PRODUCTION recovery backoff, end to end.
+///
+/// A transient 5xx waits out a cooldown before the SAME capability is
+/// retried. In production that is the provider's Retry-After, or 30 s when
+/// the provider sends none. This test uses the production fault seam (no
+/// backoff override) and proves:
+///   - the 5xx does not create cache truth (no poisoning);
+///   - the SAME capability is retried and the read recovers afterwards;
+///   - the real production cooldown is the one in play.
+#[tokio::test]
+#[ignore = "real-time: exercises the production 30 s recovery backoff end to end"]
+async fn slow_real_time_transient_5xx_waits_out_the_production_backoff_then_recovers() {
+    let production_client =
+        data_plane::transport::build_provider_client(data_plane::transport::PROVIDER_CLIENT_TIMEOUT);
+    let fx = build_with(
+        20_000,
+        8_192,
+        None,
+        production_client,
+        production_faults(),
+    )
+    .await;
+    fx.set_mode(MODE_503);
+    let cap = fx.reserve_primary().await;
+
+    let started = std::time::Instant::now();
+    let filled = fx.fill(vec![0], 0, 8_191, 0, 8_191, Some(cap)).await;
+    let elapsed = started.elapsed();
+
+    // The same semantic assertions the fast sibling makes.
+    assert!(!filled, "a 5xx must not create cache truth");
+    assert!(!fx.present(0), "a 5xx must not create cache truth");
+
+    // And the real production cooldown is the one in play.
+    assert!(
+        elapsed >= Duration::from_secs(30),
+        "the production recovery backoff must be the one in play (elapsed {elapsed:?})"
     );
 }

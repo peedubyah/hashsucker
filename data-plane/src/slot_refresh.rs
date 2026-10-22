@@ -791,6 +791,7 @@ async fn t11_in_flight_read_survives_refresh_post_acquire_uses_p2() {
                 fault_429_once: false,
                 fault_dead_once: false,
                 fault_midbody_once: false,
+                recovery_backoff: None,
             },
             None,
             None,

@@ -220,6 +220,7 @@ async fn t1_one_capability_two_child_readers_concurrent_disjoint_chunks() {
         fault_429_once: false,
         fault_dead_once: false,
         fault_midbody_once: false,
+        recovery_backoff: None,
     };
     let priority = 0;
 
@@ -361,6 +362,7 @@ async fn t3_both_readers_traverse_transport_accounting() {
         fault_429_once: false,
         fault_dead_once: false,
         fault_midbody_once: false,
+        recovery_backoff: None,
     };
     let client = reqwest::Client::new();
 
@@ -412,6 +414,7 @@ async fn t4_no_independent_reacquisition_on_dead_link() {
         fault_429_once: false,
         fault_dead_once: true,
         fault_midbody_once: false,
+        recovery_backoff: None,
     };
     let client = reqwest::Client::new();
 
@@ -1187,6 +1190,7 @@ mod cancel {
                     fault_429_once: false,
                     fault_dead_once: false,
                     fault_midbody_once: false,
+                    recovery_backoff: None,
                 },
                 None,
                 None,
@@ -1397,6 +1401,7 @@ mod reclaim {
                     fault_429_once: false,
                     fault_dead_once: false,
                     fault_midbody_once: false,
+                    recovery_backoff: None,
                 },
                 None,
                 None,
@@ -1468,6 +1473,7 @@ mod reclaim {
                     fault_429_once: false,
                     fault_dead_once: false,
                     fault_midbody_once: false,
+                    recovery_backoff: None,
                 },
                 None,
                 None,
@@ -1689,7 +1695,9 @@ mod retry_ownership {
                 Faults {
                     fault_429_always: false, fault_429_once: false,
                     fault_dead_once: false, fault_midbody_once: false,
-                },
+
+        recovery_backoff: None,
+    },
                 None, None, false, child_a_clone,
             ).await;
         });
@@ -1707,7 +1715,9 @@ mod retry_ownership {
                 Faults {
                     fault_429_always: false, fault_429_once: false,
                     fault_dead_once: false, fault_midbody_once: false,
-                },
+
+        recovery_backoff: None,
+    },
                 None, None, false, child_b_clone,
             ).await;
         });
@@ -1819,7 +1829,9 @@ mod retry_ownership {
                 Faults {
                     fault_429_always: false, fault_429_once: false,
                     fault_dead_once: false, fault_midbody_once: false,
-                },
+
+        recovery_backoff: None,
+    },
                 None, None, false, child_b_retry_clone,
             ).await;
         });
@@ -2079,6 +2091,7 @@ mod shared_cap_recovery {
                     fault_429_once: false,
                     fault_dead_once: false,
                     fault_midbody_once: false,
+                    recovery_backoff: None,
                 },
                 None,
                 None,
@@ -2422,7 +2435,9 @@ mod dead_cap_replacement {
                 Faults {
                     fault_429_always: false, fault_429_once: false,
                     fault_dead_once: false, fault_midbody_once: false,
-                },
+
+        recovery_backoff: None,
+    },
             ).await;
         });
 

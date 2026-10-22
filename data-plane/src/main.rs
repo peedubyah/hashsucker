@@ -129,11 +129,13 @@ struct ServiceState {
 
 impl ServiceState {
     async fn new(cfg: ServiceConfig) -> Result<Arc<Self>, String> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(25))
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .build()
-            .map_err(|e| format!("reqwest client build: {e}"))?;
+        // The provider client's request timeout is the production value from
+        // the transport module, so there is exactly ONE definition of it and
+        // a test that exercises the real configuration end-to-end uses the
+        // same one. The client itself is unchanged.
+        let client = data_plane::transport::build_provider_client(
+            data_plane::transport::PROVIDER_CLIENT_TIMEOUT,
+        );
         let metrics = Arc::new(Metrics::default());
         let playback = PlaybackIntelligence::new(PfConfig::from_env());
         let cache = if let Some(root) = cfg.cache_root.as_ref() {

@@ -36,6 +36,31 @@ const MAX_SAME_CAP_RETRIES: u32 = 3; // transient 429/5xx/transport reopen attem
 const MAX_REACQUIRES: u32 = 1; // dead-link single-flight reacquire-once
 const RECOVERY_BACKOFF_DEFAULT: Duration = Duration::from_secs(30); // applied when no Retry-After
 
+/// The provider/CDN client's per-request timeout. PRODUCTION VALUE.
+///
+/// A provider that accepts the connection and then never answers would
+/// otherwise hold a read open forever. This is the bound that turns that
+/// into a clean transport failure, which the recovery path then handles.
+///
+/// It lives here (not inline in main) so that ONE definition is the
+/// production one and a test that must exercise the real configuration
+/// end-to-end uses the SAME value, while a test that only needs to prove
+/// the SEMANTICS can inject a shorter one and not spend the wall clock.
+pub const PROVIDER_CLIENT_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Build the provider/CDN HTTP client.
+///
+/// Production calls this with `PROVIDER_CLIENT_TIMEOUT`. The construction is
+/// identical either way — only the timeout differs — so a test that injects
+/// a short timeout is exercising the SAME client, not a different one.
+pub fn build_provider_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .expect("provider client build")
+}
+
 /// Default-off fault gates (validation scaffold only; never set in production).
 #[derive(Clone, Copy)]
 pub struct Faults {
@@ -43,6 +68,20 @@ pub struct Faults {
     pub fault_429_once: bool,   // first CDN attempt per request -> 429 then 206 (proves internal hide)
     pub fault_dead_once: bool,  // first attempt of original cap -> 403 then real 206 (reacquire-once)
     pub fault_midbody_once: bool, // drop connection after first delivered chunk (mid-body resume)
+    /// Override the recovery backoff (the cooldown a transient 429/5xx waits
+    /// out before the SAME capability is retried).
+    ///
+    /// `None` is PRODUCTION: the provider's Retry-After when it sends one,
+    /// otherwise `RECOVERY_BACKOFF_DEFAULT` (30 s). The override exists so a
+    /// test can prove the RECOVERY SEMANTICS — the retry happens, the same
+    /// capability is reused, the bytes are exact — without spending 30 s of
+    /// wall clock per attempt. It does not weaken the proof: the retry
+    /// budget, the same-cap reuse, the byte assertions and the
+    /// cache-poisoning assertions are all unchanged.
+    ///
+    /// A test that must exercise the REAL production backoff leaves this
+    /// `None` and is marked `#[ignore]` (the explicit slow suite).
+    pub recovery_backoff: Option<Duration>,
 }
 
 /// A stale-link fault is meant to simulate ONE dead capability, not one per reader. We fire
@@ -615,6 +654,8 @@ impl ResilientRangeReader {
         // isolates the amplification question (does a CDN 429 still re-hit requestdl?).
         let effective = if self.faults.fault_429_always || self.faults.fault_429_once {
             Duration::ZERO
+        } else if let Some(override_backoff) = self.faults.recovery_backoff {
+            override_backoff
         } else {
             ra
         };

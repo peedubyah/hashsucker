@@ -1587,6 +1587,10 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         fault_midbody_once: std::env::var("SLICE35_FAULT_MIDBODY")
             .map(|v| v == "1")
             .unwrap_or(false),
+        // PRODUCTION: no override. The recovery backoff is the provider's
+        // Retry-After, or 30 s when it sends none. A test may inject a
+        // shorter one through the Faults seam; production never does.
+        recovery_backoff: None,
     };
 
     // ---- P5: classify provider-exhaustion BEFORE committing the 206 --------
@@ -1938,7 +1942,8 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         fault_429_once: false,
                         fault_dead_once: false,
                         fault_midbody_once: false,
-                    };
+                        recovery_backoff: None,
+};
                     // Observability-only: extract provider attribution from the prefetch cap.
                     let pf_provider = (cap.cap.provider.clone(), cap.cap.cap_id.clone(), cap.cap.account_scope.clone());
                     // Lowest priority; existing_cap=Some means fill_chunk_run reuses the
