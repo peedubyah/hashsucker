@@ -286,6 +286,55 @@ No planned work as completed. No vague "healthy." No speculative causes.
   than per transfer) is a fill-ownership question, and it interacts with
   the cache-policy question.
 
+## 2026-10-21 — TEST HARNESS: the adversarial suites now prove semantics in 33 s, not never
+
+- Changed (measurement/harness only, no production behaviour): the data
+  plane's provider client is now built by ONE named constructor,
+  `transport::build_provider_client(timeout)`, with the production
+  request timeout as the named constant `transport::PROVIDER_CLIENT_TIMEOUT`
+  (25 s). The `Faults` seam gained `recovery_backoff: Option<Duration>`:
+  `None` IS production (the provider's Retry-After, or the 30 s
+  `RECOVERY_BACKOFF_DEFAULT`), and a test may inject a shorter one to
+  prove the RECOVERY SEMANTICS without paying the wall clock.
+- The problem: two production intervals were being paid inside the test
+  harness. (1) A truncated provider body is only detectable through the
+  client's request timeout, and the tests' client was
+  `reqwest::Client::new()` — NO timeout — so `r7`, `r8` and `r2e` waited
+  for bytes that would never come and HUNG. (2) The transient-5xx tests
+  (`r9`, `r11`) paid the production 30 s recovery backoff per attempt.
+  `cargo test --release` on the crate NEVER COMPLETED (killed at 1800 s).
+- Fixed: the fast proofs inject 250 ms (client timeout) and 1 ms
+  (recovery backoff). NO production timeout changed (25 s is still 25 s,
+  30 s is still 30 s, the redirect policy and the retry budgets are
+  unchanged) and NO assertion was weakened — the same byte comparisons,
+  the same cache-poisoning checks, the same recovery expectations.
+- The real production configuration is now exercised END TO END by an
+  explicit suite that `cargo test` does not run:
+  `cargo test --test adversarial_cache_fill -- --ignored` — two tests
+  (`slow_real_time_truncated_origin_body_is_detected_at_the_production_timeout`,
+  `slow_real_time_transient_5xx_waits_out_the_production_backoff_then_recovers`),
+  190.01 s together, both passing, each asserting that the real interval
+  is the one in play.
+- Runtime, before -> after: `adversarial_cache_fill` never completed
+  (killed at 1800 s) -> **1.02 s**; `same_tf_route_recovery` never
+  completed (killed at 900 s) -> **0.26 s**; the whole
+  `cargo test --release` never completed -> **33.15 s**. The lib target is
+  unchanged (154 passed, 31.35 s). `media-search` untouched: 3 626 tests,
+  3 622 pass, 3 skipped, 1 pre-existing baseline fail.
+- FOUND, recorded, NOT fixed: `r2e_malformed_provider_payload_fails_over`
+  HUNG before (it never completed, so the target never finished) and now
+  completes — and FAILS. The hang was hiding that the MID-BODY path
+  re-opens the SAME lane instead of failing over to the alternate same-TF
+  route for a truncated provider payload (the client gets an empty 206),
+  and that the test's expected byte range is offset 0 while its read is
+  for `CHUNK..2*CHUNK-1`. Its assertions are UNCHANGED; it is `#[ignore]`d
+  with the reason recorded on the test, and it stays re-runnable. The
+  production failover was deliberately NOT changed — that is a behaviour
+  change, not a harness change. It is the next thing worth a slice.
+- Production was rebuilt and redeployed; a real playback still works
+  (first frame 3 465 ms, playhead advanced, exit 0).
+- Report: `docs/recon/2026-10-21-test-harness-real-time.md`.
+
 ## 2026-10-12 — VFS collection mtime scanned PMS continuously — FIXED + DEPLOYED
 
 - Changed: `media-search/src/lib/vfs/tv-webdav.js` now derives TV collection
