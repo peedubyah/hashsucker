@@ -75,10 +75,20 @@ use crate::transport::{Faults, OpenError, ReaderCapability, ResilientRangeReader
 /// asking for a whole file and then for its container's metadata at the END
 /// waited 132 s for 0 bytes and gave up before the queue reached it.
 ///
-/// The grace is long enough that a chunk the owner is ACTIVELY filling
-/// completes first (one 8 MiB chunk), so the common case does not
-/// duplicate a fetch.
-const JOIN_GRACE: Duration = Duration::from_secs(3);
+/// The grace is long enough to cover the race between the owner picking the
+/// chunk up and the owner saying so (the `started` flag), and no longer.
+///
+/// MEASURED (byte-cold startups, four fixtures): the player asks for the
+/// whole file, then for the container's metadata at the END of it. That
+/// second demand joined the first one's claim for a chunk the fill would
+/// not reach for 90-140 s, and waited. With a 3 s grace the tail read was
+/// dispatched at 3 140-3 296 ms in EVERY cold run — the grace WAS the
+/// wait, and the first frame landed at 5 164-13 295 ms.
+///
+/// The duplicate this risks is bounded and small: one 8 MiB chunk, fetched
+/// twice, when the owner was about to deliver it anyway. The wait it avoids
+/// is the whole startup. So the patience is short.
+const JOIN_GRACE: Duration = Duration::from_millis(250);
 
 pub const SUPPORTED_SCHEMA_VERSION: u64 = 1;
 
