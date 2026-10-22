@@ -22,6 +22,7 @@ use data_plane::manager::CapabilityManager;
 use data_plane::metrics::Metrics;
 use data_plane::serve::fill_chunk_run;
 use data_plane::transport::Faults;
+use futures_util::StreamExt as _;
 
 /// All fault gates off: this harness injects faults at the ORIGIN, which is
 /// where a real provider failure is observable.
@@ -34,6 +35,7 @@ const MODE_503: u8 = 1;
 const MODE_429: u8 = 2;
 const MODE_SHORT_BODY: u8 = 3;
 const MODE_DROP_MID: u8 = 4;
+const MODE_STALL_BODY: u8 = 5;
 
 /// Deterministic content: byte i is a pure function of its offset.
 fn byte_at(offset: u64) -> u8 {
@@ -133,12 +135,52 @@ async fn serve_origin(
                 ("content-length", len.to_string()),
             ];
             match mode {
-                MODE_SHORT_BODY if len > 8 => build(206, hdrs, body[..8].to_vec()),
-                MODE_DROP_MID => build(206, hdrs, body[..(len / 2).max(1)].to_vec()),
+                MODE_SHORT_BODY if len > 8 => truncated_response(&st, start, end, body[..8].to_vec()),
+                MODE_DROP_MID => {
+                    truncated_response(&st, start, end, body[..(len / 2).max(1)].to_vec())
+                }
+                MODE_STALL_BODY => {
+                    // Commits a valid 206 with the correct range metadata,
+                    // delivers a few bytes, then holds the connection open
+                    // with no further bytes and no EOF. The ONLY detector is
+                    // the client's request timeout — this is the shape the
+                    // production 25 s timeout exists for.
+                    let prefix: Vec<u8> = body[..8.min(len)].to_vec();
+                    let chunks: Vec<Result<bytes::Bytes, std::io::Error>> =
+                        vec![Ok(bytes::Bytes::from(prefix))];
+                    let stall: futures_util::stream::Pending<
+                        Result<bytes::Bytes, std::io::Error>,
+                    > = futures_util::stream::pending();
+                    let chained = futures_util::stream::iter(chunks).chain(stall);
+                    axum::response::Response::builder()
+                        .status(206)
+                        .header("content-range", format!("bytes {start}-{end}/{}", st.size))
+                        .body(axum::body::Body::from_stream(chained))
+                        .unwrap()
+                }
                 _ => build(206, hdrs, body),
             }
         }
     }
+}
+
+/// A TRUE truncated provider body: a valid 206 committing the correct range
+/// metadata, a short prefix of the body, then a clean early EOF (chunked —
+///
+/// no content-length is advertised).
+///
+/// Claiming a content-length that is never sent is NOT a truncation: hyper
+/// panics on the header/body mismatch instead of serving it, so the client
+/// sees an immediate connection death rather than a short body.
+fn truncated_response(st: &OriginState, start: u64, end: u64, prefix: Vec<u8>) -> axum::response::Response {
+    let chunks: Vec<Result<bytes::Bytes, std::io::Error>> =
+        vec![Ok(bytes::Bytes::from(prefix))];
+    let body = axum::body::Body::from_stream(futures_util::stream::iter(chunks));
+    axum::response::Response::builder()
+        .status(206)
+        .header("content-range", format!("bytes {start}-{end}/{}", st.size))
+        .body(body)
+        .unwrap()
 }
 
 async fn start_origin(state: OriginState) -> String {
@@ -810,15 +852,16 @@ async fn r14_same_tf_alternate_route_recovers_without_cross_representation() {
 
 /// The PRODUCTION client timeout, end to end.
 ///
-/// A truncated provider body is only DETECTABLE through the client's request
-/// timeout. This test uses the production client (25 s) and the production
-/// fault seam, and proves:
-///   - the truncated body is detected as a transport failure (not a
+/// A provider that commits a response and then goes silent mid-body — no
+/// further bytes, no EOF, connection held open — is only DETECTABLE through
+/// the client's request timeout. This test uses the production client
+/// (25 s) and the production fault seam, and proves:
+///   - the stalled body is detected as a transport failure (not a
 ///     successful short read);
 ///   - the fill FAILS;
 ///   - the chunk is NOT promoted, so the cache is not poisoned;
-///   - the real production interval is the one in play (the elapsed time is
-///     at least the production timeout).
+///   - the real production interval is the one in play (every attempt waits
+///     out the production timeout, so the elapsed time is a multiple of it).
 #[tokio::test]
 #[ignore = "real-time: exercises the production 25 s client timeout end to end"]
 async fn slow_real_time_truncated_origin_body_is_detected_at_the_production_timeout() {
@@ -832,7 +875,7 @@ async fn slow_real_time_truncated_origin_body_is_detected_at_the_production_time
         production_faults(),
     )
     .await;
-    fx.set_mode(MODE_SHORT_BODY);
+    fx.set_mode(MODE_STALL_BODY);
     let cap = fx.reserve_primary().await;
 
     let started = std::time::Instant::now();
@@ -840,12 +883,13 @@ async fn slow_real_time_truncated_origin_body_is_detected_at_the_production_time
     let elapsed = started.elapsed();
 
     // The same semantic assertions the fast sibling makes.
-    assert!(!filled, "a short body must fail the fill");
+    assert!(!filled, "a stalled body must fail the fill");
     assert!(!fx.present(0), "a partial origin response must not mark the chunk present");
 
-    // And the real production interval is the one in play.
+    // And the real production interval is the one in play: every one of the
+    // bounded same-lane attempts waited out the full client timeout.
     assert!(
-        elapsed >= data_plane::transport::PROVIDER_CLIENT_TIMEOUT,
+        elapsed >= 2 * data_plane::transport::PROVIDER_CLIENT_TIMEOUT,
         "the production client timeout must be the one in play (elapsed {elapsed:?})"
     );
 }

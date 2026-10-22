@@ -540,6 +540,16 @@ impl ResilientRangeReader {
                             self.metrics
                                 .upstream_errors
                                 .fetch_add(1, Ordering::SeqCst);
+                            // Request-local: a lane that commits the wrong
+                            // range semantics for this demand must not win it
+                            // again while an eligible same-TF sibling exists.
+                            // No alternate keeps the existing fatal outcome.
+                            self.enter_recovery();
+                            self.metrics.record_recovery_attempt();
+                            if self.try_failover().await {
+                                forced_status = None;
+                                continue;
+                            }
                             return Err(OpenError::Client502);
                         }
                     }
@@ -895,19 +905,56 @@ impl ResilientRangeReader {
                     return Step::Chunk(b);
                 }
                 Ok(None) => {
-                    // Provider closed the stream. If we still owe bytes, reopen at the current
-                    // offset (continuous logical stream from the client's perspective).
+                    // Provider closed the stream. If we still owe bytes, this
+                    // is a premature EOF: the lane committed a range it did
+                    // not deliver. It must not immediately win this demand
+                    // again while an eligible same-TF sibling exists, so try
+                    // request-local failover BEFORE any same-lane reopen.
+                    // (Failover consumes only the one-per-read failover
+                    // budget; the failed lane keeps its real state and stays
+                    // eligible for later unrelated reads.)
                     self.response = None;
                     if self.pos > self.req_end {
                         self.finalize(true);
                         return Step::Eof;
                     }
-                    match self.open_at().await {
-                        Ok(()) => continue,
-                        Err(e) => {
-                            self.finalize(false);
-                            return Step::Terminal(e);
+                    self.enter_recovery();
+                    if self.try_failover().await {
+                        match self.open_at().await {
+                            Ok(()) => continue,
+                            Err(e) => {
+                                self.finalize(false);
+                                return Step::Terminal(e);
+                            }
                         }
+                    }
+                    // No eligible alternate: bounded same-lane retry. This
+                    // path previously consumed no budget at all, so a lane
+                    // that ends the stream early was reopened forever (once
+                    // per byte, or forever for a zero-byte truncation).
+                    self.metrics.record_recovery_attempt();
+                    if let Some(s) = self.stage.as_ref() {
+                        s.set_attempt_retry_wait(self.recovery.attempt, 0);
+                        s.set_attempt_recovery_path(self.recovery.attempt, "premature_eof_same_lane_retry");
+                    }
+                    self.recovery.same_cap_retries += 1;
+                    self.recovery.attempt += 1;
+                    self.attempt_bytes = 0;
+                    self.attempt_headers_at = None;
+                    if self.recovery.same_cap_retries <= MAX_SAME_CAP_RETRIES {
+                        match self.open_at().await {
+                            Ok(()) => continue,
+                            Err(e) => {
+                                self.finalize(false);
+                                return Step::Terminal(e);
+                            }
+                        }
+                    } else {
+                        self.metrics
+                            .client_truncated
+                            .fetch_add(1, Ordering::SeqCst);
+                        self.finalize(false);
+                        return Step::Terminal(OpenError::Client502);
                     }
                 }
                 Err(_) => {
@@ -920,6 +967,21 @@ impl ResilientRangeReader {
                     {
                         self.midbody_triggered = true;
                         self.metrics.record_mid_body_resume();
+                    }
+                    // Request-local route recovery FIRST: a lane that failed
+                    // to satisfy this demand must not immediately win it
+                    // again while an eligible same-TF sibling exists. One
+                    // failover per read max, one-way, at the undelivered
+                    // offset — no replay, no gap.
+                    self.enter_recovery();
+                    if self.try_failover().await {
+                        match self.open_at().await {
+                            Ok(()) => continue,
+                            Err(e) => {
+                                self.finalize(false);
+                                return Step::Terminal(e);
+                            }
+                        }
                     }
                     self.metrics.record_recovery_attempt();
                     if let Some(s) = self.stage.as_ref() {

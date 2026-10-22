@@ -39,6 +39,7 @@ use data_plane::control::{ControlTorrentFile, ProviderCoord};
 use data_plane::manager::CapabilityManager;
 use data_plane::metrics::Metrics;
 use data_plane::serve::{get_file, AppState};
+use futures_util::StreamExt as _;
 
 const INFO_HASH: &str = "aa11bb22cc33dd44ee55ff66aa77bb88cc99dd00";
 const PATH: &str = "Show/Season 01/Show - S01E01.mkv";
@@ -52,6 +53,8 @@ const MODE_429: u8 = 3; // transient, load-signalling
 const MODE_SHORT_BODY: u8 = 4; // malformed/truncated provider payload
 const MODE_HANG: u8 = 5; // never answers (timeout class)
 const MODE_MIDBODY_ERROR: u8 = 6; // commits 206 then the body ERRORS mid-stream
+const MODE_TIMEOUT_BODY: u8 = 7; // commits 206, delivers a few bytes, then stalls mid-body
+const MODE_WRONG_RANGE: u8 = 8; // 206 that commits the WRONG range semantics
 
 #[derive(Clone, Default)]
 struct OriginStats {
@@ -162,6 +165,34 @@ async fn serve_origin(
                     b = b.header(k, v);
                 }
                 return b.body(body).unwrap();
+            }
+            if st.mode.load(Ordering::SeqCst) == MODE_TIMEOUT_BODY {
+                // Commits a valid 206 with the correct range metadata, delivers
+                // a few bytes, then stalls mid-body until the client's request
+                // timeout fires. Exercises the timeout-while-reading-body arm
+                // (distinct from MODE_HANG, which never answers at all).
+                let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = vec![
+                    Ok(bytes::Bytes::from(body_for(start, 8))),
+                ];
+                let stall: futures_util::stream::Pending<Result<bytes::Bytes, std::io::Error>> =
+                    futures_util::stream::pending();
+                let body = axum::body::Body::from_stream(
+                    futures_util::stream::iter(chunks).chain(stall),
+                );
+                let mut b = axum::response::Response::builder().status(206);
+                b = b.header("content-range", format!("bytes {start}-{end}/{}", st.size));
+                return b.body(body).unwrap();
+            }
+            if st.mode.load(Ordering::SeqCst) == MODE_WRONG_RANGE {
+                // Malformed: answers 206 but commits the WRONG range semantics
+                // for the requested Range. The reader must refuse the body
+                // (never trust it) and fail over request-locally when a
+                // sibling exists.
+                let bad = vec![
+                    ("content-range", format!("bytes 0-0/{}", st.size)),
+                    ("content-length", (end - start + 1).to_string()),
+                ];
+                return build_hdrs(206, bad, body_for(start, end - start + 1));
             }
             build_hdrs(206, hdrs, body_for(start, end - start + 1))
         }
@@ -711,6 +742,197 @@ async fn r2e_malformed_provider_payload_fails_over() {
     assert_eq!(body, expected(CHUNK, CHUNK as usize), "the client still gets the full bytes");
     assert_eq!(winner.range_requests() - winner_before, 1,
         "the still-cached route delivered the read");
+}
+
+// ===========================================================================
+// T1 — healthy primary: one lane serves, the sibling is untouched
+// ===========================================================================
+
+#[tokio::test]
+async fn t1_healthy_read_uses_one_lane_only() {
+    let st = build_stack(FILE_SIZE, None).await;
+    let (status, body, _p) = read(&st, CHUNK, 2 * CHUNK - 1).await;
+    assert_eq!(status, 206);
+    assert_eq!(body, expected(CHUNK, CHUNK as usize), "healthy bytes are exact");
+    assert_eq!(
+        st.primary.range_requests() + st.alternate.range_requests(),
+        1,
+        "a healthy read pulls exactly one provider lane, once"
+    );
+}
+
+// ===========================================================================
+// T5 — a lane that fails a demand must not win that demand again
+// ===========================================================================
+
+#[tokio::test]
+async fn r2j_midbody_error_does_not_reopen_failed_lane() {
+    // The Err arm pin: the failing lane commits 206, delivers 8 bytes, then
+    // the body errors. The same demand must move to the alternate
+    // immediately — not burn same-lane retries on the lane that just broke.
+    let st = build_stack(FILE_SIZE, None).await;
+    let served_by = lane_that_serves(&st).await;
+    let loser = if served_by == "torbox" { &st.primary } else { &st.alternate };
+    let winner = if served_by == "torbox" { &st.alternate } else { &st.primary };
+    loser.fault(MODE_MIDBODY_ERROR);
+    let winner_before = winner.range_requests();
+    let loser_before = loser.range_requests();
+
+    let (status, body, _p) = read(&st, CHUNK, 2 * CHUNK - 1).await;
+    assert_eq!(status, 206, "one request, transparently recovered");
+    assert_eq!(body, expected(CHUNK, CHUNK as usize), "no duplicated boundary byte, no gap");
+    assert_eq!(
+        loser.range_requests() - loser_before,
+        1,
+        "the failed lane served its one attempt and never re-won this demand"
+    );
+    assert_eq!(
+        winner.range_requests() - winner_before,
+        1,
+        "the alternate served the remainder in one reopen at the exact next byte"
+    );
+}
+
+// ===========================================================================
+// T6 — timeout while reading the body fails over (injected short timeout)
+// ===========================================================================
+
+#[tokio::test]
+async fn r2i_body_timeout_fails_over_to_alternate() {
+    // Production uses the 25 s provider client timeout; this test injects
+    // 250 ms through the SAME client constructor to prove the SEMANTICS
+    // (demand moves to the alternate, bytes stay exact) without spending
+    // the wall clock. The real 25 s wiring is proven by the ignored
+    // real-time suite.
+    let st = build_stack(FILE_SIZE, Some(250)).await;
+    let served_by = lane_that_serves(&st).await;
+    let loser = if served_by == "torbox" { &st.primary } else { &st.alternate };
+    let winner = if served_by == "torbox" { &st.alternate } else { &st.primary };
+    loser.fault(MODE_TIMEOUT_BODY);
+    let winner_before = winner.range_requests();
+    let loser_before = loser.range_requests();
+
+    let started = std::time::Instant::now();
+    let (status, body, _p) = read(&st, CHUNK, 2 * CHUNK - 1).await;
+    let elapsed = started.elapsed();
+    assert_eq!(status, 206, "a mid-body stall must not stall the client");
+    assert_eq!(body, expected(CHUNK, CHUNK as usize), "post-timeout bytes are exact");
+    assert_eq!(
+        winner.range_requests() - winner_before,
+        1,
+        "the alternate served the demand after the stall"
+    );
+    assert_eq!(
+        loser.range_requests() - loser_before,
+        1,
+        "the stalled lane was tried once and not retried for this demand"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "failover happens at the injected timeout, not the production one: {elapsed:?}"
+    );
+}
+
+// ===========================================================================
+// T7 — a 206 with wrong range semantics fails over (body never trusted)
+// ===========================================================================
+
+#[tokio::test]
+async fn r2h_wrong_range_fails_over_to_alternate() {
+    let st = build_stack(FILE_SIZE, None).await;
+    let served_by = lane_that_serves(&st).await;
+    let loser = if served_by == "torbox" { &st.primary } else { &st.alternate };
+    let winner = if served_by == "torbox" { &st.alternate } else { &st.primary };
+    loser.fault(MODE_WRONG_RANGE);
+    let winner_before = winner.range_requests();
+    let loser_before = loser.range_requests();
+
+    let (status, body, _p) = read(&st, CHUNK, 2 * CHUNK - 1).await;
+    assert_eq!(status, 206, "a lying 206 must not fail the client");
+    assert_eq!(body, expected(CHUNK, CHUNK as usize), "bytes come from the honest lane");
+    assert_eq!(
+        loser.range_requests() - loser_before,
+        1,
+        "the lying lane was tried once and its body never trusted"
+    );
+    assert_eq!(
+        winner.range_requests() - winner_before,
+        1,
+        "the alternate delivered the demand"
+    );
+}
+
+// ===========================================================================
+// T4 (truncation variant) — every route truncating fails closed, poisons
+// nothing, and a healed lane serves later reads
+// ===========================================================================
+
+#[tokio::test]
+async fn r3b_both_truncated_fails_closed_without_cache_poison() {
+    let st = build_stack(FILE_SIZE, None).await;
+    st.primary.fault(MODE_SHORT_BODY);
+    st.alternate.fault(MODE_SHORT_BODY);
+    let p_before = st.primary.range_requests();
+    let a_before = st.alternate.range_requests();
+
+    let (status, body, _p) = read(&st, CHUNK, 2 * CHUNK - 1).await;
+    // Honest shapes only: explicit 502, or a visibly short stream whose
+    // bytes are a correct prefix. Never a full-length wrong body.
+    assert!(
+        status == 502 || (status == 206 && body.len() < CHUNK as usize),
+        "exhaustion is explicit or visibly short, never a silent success (status={status}, len={})",
+        body.len()
+    );
+    assert_eq!(
+        body,
+        expected(CHUNK, body.len()),
+        "whatever arrived is a correct PREFIX of the demanded Range"
+    );
+    // Bounded: first lane once, failover lane once + its bounded same-lane
+    // retries — never a reopen loop.
+    assert!(
+        st.primary.range_requests() - p_before <= 5
+            && st.alternate.range_requests() - a_before <= 5,
+        "no lane is reopened in a loop (primary={}, alternate={})",
+        st.primary.range_requests() - p_before,
+        st.alternate.range_requests() - a_before,
+    );
+    // No corrupted cache publication: a 5-byte staging is discarded, never
+    // advertised as a complete chunk.
+    assert!(!st.present(1), "an incomplete body is never published PRESENT");
+
+    // The lanes were never durably condemned: heal one and the next demand
+    // for the same exact TorrentFile succeeds with authoritative bytes.
+    st.alternate.fault(MODE_OK);
+    let (status, body, _p) = read(&st, CHUNK, 2 * CHUNK - 1).await;
+    assert_eq!(status, 206, "a healed lane serves the next demand");
+    assert_eq!(body, expected(CHUNK, CHUNK as usize));
+    st.wait_present(1).await;
+    assert_eq!(st.read_back(1), expected(CHUNK, CHUNK as usize));
+}
+
+// ===========================================================================
+// T8 — the recovered chunk is the authoritative cache content
+// ===========================================================================
+
+#[tokio::test]
+async fn r2k_recovered_chunk_is_authoritative_cache_content() {
+    let st = build_stack(FILE_SIZE, None).await;
+    let served_by = lane_that_serves(&st).await;
+    let loser = if served_by == "torbox" { &st.primary } else { &st.alternate };
+    loser.fault(MODE_SHORT_BODY);
+
+    let (status, body, _p) = read(&st, CHUNK, 2 * CHUNK - 1).await;
+    assert_eq!(status, 206);
+    assert_eq!(body, expected(CHUNK, CHUNK as usize));
+    // The 1-byte partial from the broken lane never became durable truth;
+    // the alternate's complete bytes did.
+    st.wait_present(1).await;
+    assert_eq!(
+        st.read_back(1),
+        expected(CHUNK, CHUNK as usize),
+        "durable cache content is the complete recovered chunk"
+    );
 }
 
 // ===========================================================================
