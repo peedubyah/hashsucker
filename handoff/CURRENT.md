@@ -393,6 +393,65 @@ session, both healthy. The 7 untracked user files (ab-*.jsonl, ab-*.json,
 .env.example, bench-core-latency.mjs, ab-*-driver.sh) are preserved and
 untouched.
 
+## Live session state (2026-10-21, START FAST: capability + permit path)
+
+**What is now true.** The previous slice's "26 034 ms capability
+acquisition" was **not the provider**. The data plane's own acquisition
+trace (new in this slice) shows a **72 606 ms** acquisition with
+`api_requests_delta = 0` — an interval with no provider call in it — and a
+permit wait of up to **95 837 ms** while a permit was held for **100 007
+ms**. A foreground demand was queueing behind the same file's BACKGROUND
+FILL for the capability's maxInFlight permit.
+
+**The fix.** The capability pool's bound, 2 -> 4. The mechanism already
+existed and was already demand-driven ("2->4 only via explicit POOL_MAX
+opt-in"); the bound was simply smaller than the concurrent transfers a
+player's request pattern needs for ONE file: the whole-file request's
+client stream, its background fill, the container-index read, and the
+media-data read. The invariant is UNCHANGED — maxInFlight=1 still holds PER
+capability (one in-flight transfer per signed delivery URL); the pool just
+holds enough capabilities that a foreground demand never queues behind a
+bulk fill's ownership of the last free one.
+
+**Measured (production stack, matched legs, fresh container and fresh
+byte-cold fixtures per leg):** acquisition-window p95 **27 634 -> 670 ms**,
+max **59 436 -> 670 ms**; acquisitions over 1 s / 5 s / 10 s
+**3 / 3 / 3 -> 0 / 0 / 0**; permit waits **4 -> 0**; worst first frame
+**60 625 -> 28 308 ms**. The provider API never changed: **170-992 ms**
+(p50 342 ms).
+
+**The remaining 28 s is the PLAYER's.** The canonical waterfall (now 14
+stages) attributes **26 808 ms** to `media_data_request ->
+player_file_loaded` — owner: client — with every data-plane stage
+sub-second. HashSucker adds **0 ms** after the provider's first byte.
+
+**How to measure it again.** `node tools/hs/capability.mjs --fixture
+"label=intent" [--fixture ...]` reports the acquisition windows, the
+per-acquisition breakdown (provider API / permit wait / single-flight wait /
+cooldown) and the permit's hold side. The full report:
+`docs/recon/2026-10-21-start-fast-capability-permit.md`.
+
+**Do not read the remaining permit HOLD as fixed.** A background fill still
+holds one file's capability for up to 100 s. The fix removes the
+starvation; it does not remove the hold. That is a fill-ownership
+question, and it interacts with the cache-policy question.
+
+**Do not read the dual-route tax as a startup defect.** RealDebrid is
+tried first on dual-route files and its `/unrestrict/link` answers 403, so
+every acquisition of such a file pays ~540 ms of dead-route tax before
+TorBox succeeds. That is route health, not startup mechanics.
+
+**UNCACHED EXECUTION GAP (unchanged, deliberately).** Rear Window
+(tt0089883) does not play: every candidate is uncached/unexecutable under
+policy and the alternate route refuses the add. Not latency; a later
+explicit product-policy decision. The RealDebrid-only fixtures
+(tt3581920, tt0039825) do not play for the same reason.
+
+**State of the trees.** `main` carries the START FAST slice on top of the
+cold-start slice's `6504f4d`, `633215a`, `f37d44c`. Production runs the
+rebuilt data-plane image (recreated, healthy). The 7 untracked user files
+are preserved and untouched.
+
 ## Live session state (2026-10-21, cold start, small — the last 5 s, characterized and cut)
 
 **What is now true.** A byte-cold first frame is **2.2-2.6 s** (was

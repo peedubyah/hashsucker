@@ -15,11 +15,41 @@
  *   4  player_launched          the player process exists
  *   5  first_http               the player's first HTTP request reached the server
  *   6  first_rust_byte_request  the data plane received the byte request
- *   7  provider_request_start   the provider request was dispatched
- *   8  provider_first_byte      the provider's first byte arrived
- *   9  first_byte_to_client     the first byte was delivered to the client
- *  10  player_file_loaded       the player has the media (container read)
- *  11  first_frame              a frame is on screen (progressing)
+ *   7  capability_acquired      the data plane holds the capability AND its permit
+ *   8  provider_request_start   the provider request was dispatched
+ *   9  provider_first_byte      the provider's first byte arrived
+ *  10  first_byte_to_client     the first byte was delivered to the client
+ *  11  player_metadata_request  the player asked for the container's index
+ *  12  media_data_request       the player asked for the media data
+ *  13  player_file_loaded       the player probed the container
+ *  14  first_frame              a frame is on screen (progressing)
+ *
+ * The media-data request precedes the player's probe event: the player asks
+ * for the media data as soon as it has the index, and its probe completes
+ * only once the demux has the frames. The list documents the order the
+ * stages must occur in; the assembled waterfall orders them by their
+ * measured instants, so a real run is placed by when it actually happened.
+ *
+ * THE PLAYER'S THREE REQUESTS. A player opens a non-faststart file with
+ * three Range requests, and they are three DIFFERENT things:
+ *   1. the whole file   — it cannot know where the index is until it reads
+ *                         the head, so it asks for everything;
+ *   2. the index       — it seeks back to the end for the container's index
+ *                         (the moov);
+ *   3. the media data  — it seeks back again to the start for the frames.
+ * The second and the third are the ones that can queue behind the file's
+ * own exclusive permit, so they are separate stages.
+ *
+ * WHERE THE CAPABILITY IS ACQUIRED. On the cached byte route the delivery
+ * capability is acquired by the RUST DATA PLANE, not by the Node server:
+ * the server mints a playback object bound to the TorrentFile and the data
+ * plane turns that into a provider capability at the moment the bytes are
+ * needed. So stage 7 is the whole of "capability lookup / reuse /
+ * acquisition" on this route, and it is stamped where it actually happens.
+ * The data plane's stage report additionally carries the acquisition's own
+ * BREAKDOWN (provider API time, permit wait, single-flight wait, cooldown),
+ * so a slow acquisition is attributed to a first causal bucket instead of
+ * being labelled "the provider API".
  *
  * The owners are the processes that hold the time:
  *   - server     the Node service (identity, Binding, token, byte proxy)
@@ -64,9 +94,12 @@ export const WATERFALL_STAGES = Object.freeze([
   { stage: 'player_launched', owner: WATERFALL_OWNER.CLIENT },
   { stage: 'first_http', owner: WATERFALL_OWNER.SERVER },
   { stage: 'first_rust_byte_request', owner: WATERFALL_OWNER.DATA_PLANE },
+  { stage: 'capability_acquired', owner: WATERFALL_OWNER.DATA_PLANE },
   { stage: 'provider_request_start', owner: WATERFALL_OWNER.DATA_PLANE },
   { stage: 'provider_first_byte', owner: WATERFALL_OWNER.DATA_PLANE },
   { stage: 'first_byte_to_client', owner: WATERFALL_OWNER.DATA_PLANE },
+  { stage: 'player_metadata_request', owner: WATERFALL_OWNER.DATA_PLANE },
+  { stage: 'media_data_request', owner: WATERFALL_OWNER.DATA_PLANE },
   { stage: 'player_file_loaded', owner: WATERFALL_OWNER.CLIENT },
   { stage: 'first_frame', owner: WATERFALL_OWNER.CLIENT },
 ]);

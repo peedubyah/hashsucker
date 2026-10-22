@@ -186,6 +186,23 @@ pub struct Metrics {
     pub limiter_wait_ms_total: AtomicU64,
     // Cumulative time spent in internal retry recovery — distinct from limiter wait.
     pub internal_recovery_ms_total: AtomicU64,
+    // ---- START FAST: the permit's HOLD side ----
+    //
+    // `limiter_wait_ms_total` measures the WAIT side: time a reader spent
+    // blocked because another holder had the capability's maxInFlight permit.
+    // These three measure the HOLD side: how long the permit was actually
+    // held once taken. The pair is what names the invariant: if a permit is
+    // routinely held for tens of seconds, the holder is a long-lived
+    // background transfer, and a foreground demand that needs the same
+    // capability will queue behind it.
+    /// Number of capability reservations released (each held a permit).
+    pub permit_holds: AtomicU64,
+    /// Cumulative milliseconds a permit was held.
+    pub permit_hold_ms_total: AtomicU64,
+    /// The longest single permit hold observed, in milliseconds.
+    pub permit_hold_ms_max: AtomicU64,
+    /// The longest single permit WAIT observed, in milliseconds.
+    pub permit_wait_ms_max: AtomicU64,
     /// Demands that took over a chunk another reader's plan had claimed but not
     /// yet started. The count is the fix's own evidence: before it, a demand
     /// for a chunk far from the client's window waited behind that window's
@@ -471,6 +488,64 @@ impl DecisionLog {
 // Slice 4.5 — T0..T5 cold-open stage clock
 // ---------------------------------------------------------------------------
 
+/// What ONE capability acquisition actually spent its time on.
+///
+/// The startup slice needs to name a FIRST causal bucket for a slow
+/// acquisition. "The provider API was slow" is not a bucket — it is a
+/// summary that hides four different waits (a local permit, a single-flight
+/// queue, a throttle cooldown, and the provider's own round trip). Each of
+/// those is measured here, separately, in milliseconds, so a slow
+/// acquisition can be attributed to exactly one of them.
+///
+/// Observability only. No provider URL, token, or signed capability is
+/// carried here — only the provider NAME and the endpoint PATH.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct AcquisitionTrace {
+    /// The provider the acquisition ended up on (or the last one tried).
+    pub provider: String,
+    /// How the capability was obtained:
+    ///   "reuse"       — an existing, still-valid capability's permit was taken
+    ///   "acquire"     — a fresh provider call minted a capability
+    ///   "permit_wait" — the capability existed but its permit was held
+    ///   "failed"      — no capability could be obtained
+    pub outcome: String,
+    /// Total milliseconds inside the acquisition.
+    pub total_ms: u64,
+    /// Provider API calls made during this acquisition.
+    pub api_calls: u32,
+    /// Milliseconds spent inside provider API calls (the provider's round trip).
+    pub api_ms: u64,
+    /// Milliseconds blocked on a capability's maxInFlight permit.
+    pub permit_wait_ms: u64,
+    /// Milliseconds slept out a throttle cooldown.
+    pub cooldown_ms: u64,
+    /// Milliseconds waiting on another task's in-flight acquisition
+    /// (the single-flight dedupe): the owner was already acquiring.
+    pub inflight_wait_ms: u64,
+    /// The slot's capability-pool size and target at the time of the wait.
+    pub pool_size: usize,
+    pub pool_target: usize,
+    /// The capability id the acquisition waited on (observability only).
+    pub cap_id: String,
+    /// Per provider API call: the endpoint path, its duration, and its status.
+    pub api_detail: Vec<ApiCallTrace>,
+}
+
+/// One provider API call made during a capability acquisition.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct ApiCallTrace {
+    /// The endpoint PATH (no host, no query, no token).
+    pub endpoint: String,
+    /// The provider that owns the endpoint.
+    pub provider: String,
+    /// Milliseconds for the call (headers received).
+    pub ms: u64,
+    /// The HTTP status, when a response arrived.
+    pub status: Option<u16>,
+    /// True when the call hit the internal timeout instead of answering.
+    pub timed_out: bool,
+}
+
 /// Raw stage instants for ONE logical client request.
 ///
 /// Every stage is `Option` because not every stage occurs on every request: a
@@ -629,6 +704,11 @@ pub struct StageClock {
     /// hard-failure lane switch). Attempts after the switch carry the new
     /// provider/cap, so the count plus attempt timeline fully describes it.
     failovers: Arc<AtomicU64>,
+    /// Capability acquisitions recorded on this clock. A request can make
+    /// MORE than one (the demand's own pre-acquire, then a fill span's
+    /// acquire, then a hand-back acquisition), and the SLOW one is the one
+    /// that matters — so this is a bounded LIST, not a single stamp.
+    acquisitions: Arc<Mutex<Vec<AcquisitionTrace>>>,
 }
 
 impl Default for StageClock {
@@ -662,6 +742,7 @@ impl StageClock {
             corr_id,
             span_kind: Arc::new(Mutex::new("serve".to_string())),
             failovers: Arc::new(AtomicU64::new(0)),
+            acquisitions: Arc::new(Mutex::new(Vec::with_capacity(4))),
         }
     }
 
@@ -687,6 +768,21 @@ impl StageClock {
     /// Same-TF provider lane switches on this clock.
     pub fn failover_count(&self) -> u64 {
         self.failovers.load(Ordering::SeqCst)
+    }
+
+    /// Record one capability acquisition on this clock. Bounded: a pathological
+    /// request cannot grow this list without limit.
+    pub fn add_acquisition(&self, trace: AcquisitionTrace) {
+        const ACQUISITION_CAP: usize = 8;
+        let mut list = self.acquisitions.lock().unwrap();
+        if list.len() < ACQUISITION_CAP {
+            list.push(trace);
+        }
+    }
+
+    /// The capability acquisitions recorded on this clock.
+    pub fn acquisitions(&self) -> Vec<AcquisitionTrace> {
+        self.acquisitions.lock().unwrap().clone()
     }
 
     /// Returns the T0 of this clock, for computing offsets in the transport layer.
@@ -948,6 +1044,11 @@ pub struct StageReport {
     /// slow" from "the provider's BODY was slow" — the two have identical
     /// `ttfb_ms` but completely different causes.
     pub cdn_attempts: Vec<CdnAttempt>,
+    /// Every capability acquisition this request made, each with its own
+    /// breakdown (provider API time, permit wait, cooldown, single-flight
+    /// wait). A request can make several; the SLOW one is what a slow
+    /// startup is made of.
+    pub acquisitions: Vec<AcquisitionTrace>,
     /// Observability-only: the provider that owned the capability used for this request.
     /// Provider is execution metadata, NOT part of TorrentFile/cache byte identity.
     pub provider: String,
@@ -1017,6 +1118,11 @@ impl StageReport {
             },
             // Per-attempt CDN telemetry: decomposes T3→T4 into individual attempts.
             "cdn_attempts": self.cdn_attempts,
+            // Per-acquisition breakdown: names the FIRST causal bucket of a
+            // slow capability acquisition (permit / cooldown / single-flight
+            // / provider API) instead of labelling the whole interval
+            // "provider API".
+            "acquisitions": self.acquisitions,
             // Observability-only: provider attribution for this request.
             "provider": self.provider,
             "cap_id": self.cap_id,
@@ -1235,6 +1341,38 @@ impl Metrics {
     // ---- §15 cumulative timing ----
     pub fn add_limiter_wait_ms(&self, ms: u64) {
         self.limiter_wait_ms_total.fetch_add(ms, Ordering::SeqCst);
+        // Longest single wait, so a slow startup can be attributed to ONE
+        // wait rather than to an average that hides it.
+        let mut max = self.permit_wait_ms_max.load(Ordering::SeqCst);
+        while ms > max {
+            match self.permit_wait_ms_max.compare_exchange(
+                max,
+                ms,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(actual) => max = actual,
+            }
+        }
+    }
+    /// Record a capability reservation being released, and how long it held
+    /// its permit.
+    pub fn record_permit_hold(&self, ms: u64) {
+        self.permit_holds.fetch_add(1, Ordering::SeqCst);
+        self.permit_hold_ms_total.fetch_add(ms, Ordering::SeqCst);
+        let mut max = self.permit_hold_ms_max.load(Ordering::SeqCst);
+        while ms > max {
+            match self.permit_hold_ms_max.compare_exchange(
+                max,
+                ms,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(actual) => max = actual,
+            }
+        }
     }
     /// Record a demand that took over a chunk another reader had claimed.
     pub fn record_demand_chunk_takeover(&self) {

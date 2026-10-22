@@ -36,6 +36,41 @@ the client at 463-684 ms; HashSucker adds 0 ms after the provider's first
 byte) — it makes the NEXT startup cold. Changing what the fill fetches is
 the cache's warming contract and was deliberately not attempted.
 
+**START FAST slice (2026-10-21) — DONE. VERDICT: START FAST — PERMIT
+BOTTLENECK FIXED.** The previous slice's "26 034 ms capability
+acquisition" was **NOT the provider**: the data plane's own acquisition
+trace shows a **72 606 ms** acquisition with `api_requests_delta = 0` — an
+interval with no provider call in it. A foreground demand was queueing for
+a capability whose maxInFlight permit was held by the same file's
+**background fill** (permits measured held for up to **100 007 ms**),
+because the capability pool's bound (2) was smaller than the concurrent
+transfers a player's request pattern needs for ONE file (client stream +
+background fill + index read + media-data read). The bound is now **4** —
+the mechanism the code already had and the comment already anticipated —
+and the invariant is UNCHANGED (maxInFlight=1 still holds PER capability).
+Measured, matched legs, fresh container and fresh byte-cold fixtures per
+leg: acquisition-window p95 **27 634 -> 670 ms**, max **59 436 -> 670 ms**,
+acquisitions over 1 s / 5 s / 10 s **3 / 3 / 3 -> 0 / 0 / 0**, permit waits
+**4 -> 0**, worst first frame **60 625 -> 28 308 ms**. Report:
+`docs/recon/2026-10-21-start-fast-capability-permit.md`.
+
+**The capability path is characterized and needs no fix:** the provider API
+is **170-992 ms** on every acquisition measured (p50 342 ms) across TorBox,
+RealDebrid, single-route and dual-route; reuse is 0-call and works; the
+single-flight wait was 0 ms in every acquisition measured; the throttle
+cooldown path is dead code in production. The dual-route hypothesis is
+**CLOSED** — route B is not held behind route A's acquisition; the waits
+were permit waits with 0 API calls. The one waste found is a **~540 ms
+dead-route tax** (RealDebrid is tried first and 403s before TorBox
+succeeds) — route-health work, deliberately not taken here.
+
+**What the fix does NOT claim:** the eager fill still holds a file's
+capability for up to 100 s. The fix removes the STARVATION; it does not
+remove the HOLD. The remaining worst first frame (28 308 ms) is the
+**player's own demux** — the canonical waterfall attributes 26 808 ms to
+`media_data_request -> player_file_loaded` (owner: client) with every
+data-plane stage sub-second.
+
 **Kept separate from speed:** Rear Window (tt0089883) does not PLAY right now
 — every candidate is uncached at TorBox, RealDebrid refuses the add, and the
 binding fails with `NO_PLACEMENT` before any size comparison. A supply

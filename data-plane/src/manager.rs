@@ -93,6 +93,33 @@ pub struct ReservedCapability {
     pub cap: Arc<DeliveryCapability>,
     // held for the duration of the read; enforces maxInFlight=1 per capability.
     pub _permit: OwnedSemaphorePermit,
+    /// What this acquisition spent its time on. Observability only.
+    pub trace: crate::metrics::AcquisitionTrace,
+    /// When the permit was taken. The permit is released when this
+    /// reservation drops, so this is the start of the permit's HOLD.
+    held_since: Instant,
+    /// The metrics the hold duration is recorded into.
+    metrics: Arc<Metrics>,
+}
+
+impl ReservedCapability {
+    /// The permit's hold time so far, in milliseconds.
+    pub fn held_ms(&self) -> u64 {
+        self.held_since.elapsed().as_millis() as u64
+    }
+}
+
+impl Drop for ReservedCapability {
+    /// Releasing the reservation IS the release of the capability's
+    /// maxInFlight permit. The hold duration is recorded here so the
+    /// permit's HOLD side is measurable, not just its WAIT side: a permit
+    /// routinely held for tens of seconds means the holder is a long-lived
+    /// transfer, and a foreground demand needing the same capability queues
+    /// behind it.
+    fn drop(&mut self) {
+        self.metrics
+            .record_permit_hold(self.held_since.elapsed().as_millis() as u64);
+    }
 }
 
 /// Inner state of a capability lease. The single owned reservation (holding the
@@ -149,6 +176,20 @@ impl Drop for LogicalChild {
             inner.reserved = None;
         }
     }
+}
+
+/// The timing breakdown of one capability resolution.
+///
+/// `api_ms` is the provider's own round trip. `inflight_wait_ms` is a LOCAL
+/// queue wait: another task was already resolving this exact capability and
+/// this one waited behind it. A slow resolution is one or the other, and the
+/// two call for different fixes.
+#[derive(Debug, Clone, Default)]
+pub struct ResolveTiming {
+    pub api_ms: u64,
+    pub api_calls: u32,
+    pub inflight_wait_ms: u64,
+    pub api_detail: Vec<crate::metrics::ApiCallTrace>,
 }
 
 /// A handle to one borrowed child reader. Holds a clone of the underlying
@@ -474,11 +515,36 @@ impl CapabilityManager {
                 }
             }
         }
+        // START FAST — the capability pool's bound.
+        //
+        // The bound decides whether a foreground demand QUEUES behind a busy
+        // capability or gets its OWN. The demand-driven growth above grows
+        // 1->2 on concurrent-read pressure; this bound is what stops it there.
+        //
+        // MEASURED (byte-cold cohort, production): with the bound at 2, a
+        // player's request pattern for ONE file needs up to FOUR concurrent
+        // transfers of that file — the whole-file request's client stream, its
+        // background fill, the container-index (tail) read, and the media-data
+        // read. With only two capabilities, the third and fourth found the
+        // pool saturated and BLOCKED on a permit that the background fill
+        // held for up to 89 s. Measured first frames: 73 470 ms (a 67.717 s
+        // permit wait), 22 864 ms, 13 795 ms — against 349-4 717 ms on the
+        // same fixtures when the pool was not saturated.
+        //
+        // The bound is now 4, which covers the observed pattern. The
+        // INVARIANT IS UNCHANGED: maxInFlight=1 still holds PER CAPABILITY
+        // (one in-flight transfer per signed delivery URL). The pool simply
+        // holds enough capabilities that a foreground demand never has to
+        // queue behind a bulk fill's ownership of the last free one.
+        //
+        // The growth is DEMAND-DRIVEN: a capability is minted only when a
+        // real concurrent read arrives for that file, so the extra provider
+        // calls are paid only when there is genuine concurrency.
         let pool_max_default = std::env::var("POOL_MAX")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v >= 2)
-            .unwrap_or(2);
+            .unwrap_or(4);
         let neg_ttl = std::env::var("NEG_CACHE_TTL_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -510,11 +576,17 @@ impl CapabilityManager {
 
     /// Resolve a capability for a given pool index with single-flight dedupe and a bounded
     /// negative cache for hard failures.
+    ///
+    /// The second element is the TIMING BREAKDOWN: how long the resolution
+    /// spent inside the provider's own API, and how long it spent waiting on
+    /// ANOTHER task's in-flight resolution of the same key. Those are two
+    /// completely different waits and only one of them is the provider's
+    /// fault; the startup slice needs them apart.
     async fn resolve_internal(
         &self,
         slot: &Slot,
         idx: usize,
-    ) -> Result<Arc<DeliveryCapability>, AcquireError> {
+    ) -> (Result<Arc<DeliveryCapability>, AcquireError>, ResolveTiming) {
         let key = format!("{}#{}", slot.sf_key(), idx);
         let coord = slot.coord.clone();
         let tf = self.tf.clone();
@@ -529,7 +601,7 @@ impl CapabilityManager {
             if let Some(entry) = nc.get(&key) {
                 if Instant::now() < entry.expires_at {
                     self.metrics.record_negative_hit();
-                    return Err(entry.err.clone());
+                    return (Err(entry.err.clone()), ResolveTiming::default());
                 }
                 nc.remove(&key);
             }
@@ -539,7 +611,7 @@ impl CapabilityManager {
             // fast path: already present and still usable
             if let Some(c) = slot.caps.lock().unwrap().get(idx).cloned() {
                 if c.usable_now(Instant::now()) {
-                    return Ok(c);
+                    return (Ok(c), ResolveTiming::default());
                 }
             }
             let entry = {
@@ -555,7 +627,7 @@ impl CapabilityManager {
             if entry.done.load(Ordering::SeqCst) {
                 let r = entry.result.lock().unwrap();
                 if let Some(res) = &*r {
-                    return res.clone();
+                    return (res.clone(), ResolveTiming::default());
                 }
             }
             // try to become the owner (only one task acquires per key)
@@ -620,10 +692,13 @@ impl CapabilityManager {
                         entry.done.store(true, Ordering::SeqCst);
                         entry.notify.notify_waiters();
                         self.inflight.lock().await.remove(&key);
-                        return res;
+                        return (res, ResolveTiming::default());
                     }
                 }
-                let res = provider::acquire(&coord, &tf, &keys, &client, &metrics).await;
+                let api_started = Instant::now();
+                let mut api_detail = Vec::new();
+                let res = provider::acquire(&coord, &tf, &keys, &client, &metrics, &mut api_detail).await;
+                let api_ms = api_started.elapsed().as_millis() as u64;
                 // A11: a provider Retry-After from the acquisition API describes
                 // the ACCOUNT (this endpoint's quota), not this one resource, so
                 // it is recorded at (provider, account_scope) and suppresses
@@ -667,14 +742,33 @@ impl CapabilityManager {
                 entry.done.store(true, Ordering::SeqCst);
                 entry.notify.notify_waiters();
                 self.inflight.lock().await.remove(&key);
-                return res;
+                return (
+                    res,
+                    ResolveTiming {
+                        api_ms,
+                        api_calls: api_detail.len() as u32,
+                        api_detail,
+                        ..Default::default()
+                    },
+                );
             }
-            // waiter: double-checked wait to avoid lost wakeups
+            // waiter: double-checked wait to avoid lost wakeups.
+            //
+            // The time spent here is the SINGLE-FLIGHT WAIT: another task is
+            // already acquiring this exact capability, and this one is queued
+            // behind it. It is a LOCAL queue wait, not the provider's latency.
+            let inflight_started = Instant::now();
             loop {
                 if entry.done.load(Ordering::SeqCst) {
                     let r = entry.result.lock().unwrap();
                     if let Some(res) = &*r {
-                        return res.clone();
+                        return (
+                            res.clone(),
+                            ResolveTiming {
+                                inflight_wait_ms: inflight_started.elapsed().as_millis() as u64,
+                                ..Default::default()
+                            },
+                        );
                     }
                 }
                 let notified = entry.notify.notified();
@@ -730,6 +824,14 @@ impl CapabilityManager {
                 Some(ReservedCapability {
                     cap: cap.clone(),
                     _permit: permit,
+                    trace: crate::metrics::AcquisitionTrace {
+                        provider: cap.provider.clone(),
+                        outcome: "reuse".to_string(),
+                        cap_id: cap.cap_id.clone(),
+                        ..Default::default()
+                    },
+                    held_since: Instant::now(),
+                    metrics: self.metrics.clone(),
                 })
             }
             Err(_) => None,
@@ -744,6 +846,7 @@ impl CapabilityManager {
         slot: &Slot,
         now: Instant,
         priority: u8,
+        trace: &mut crate::metrics::AcquisitionTrace,
     ) -> Result<ReservedCapability, AcquireError> {
         // 0) prune dead/expired capabilities so the pool can be refilled. Without this
         //    an expired (e.g. TTL'd) or revoked cap would sit in the slot forever at
@@ -772,6 +875,11 @@ impl CapabilityManager {
         if let Some(cap) = self.first_usable_free(slot, now) {
             if let Some(r) = self.try_reserve(&cap) {
                 self.metrics.record_cap_reuse();
+                trace.provider = cap.provider.clone();
+                trace.cap_id = cap.cap_id.clone();
+                trace.outcome = "reuse".to_string();
+                trace.pool_size = slot.caps.lock().unwrap().len();
+                trace.pool_target = slot.target.load(Ordering::SeqCst);
                 return Ok(r);
             }
         }
@@ -796,10 +904,22 @@ impl CapabilityManager {
             && !slot.breaker.is_open(now)
         {
             let idx = slot.caps.lock().unwrap().len();
-            match self.resolve_internal(slot, idx).await {
+            let (res, timing) = self.resolve_internal(slot, idx).await;
+            trace.provider = slot.coord.provider.clone();
+            trace.api_ms += timing.api_ms;
+            trace.api_calls += timing.api_calls;
+            trace.inflight_wait_ms += timing.inflight_wait_ms;
+            for call in timing.api_detail {
+                trace.api_detail.push(call);
+            }
+            match res {
                 Ok(cap) => {
                     slot.caps.lock().unwrap().push(cap.clone());
                     if let Some(r) = self.try_reserve(&cap) {
+                        trace.outcome = "acquire".to_string();
+                        trace.cap_id = cap.cap_id.clone();
+                        trace.pool_size = slot.caps.lock().unwrap().len();
+                        trace.pool_target = slot.target.load(Ordering::SeqCst);
                         return Ok(r);
                     }
                 }
@@ -819,6 +939,7 @@ impl CapabilityManager {
                 let wait = until.saturating_duration_since(Instant::now());
                 if !wait.is_zero() {
                     tokio::time::sleep(wait).await;
+                    trace.cooldown_ms += wait.as_millis() as u64;
                 }
             }
             // Slice 4.75 — instrument permit contention.
@@ -839,6 +960,10 @@ impl CapabilityManager {
             // happen. Elapsed time is recorded either way.
             let contended = cap.limiter.available_permits() == 0;
             let waited_from = Instant::now();
+            trace.provider = cap.provider.clone();
+            trace.cap_id = cap.cap_id.clone();
+            trace.pool_size = slot.caps.lock().unwrap().len();
+            trace.pool_target = slot.target.load(Ordering::SeqCst);
             match cap.limiter.clone().acquire_owned().await {
                 Ok(permit) => {
                     if contended {
@@ -848,9 +973,21 @@ impl CapabilityManager {
                     }
                     cap.in_flight.fetch_add(1, Ordering::SeqCst);
                     self.metrics.record_cap_reuse();
+                    let permit_wait_ms = waited_from.elapsed().as_millis() as u64;
+                    trace.outcome = "permit_wait".to_string();
+                    trace.permit_wait_ms = permit_wait_ms;
                     return Ok(ReservedCapability {
                         cap: cap.clone(),
                         _permit: permit,
+                        trace: crate::metrics::AcquisitionTrace {
+                            provider: cap.provider.clone(),
+                            outcome: "permit_wait".to_string(),
+                            permit_wait_ms,
+                            cap_id: cap.cap_id.clone(),
+                            ..Default::default()
+                        },
+                        held_since: Instant::now(),
+                        metrics: self.metrics.clone(),
                     });
                 }
                 Err(_) => return Err(AcquireError::Transient("permit closed".into())),
@@ -867,6 +1004,12 @@ impl CapabilityManager {
         priority: u8,
     ) -> Result<ReservedCapability, DeliveryError> {
         let now = Instant::now();
+        let started = Instant::now();
+        // The acquisition's own breakdown. Every wait an acquisition can
+        // spend is recorded here SEPARATELY, so a slow acquisition is
+        // attributed to a first causal bucket instead of being labelled
+        // "the provider API".
+        let mut trace = crate::metrics::AcquisitionTrace::default();
         let mut last_err: Option<String> = None;
         let mut retry_after: Option<Duration> = None;
         let mut route_failures: Vec<RouteFailure> = Vec::new();
@@ -886,6 +1029,14 @@ impl CapabilityManager {
                 if let Some(r) = self.try_reserve(&cap) {
                     slot.breaker.record_success();
                     self.metrics.record_cap_reuse();
+                    trace.provider = cap.provider.clone();
+                    trace.cap_id = cap.cap_id.clone();
+                    trace.outcome = "reuse".to_string();
+                    trace.pool_size = slot.caps.lock().unwrap().len();
+                    trace.pool_target = slot.target.load(Ordering::SeqCst);
+                    trace.total_ms = started.elapsed().as_millis() as u64;
+                    let mut r = r;
+                    r.trace = trace;
                     return Ok(r);
                 }
             }
@@ -908,9 +1059,11 @@ impl CapabilityManager {
                 });
                 continue;
             }
-            match self.try_slot(slot, now, priority).await {
-                Ok(r) => {
+            match self.try_slot(slot, now, priority, &mut trace).await {
+                Ok(mut r) => {
                     slot.breaker.record_success();
+                    trace.total_ms = started.elapsed().as_millis() as u64;
+                    r.trace = trace;
                     return Ok(r);
                 }
                 Err(AcquireError::RateLimited(ra)) => {
@@ -1036,6 +1189,14 @@ impl CapabilityManager {
                         return Some(ReservedCapability {
                             cap: cap.clone(),
                             _permit: permit,
+                            trace: crate::metrics::AcquisitionTrace {
+                                provider: cap.provider.clone(),
+                                outcome: "reuse".to_string(),
+                                cap_id: cap.cap_id.clone(),
+                                ..Default::default()
+                            },
+                            held_since: Instant::now(),
+                            metrics: self.metrics.clone(),
                         });
                     }
                     _ => return None, // timed out or closed: bail, never delay demand
@@ -1099,7 +1260,7 @@ impl CapabilityManager {
         // Drop dead/expired caps so the fresh acquire isn't blocked by a dead one still
         // occupying the slot.
         slot.caps.lock().unwrap().retain(|c| !c.prunable(now));
-        let cap = match self.resolve_internal(slot, 0).await {
+        let cap = match self.resolve_internal(slot, 0).await.0 {
             Ok(c) => c,
             Err(_e) => {
                 slot.breaker.record_failure();
@@ -1387,7 +1548,7 @@ impl CapabilityManager {
                 continue;
             }
             let idx = slot.caps.lock().unwrap().len();
-            match self.resolve_internal(slot, idx).await {
+            match self.resolve_internal(slot, idx).await.0 {
                 Ok(cap) => {
                     slot.caps.lock().unwrap().push(cap.clone());
                     if let Some(r) = self.try_reserve(&cap) {
@@ -1504,7 +1665,7 @@ impl CapabilityManager {
         // (concurrent identical prewarms share it: exactly one API call).
         // No try_reserve anywhere on this path: the warmed cap lands
         // warm/free, permit untouched for later standby reservation.
-        match self.resolve_internal(slot, caps_len).await {
+        match self.resolve_internal(slot, caps_len).await.0 {
             Ok(cap) => {
                 {
                     let mut caps = slot.caps.lock().unwrap();
@@ -1725,7 +1886,7 @@ mod retry_after_scope_tests {
 
         let now = Instant::now();
         for slot in mgr.slots.iter().filter(|s| s.coord.account_scope == "default") {
-            let err = match mgr.try_slot(slot, now, 0).await {
+            let err = match mgr.try_slot(slot, now, 0, &mut crate::metrics::AcquisitionTrace::default()).await {
             Ok(_) => panic!("suppressed"),
             Err(e) => e,
         };
@@ -1739,7 +1900,7 @@ mod retry_after_scope_tests {
         // error class proves it was not blocked by the directive.
         let other = mgr.slots.iter().find(|s| s.coord.account_scope == "secondary").unwrap();
         let blocked = matches!(
-            mgr.try_slot(other, now, 0).await,
+            mgr.try_slot(other, now, 0, &mut crate::metrics::AcquisitionTrace::default()).await,
             Err(AcquireError::RateLimited(_))
         );
         assert!(!blocked,
@@ -1757,7 +1918,7 @@ mod retry_after_scope_tests {
         let now = Instant::now();
         let rd = mgr.slots.iter().find(|s| s.coord.provider == "realdebrid").unwrap();
         let blocked = matches!(
-            mgr.try_slot(rd, now, 0).await,
+            mgr.try_slot(rd, now, 0, &mut crate::metrics::AcquisitionTrace::default()).await,
             Err(AcquireError::RateLimited(_))
         );
         assert!(!blocked, "provider scoping is respected");
@@ -1770,7 +1931,7 @@ mod retry_after_scope_tests {
         let slot = &mgr.slots[0];
         let now = Instant::now();
         assert!(matches!(
-            mgr.try_slot(slot, now, 0).await,
+            mgr.try_slot(slot, now, 0, &mut crate::metrics::AcquisitionTrace::default()).await,
             Err(AcquireError::RateLimited(Some(_)))
         ));
 
@@ -1783,9 +1944,108 @@ mod retry_after_scope_tests {
             .unwrap()
             .insert(("torbox".to_string(), "default".to_string()), past);
         let blocked = matches!(
-            mgr.try_slot(slot, now, 0).await,
+            mgr.try_slot(slot, now, 0, &mut crate::metrics::AcquisitionTrace::default()).await,
             Err(AcquireError::RateLimited(_))
         );
         assert!(!blocked, "expired evidence must never suppress");
+    }
+}
+
+// ---- START FAST: the permit must not queue a foreground demand ----------
+//
+// The startup slice measured a foreground demand QUEUING for up to 89 s
+// behind a background fill's ownership of the file's last free capability:
+// the pool's growth bound was 2, and a player's request pattern for ONE
+// file needs up to FOUR concurrent transfers of it (the whole-file
+// request's client stream, its background fill, the container-index read,
+// and the media-data read).
+//
+// This test pins the BEHAVIOUR, not the constant: a demand that finds the
+// pool's capabilities all busy must get its OWN capability promptly
+// instead of waiting for a permit that is held for the length of a bulk
+// transfer. It fails (by timing out) against the old bound.
+#[cfg(test)]
+mod permit_growth_tests {
+    use super::*;
+    use crate::capability::ApiKeys;
+    use crate::control::{ControlTorrentFile, ProviderCoord};
+
+    fn tf() -> ControlTorrentFile {
+        ControlTorrentFile {
+            id: "tf-permit".into(),
+            info_hash: "b".repeat(40),
+            canonical_internal_path: Some("Show/Movie.mkv".into()),
+            size: 1000,
+        }
+    }
+
+    fn coord() -> ProviderCoord {
+        ProviderCoord {
+            provider: "torbox".into(),
+            account_scope: "default".into(),
+            provider_resource_id: "res-p".into(),
+            provider_file_id: "0".into(),
+            state: "ready".into(),
+            canonical_internal_path: Some("Show/Movie.mkv".into()),
+            size: 1000,
+        }
+    }
+
+    fn build() -> CapabilityManager {
+        CapabilityManager::new(
+            tf(),
+            vec![coord()],
+            ApiKeys { torbox: "test-key".into(), realdebrid: String::new() },
+            reqwest::Client::new(),
+            Arc::new(Metrics::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_demand_finds_its_own_capability_instead_of_queueing_for_a_busy_permit() {
+        let _env = crate::test_env::env_lock();
+        // The mock provider edge mints a capability without dialing anything.
+        std::env::set_var("HY4_TEST_ACQUIRE_BASE_URL", "http://127.0.0.1:1/mock");
+
+        let mgr = build();
+
+        // Two demands arrive and both keep their capability (a permit held),
+        // exactly as a long-running background fill does.
+        let held_one = mgr
+            .acquire_for_read(0)
+            .await
+            .map_err(|_| "acquire failed".to_string())
+            .expect("first capability");
+        let held_two = mgr
+            .acquire_for_read(0)
+            .await
+            .map_err(|_| "acquire failed".to_string())
+            .expect("second capability");
+        assert_ne!(
+            held_one.cap.cap_id, held_two.cap.cap_id,
+            "two concurrent demands must not share one capability's permit"
+        );
+
+        // A THIRD demand arrives while both permits are held. It must be
+        // served promptly — by getting its own capability — not by waiting
+        // for a permit that a bulk transfer may hold for a minute.
+        let third = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            mgr.acquire_for_read(0),
+        )
+        .await
+        .expect("the third demand must not queue behind a busy permit")
+        .map_err(|_| "acquire failed".to_string())
+        .expect("the third demand must get a capability");
+        assert_ne!(
+            third.cap.cap_id, held_one.cap.cap_id,
+            "the third demand must not reuse a capability whose permit is held"
+        );
+        assert_ne!(
+            third.cap.cap_id, held_two.cap.cap_id,
+            "the third demand must not reuse a capability whose permit is held"
+        );
+
+        std::env::remove_var("HY4_TEST_ACQUIRE_BASE_URL");
     }
 }

@@ -39,12 +39,46 @@ test('waterfall: the canonical stage list is the playback session, in order', ()
     'player_launched',
     'first_http',
     'first_rust_byte_request',
+    'capability_acquired',
     'provider_request_start',
     'provider_first_byte',
     'first_byte_to_client',
+    'player_metadata_request',
+    'media_data_request',
     'player_file_loaded',
     'first_frame',
   ]);
+});
+
+// The two stages the START FAST slice added. They exist so a startup can be
+// split at the two points where a SECOND was being spent: the capability
+// acquisition (the data plane holding the capability AND its permit) and the
+// player's media-data request (the request that can queue behind the file's
+// own exclusive permit).
+test('waterfall: the capability stage and the media-data stage are canonical', () => {
+  assert.ok(WATERFALL_STAGE_NAMES.includes('capability_acquired'));
+  assert.ok(WATERFALL_STAGE_NAMES.includes('media_data_request'));
+  assert.ok(WATERFALL_STAGE_NAMES.includes('player_metadata_request'));
+  // The capability stage sits between the byte request and the provider
+  // dispatch: a capability is obtained before a provider byte can exist.
+  assert.ok(
+    WATERFALL_STAGE_NAMES.indexOf('capability_acquired')
+      > WATERFALL_STAGE_NAMES.indexOf('first_rust_byte_request'),
+  );
+  assert.ok(
+    WATERFALL_STAGE_NAMES.indexOf('capability_acquired')
+      < WATERFALL_STAGE_NAMES.indexOf('provider_request_start'),
+  );
+  // The player's index request comes first, then its media-data request;
+  // both precede the first frame.
+  assert.ok(
+    WATERFALL_STAGE_NAMES.indexOf('player_metadata_request')
+      < WATERFALL_STAGE_NAMES.indexOf('media_data_request'),
+  );
+  assert.ok(
+    WATERFALL_STAGE_NAMES.indexOf('media_data_request')
+      < WATERFALL_STAGE_NAMES.indexOf('first_frame'),
+  );
 });
 
 test('waterfall: every stage has exactly one owning process', () => {
@@ -68,14 +102,26 @@ test('waterfall: marks from three processes land on one ordered timeline', () =>
     { stage: 'player_file_loaded', atMs: 900 },
     { stage: 'first_frame', atMs: 950 },
   ] };
+  // The player's second and third Range requests are separate byte requests
+  // in the data plane, each with its own anchor.
   const dataPlane = { process: 'data-plane', anchorWallMs: 1_400, marks: [
     { stage: 'first_rust_byte_request', atMs: 0 },
+    { stage: 'capability_acquired', atMs: 4 },
     { stage: 'provider_request_start', atMs: 5 },
     { stage: 'provider_first_byte', atMs: 300 },
     { stage: 'first_byte_to_client', atMs: 320 },
   ] };
 
-  const waterfall = assembleWaterfall({ sessionId: 's-1', sources: [server, client, dataPlane] });
+  const secondRequest = { process: 'data-plane', anchorWallMs: 1_750, marks: [
+    { stage: 'player_metadata_request', atMs: 10 },
+  ] };
+  const thirdRequest = { process: 'data-plane', anchorWallMs: 1_800, marks: [
+    { stage: 'media_data_request', atMs: 10 },
+  ] };
+  const waterfall = assembleWaterfall({
+    sessionId: 's-1',
+    sources: [server, client, dataPlane, secondRequest, thirdRequest],
+  });
   assert.deepEqual(waterfall.stages.map((s) => s.stage), [
     'intent_accepted',
     'binding_resolved',
@@ -83,9 +129,12 @@ test('waterfall: marks from three processes land on one ordered timeline', () =>
     'player_launched',
     'first_http',
     'first_rust_byte_request',
+    'capability_acquired',
     'provider_request_start',
     'provider_first_byte',
     'first_byte_to_client',
+    'player_metadata_request',
+    'media_data_request',
     'player_file_loaded',
     'first_frame',
   ].filter((s) => s !== 'first_http'));

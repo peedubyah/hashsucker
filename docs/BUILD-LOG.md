@@ -208,6 +208,84 @@ No planned work as completed. No vague "healthy." No speculative causes.
   NEXT startup cold and spends the provider's budget on bytes nobody asked
   for.
 
+## 2026-10-21 — START FAST: CAPABILITY + PERMIT PATH — the 26 s was a permit, not the provider
+
+- Changed: the capability pool's bound. The previous slice's "26 034 ms
+  capability acquisition" was NOT a provider call: the data plane's own
+  acquisition trace shows a 72 606 ms acquisition with
+  `api_requests_delta = 0` — an interval with no provider call in it. A
+  foreground demand was queueing for a capability whose maxInFlight permit
+  was held by the same file's BACKGROUND FILL (permits were measured held
+  for up to 100 007 ms), because the pool's bound (2) was smaller than the
+  number of concurrent transfers a player's request pattern needs for one
+  file: the whole-file request's client stream, its background fill, the
+  container-index read, and the media-data read. The bound is now **4** —
+  the mechanism the code already had ("2->4 only via explicit POOL_MAX
+  opt-in") and the comment already anticipated. The invariant is UNCHANGED:
+  maxInFlight=1 still holds PER CAPABILITY; the pool simply holds enough
+  capabilities that a foreground demand never queues behind a bulk fill's
+  ownership of the last free one.
+- Also changed (measurement only, no behaviour): the canonical startup
+  waterfall goes from 11 stages to 14 (`capability_acquired`,
+  `player_metadata_request`, `media_data_request`), and every capability
+  acquisition now carries its own BREAKDOWN — provider API time, permit
+  wait, single-flight wait, cooldown — plus the per-call endpoint detail.
+  The data plane also records the permit's HOLD side (count, total, max),
+  which is what named the defect.
+- Verification: the cohort NAMED the bucket. BEFORE (pool = 2, fresh
+  container, fresh byte-cold fixtures): acquisition window p50 150 ms,
+  p95 **27 634 ms**, max **59 436 ms**; 3 acquisitions over 1 s / 5 s /
+  10 s; **4 permit waits** (p50 27 634 ms, max 59 436 ms); provider API
+  p50 262 ms, max 992 ms; worst first frame **60 625 ms**. AFTER (pool =
+  4, matched leg): p50 215 ms, p95 **670 ms**, max **670 ms**; **0**
+  acquisitions over 1 s; **0 permit waits**; provider API p50 342 ms, max
+  664 ms; worst first frame 28 308 ms. A third leg on the shipped image
+  (6 more fresh byte-cold fixtures): 31 windows, p50 23 ms, p95 2 560 ms,
+  max 4 772 ms, **0 permit waits**.
+- Production evidence: the remaining 28 308 ms first frame is the CLIENT's,
+  not HashSucker's — the canonical waterfall attributes **26 808 ms to
+  `media_data_request -> player_file_loaded` (owner: client)** on a
+  reproduction (tt1856101) with every data-plane stage sub-second
+  (provider first byte at 726 ms). HashSucker adds **0 ms** after the
+  provider's first byte.
+- Capability path, characterized and NOT changed: the provider API is
+  170-992 ms (p50 342 ms) on every acquisition measured, across TorBox,
+  RealDebrid, single-route and dual-route; reuse is 0-call and works (18 of
+  31 windows were `reuse` with no provider call); the single-flight
+  dedupe wait was **0 ms in every acquisition measured**; the throttle
+  cooldown path is dead code in production (`cap.throttle()` is only called
+  from tests). The one waste found is a **~540 ms dead-route tax** on
+  dual-route files (RealDebrid is tried first and `/unrestrict/link` 403s
+  before TorBox succeeds) — route-health work, not startup mechanics, and
+  deliberately not taken here.
+- The dual-route hypothesis is CLOSED: route B is NOT held behind route
+  A's acquisition. The 22 073 ms waits on the dual-route fixture were
+  permit waits with `api_calls = 0` — not route-specific at all.
+- Unproven / not touched: the eager whole-file fill still fetches
+  0.16-1.98 GB, still evicts up to 1.94 GB, and still holds a file's
+  capability for up to 100 s. The fix removes the STARVATION; it does not
+  remove the HOLD. That is the cache-policy question, left where the
+  previous slice left it. Rear Window remains an **UNCACHED EXECUTION GAP**
+  and was not touched.
+- Safety: the change is a pool bound — no byte path, chunk grid or cache
+  key is touched. `r1`-`r13` (byte exactness, no duplicate, no skip) and
+  `r14` (same-TF route failover) pass; data-plane **154** passed (153 + a
+  new regression test); media-search **3 626** tests / 3 622 pass / 3
+  skipped / 1 pre-existing baseline fail. A seek still works (resumed at
+  30 s, played to 31.4 s, clean exit 0) and sustained playback is clean
+  (playhead advances, exit 0). The new regression test **fails by timeout
+  against the old bound and passes against the new one** — verified against
+  both, so it pins the behaviour and not the constant.
+- Known wart, recorded: the pool's TARGET is bounded at 4 but its SIZE can
+  reach 5 under concurrent growth (two demands can both observe
+  target = 3). One capability of overshoot; bounded; not a correctness
+  issue.
+- Next: the permit's HOLD side is now measured and is the next real
+  question — a background fill holds one file's capability for up to 100 s.
+  Whether the fill should hold a permit across its whole lifetime (rather
+  than per transfer) is a fill-ownership question, and it interacts with
+  the cache-policy question.
+
 ## 2026-10-12 — VFS collection mtime scanned PMS continuously — FIXED + DEPLOYED
 
 - Changed: `media-search/src/lib/vfs/tv-webdav.js` now derives TV collection

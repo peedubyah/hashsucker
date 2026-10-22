@@ -1654,7 +1654,15 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     let first_reserved: Option<manager::ReservedCapability> = if needs_provider && !skip_acquire {
         stage.set_t1(Instant::now());
         match state.manager.acquire_for_read(priority).await {
-            Ok(r) => Some(r),
+            Ok(r) => {
+                // Record WHAT the acquisition spent its time on. A slow
+                // acquisition is attributed to a first causal bucket (a local
+                // permit, a single-flight queue, a throttle cooldown, or the
+                // provider's own round trip) instead of being labelled
+                // "provider API".
+                stage.add_acquisition(r.trace.clone());
+                Some(r)
+            }
             Err(manager::DeliveryError::AllSameTfFailed { retry_after, routes, .. }) => {
                 // The failed routes travel with the error: the north records
                 // durable route-failure evidence from them (a route that
@@ -1751,6 +1759,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                 cdn_requests_delta: metrics.cdn_requests.load(Ordering::SeqCst) - cdn_before,
                 work_class: WorkClass::Demand,
                 cdn_attempts: stage.take_attempts(),
+                acquisitions: stage.acquisitions(),
                 provider_failovers: stage.failover_count(),
                 provider: provider_attribution.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_default(),
                 cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
@@ -1802,6 +1811,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     cdn_requests_delta: metrics.cdn_requests.load(Ordering::SeqCst) - cdn_before,
                     work_class: WorkClass::Demand,
                     cdn_attempts: stage.take_attempts(),
+                acquisitions: stage.acquisitions(),
                     provider_failovers: stage.failover_count(),
                     provider: provider_attribution.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_default(),
                     cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
@@ -1980,6 +1990,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         cdn_requests_delta: 1,
                         work_class: WorkClass::Prefetch,
                         cdn_attempts: pf_stage.take_attempts(),
+                        acquisitions: pf_stage.acquisitions(),
                         provider_failovers: pf_stage.failover_count(),
                         provider: pf_provider.0.clone(),
                         cap_id: pf_provider.1.clone(),
@@ -2914,6 +2925,7 @@ else if stripe_wanted(sub.len())
                                     work_class: WorkClass::DemandJoinedFill,
                                     // DemandJoinedFill: CDN attempts are attributed to the fill owner.
                                     cdn_attempts: vec![],
+                                    acquisitions: join_clock.acquisitions(),
                                     // Provider attribution is on the fill owner's stage report.
                                     provider: String::new(),
                                     cap_id: String::new(),
@@ -3289,6 +3301,7 @@ else if stripe_wanted(sub.len())
             cdn_requests_delta: metrics.cdn_requests.load(Ordering::SeqCst) - cdn_before,
             work_class: WorkClass::Demand,
             cdn_attempts: stage.take_attempts(),
+                acquisitions: stage.acquisitions(),
             provider_failovers: stage.failover_count(),
             provider: provider_attribution.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_default(),
             cap_id: provider_attribution.as_ref().map(|(_, c, _)| c.clone()).unwrap_or_default(),
@@ -3977,7 +3990,12 @@ async fn fill_chunk_run_inner(
             }
             None => {
                 let reserved = match manager.acquire_for_read(priority).await {
-                    Ok(r) => r,
+                    Ok(r) => {
+                        if let Some(s) = stage.as_ref() {
+                            s.add_acquisition(r.trace.clone());
+                        }
+                        r
+                    }
                     Err(_) => {
                         stager.abort();
                         guard.finish_failure();
@@ -4484,7 +4502,12 @@ pub async fn serve_upstream_only(
     let reserved = match existing_cap {
         Some(cap) => cap,
         None => match manager.acquire_for_read(priority).await {
-            Ok(r) => r,
+            Ok(r) => {
+                if let Some(s) = stage.as_ref() {
+                    s.add_acquisition(r.trace.clone());
+                }
+                r
+            }
             Err(_) => return (false, ResponseOutcome::Error, 0),
         },
     };
@@ -4905,6 +4928,18 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
         "timing": {
             "limiter_wait_ms_total": m.limiter_wait_ms_total.load(Ordering::SeqCst),
             "internal_recovery_ms_total": m.internal_recovery_ms_total.load(Ordering::SeqCst),
+        },
+        // The permit's HOLD side. `limiter_wait_ms_total` is the WAIT side:
+        // how long a reader was blocked because another holder had the
+        // capability's maxInFlight permit. These are how long a permit was
+        // HELD once taken. The pair names the invariant: a permit held for
+        // tens of seconds belongs to a long-lived transfer, and a foreground
+        // demand needing the same capability queues behind it.
+        "permit": {
+            "holds": m.permit_holds.load(Ordering::SeqCst),
+            "hold_ms_total": m.permit_hold_ms_total.load(Ordering::SeqCst),
+            "hold_ms_max": m.permit_hold_ms_max.load(Ordering::SeqCst),
+            "wait_ms_max": m.permit_wait_ms_max.load(Ordering::SeqCst),
         },
         // Other TorBox APIs (expected 0 — proves they never enter the Range hot path)
         "other_api_calls": {

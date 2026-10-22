@@ -198,6 +198,29 @@ async function collectWaterfall({ base, sessionId, clientMarks }) {
   const dataPlane = await readDataPlaneStages(sessionId);
   if (dataPlane) sources.push(dataPlane);
 
+  // The player's SECOND and THIRD byte requests. A player opens a
+  // non-faststart file with three Ranges: the whole file, the container's
+  // index at the end, and the media data back at the start. The second and
+  // third are the ones that can queue behind the file's own exclusive
+  // permit, so each is a source of its own (a SEPARATE request with its
+  // own T0 anchor).
+  const metadataRequest = dataPlane?.requests?.[1] ?? null;
+  if (metadataRequest && Number.isFinite(metadataRequest.T0_received_ms)) {
+    sources.push({
+      process: 'data-plane',
+      anchorWallMs: Number.isFinite(metadataRequest.T0_wall_ms) ? metadataRequest.T0_wall_ms : null,
+      marks: [{ stage: 'player_metadata_request', atMs: metadataRequest.T0_received_ms }],
+    });
+  }
+  const mediaDataRequest = dataPlane?.requests?.[2] ?? null;
+  if (mediaDataRequest && Number.isFinite(mediaDataRequest.T0_received_ms)) {
+    sources.push({
+      process: 'data-plane',
+      anchorWallMs: Number.isFinite(mediaDataRequest.T0_wall_ms) ? mediaDataRequest.T0_wall_ms : null,
+      marks: [{ stage: 'media_data_request', atMs: mediaDataRequest.T0_received_ms }],
+    });
+  }
+
   const waterfall = assembleWaterfall({ sessionId, sources });
   // EVERY byte request the player made, not just the first. A player issues
   // several (a probe, then ranges, then the container's metadata), and the
@@ -211,6 +234,12 @@ async function collectWaterfall({ base, sessionId, clientMarks }) {
       cdnRequests: r.cdn_requests_delta ?? null,
       apiRequests: r.api_requests_delta ?? null,
       provider: r.provider || null,
+      // The acquisition's own breakdown. `acquisitionApiMs` is the T1→T2
+      // window; `acquisitions` says WHERE inside it the time went.
+      acquisitionApiMs: r.acquisition_api_ms ?? null,
+      acquisitions: r.acquisitions ?? [],
+      providerFailovers: r.provider_failovers ?? null,
+      termination: r.termination ?? null,
       t3DispatchedMs: r.T3_cdn_dispatched_ms ?? null,
       t4FirstUpstreamByteMs: r.T4_first_upstream_byte_ms ?? null,
       t5FirstClientByteMs: r.T5_first_client_byte_ms ?? null,
@@ -289,6 +318,11 @@ async function readDataPlaneStages(sessionId) {
   const anchorWallMs = Number.isFinite(report?.T0_wall_ms) ? report.T0_wall_ms : null;
   const marks = [
     { stage: 'first_rust_byte_request', atMs: off(report.T0_received_ms) },
+    // The capability AND its permit are in hand. The acquisition's own
+    // breakdown (provider API / permit wait / single-flight wait) travels
+    // with the stage report, so a slow acquisition is attributable to a
+    // first causal bucket rather than to "the provider".
+    { stage: 'capability_acquired', atMs: off(report.T2_capability_ready_ms) },
     { stage: 'provider_request_start', atMs: off(report.T3_cdn_dispatched_ms) },
     { stage: 'provider_first_byte', atMs: off(report.T4_first_upstream_byte_ms) },
     { stage: 'first_byte_to_client', atMs: off(report.T5_first_client_byte_ms) },

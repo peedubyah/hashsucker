@@ -39,6 +39,7 @@ pub async fn acquire(
     keys: &ApiKeys,
     client: &reqwest::Client,
     metrics: &Metrics,
+    api_detail: &mut Vec<crate::metrics::ApiCallTrace>,
 ) -> Result<Arc<DeliveryCapability>, AcquireError> {
     // Test-only stubbed provider edge for deterministic proof seams.
     // COMPILED OUT of production binaries (#[cfg(test)]): proofs must
@@ -82,8 +83,8 @@ pub async fn acquire(
         }
     }
     match coord.provider.as_str() {
-        "torbox" => acquire_torbox(coord, tf, keys, client, metrics).await,
-        "realdebrid" => acquire_realdebrid(coord, tf, keys, client, metrics).await,
+        "torbox" => acquire_torbox(coord, tf, keys, client, metrics, api_detail).await,
+        "realdebrid" => acquire_realdebrid(coord, tf, keys, client, metrics, api_detail).await,
         other => Err(AcquireError::terminal(format!(
             "unsupported provider: {other}"
         ))),
@@ -124,6 +125,7 @@ async fn acquire_torbox(
     keys: &ApiKeys,
     client: &reqwest::Client,
     metrics: &Metrics,
+    api_detail: &mut Vec<crate::metrics::ApiCallTrace>,
 ) -> Result<Arc<DeliveryCapability>, AcquireError> {
     if keys.torbox.is_empty() {
         return Err(AcquireError::terminal("torbox: missing API key"));
@@ -153,11 +155,25 @@ async fn acquire_torbox(
     let resp = match tokio::time::timeout(Duration::from_secs(25), client.get(&url).send()).await {
         Ok(r) => r.map_err(|e| AcquireError::Transient(format!("torbox requestdl: {e}")))?,
         Err(_) => {
+            api_detail.push(crate::metrics::ApiCallTrace {
+                endpoint: "/torrents/requestdl".to_string(),
+                provider: "torbox".to_string(),
+                ms: 25_000,
+                status: None,
+                timed_out: true,
+            });
             return Err(AcquireError::Transient(
                 "torbox requestdl timed out (25s)".into(),
             ))
         }
     };
+    api_detail.push(crate::metrics::ApiCallTrace {
+        endpoint: "/torrents/requestdl".to_string(),
+        provider: "torbox".to_string(),
+        ms: started.elapsed().as_millis() as u64,
+        status: Some(resp.status().as_u16()),
+        timed_out: false,
+    });
 
     // Layer A metrics (requestdl / API acquisition).
     let status = resp.status().as_u16();
@@ -242,17 +258,18 @@ async fn acquire_realdebrid(
     keys: &ApiKeys,
     client: &reqwest::Client,
     metrics: &Metrics,
+    api_detail: &mut Vec<crate::metrics::ApiCallTrace>,
 ) -> Result<Arc<DeliveryCapability>, AcquireError> {
     if keys.realdebrid.is_empty() {
         return Err(AcquireError::terminal("realdebrid: missing API key"));
     }
     // MODE A — reuse an existing /downloads artifact (no provider state created).
-    if let Ok(cap) = acquire_rd_mode_a(coord, tf, keys, client, metrics).await {
+    if let Ok(cap) = acquire_rd_mode_a(coord, tf, keys, client, metrics, api_detail).await {
         return Ok(cap);
     }
     // MODE B — create state only when explicitly enabled.
     if std::env::var("RD_MODE_B").map(|v| v == "1").unwrap_or(false) {
-        if let Ok(cap) = acquire_rd_mode_b(coord, tf, keys, client, metrics).await {
+        if let Ok(cap) = acquire_rd_mode_b(coord, tf, keys, client, metrics, api_detail).await {
             return Ok(cap);
         }
     }
@@ -295,6 +312,7 @@ async fn rd_info_checked(
     keys: &ApiKeys,
     client: &reqwest::Client,
     metrics: &Metrics,
+    api_detail: &mut Vec<crate::metrics::ApiCallTrace>,
 ) -> Result<Option<serde_json::Value>, AcquireError> {
     let info_url = format!("{REALDEBRID_API_BASE}/torrents/info/{rid}");
     let info_started = std::time::Instant::now();
@@ -309,8 +327,24 @@ async fn rd_info_checked(
     .await
     {
         Ok(r) => r.map_err(|e| AcquireError::Transient(format!("rd info: {e}")))?,
-        Err(_) => return Err(AcquireError::Transient("rd info timed out (25s)".into())),
+        Err(_) => {
+            api_detail.push(crate::metrics::ApiCallTrace {
+                endpoint: "/torrents/info".to_string(),
+                provider: "realdebrid".to_string(),
+                ms: 25_000,
+                status: None,
+                timed_out: true,
+            });
+            return Err(AcquireError::Transient("rd info timed out (25s)".into()));
+        }
     };
+    api_detail.push(crate::metrics::ApiCallTrace {
+        endpoint: "/torrents/info".to_string(),
+        provider: "realdebrid".to_string(),
+        ms: info_started.elapsed().as_millis() as u64,
+        status: Some(info_resp.status().as_u16()),
+        timed_out: false,
+    });
     metrics.record_api(info_resp.status().as_u16(), info_started.elapsed());
     if info_resp.status().as_u16() == 429 {
         let ra = parse_retry_after(
@@ -347,6 +381,7 @@ async fn rd_list_scan_rid(
     keys: &ApiKeys,
     client: &reqwest::Client,
     metrics: &Metrics,
+    api_detail: &mut Vec<crate::metrics::ApiCallTrace>,
 ) -> Result<String, AcquireError> {
     let list_url = format!("{REALDEBRID_API_BASE}/torrents?limit=100");
     let started = std::time::Instant::now();
@@ -362,11 +397,25 @@ async fn rd_list_scan_rid(
     {
         Ok(r) => r.map_err(|e| AcquireError::Transient(format!("rd torrents: {e}")))?,
         Err(_) => {
+            api_detail.push(crate::metrics::ApiCallTrace {
+                endpoint: "/torrents".to_string(),
+                provider: "realdebrid".to_string(),
+                ms: 25_000,
+                status: None,
+                timed_out: true,
+            });
             return Err(AcquireError::Transient(
                 "rd torrents timed out (25s)".into(),
             ))
         }
     };
+    api_detail.push(crate::metrics::ApiCallTrace {
+        endpoint: "/torrents".to_string(),
+        provider: "realdebrid".to_string(),
+        ms: started.elapsed().as_millis() as u64,
+        status: Some(list_resp.status().as_u16()),
+        timed_out: false,
+    });
     metrics.record_api(list_resp.status().as_u16(), started.elapsed());
     if list_resp.status().as_u16() == 429 {
         let ra = parse_retry_after(
@@ -413,6 +462,7 @@ async fn acquire_rd_mode_a(
     keys: &ApiKeys,
     client: &reqwest::Client,
     metrics: &Metrics,
+    api_detail: &mut Vec<crate::metrics::ApiCallTrace>,
 ) -> Result<Arc<DeliveryCapability>, AcquireError> {
     let want_hash = tf.info_hash.to_ascii_lowercase();
     let want_path = tf
@@ -438,7 +488,7 @@ async fn acquire_rd_mode_a(
 
     let mut direct_json: Option<serde_json::Value> = None;
     if let Some(rid) = coord_rid {
-        match rd_info_checked(rid, &want_hash, keys, client, metrics).await? {
+        match rd_info_checked(rid, &want_hash, keys, client, metrics, api_detail).await? {
             Some(j) => direct_json = Some(j),
             None => {
                 eprintln!(
@@ -452,8 +502,8 @@ async fn acquire_rd_mode_a(
     let info_json: serde_json::Value = match direct_json {
         Some(j) => j,
         None => {
-            let rid = rd_list_scan_rid(&want_hash, keys, client, metrics).await?;
-            match rd_info_checked(&rid, &want_hash, keys, client, metrics).await? {
+            let rid = rd_list_scan_rid(&want_hash, keys, client, metrics, api_detail).await?;
+            match rd_info_checked(&rid, &want_hash, keys, client, metrics, api_detail).await? {
                 Some(j) => j,
                 None => {
                     return Err(AcquireError::terminal(format!(
@@ -559,11 +609,25 @@ async fn acquire_rd_mode_a(
     {
         Ok(r) => r.map_err(|e| AcquireError::Transient(format!("rd unrestrict: {e}")))?,
         Err(_) => {
+            api_detail.push(crate::metrics::ApiCallTrace {
+                endpoint: "/unrestrict/link".to_string(),
+                provider: "realdebrid".to_string(),
+                ms: 25_000,
+                status: None,
+                timed_out: true,
+            });
             return Err(AcquireError::Transient(
                 "rd unrestrict timed out (25s)".into(),
             ))
         }
     };
+    api_detail.push(crate::metrics::ApiCallTrace {
+        endpoint: "/unrestrict/link".to_string(),
+        provider: "realdebrid".to_string(),
+        ms: unres_started.elapsed().as_millis() as u64,
+        status: Some(unres_resp.status().as_u16()),
+        timed_out: false,
+    });
     metrics.record_api(unres_resp.status().as_u16(), unres_started.elapsed());
     if unres_resp.status().as_u16() == 429 {
         let ra = parse_retry_after(
@@ -615,6 +679,7 @@ async fn acquire_rd_mode_b(
     keys: &ApiKeys,
     client: &reqwest::Client,
     metrics: &Metrics,
+    api_detail: &mut Vec<crate::metrics::ApiCallTrace>,
 ) -> Result<Arc<DeliveryCapability>, AcquireError> {
     let magnet = format!("magnet:?xt=urn:btih:{}", tf.info_hash);
     let add = client
