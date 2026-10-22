@@ -2999,7 +2999,15 @@ else if stripe_wanted(sub.len())
                                         .await;
                                     }
                                 }
-                                if record.failed.load(Ordering::SeqCst) {
+                                // THE CACHE IS THE AUTHORITY, not the flags.
+                                // A takeover and the fill owner can race on
+                                // the same chunk: one of them publishes it
+                                // and the other reports "not published".
+                                // The chunk being durable is the fact that
+                                // matters to this demand, so ask the cache.
+                                let chunk_present =
+                                    cache.is_present(&tf_id.cache_key(), index).unwrap_or(false);
+                                if record.failed.load(Ordering::SeqCst) && !chunk_present {
                                     // T19: terminal-chunk truncation joins
                                     // stripe workers so the survivor (and a
                                     // warm replacement) drains the remainder
@@ -3514,6 +3522,14 @@ impl OwnedFillGuard {
                 Some(r) => r,
                 None => continue,
             };
+            // FIRST TERMINAL STATE WINS. A chunk that is already durable
+            // stays durable: a second fill that found it present and did
+            // not publish it must NOT downgrade the shared record to
+            // "failed" — that record is what every other reader of the
+            // chunk waits on, and a takeover can race the owner here.
+            if rec.success.load(Ordering::SeqCst) {
+                continue;
+            }
             if ok && published.contains(idx) {
                 rec.success.store(true, Ordering::SeqCst);
             } else {

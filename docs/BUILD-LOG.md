@@ -109,17 +109,30 @@ No planned work as completed. No vague "healthy." No speculative causes.
   chunk 258 fetches away and waits **132 s for 0 bytes**, then asks again and
   waits 72 s. The player gave up at ~90 s.
 - Before/after, same fixtures, same session, production stack:
-  tt0053291 (10.5 GB) **90 090 -> 4 105 ms**; tt0075686 (4.3 GB)
-  **90 081 -> 5 639 ms**; tt0468569 (4.4 GB) **90 089 -> 4 901 ms**.
+  tt0053291 (10.5 GB) **90 090 -> 5 546 ms**; tt0075686 (4.3 GB)
+  **90 081 -> 5 016 ms**; tt0468569 (4.4 GB) **90 089 -> 4 996 ms**.
   All three pre-fix numbers landed within 9 ms of each other — the signature
   of a timeout, not of a slow provider.
+- Two hardening changes fell out of the first deployment and are in the same
+  commit: a fill must not downgrade a chunk that is ALREADY durable back to
+  "failed" (a takeover can race the fill owner, and the shared record is what
+  every other reader of that chunk waits on — without the guard, failed chunk
+  fills went from ~50 % to 18 560 in seven minutes); and a demand that finds
+  the chunk durable in the CACHE must read it, whatever the record's flags
+  say.
 - Production evidence: a post-fix cohort of 8 fixtures x 3 runs on the live
-  stack: warm-movie p50 552 ms, warm-episode 309 ms, byte-cold-movie
-  2 608 ms, byte-cold-episode 320 ms, dual-route 609 ms, large-file 764 ms,
-  season-pack 421 ms; 21/21 successful runs split into body-hot (14 runs,
-  total p50 523 ms) and body-cold (7 runs, total p50 5 069 ms, max 8 664 ms).
-  The provider's own TTFB on a cold read is **88 ms** (p50) and **HashSucker
-  adds 0 ms** between the provider's first byte and the client's.
+  stack: warm-movie p50 561 ms, warm-episode 342 ms, byte-cold-movie
+  1 513 ms, byte-cold-episode 359 ms, dual-route 30 007 ms, large-file
+  680 ms, season-pack 419 ms; 21/21 successful runs split into body-hot
+  (13 runs, total p50 533 ms) and body-cold (8 runs, total p50 5 854 ms,
+  max 33 210 ms). The provider's own first byte is 452 ms (p50) after the
+  byte request, and **HashSucker adds 0 ms** between the provider's first
+  byte and the client's.
+- The residual 30 s on the dual-route fixture is NOT a queue wait: the stage
+  report names it as the **capability acquisition** — `T1_acquire_issued` ->
+  `T2_capability_ready` = **26 034 ms** (the provider API call that yields
+  the download URL), with the provider's own TTFB after it of 193 ms. It is
+  provider-side and pre-byte.
 - Unproven: the remaining cold bucket is the PLAYER's own container work over
   a whole-file request (the player asks for 0..size; the byte path honours it;
   ~1 040 evictions, 524 of 994 chunk fills failed, 8.34 GB fetched for 6

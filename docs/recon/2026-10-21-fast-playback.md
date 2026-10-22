@@ -19,7 +19,7 @@ demand for the same file — the player's own request for the container's
 metadata at the *end* of the file — then waits behind that queue instead of
 fetching the one chunk it needs. Measured: 132 s of waiting for 0 bytes. The
 fix (a bounded takeover) took the same three fixtures from **90 090 / 90 081 /
-90 089 ms to 4 105 / 5 639 / 4 901 ms**.
+90 089 ms to 5 546 / 5 016 / 4 996 ms**.
 
 ---
 
@@ -109,9 +109,9 @@ not of a slow provider.
 
 | fixture | total | first frame | speed-up |
 |---|---|---|---|
-| tt0053291 | 4 105 ms | 4 101 ms | **22×** |
-| tt0075686 | 5 639 ms | 5 634 ms | **16×** |
-| tt0468569 | 4 901 ms | 4 896 ms | **18×** |
+| tt0053291 | 5 546 ms | 5 540 ms | **16×** |
+| tt0075686 | 5 016 ms | 5 011 ms | **18×** |
+| tt0468569 | 4 996 ms | 4 992 ms | **18×** |
 
 **The slow trace, annotated** (before the fix, tt0075686):
 
@@ -143,11 +143,12 @@ waited another 72 s. It gave up at ~90 s.
 **AFTER the fix**, the same three requests:
 
 ```
-REQ 0..4340539372        cacheHit=false  t5=613   term=cancelled  bytes=147456
-REQ 4340177162..4340539372  cacheHit=true   t5=0     term=complete   bytes=362211
+REQ 0..4340539372          cacheHit=false  t5=653   term=cancelled  bytes=34004352
+REQ 4340177162..4340539372  cacheHit=false  t5=3899  term=complete   bytes=362211
 ```
 
-The metadata chunk was already durable, and the first frame landed at 5.6 s.
+The metadata chunk was fetched by the demand itself, and the first frame landed
+at 5.0 s.
 
 ---
 
@@ -271,29 +272,29 @@ states recorded honestly):
 
 | fixture | warm | played | total p50 | total p95 | total max | cache classes |
 |---|---|---|---|---|---|---|
-| warm-movie (tt10986410) | yes | 3/3 | 552 ms | 5 737 ms | 5 737 ms | cold-body 1, hot 2 |
-| warm-episode (tt10986410:4:4) | yes | 3/3 | 309 ms | 865 ms | 865 ms | cold-body 1 |
-| byte-cold-movie (tt0075686) | yes | 3/3 | 2 608 ms | 2 661 ms | 2 661 ms | cold-body 1, cold-unknown 1, hot 1 |
-| byte-cold-episode (tt31510819:2:5) | yes | 3/3 | 320 ms | 1 234 ms | 1 234 ms | cold-body 1 |
-| dual-route (tt0021749) | yes | 3/3 | 609 ms | 8 664 ms | 8 664 ms | cold-body 1, hot 2 |
-| large-file (tt0120737, 155 GB) | yes | 3/3 | 764 ms | 6 661 ms | 6 661 ms | cold-body 1, hot 2 |
-| season-pack (tt2356777:1:3) | yes | 3/3 | 421 ms | 5 069 ms | 5 069 ms | cold-body 1, hot 2 |
+| warm-movie (tt10986410) | yes | 3/3 | 561 ms | 5 506 ms | 5 506 ms | cold-body 1, hot 2 |
+| warm-episode (tt10986410:4:4) | yes | 3/3 | 342 ms | 877 ms | 877 ms | cold-body 1 |
+| byte-cold-movie (tt0075686) | yes | 3/3 | 1 513 ms | 1 564 ms | 1 564 ms | hot 3 (the body was cached by the previous cohort) |
+| byte-cold-episode (tt31510819:2:5) | yes | 3/3 | 359 ms | 838 ms | 838 ms | cold-body 1 |
+| dual-route (tt0021749) | yes | 3/3 | **30 007 ms** | 33 210 ms | 33 210 ms | cold-body 3 |
+| large-file (tt0120737, 155 GB) | yes | 3/3 | 680 ms | 6 203 ms | 6 203 ms | cold-body 1, hot 2 |
+| season-pack (tt2356777:1:3) | yes | 3/3 | 419 ms | 5 161 ms | 5 161 ms | cold-body 1, hot 2 |
 | rear-window (tt0089883) | — | **0/3** | — | — | — | *no serviceable candidate* |
 
 Split by cache state, over all 21 successful runs:
 
-| class | runs | total p50 | total max | first frame p50 |
-|---|---|---|---|---|
-| body hot | 14 | 523 ms | 2 608 ms | 518 ms |
-| body cold | 7 | 5 069 ms | 8 664 ms | 5 064 ms |
+| class | runs | total p50 | total max | first frame p50 | provider dispatch p50 | provider first byte p50 | HashSucker added after the provider's first byte |
+|---|---|---|---|---|---|---|---|
+| body cold | 8 | 5 854 ms | 33 210 ms | 5 849 ms | 232 ms | 452 ms | **0 ms** |
+| body hot | 13 | 533 ms | 1 564 ms | 527 ms | — | — | **0 ms** |
 
 Against the pre-fix measurements on the same fixtures: **90 090 / 90 081 /
-90 089 ms** → **4 105 / 5 639 / 4 901 ms**.
+90 089 ms** → **5 546 / 5 016 / 4 996 ms**.
 
 Against the product's shape — a healthy start should be well under a second,
 and a cold-but-healthy provider in the low single digits — the warm path is
-now **~0.5 s** and the cold-body path is **2.4–8.7 s** with the provider's
-own cold read and the player's whole-file demux as the remainder.
+now **~0.5 s**, and the cold-body path is **1.5–6.2 s** apart from one
+fixture whose remaining cost is a slow **capability acquisition** (below).
 
 ---
 
@@ -301,14 +302,22 @@ own cold read and the player's whole-file demux as the remainder.
 
 After the fix, a cold first read still costs:
 
-* **~0.4 s** for the provider's first byte (88 ms TTFB after dispatch, plus
-  322 ms of capability acquisition) — external.
-* **~4.2 s (p50)** in the player's own `file_loaded`, on a request for the
+* **~0.45 s** for the provider's first byte (452 ms p50 from the byte request
+  to the provider's first byte) — external.
+* **~4.4 s (p50)** in the player's own `file_loaded`, on a request for the
   **whole file**. The byte path honours the range the client asked for, so a
   4.3 GB request means 4.3 GB of provider traffic, ~1 040 evictions and 524
   failed chunk fills, and the player's demux is gated on that stream. The
   container's index was already durable (0 ms); the wait is the player's own
   work over a whole-file range.
+* **up to 26 s**, on some runs, in the **capability acquisition** — the
+  provider API call that yields the download URL. The stage report names it
+  exactly: on the 30 s dual-route run, `T1_acquire_issued` → `T2_capability_ready`
+  was **26 034 ms**, while the provider's own TTFB afterwards was **193 ms**.
+  That is a provider-API cost incurred *before any byte request exists*, and
+  it is the whole of the remaining 30 s on that fixture. It is not a queue
+  wait and not a byte-path delay: the demand's takeover fires on schedule and
+  then waits for the acquisition it is entitled to.
 
 That last item is the next candidate, and it is a **cache-policy / range-shape**
 question, not a latency bug in the byte path: a demand-driven fill (fetch what
@@ -349,21 +358,30 @@ claimed but not started waited, unbounded, behind that plan's in-order fill
 queue. It was proven with the canonical waterfall (the bucket was
 `first_byte_to_client → player_file_loaded`), named to the exact code path
 (the demand consume loop's Waiter arm), repaired with a bounded takeover, and
-measured before/after on the same fixtures: **90 090 → 4 105 ms**,
-**90 081 → 5 639 ms**, **90 089 → 4 901 ms**.
+measured before/after on the same fixtures: **90 090 → 5 546 ms**,
+**90 081 → 5 016 ms**, **90 089 → 4 996 ms**.
 
 HashSucker adds **0 ms** after the provider's first byte, and the provider's
-own TTFB is **88 ms** (p50) on a cold read. The warm first frame is now
-**~0.5 s** and the cold-body first frame **2.4–8.7 s**.
+own TTFB is **193–452 ms** on a cold read. The warm first frame is now
+**~0.5 s** and the cold-body first frame **1.5–6.2 s**, with one fixture
+whose residual is a slow provider *capability acquisition* (26 s inside the
+provider API call, before any byte request exists).
 
-Two things are deliberately NOT claimed as fixed:
+Three things are deliberately NOT claimed as fixed:
 
 1. **The whole-file range.** The player asks for the entire file, the byte
    path honours it, and the player's own demux of that stream is the largest
-   remaining cold bucket (p50 4.2 s). The provider traffic and the eviction
+   remaining cold bucket (p50 4.4 s). The provider traffic and the eviction
    storm (8.7 GB evicted, 524 failed chunk fills) come from the same place.
    This is a cache-policy / range-shape question and belongs to its own slice.
-2. **Rear Window's failure to play at all.** Every candidate is uncached and
+2. **A slow capability acquisition.** On some runs the provider's API call
+   that yields the download URL took 26 s — measured as
+   `T1_acquire_issued → T2_capability_ready`. It is provider-side and
+   pre-byte, but it is the whole of the 30 s dual-route fixture. The demand's
+   takeover fires on schedule; it then waits for an acquisition it is entitled
+   to. Whether an acquisition can be reused or overlapped is a separate
+   question, and no evidence here earns a change to it.
+3. **Rear Window's failure to play at all.** Every candidate is uncached and
    the alternate route refuses the add. That is a supply failure. It is
    recorded as a reliability finding, not a latency one — and it is the reason
    the cohort's "previously slow fixture" row reads `0/3 played` rather than a
