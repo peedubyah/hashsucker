@@ -159,6 +159,55 @@ No planned work as completed. No vague "healthy." No speculative causes.
   player's own demux wait). Whether the fill should be demand-driven is the
   next question, and it is a cache-policy question, not a latency bug.
 
+## 2026-10-21 — COLD START, SMALL — the ~4-6 s cold start: characterized, and one bounded fix
+
+- Changed: the byte path's takeover patience. The previous slice left a
+  3 000 ms wait before a demand would fetch a chunk another reader's plan had
+  claimed but not started; it is now **250 ms** (`data-plane/src/serve.rs`,
+  `JOIN_GRACE`). The chunk's fill record already carries a `started` flag, so
+  "the owner is on this chunk" was never what the grace protected — it only
+  covered the race between the owner picking a chunk up and saying so. The
+  duplicate it risks is one 8 MiB chunk; the wait it avoids is the whole
+  startup. Also added the slice's instruments:
+  `media-search/tools/hs/coldstart.mjs` (the pre-first-frame Range traffic
+  with the chunk accounting, read from the data plane's own decision log
+  and stage reports) and `media-search/tools/hs/data-plane.mjs`.
+- Verification: the measurement NAMED the wait. The tail read's provider
+  request was dispatched at **3 140 / 3 161 / 3 140 / 3 296 ms** in four
+  cold runs against a 3 000 ms patience — the patience WAS the wait, and the
+  provider's own TTFB after dispatch was 190-400 ms.
+- Before/after, SAME fixtures, SAME byte-cold state (`full_miss` on both
+  sides), production stack: tt0075686 5 688 -> 2 585 ms; tt0468569
+  5 227 -> 2 371 ms; tt27419466 5 406 -> 2 186 ms; tt7366338:1:2
+  5 534 -> 2 450 ms; tt10986410:4:1 4 887 -> 2 218 ms; tt2356777:1:3
+  5 085 -> 2 521 ms. **Median 5 306 -> 2 438 ms (2.16x)**, every fixture
+  improved, none regressed. A disjoint set of six same-shape fixtures
+  measured 3 619 / 4 359 / 3 959 / 2 155 / 1 189 / 2 797 ms. The tail
+  read's provider dispatch moved from ~3 150 ms to 409-541 ms.
+- Production evidence (the characterization the slice required): the player
+  makes the SAME three requests in every cold run — the whole file
+  (`0..size`), the container's index at the END (`size-362211..size`), then
+  the media data. The whole-file request makes the byte path claim **295-831
+  chunks** (8 MiB each) against the **3-9** the player actually needs before
+  the first frame; the fill fetched **164 MB - 1.98 GB** while the player
+  consumed **12.9-58.4 MB**, and evicted **9-231 chunks (up to 1.94 GB)**
+  from the 8 GiB cache. The demanded reads are NOT delayed by that (the
+  head's first byte reaches the client at 463-684 ms; HashSucker adds 0 ms
+  after the provider's first byte) — so the fill's waste is a cache-policy
+  question, and it is NOT taken here.
+- Unproven: whether a demand-driven fill (fetch what the client consumes)
+  would keep the file warm and stop the eviction storm. That changes the
+  cache's warming contract and was deliberately not attempted.
+- Safety: the Ranges served are unchanged; a seek still works (resumed at
+  30 s, played to 31.4 s, clean exit 0); sustained playback is clean
+  (playhead advances, exit 0); failed chunk fills stayed at 0-2 per run.
+  data-plane 153 passed / 0 failed; media-search 3 625 tests / 3 621 pass /
+  3 skipped / 1 pre-existing baseline fail.
+- Next gate: the fixed-grid fill's policy — how far ahead it may fetch and
+  what it may evict. It does not slow the demanded reads, but it makes the
+  NEXT startup cold and spends the provider's budget on bytes nobody asked
+  for.
+
 ## 2026-10-12 — VFS collection mtime scanned PMS continuously — FIXED + DEPLOYED
 
 - Changed: `media-search/src/lib/vfs/tv-webdav.js` now derives TV collection

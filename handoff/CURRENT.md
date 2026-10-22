@@ -393,6 +393,49 @@ session, both healthy. The 7 untracked user files (ab-*.jsonl, ab-*.json,
 .env.example, bench-core-latency.mjs, ab-*-driver.sh) are preserved and
 untouched.
 
+## Live session state (2026-10-21, cold start, small — the last 5 s, characterized and cut)
+
+**What is now true.** A byte-cold first frame is **2.2-2.6 s** (was
+4.9-5.7 s). The slice measured the previous slice's takeover and found the
+wait it introduced was the largest internal term: the player asks for the
+WHOLE file, then for the container's index at the END of it; that second
+demand joined the first one's claim for a chunk the fill would not reach
+for 90-140 s, and waited. The tail read's provider request was dispatched
+at **3 140-3 296 ms** in every cold run against a **3 000 ms** patience.
+The patience is now **250 ms**. Same six byte-cold fixtures (`full_miss` on
+both sides): **5 306 -> 2 438 ms median, 2.16x**, none worse.
+
+**The startup's shape, measured:** three requests from the player, always
+the same — the whole file, the index at the end, then the media data. The
+whole-file request makes the byte path claim **295-831 chunks** (8 MiB each)
+against the **3-9** the player needs before the first frame; the fill
+fetched **164 MB - 1.98 GB** while the player consumed **12.9-58.4 MB**,
+evicting **9-231 chunks (up to 1.94 GB)** from the 8 GiB cache. It does
+NOT delay the demanded reads (the head's first byte lands at 463-684 ms) —
+it makes the NEXT startup cold. That is a **cache-policy question** and was
+deliberately not taken; the slice forbids a cache redesign.
+
+**How to measure it again.** `node tools/hs/coldstart.mjs --fixture
+"label=intent" [--fixture ...]` reports the pre-first-frame Range traffic
+with the chunk accounting, read from the data plane's own decision log and
+stage reports. The full report: `docs/recon/2026-10-21-cold-start-small.md`.
+
+**Do not read the excluded fixtures as slow starts.** Rear Window
+(tt0089883) does not PLAY — every candidate uncached at TorBox, RealDebrid
+refuses the add, and the binding fails with `NO_PLACEMENT` before any size
+comparison. That is a SUPPLY failure, and it is not this slice's subject.
+
+**Do not start capability-acquisition work.** The dual-route fixture's
+residual is a slow provider API call (26 s inside
+`T1_acquire_issued -> T2_capability_ready`) that happens BEFORE any byte
+request exists. It is measured and named, and it is explicitly out of
+scope here.
+
+**State of the trees.** `main` carries the cold-start fix (`633215a`) on top
+of the previous slice's `f37d44c`, `6df1163` and `8ae3528`. Production runs
+the rebuilt data-plane image (recreated, healthy). The 7 untracked user
+files are preserved and untouched.
+
 ## Live session state (2026-10-19, critical-path independence audit)
 
 - `main` is AHEAD of `github/main` (local commits, unpushed). The header

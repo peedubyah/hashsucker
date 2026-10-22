@@ -18,12 +18,23 @@ provider's first byte. Full report: `docs/recon/2026-10-21-fast-playback.md`.
 won were serviceable, exact and within the quality floor; the time was not
 spent choosing them.
 
-**Not fixed here, deliberately:** the player asks for the WHOLE file, the byte
-path honours it, and the player's own demux of that stream is the largest
-remaining cold bucket (p50 4.2 s), with the provider traffic and the
-eviction storm (1 040 evictions, 524 of 994 chunk fills failed) behind it. A
-demand-driven fill instead of a range-driven one is the next question, and it
-is a cache-policy question, not a latency bug.
+**Cold-start slice (2026-10-21) — DONE. VERDICT: COLD START — BOUNDED CACHE
+FIX.** The ~4-6 s byte-cold start was ONE internal wait: the takeover's
+3 000 ms patience, not the provider, the cache or the player. Measured: the
+tail read's provider request was dispatched at ~3 150 ms in EVERY cold run
+against a 3 000 ms patience. Cut to 250 ms; the same six byte-cold fixtures
+went **5 306 -> 2 438 ms median (2.16x)**, every fixture improved, none
+regressed. Report: `docs/recon/2026-10-21-cold-start-small.md`.
+
+**Characterized, and NOT fixed (a cache-policy question, not a startup
+defect):** the player asks for the WHOLE file, so the byte path claims
+**295-831 chunks** (8 MiB each) against the **3-9** needed before the first
+frame; the fill fetched **164 MB - 1.98 GB** while the player consumed
+**12.9-58.4 MB**, evicting **9-231 chunks (up to 1.94 GB)** from the 8 GiB
+cache. It does NOT delay the demanded reads (the head's first byte reaches
+the client at 463-684 ms; HashSucker adds 0 ms after the provider's first
+byte) — it makes the NEXT startup cold. Changing what the fill fetches is
+the cache's warming contract and was deliberately not attempted.
 
 **Kept separate from speed:** Rear Window (tt0089883) does not PLAY right now
 — every candidate is uncached at TorBox, RealDebrid refuses the add, and the
