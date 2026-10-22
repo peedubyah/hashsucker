@@ -135,9 +135,19 @@ async fn serve_origin(
                 ("content-length", (end - start + 1).to_string()),
             ];
             if st.mode.load(Ordering::SeqCst) == MODE_SHORT_BODY {
-                // Malformed: claims 206 + the correct range metadata, then
-                // truncates the payload hard.
-                return build_hdrs(206, hdrs, body_for(start, 1));
+                // Truncated: commits a valid 206 with the correct range
+                // metadata, delivers one byte, then ends the stream cleanly.
+                // No content-length is advertised (chunked), so this is a
+                // true premature-EOF truncation and not a header/body
+                // mismatch (which hyper rejects with a panic instead of
+                // serving a truncated body).
+                let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = vec![
+                    Ok(bytes::Bytes::from(body_for(start, 1))),
+                ];
+                let body = axum::body::Body::from_stream(futures_util::stream::iter(chunks));
+                let mut b = axum::response::Response::builder().status(206);
+                b = b.header("content-range", format!("bytes {start}-{end}/{}", st.size));
+                return b.body(body).unwrap();
             }
             if st.mode.load(Ordering::SeqCst) == MODE_MIDBODY_ERROR {
                 // Commits a valid 206 with the correct range metadata, delivers
@@ -674,28 +684,14 @@ async fn r2d_timeout_fails_over_to_alternate() {
         "the still-cached route delivered the read");
 }
 
-/// KNOWN-FAILING (never passing) — kept out of the default path, with its
-/// reason recorded.
+/// r2e — a truncated provider payload must fail over to the alternate
+/// same-TF route and still deliver the exact requested Range.
 ///
-/// This test HUNG before the harness work: it needed a client request
-/// timeout to detect the truncated provider payload, and the test's client
-/// had none, so the read never completed and the whole target never
-/// finished. With the PRODUCTION timeout injected it now completes — and
-/// FAILS, exposing two things that the hang was hiding:
-///
-///  1. the mid-body path re-opens the SAME lane; it does not fail over to
-///     the alternate same-TF route for a truncated payload, so the read
-///     exhausts its retry budget and the client gets an empty 206;
-///  2. its expected byte range is `expected(0, CHUNK)` while the read is
-///     for `CHUNK..2*CHUNK-1` — the wrong offset.
-///
-/// The assertions are UNCHANGED (not weakened): the test still demands a
-/// 206 with the whole range and the alternate route delivering it. It is
-/// `#[ignore]`d because it does not hold today, and it stays in the suite
-/// so the defect remains visible and re-runnable
-/// (`cargo test --test same_tf_route_recovery -- --ignored`).
+/// The faulted lane commits a valid 206 with the correct range metadata,
+/// delivers one byte, then ends the stream cleanly (premature EOF). The
+/// read is for `CHUNK..2*CHUNK-1`, so the expected bytes are generated
+/// from offset CHUNK — not offset 0.
 #[tokio::test]
-#[ignore = "known-failing: the truncated-payload failover does not happen (see the note above)"]
 async fn r2e_malformed_provider_payload_fails_over() {
     let st = build_stack(FILE_SIZE, None).await;
     let served_by = lane_that_serves(&st).await;
@@ -703,9 +699,16 @@ async fn r2e_malformed_provider_payload_fails_over() {
     let winner = if served_by == "torbox" { &st.alternate } else { &st.primary };
     loser.fault(MODE_SHORT_BODY);
     let winner_before = winner.range_requests();
+    let loser_before = loser.range_requests();
     let (status, body, _p) = read(&st, CHUNK, 2 * CHUNK - 1).await;
+    eprintln!(
+        "[r2e] served_by={served_by} loser_delta={} winner_delta={} body_len={}",
+        loser.range_requests() - loser_before,
+        winner.range_requests() - winner_before,
+        body.len(),
+    );
     assert_eq!(status, 206, "a truncated provider payload must not truncate the client");
-    assert_eq!(body, expected(0, CHUNK as usize), "the client still gets the full bytes");
+    assert_eq!(body, expected(CHUNK, CHUNK as usize), "the client still gets the full bytes");
     assert_eq!(winner.range_requests() - winner_before, 1,
         "the still-cached route delivered the read");
 }
