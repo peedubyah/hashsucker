@@ -6102,3 +6102,145 @@ capability/permit startup slice. Candidates left standing: (1) deploy +
 
 **TRUNCATED ROUTE FAILOVER — CLOSED.** Safe exact same-TF recovery now
 covers the exposed truncated-body case.
+
+## 2026-10-23 — ROUTE HEALTH + FILL OWNERSHIP — CLOSED
+
+### WHAT CHANGED
+
+Route health (fixed, three small commits' worth in two):
+
+- `media-search/src/lib/control-plane/store.js` —
+  `listDataPlaneCoordinates` now orders routes with FRESH USABLE evidence
+  before unobserved ones. Attempt preference only: eligibility, terminal
+  exclusion, and the no-evidence order (provider ASC) are all unchanged.
+- `data-plane/src/manager.rs` — `CapabilityManager::new` emits slots in
+  S-1 coord order (order-preserving grouping) instead of HashMap iteration
+  order, so the offered preference survives into attempt order. Grouping
+  and identity semantics unchanged. (Without this the Node ordering would
+  have been theater: the byte path attempts slots in iteration order.)
+- `media-search/src/server/app.js` — the `/play/<token>` handler now passes
+  the same failure-isolated serving-attribution callback the VFS/WebDAV
+  path uses, so direct plays record usable evidence. The plumbing
+  (`servePlaybackObject` → `serveAuthoritativeBytes` → attribution
+  headers) already existed; only the call site was missing. Pure cache hits
+  carry no attribution and still record nothing.
+
+Fill ownership (investigated, NO change — verdict HEALTHY, see below).
+
+### WHAT WAS PROVEN
+
+**The ~540 ms tax, reproduced live (Phase 1).** Post-deploy cold-pool
+play of dual-route Ted Lasso S01E02 (`tf_2c3a7f11`): first acquisition
+paid RD `/torrents/info` 398 ms + `/unrestrict/link` **403** 565 ms, then
+TorBox `/torrents/requestdl` 325 ms → success. ~963 ms of dead-route tax
+on one cold acquisition; later requests reused the warm TorBox cap
+(0 API calls). First frame still healthy (3.2 s, client-dominated).
+
+**Evidence classification (Phase 2).** The RD attempt was
+NEVER-OBSERVED-as-dead: success-path reads never record evidence (only
+class-D total exhaustion does), so the classifier saw RD as
+retryable-unknown forever. Production evidence table: 57 usable
+(52 TorBox), 1 terminal + 1 temporary (both long expired). Nothing was
+"known dead" — the fix is prefer-known-good, not exclude-known-bad.
+
+**403 semantics (Phase 4).** RD 403 on `/unrestrict/link` classifies as
+`AcquireError::no_capability` (not terminal, not transient): breaker
+failure (in-memory, threshold 3 / 30 s cooldown), next slot tried. Correct
+as a per-attempt verdict; wrong as durable memory — which is why the
+usable-side ordering (not 403 recording) is the fix. Recording
+acquisition 403s as terminal was rejected: a 403 can be account-level,
+and the tax is already removed whenever the sibling proved itself.
+
+**Freshness (Phase 5).** Usable 30 min / temporary 5 min / terminal
+10 min TTLs. The preference window matches: proven route preferred for
+30 min, then honest re-discovery.
+
+**Causal proof, same-fixture before/after (Phase 7).** Deterministic:
+no-evidence order still provider-ASC (negative control green);
+TorBox-usable → TorBox first; RD-usable → RD first (no provider bias);
+expired usable → ASC; terminal → excluded; all-terminal → empty set
+(fail closed). Rust: slots follow S-1 order both directions. Live: after
+the direct play recorded TorBox usable for the episode TF, production
+coord order reads TorBox-first, RD second and eligible.
+
+**Fill lifecycle/utilization/harm/cancellation (Phases 8–12).**
+Permit = per signed capability, held for the whole fill via the
+reservation hand-back chain. Production (33 h window): 7134 holds, mean
+1.6 s, max 26.5 s; acquisitions 78 vs reuses 7061 (98.9% reuse);
+limiter_permit_waits 33 pre-window (max 3 s), 0 post-deploy; pool_growths
+23; reacquisitions 0; layer-A API 84 calls, 0 4xx/5xx, avg 277 ms.
+Client disconnect does NOT stop a fill — explicit design ("Keep filling:
+the chunk is still worth having, and waiters depend on these records
+being resolved"). No abort handles exist in the default path by design.
+Cache: 451 GB fetched / 448 GB evicted / 8.6 GB served local; overfetch
+ratio 5.5%; the churn driver is whole-file fetch policy — the known,
+out-of-scope cache-policy question. No pool exhaustion, no churn, no
+starvation recurrence. Route-health × fill (Phase 14): analyzed, no
+violation — failure-driven recovery consults live slot state
+(breaker/cap-status/failover); healthy transfers are correctly NOT
+preempted by evidence changes (preemption would waste, not save).
+
+**Regression.** Rust: 155 lib + 14 adversarial + 19 recovery + 9
+coalescing, all green. Node: 3634 tests, 3630 pass — the 1 failure is the
+pre-existing `vfs-collection-resilience` C1/C2/C3 (documented baseline
+failure, untouched by this slice). Production constants 25 s / 30 s
+unchanged. Deployed: media-search + data-plane rebuilt from main and
+recreated, both healthy; 5 natural plays (3 pre, 2 post + 1 evidence
+check), all 0 manual actions, `file-loaded: 1`, clean exits, no provider
+URL leak.
+
+### WHAT REMAINS UNPROVEN
+
+- A live cold acquisition going TorBox-first with zero RD attempt (needs
+  cold pool + fresh usable evidence simultaneously; the deterministic
+  suites prove the mechanism, production awaits a natural cold leg).
+- Abandoned-fill byte reuse attribution (counters don't split it; not
+  worth manufacturing traffic to split).
+
+### WHAT WAS LEARNED
+
+- The tax was never "RD always first": Rust slot order was HashMap
+  nondeterminism, so RD was first ~50% of cold acquisitions. Fixing only
+  the Node order would have been theater; both halves were required.
+- Usable evidence had a missing producer on the path the product is
+  pivoting to (direct playback). Evidence loops need producer audits per
+  serving path, not just consumer audits.
+- `pool_attribution`/`stages_recent`/`api_detail` already answer most
+  "who attempted what" questions live — the waterfall is the timeline
+  Phase 1 asks for; no new tracing was built.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- "Route order is provider-ASC": now evidence-driven (usable-first),
+  eligibility unchanged.
+- "Slot order is nondeterministic": now S-1 order, deterministically.
+- "Fills hold capabilities ~100 s idly": holds are active transfers;
+  post-disconnect continuation is intentional prefetch/waiter-resolution,
+  not a leak.
+
+### WHAT SHOULD BE UPDATED
+
+- Done in-slice: this log,
+  `docs/retrospectives/2026-10-23-route-health-fill-ownership.md`,
+  `PLANS.md` (slice entry), `handoff/CURRENT.md` (session section).
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing. (Noted: `DATA_PLANE_FORCE_SLOT_ORDER` bench gate is now
+  redundant for order control since construction is deterministic; kept —
+  harmless, still useful to force a specific lane in benches.)
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. Left standing, all explicitly out of
+scope here: uncached-execution policy (Rear Window), cache/warming policy
+(overfetch + churn), the RD-403-as-signal question (only if the tax
+persists after this fix), torrent file-tree sidecar.
+
+### VERDICTS
+
+**ROUTE HEALTH — KNOWN-DEAD TAX FIXED** (precisely: usable-evidence
+preference removes the repeated failed first attempt; eligibility and
+freshness policy unchanged).
+**FILL OWNERSHIP — HEALTHY** (long holds are active/useful; no measurable
+harm; cancellation-after-disconnect intentional; churn is cache policy).

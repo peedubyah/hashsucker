@@ -3,6 +3,23 @@
 Active phase: **Core playback reliability & recovery — CLOSED**.
 → [`docs/phases/phase-core-playback-reliability.md`](docs/phases/phase-core-playback-reliability.md)
 
+**Route health + fill ownership slice (2026-10-23) — DONE. VERDICTS:
+ROUTE HEALTH — KNOWN-DEAD TAX FIXED / FILL OWNERSHIP — HEALTHY.**
+The ~540 ms dead-route tax was reproduced live (~963 ms: RD info 398 +
+unrestrict 403 565, then TorBox 325). Fixed by preferring routes with
+fresh usable evidence in `listDataPlaneCoordinates` (attempt preference
+only; eligibility unchanged) + preserving S-1 coord order into Rust slots
+(previously HashMap nondeterminism — a Node-only fix would have been
+theater) + wiring the missing usable-evidence producer on the direct
+`/play/` path. Fill ownership investigated end to end and left unchanged:
+holds are active transfers (prod mean 1.6 s), starvation fixed with no
+recurrence, post-disconnect continuation intentional, churn is the known
+out-of-scope cache-policy question. Rust 155+14+19+9 green; Node
+3630/3634 (1 pre-existing baseline failure). Both services rebuilt +
+recreated and healthy; production coord order now TorBox-first with RD
+eligible. Evidence: `docs/BUILD-LOG.md` 2026-10-23; retrospective
+`docs/retrospectives/2026-10-23-route-health-fill-ownership.md`.
+
 **Truncated same-TF route failover slice (2026-10-22) — DONE. VERDICT:
 CLOSED.** A lane that committed a 206 then truncated mid-body was reopened
 for the same demand 8192 times while the healthy alternate was never

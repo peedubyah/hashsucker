@@ -340,6 +340,28 @@ recovered from the dropped stash's untracked commit (`b4d12bd`) and restored
 untracked. A dropped stash is still recoverable while its object survives —
 look in `git fsck --unreachable` before assuming a loss.
 
+## Live session state (2026-10-23, route health + fill ownership — CLOSED)
+
+**What is now true.** Dual-route cold acquisitions no longer pay a failed
+RealDebrid attempt ahead of a proven TorBox route: `listDataPlaneCoordinates`
+orders fresh-usable-evidence routes first (preference, not eligibility),
+Rust slots preserve S-1 order (was HashMap nondeterminism), and direct
+`/play/` deliveries now record usable evidence like the VFS path always
+did. Live proof: Ted Lasso S01E02 (`tf_2c3a7f11`) first acquisition paid
+RD info 398 ms + unrestrict 403 565 ms before TorBox 325 ms; after the
+play recorded TorBox usable, production coord order reads TorBox-first
+with RD still eligible. Fill ownership verdict HEALTHY, no change: holds
+are active transfers (prod mean 1.6 s over 7134 holds), starvation fixed
+with no recurrence (0 post-deploy waits), post-disconnect continuation
+intentional by design, churn is the known cache-policy question.
+Deployed: media-search + data-plane rebuilt from main and recreated, both
+healthy; 6 natural plays, all 0 manual actions, `file-loaded: 1`, clean
+exits. Production constants unchanged (25 s / 30 s). Evidence:
+`docs/BUILD-LOG.md` 2026-10-23;
+`docs/retrospectives/2026-10-23-route-health-fill-ownership.md`.
+Explicitly NOT started afterward: uncached-execution work, cache-policy
+redesign.
+
 ## Live session state (2026-10-22, truncated same-TF route failover — CLOSED)
 
 **What is now true.** A provider lane that commits a 206 and then
