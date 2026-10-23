@@ -439,27 +439,31 @@ impl CapabilityManager {
     ) -> Self {
         // Default slot grouping: identical to the pre-P15 behavior. We
         // group coords by placement, pick the file whose size matches the
-        // authoritative TorrentFile, and build a Slot per group. The
-        // resulting slot iteration order is whatever HashMap iteration
-        // produces, which is what the existing system has always done
-        // (and is what other code paths and tests rely on). S-1 order
-        // is NOT modified here. P15's bench uses an EXPLICIT,
-        // opt-in, reversible env-var gate (DATA_PLANE_FORCE_SLOT_ORDER) below
-        // to deterministically target a specific provider as the first
-        // slot; the default is unchanged.
+        // authoritative TorrentFile, and build a Slot per group. Groups
+        // are emitted in S-1 coord order (first-seen placement first), so
+        // the byte path attempts routes in the order Node offered them —
+        // including Node's evidence-driven preference (a route with fresh
+        // usable evidence sorts first). Previously this iterated a
+        // HashMap, so S-1 order was destroyed and attempt order was
+        // nondeterministic per process; grouping and identity semantics
+        // are unchanged, only the emission order is now deterministic.
+        let mut order: Vec<(String, String, String)> = Vec::new();
         let mut groups: HashMap<(String, String, String), Vec<ProviderCoord>> = HashMap::new();
         for c in coords {
-            groups
-                .entry((
-                    c.provider.clone(),
-                    c.account_scope.clone(),
-                    c.provider_resource_id.clone(),
-                ))
-                .or_default()
-                .push(c);
+            let key = (
+                c.provider.clone(),
+                c.account_scope.clone(),
+                c.provider_resource_id.clone(),
+            );
+            if !groups.contains_key(&key) {
+                order.push(key.clone());
+            }
+            groups.entry(key).or_default().push(c);
         }
         let mut slots = Vec::new();
-        for ((provider, scope, resource), files) in groups {
+        for key in &order {
+            let (provider, scope, resource) = key;
+            let files = &groups[key];
             let target = files
                 .iter()
                 .find(|f| f.size == tf.size)
@@ -490,10 +494,9 @@ impl CapabilityManager {
             }
         }
         // P15: OPTIONAL, REVERSIBLE bench-only ordering gate. When unset
-        // (the default), slot iteration order is identical to the
-        // pre-P15 system (HashMap iteration; not deterministic). When
-        // set, moves the named provider to the FRONT of its tfId's slot
-        // list so the bench can deterministically force a specific
+        // (the default), slot iteration order is S-1 coord order (first-seen
+        // placement first). When set, moves the named provider to the FRONT
+        // of its tfId's slot list so the bench can deterministically force a specific
         // provider as the first-tried slot and DATA_PLANE_FORCE_SLOT_FAILURE
         // can target it. Relative order among non-named providers is
         // preserved.
@@ -1948,6 +1951,33 @@ mod retry_after_scope_tests {
             Err(AcquireError::RateLimited(_))
         );
         assert!(!blocked, "expired evidence must never suppress");
+    }
+
+    #[tokio::test]
+    async fn slot_providers_follow_s1_coord_order() {
+        // Route-health work (usable-first ordering) is decided by Node and
+        // expressed as S-1 coord order. The byte path attempts slots in
+        // iteration order, so construction must preserve it: grouping by
+        // placement must not scramble the offered preference into HashMap
+        // nondeterminism. TorBox-first here is the evidence-driven case
+        // (TorBox delivered recently); realdebrid-first elsewhere is the
+        // no-evidence case. Both must survive construction verbatim.
+        for coords in [
+            vec![
+                coord("torbox", "default", "res-tb", "0"),
+                coord("realdebrid", "default", "res-rd", "0"),
+            ],
+            vec![
+                coord("realdebrid", "default", "res-rd", "0"),
+                coord("torbox", "default", "res-tb", "0"),
+            ],
+        ] {
+            let want: Vec<String> = coords.iter().map(|c| c.provider.clone()).collect();
+            let mgr = build(coords);
+            let got: Vec<String> =
+                mgr.slots.iter().map(|s| s.coord.provider.clone()).collect();
+            assert_eq!(got, want, "slot attempt order is S-1 coord order");
+        }
     }
 }
 

@@ -1499,6 +1499,14 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
     // The evidence's own horizon bounds the exclusion: a terminal record
     // that is not superseded expires and the route is offered again, so a
     // stale or wrong verdict cannot un-serve a title forever.
+    //
+    // ORDER is an attempt preference, not eligibility: a route with FRESH
+    // USABLE evidence (it delivered bytes recently) is offered before an
+    // unobserved one, so a cold acquisition does not spend a failed
+    // provider attempt (and its latency) ahead of a route already proven
+    // executable for this exact TorrentFile. Eligibility is unchanged —
+    // every offered route may still be attempted, and with no usable
+    // evidence the order is exactly as before (provider, scope, file).
     return db.prepare(`
       SELECT
         pl.provider             AS provider,
@@ -1524,7 +1532,9 @@ export function createControlPlaneStore({ dbPath = ':memory:', database = null, 
           AND ev.state = 'terminal'
           AND ev.expires_at > @now
         )
-      ORDER BY pl.provider, pl.account_scope, pf.provider_file_id
+      ORDER BY
+        CASE WHEN ev.state = 'usable' AND ev.expires_at > @now THEN 0 ELSE 1 END,
+        pl.provider, pl.account_scope, pf.provider_file_id
     `).all({ torrentFileId, now: now() });
   }
 
