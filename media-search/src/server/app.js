@@ -2936,6 +2936,26 @@ export function createRequestHandler(dependencies = {}) {
             dataPlaneBaseUrl: env.DATA_PLANE_URL ?? 'http://data-plane:3001',
             fetchFn,
             now: clock(),
+            // A route that just delivered bytes is not a dead route — the
+            // same hygiene the VFS/WebDAV path applies, so direct plays
+            // feed the usable-evidence ordering the byte path offers.
+            // Evidence hygiene must never break playback.
+            onServingAttribution: (attribution) => {
+              try {
+                if (attribution?.provider && attribution?.providerResourceId && attribution?.providerFileId) {
+                  routeFailureRecorder?.clearRouteFailure({
+                    provider: attribution.provider,
+                    accountScope: 'default',
+                    providerResourceId: attribution.providerResourceId,
+                    providerFileId: attribution.providerFileId,
+                    infoHash: attribution.infoHash ?? null,
+                    fileIndexKey: -1,
+                  });
+                }
+              } catch {
+                // Evidence hygiene must never break primary playback.
+              }
+            },
           });
           return;
         } catch (error) {
