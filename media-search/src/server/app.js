@@ -27,8 +27,17 @@ import {
 import { servePlaybackObject, PlaybackObjectError } from './playback-route.js';
 import {
   resolvePlaybackIntent,
+  readAuthoritativeBinding,
   PlaybackObjectApiError,
 } from '../api/playback-object.js';
+import {
+  resolvePlayback,
+  PLAY_OUTCOME,
+} from '../lib/playback/orchestrate.js';
+import { createPreparationStore } from '../lib/prepare/store.js';
+import { createPrepareDriver } from '../lib/prepare/driver.js';
+import { createRdPrepareAdapter } from '../lib/prepare/rd-acquire.js';
+import { createTorBoxPrepareAdapter } from '../lib/prepare/torbox-acquire.js';
 import {
   mintPlaybackToken,
   playbackObjectPath,
@@ -943,6 +952,103 @@ export function createRequestHandler(dependencies = {}) {
     torBoxInventoryProvider,
     now: clock,
   }));
+
+  // ── Preparation (moonshot vertical): provider-neutral async acquisition.
+  // Feature-flagged: PREPARE_ENABLED=1 arms orchestration + status endpoint.
+  // Default OFF preserves today's exact behavior (unbound → NOT_AVAILABLE).
+  const prepareEnabled = dependencies.prepareEnabled
+    ?? String(env.PREPARE_ENABLED ?? '0').toLowerCase() === '1';
+  const prepareEnvNum = (name, fallback, min) => {
+    const n = Number(env[name]);
+    return Number.isSafeInteger(n) && n >= min ? n : fallback;
+  };
+  const prepareConfig = {
+    maxConcurrentTotal: prepareEnvNum('PREPARE_MAX_CONCURRENT', 2, 1),
+    maxConcurrentPerProvider: prepareEnvNum('PREPARE_MAX_PER_PROVIDER', 2, 1),
+    maxSizeBytes: prepareEnvNum('PREPARE_MAX_SIZE_BYTES', 100 * 1024 * 1024 * 1024, 1),
+    maxAttempts: prepareEnvNum('PREPARE_MAX_ATTEMPTS', 20, 1),
+    pollIntervalByProvider: {
+      torbox: prepareEnvNum('PREPARE_POLL_MS_TORBOX', 60_000, 5_000),
+      realdebrid: prepareEnvNum('PREPARE_POLL_MS_RD', 30_000, 5_000),
+    },
+    preparationTimeoutMs: prepareEnvNum('PREPARE_TIMEOUT_MS', 6 * 60 * 60 * 1000, 60_000),
+  };
+  const prepareProviderOrder = String(env.PREPARE_PROVIDER_ORDER ?? 'torbox,realdebrid')
+    .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  let prepareStore = null;
+  let prepareDriver = null;
+  const prepareAdapters = {};
+  if (prepareEnabled && controlPlaneStore) {
+    try {
+      prepareStore = createPreparationStore({
+        db: controlPlaneStore.db,
+        clock,
+        config: { preparationTimeoutMs: prepareConfig.preparationTimeoutMs },
+      });
+      if (env.TORBOX_API_KEY) {
+        prepareAdapters.torbox = createTorBoxPrepareAdapter({ apiKey: env.TORBOX_API_KEY });
+      }
+      if (rdClient) {
+        prepareAdapters.realdebrid = createRdPrepareAdapter({ store: controlPlaneStore, client: rdClient });
+      }
+      prepareDriver = createPrepareDriver({
+        store: prepareStore,
+        controlPlaneStore,
+        adapters: prepareAdapters,
+        config: prepareConfig,
+        clock,
+        log: (...a) => console.log('media-search: prepare', ...a),
+      });
+    } catch (err) {
+      console.warn('media-search: preparation disabled (init failed):', err?.message ?? err);
+      prepareStore = null;
+      prepareDriver = null;
+    }
+  }
+
+  // Preparation dependencies for orchestration + status endpoint + worker.
+  // Null when the flag is off: orchestration then resolves NOT_AVAILABLE
+  // exactly like today. Eligible backends follow configured credentials
+  // in the documented default order (TorBox first — same convention as
+  // the alternate-fallback chain); refusal memory, not config, moves
+  // subsequent attempts.
+  function getPrepareDeps() {
+    if (!prepareEnabled || !prepareDriver) return null;
+    const eligibleProviders = prepareProviderOrder.filter(
+      (p) => (p === 'torbox' && env.TORBOX_API_KEY) || (p === 'realdebrid' && rdClient),
+    );
+    if (eligibleProviders.length === 0) return null;
+    return {
+      driver: prepareDriver,
+      eligibleProviders,
+      rebindFn: async ({ mediaType, mediaId, season, episode }) => {
+        const requestEnsureFn = buildRequestScopedEnsureFn({
+          fallbackFn: ensureTorBoxFileIdentityFn,
+          explicitFn: hasExplicitEnsureFn,
+          controlPlaneStore,
+          torBoxProvider,
+          apiKey: env.TORBOX_API_KEY,
+          apiBase: env.TORBOX_API_URL,
+          clock,
+          scope: 'prepare-rebind',
+        });
+        await searchByMedia(searchCache, {
+          mediaId, mediaType, season, episode,
+          source: 'prepare-rebind',
+          sourceType: 'system',
+          controlPlaneStore,
+          ...(requestEnsureFn ? { ensureTorBoxFileIdentity: requestEnsureFn } : {}),
+          ...rdEnsureForRequest({ rdClient, controlPlaneStore, clock }),
+        });
+        const rebound = readAuthoritativeBinding({
+          controlPlaneStore, mediaType, mediaId, season, episode,
+        });
+        return rebound
+          ? { bound: true, torrentFileId: rebound.torrentFileId, itemId: rebound.itemId }
+          : { bound: false };
+      },
+    };
+  }
   const torBoxDownloadUrlCache = wrapTorBoxDownloadUrlCacheWithAccounting(
     dependencies.torBoxDownloadUrlCache || getTorBoxDownloadUrlCache()
   );
@@ -3415,10 +3521,11 @@ export function createRequestHandler(dependencies = {}) {
         }
       }
       // The playback object: one step from a media intent to a stable,
-      // HashSucker-owned playback URL. A thin adapter over the authority that
-      // already exists — the warm path reads the active Binding and mints the
-      // object (no discovery, no provider inventory); the cold path runs the
-      // same request pipeline a Seerr request runs, then mints the object.
+      // HashSucker-owned playback URL. Canonical Play orchestration:
+      // READY (warm or cold-bound) mints immediately; unbound intents
+      // resolve PREPARING (durable single-flight preparation),
+      // NOT_AVAILABLE, or AMBIGUOUS (needs user decision). With preparation
+      // disabled the outcomes collapse to today's exact behavior.
       if (request.method === 'POST' && url.pathname === '/api/playback-object') {
         const startedAt = performance.now();
         const body = await readBody(request);
@@ -3439,7 +3546,7 @@ export function createRequestHandler(dependencies = {}) {
             clock,
             scope: 'playback-object',
           });
-          const result = await resolvePlaybackIntent({
+          const outcome = await resolvePlayback({
             controlPlaneStore,
             cache: searchCache,
             env,
@@ -3459,13 +3566,31 @@ export function createRequestHandler(dependencies = {}) {
               source: 'playback-object',
               sourceType: 'client',
             }),
+            prepareDeps: getPrepareDeps() ? async () => getPrepareDeps() : null,
           });
+          const timings = { totalMs: Math.round(performance.now() - startedAt) };
+          const sessionEcho = sessionId ? { sessionId } : {};
+          if (outcome.outcome === PLAY_OUTCOME.PREPARING) {
+            return sendJson(response, 202, { ...outcome, timings, ...sessionEcho });
+          }
+          if (outcome.outcome === PLAY_OUTCOME.AMBIGUOUS) {
+            return sendJson(response, 409, {
+              error: outcome.message, code: 'AMBIGUOUS_INTENT', candidates: outcome.candidates,
+            });
+          }
+          if (outcome.outcome === PLAY_OUTCOME.NOT_AVAILABLE) {
+            return sendJson(response, 409, {
+              error: 'no authoritative representation could be established for that intent',
+              code: 'NO_AUTHORITATIVE_REPRESENTATION', reason: outcome.reason,
+            });
+          }
+          if (outcome.outcome === PLAY_OUTCOME.ERROR) {
+            return sendJson(response, 400, { error: outcome.message, code: outcome.code });
+          }
           return sendJson(response, 200, {
-            ...result,
-            timings: { ...result.timings, totalMs: Math.round(performance.now() - startedAt) },
-            // The session id, so the measuring client can pull this session's
-            // stages (and the data plane's byte stages) onto one timeline.
-            ...(sessionId ? { sessionId } : {}),
+            ...outcome,
+            timings: { ...(outcome.timings ?? {}), ...timings },
+            ...sessionEcho,
           });
         } catch (err) {
           if (err instanceof PlaybackObjectApiError) {
@@ -3476,6 +3601,68 @@ export function createRequestHandler(dependencies = {}) {
             });
           }
           return sendJson(response, 400, { error: err.message });
+        }
+      }
+      // Preparation status: the machine-readable side of PREPARING. When a
+      // preparation is READY this endpoint rebinds through the normal
+      // pipeline (bounded, user-driven by the waiting client — never a
+      // background timer) and mints the playback object, so the client
+      // polls here then plays without a second user command. Exposes
+      // state + media identity only: no hashes, resource ids,
+      // credentials, or route internals.
+      {
+        const prepMatch = request.method === 'GET'
+          && url.pathname.match(/^\/api\/playback-preparations\/(\d+)$/);
+        if (prepMatch) {
+          if (!prepareEnabled || !prepareStore) {
+            return sendJson(response, 503, { error: 'preparation unavailable', code: 'PREPARATION_UNAVAILABLE' });
+          }
+          const row = prepareStore.get(Number(prepMatch[1]));
+          if (!row) return sendJson(response, 404, { error: 'no such preparation' });
+          const media = {
+            mediaType: row.media_type, mediaId: row.media_id,
+            season: row.season, episode: row.episode, title: row.title,
+          };
+          const base = {
+            id: row.id, state: row.state, provider: row.provider, media,
+            attempts: row.attempts, createdAt: row.created_at, updatedAt: row.updated_at,
+            lastError: row.last_error,
+          };
+          if (row.state !== 'ready') {
+            return sendJson(response, 200, { ...base, ready: false });
+          }
+          // READY: ensure the Binding exists through the normal pipeline,
+          // then mint exactly like the warm path (no provider work when
+          // already bound).
+          try {
+            const deps = getPrepareDeps();
+            if (deps?.rebindFn) {
+              await deps.rebindFn({
+                mediaType: row.media_type, mediaId: row.media_id,
+                season: row.season, episode: row.episode,
+              });
+            }
+            const rebound = readAuthoritativeBinding({
+              controlPlaneStore, mediaType: row.media_type, mediaId: row.media_id,
+              season: row.season, episode: row.episode,
+            });
+            if (!rebound?.torrentFileId) {
+              return sendJson(response, 200, { ...base, ready: true, bound: false });
+            }
+            const secret = readPlaybackSecret(env);
+            if (!secret) return sendJson(response, 200, { ...base, ready: true, bound: true });
+            const { token } = mintPlaybackToken({
+              torrentFileId: rebound.torrentFileId, secret,
+              ttlSeconds: readPlaybackTtlSeconds(env), now: clock(),
+            });
+            return sendJson(response, 200, {
+              ...base, ready: true, bound: true,
+              torrentFileId: rebound.torrentFileId,
+              playbackUrl: playbackObjectPath(token),
+            });
+          } catch (err) {
+            return sendJson(response, 200, { ...base, ready: true, bound: false, error: String(err?.message ?? err).slice(0, 160) });
+          }
         }
       }
       // Measurement: the server's stages for one playback session.

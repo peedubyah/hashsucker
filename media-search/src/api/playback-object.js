@@ -68,10 +68,11 @@ function libraryIdentityKey({ mediaType, mediaId, season, episode }) {
 
 /**
  * Read the active Binding's TorrentFile for one media coordinate.
+ * Exported for orchestration rebind checks (same read, no duplication).
  *
  * @returns {{ torrentFileId: string, itemId: string }|null}
  */
-function readAuthoritativeBinding({ controlPlaneStore, mediaType, mediaId, season, episode }) {
+export function readAuthoritativeBinding({ controlPlaneStore, mediaType, mediaId, season, episode }) {
   if (!controlPlaneStore
     || typeof controlPlaneStore.getLibraryItemByIdentityKey !== 'function'
     || typeof controlPlaneStore.getActiveBindingForLibraryItem !== 'function') {

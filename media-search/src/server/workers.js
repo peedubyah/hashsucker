@@ -53,6 +53,11 @@ import { createSeasonReconciler } from '../lib/anticipation/season-reconciliatio
 import { resolveSeerrSeasonEpisodes } from '../lib/intents/providers/seerr.js';
 import { confirmPlexEpisode } from '../lib/consumers/plex.js';
 import { notifyPlex } from '../lib/requests/plex-notifier.js';
+import { createPreparationStore } from '../lib/prepare/store.js';
+import { createPrepareDriver } from '../lib/prepare/driver.js';
+import { createRdPrepareAdapter } from '../lib/prepare/rd-acquire.js';
+import { createTorBoxPrepareAdapter } from '../lib/prepare/torbox-acquire.js';
+import { createRealDebridClient } from '../lib/providers/realdebrid/client.js';
 
 // NOTE (durability verdict tranche): background durability V1 is RETIRED.
 // The named-repair runtime loop (scheduler + runtime + executor +
@@ -301,6 +306,96 @@ function armAnticipationTimer(delayMs) {
 }
 if (anticipationOn) {
   armAnticipationTimer(2 * 60_000);
+}
+
+// ─── preparation ticker (moonshot vertical) ─────────────────────────────
+// Advances durable provider-neutral preparations toward READY: expire
+// overdue, poll in-flight acquisitions, persist exact-file closure on
+// readiness, run notify hooks. Persist + notify ONLY — Binding always
+// happens through request-driven pipeline runs (status-endpoint rebind,
+// next Play, season scheduler), never a background timer.
+// PREPARE_ENABLED=1 arms (default OFF = today's exact behavior).
+// Interval default 30 s, first tick 15 s after boot. One driver +
+// adapters built once and reused across ticks: adapter rate-limiters and
+// refusal memory must survive between ticks.
+const prepareFlag = String(process.env.PREPARE_ENABLED ?? '0').toLowerCase();
+const prepareOn = prepareFlag === '1' || prepareFlag === 'true';
+const prepareTickMs = (() => {
+  const n = Number(process.env.PREPARE_TICK_MS ?? 30_000);
+  return Number.isSafeInteger(n) && n >= 5_000 ? n : 30_000;
+})();
+let prepareTimer = null;
+let prepareInFlight = false;
+let prepareTick = 0;
+let prepareDriverSingleton = null;
+function prepareDriverOnce() {
+  if (prepareDriverSingleton) return prepareDriverSingleton;
+  if (!controlPlaneStore) return null;
+  const adapters = {};
+  if (process.env.TORBOX_API_KEY) {
+    adapters.torbox = createTorBoxPrepareAdapter({ apiKey: process.env.TORBOX_API_KEY });
+  }
+  if (process.env.REALDEBRID_API_KEY) {
+    adapters.realdebrid = createRdPrepareAdapter({
+      store: controlPlaneStore,
+      client: createRealDebridClient({ apiKey: process.env.REALDEBRID_API_KEY }),
+    });
+  }
+  if (Object.keys(adapters).length === 0) return null;
+  const num = (name, fallback, min) => {
+    const n = Number(process.env[name]);
+    return Number.isSafeInteger(n) && n >= min ? n : fallback;
+  };
+  prepareDriverSingleton = createPrepareDriver({
+    store: createPreparationStore({
+      db: controlPlaneStore.db,
+      config: {
+        preparationTimeoutMs: num('PREPARE_TIMEOUT_MS', 6 * 60 * 60 * 1000, 60_000),
+      },
+    }),
+    controlPlaneStore,
+    adapters,
+    config: {
+      maxConcurrentTotal: num('PREPARE_MAX_CONCURRENT', 2, 1),
+      maxConcurrentPerProvider: num('PREPARE_MAX_PER_PROVIDER', 2, 1),
+      maxSizeBytes: num('PREPARE_MAX_SIZE_BYTES', 100 * 1024 * 1024 * 1024, 1),
+      maxAttempts: num('PREPARE_MAX_ATTEMPTS', 20, 1),
+      pollIntervalByProvider: {
+        torbox: num('PREPARE_POLL_MS_TORBOX', 60_000, 5_000),
+        realdebrid: num('PREPARE_POLL_MS_RD', 30_000, 5_000),
+      },
+    },
+    log: (msg) => console.log(`media-search: prepare ${msg}`),
+  });
+  return prepareDriverSingleton;
+}
+function armPrepareTimer(delayMs) {
+  console.log(`media-search: preparation ticker armed delayMs=${delayMs}`);
+  prepareTimer = arm(async () => {
+    const tick = ++prepareTick;
+    console.log(`media-search: preparation tick=${tick} entered`);
+    try {
+      const driver = prepareDriverOnce();
+      if (!driver) {
+        console.log(`media-search: preparation tick=${tick} skipped (no adapters/control plane)`);
+      } else if (!prepareInFlight) {
+        prepareInFlight = true;
+        try {
+          const summary = await driver.advanceOnce({ limit: 5 });
+          console.log(`media-search: preparation tick=${tick} expired=${summary.expired} advanced=${summary.advanced}`);
+        } finally {
+          prepareInFlight = false;
+        }
+      }
+    } catch (error) {
+      console.warn(`media-search: preparation tick=${tick} error=${error?.stack || error?.message}`);
+    } finally {
+      armPrepareTimer(prepareTickMs);
+    }
+  }, delayMs);
+}
+if (prepareOn) {
+  armPrepareTimer(15_000);
 }
 
 // ─── quality-upgrade watch ──────────────────────────────────────────
