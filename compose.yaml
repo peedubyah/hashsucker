@@ -58,6 +58,20 @@ services:
       JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
       JELLYFIN_MEDIA_ROOT: ${JELLYFIN_MEDIA_ROOT:-}
       RESOLVER_PROFILE: ${RESOLVER_PROFILE:-0}
+      # Preparation vertical (moonshot): PREPARE_ENABLED=1 arms async
+      # provider-neutral acquisition (orchestration PREPARING outcome,
+      # status endpoint, worker tick). Default OFF = today's exact
+      # behavior. Bounds below are conservative production-safe defaults.
+      PREPARE_ENABLED: ${PREPARE_ENABLED:-0}
+      PREPARE_PROVIDER_ORDER: ${PREPARE_PROVIDER_ORDER:-torbox,realdebrid}
+      PREPARE_MAX_CONCURRENT: ${PREPARE_MAX_CONCURRENT:-2}
+      PREPARE_MAX_PER_PROVIDER: ${PREPARE_MAX_PER_PROVIDER:-2}
+      PREPARE_MAX_SIZE_BYTES: ${PREPARE_MAX_SIZE_BYTES:-107374182400}
+      PREPARE_MAX_ATTEMPTS: ${PREPARE_MAX_ATTEMPTS:-20}
+      PREPARE_TIMEOUT_MS: ${PREPARE_TIMEOUT_MS:-21600000}
+      PREPARE_TICK_MS: ${PREPARE_TICK_MS:-30000}
+      PREPARE_POLL_MS_TORBOX: ${PREPARE_POLL_MS_TORBOX:-60000}
+      PREPARE_POLL_MS_RD: ${PREPARE_POLL_MS_RD:-30000}
       SEERR_WEBHOOK_TOKEN: ${SEERR_WEBHOOK_TOKEN:-}
       SEERR_URL: ${SEERR_URL:-}
       SEERR_API_KEY: ${SEERR_API_KEY:-}
