@@ -6606,3 +6606,152 @@ anticipation/future-intent → acquire → poll → bind → notify, no picker,
 no swarm) is the viable, bounded, evidence-backed shape. RD is out on
 this appliance. Resolver-first keeps its right to exist iff prepare is
 built — the gap is real, recurring, and closable without new backends.
+
+## 2026-10-24 — REAL-DEBRID ACQUISITION AUTOPSY — CLOSED
+
+Forensic slice, no product code changed, no policy changed, nothing
+deployed. Prior slice's "TorBox-only" needed proof, not trust: 125 RD
+add-failures (29 hard + 96 transient, 0 success) plus one 403 probe.
+
+### WHAT CHANGED
+
+Nothing in product code. Scratch-only observers under
+`/var/tmp/patrick/hashsucker/rd-autopsy/` (key file chmod-600, all
+deleted at close): credential extraction (length-only logging), account
+probe, 4-op control battery.
+
+### WHAT WAS PROVEN
+
+**1. Current RD acquisition code path (Phase 1).** `ensure.js run()`:
+durable-first `findPlacementByInfoHash` (zero writes) → bounded
+`listTorrents(limit 100)` + `getTorrentInfo` per match (≤3) → probe
+`addMagnet('magnet:?xt=urn:btih:<hash>')` → `getTorrentInfo` hash/files
+verify → `classifyCandidateToRdFile` exact mapping → `selectFiles([id])`
+→ require `status==='downloaded'` → persist placement/inventory/TF.
+`client.js`: POST `https://api.real-debrid.com/rest/1.0/torrents/addMagnet`,
+form-encoded `magnet`, `Authorization: Bearer`, 10 s timeout, global
+scheduler (concurrency 1, 500 ms pacing), one 429-retry + 60 s cooldown.
+Request shape is contract-correct against current RD docs.
+
+**2. Contract check (Phase 2).** Endpoints used all exist in current RD
+docs with unchanged semantics; Bearer auth correct (proven live: reads
+200); addMagnet/selectFiles/info/delete/unrestrict shapes match docs.
+No contract drift. Drive-by note (not fixed, out of bounds):
+`REALDEBRID_ERROR_CODES.SLOW_DOWN` is referenced but undefined in
+client.js — harmless (comparison false), zero behavior impact.
+
+**3. Account capability (Phase 3).** `GET /user` → 200, `type:"free"`,
+premium 0 days. Per RD's documented contract, addMagnet on a non-premium
+account answers **403 "account locked, not premium"** — exactly what we
+observe. Credential valid; entitlement absent.
+
+**4. Capability matrix, this appliance (Phase 4/10):**
+
+| Capability | Observed status |
+|---|---|
+| existing placement/file delivery (historical) | worked (7 usable evidence rows, latest today 02:14 CDT) |
+| GET /user, list, torrent info | 200 live (167–549 ms) |
+| addMagnet (benign 106 MB hash) | **403 permission_denied, code 9, 167 ms, nothing created** |
+| unrestrict existing downloaded link | **403 hoster_not_free, code 20** (delivery seam also refused today) |
+| selectFiles on prod resources | not attempted (nothing to select toward; documented + code-proven) |
+| delete scratch resource | n/a (refusal creates nothing) |
+
+Reads fine; both write/execution seams refused with documented
+entitlement codes (9 = permission_denied, 20 = hoster_not_free) —
+neither is a malformed-request code (those are 400/code 3).
+
+**5. True counts behind 29+96 (Phase 5).** **8 UNIQUE infoHashes**
+across 17 Rear Window decisions (+2 transient on one Lowdown hash;
+127 rd-add-failed entries globally, zero successes anywhere ever).
+Failure signatures: exactly 2 — `hard` (real 403s, first burst) then
+`transient`-only for 20+ min. The 96 are NOT independent samples; they
+are a retry storm (up to 13 candidates × 17 decisions) cascading into
+resolver-safe 429 fail-fast (`resolverSafe:true` skips the cooldown
+path, so 429s surface as unlogged transients — zero `entering global
+cooldown` lines in 96 h of logs; message-level proof not retained by
+design, stated as inference).
+
+**6. Raw control result (Phase 6).** Byte-identical-shape request outside
+the app path → identical 403/permission_denied/9. Provider-side refusal,
+not application construction.
+
+**7. Auth/token (Phases 7/9).** Single `rdClient` from
+`env.REALDEBRID_API_KEY` shared by delivery/acquisition/fallback/
+reconciler (app.js) — no stale-token-B possible; reads prove the key
+valid. Host↔container parity: key flows host env → compose → container;
+no host .env file in repo. Fresh-token testing would need account login
+— boundary stopped at, reported: only a premium upgrade (user decision)
+could change the answer.
+
+**8. 403 semantics (Phase 11).** Account-global (refused pre-resource,
+same for RW hashes and benign trailer), endpoint-specific in code
+(9 vs 20), token-valid, documented premium restriction, not rate-limit
+(no 429/slowness: 167 ms), not geographic (same-IP reads fine), stable
+Oct 21 → Oct 24.
+
+**9. Retry/classification (Phase 12).** 403→hard is correct and memoized
+per request. The waste is second-order: transient-storm retries hammer a
+refusing endpoint (~8–16 doomed calls/decision). A short-lived
+account-level add-refusal memo would cut it, but that IS a production
+behavior change and fails this slice's fix gate (provider does not work
++ request is not wrong) — REPORTED ONLY, not implemented.
+
+**10. Viability/selectivity (Phases 13–15).** Not runnable — add refused,
+nothing to continue (per slice: no theoretical RD-vs-TorBox comparison;
+state unavailable-under-current-account/config).
+
+### WHAT REMAINS UNPROVEN
+
+- Transient-storm message breakdown (429 vs timeout; records keep
+  classes only — known instrumentation limit).
+- How today's 02:14 RD usable delivery was produced while unrestrict
+  403s (alternate path? stale evidence? — flagged, not chased; slice
+  scope is acquisition).
+- Premium-account RD behavior (would need user action; untouched).
+
+### WHAT WAS LEARNED
+
+- "125 failures" was 8 unique attempts + a cooldown/rate-limit cascade.
+  Count unique units before calling anything a rate.
+- Resolver-safe 429s are INVISIBLE as cooldowns (fail-fast, unlogged) —
+  log absence proves nothing about rate limiting in that mode.
+- Free-vs-paid is the whole RD story here; everything else (filter-gate,
+  403s, transients) is commentary on top of it. TorBox paid plan 1 vs RD
+  free is the billing fact behind the architecture.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- Prior slice's "TorBox-only" (soft, probe-based) → hardened:
+  **account-capability-blocked, proven at every seam**.
+- "RD delivery works" → qualified: historical + read-paths fine;
+  execution seams (add AND unrestrict) refuse today.
+
+### WHAT SHOULD BE UPDATED (list files)
+
+- Done in-slice: this log,
+  `docs/retrospectives/2026-10-24-rd-acquisition-autopsy.md`,
+  `PLANS.md` (slice entry), `handoff/CURRENT.md` (session section).
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. Candidates, all NOT started: (a) the
+flag-gated demand-linked TorBox prepare experiment (prior slice); (b) a
+`permission_denied`-class account-level add-refusal memo IF waste is
+re-measured post-verdict (reported, unimplemented); (c) premium upgrade
+is a user/billing decision, not engineering.
+
+### VERDICT
+
+**RD ACQUISITION — ACCOUNT CAPABILITY BLOCKED.** Raw control requests
+with valid auth are rejected because the free-tier account does not
+permit magnet acquisition (403/permission_denied/code 9, exactly per
+the documented contract); the request construction is correct, the
+credential is valid, and 8 unique attempts + 1 benign control + matrix
+separation prove it at every seam. Prepare stays provider-neutral
+(TorBox path viable; RD seam remains wired for premium accounts).
+Torrent-streamer escalation NOT earned (TorBox covers; privacy-blocked
+anyway).

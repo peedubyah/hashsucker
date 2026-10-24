@@ -3,6 +3,18 @@
 Active phase: **Core playback reliability & recovery — CLOSED**.
 → [`docs/phases/phase-core-playback-reliability.md`](docs/phases/phase-core-playback-reliability.md)
 
+**RD acquisition autopsy slice (2026-10-24) — DONE. VERDICT: RD
+ACQUISITION — ACCOUNT CAPABILITY BLOCKED.** Forensic, no code changed.
+`GET /user` → free tier, premium 0: addMagnet 403/permission_denied/9
+is exactly the documented non-premium answer. Request shape
+contract-correct; single credential (reads 200); 8 unique hashes behind
+"125 failures" (rest = resolver-safe 429 cascade, unlogged by design);
+raw control reproduces app result byte-for-byte; unrestrict on existing
+links also 403s (code 20) while reads work. Prepare stays
+provider-neutral; swarm escalation not earned. Evidence:
+`docs/BUILD-LOG.md` 2026-10-24; retrospective
+`docs/retrospectives/2026-10-24-rd-acquisition-autopsy.md`.
+
 **Uncached execution slice (2026-10-24) — DONE. VERDICT: UNCACHED
 EXECUTION — PREPARE, DON'T WAIT.** Adversarial recon/measurement, no
 product code changed. Confirmed execution gap ≈ 4–7% of human demand

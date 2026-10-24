@@ -340,6 +340,20 @@ recovered from the dropped stash's untracked commit (`b4d12bd`) and restored
 untracked. A dropped stash is still recoverable while its object survives —
 look in `git fsck --unreachable` before assuming a loss.
 
+## Live session state (2026-10-24, RD acquisition autopsy — CLOSED)
+
+**What is now true.** RD acquisition is proven account-blocked, not
+app-broken: account is free-tier (premium 0), addMagnet 403/
+permission_denied/9 is the documented non-premium answer, request shape
+is contract-correct, one shared credential (reads 200), 8 unique hashes
+behind "125 failures" (rest = resolver-safe 429 cascade). Raw control =
+app result. Unrestrict on existing links also 403s today (code 20);
+reads fine. "TorBox-only" hardened to account/config scope; prepare
+stays provider-neutral; no swarm escalation. No code or policy changed.
+Evidence: `docs/BUILD-LOG.md` 2026-10-24;
+`docs/retrospectives/2026-10-24-rd-acquisition-autopsy.md`. Explicitly
+NOT started afterward: prepare implementation, torrent streamer.
+
 ## Live session state (2026-10-24, uncached execution — CLOSED)
 
 **What is now true.** The uncached gap is measured and verdict-bound
