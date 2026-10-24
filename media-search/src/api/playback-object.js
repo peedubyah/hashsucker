@@ -240,11 +240,17 @@ export async function resolvePlaybackIntent({
       controlPlaneStore, mediaType: resolvedType, mediaId: resolvedMediaId, season, episode,
     });
     if (!binding) {
-      throw new PlaybackObjectApiError(
+      const noRepError = new PlaybackObjectApiError(
         409,
         'NO_AUTHORITATIVE_REPRESENTATION',
         'no authoritative representation could be established for that intent',
       );
+      // The pipeline's ranked candidates travel with the failure so
+      // orchestration above can classify (executable alternative?
+      // preparation candidate?) without re-running discovery. Additive:
+      // existing catch sites ignore the property.
+      noRepError.prepareResult = prepareResult ?? null;
+      throw noRepError;
     }
   }
 
