@@ -340,6 +340,25 @@ recovered from the dropped stash's untracked commit (`b4d12bd`) and restored
 untracked. A dropped stash is still recoverable while its object survives —
 look in `git fsck --unreachable` before assuming a loss.
 
+## Live session state (2026-10-24, uncached execution — CLOSED)
+
+**What is now true.** The uncached gap is measured and verdict-bound
+(PREPARE, DON'T WAIT), with no product code changed: ~4–7% of human
+demand confirmed unexecutable (Rear Window: every candidate uncached,
+RD add 0/125; Lowdown), ~60% of apparent demand reclassified
+non-execution (unaired MobLand E7–10, wrong-typed plays, U6 identity).
+Live probes: TorBox accepts/downloads/deletes (106 MB ≤5.6 min;
+whole-torrent, no file-select); RD addMagnet refused 403 account-wide
+(TorBox-only appliance). Fallback covers 0%; sync is Background-only;
+swarm unnecessary + privacy-blocked (no VPN egress). Earned next step
+(NOT started): flag-gated demand-linked TorBox prepare
+(acquire→poll→bind→notify, no picker). TorBox probe row lingered
+visibly post-delete (`active:false`, re-delete 500s — stale read model;
+final check at close). Evidence: `docs/BUILD-LOG.md` 2026-10-24;
+`docs/retrospectives/2026-10-24-uncached-execution.md`. Explicitly NOT
+started afterward: prepare implementation, cache-policy redesign,
+direct swarm.
+
 ## Live session state (2026-10-24, cache value — CLOSED)
 
 **What is now true.** Whole-file fill earned its keep: new bounded

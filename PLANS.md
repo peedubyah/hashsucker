@@ -3,6 +3,22 @@
 Active phase: **Core playback reliability & recovery — CLOSED**.
 → [`docs/phases/phase-core-playback-reliability.md`](docs/phases/phase-core-playback-reliability.md)
 
+**Uncached execution slice (2026-10-24) — DONE. VERDICT: UNCACHED
+EXECUTION — PREPARE, DON'T WAIT.** Adversarial recon/measurement, no
+product code changed. Confirmed execution gap ≈ 4–7% of human demand
+(Rear Window: 13 candidates all uncached, RD add 0/125; Lowdown) with
+~60% of apparent demand reclassified (unaired, wrong-typed, U6
+identity). Acceptable-fallback covers 0% of the confirmed set. Live
+probes: TorBox accepts+downloads+deletes (106 MB, ≤5.6 min upper bound;
+whole-torrent, no file-select, no progressive streaming); RD addMagnet
+refused 403 at account level (multi-provider collapses to TorBox-only).
+Sync acquisition is Background-only latency; demand-linked TorBox
+prepare (failed-Play/anticipation → acquire → poll → bind → notify, no
+picker, no swarm) is the earned shape — explicitly NOT started. No
+direct swarm (unnecessary + home-IP privacy-blocked). Evidence:
+`docs/BUILD-LOG.md` 2026-10-24; retrospective
+`docs/retrospectives/2026-10-24-uncached-execution.md`.
+
 **Cache value slice (2026-10-24) — DONE. VERDICT: CACHE VALUE — KEEP
 WHOLE-FILE FILL.** Right-to-exist test for whole-file/background fill via
 a new bounded in-memory per-chunk ledger (source, fetch→use join,

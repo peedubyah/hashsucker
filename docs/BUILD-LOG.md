@@ -6375,3 +6375,234 @@ redemptions are concrete (0-API full replays, GB-scale resume/seek
 service), and no harm was demonstrated (no starvation, no failover
 interaction, LRU-fair evictions, sub-second refetch). Nothing
 overwhelmingly earned a behavior change.
+
+## 2026-10-24 — UNCACHED EXECUTION: RIGHT TO EXIST — CLOSED
+
+Adversarial recon/measurement slice. No product code changed, no policy
+changed, nothing deployed. All observation via read-only DB reads,
+read-only provider APIs, keyless public docs, and two bounded live
+provider probes with verified cleanup.
+
+### WHAT CHANGED
+
+Nothing in product code. Scratch-only observers under
+`/var/tmp/patrick/hashsucker/uncached/` (deleted at close): TorBox
+checkcached probe script, account-state reader, one TorBox acquisition
+probe, one RD acquisition probe.
+
+### WHAT WAS PROVEN
+
+**1. Executive verdict: `UNCACHED EXECUTION — PREPARE, DON'T WAIT`** (TorBox-only; RD dead on this appliance; no swarm; no picker). Rationale
+in §12 below; falsifiers answered in §13.
+
+**2. Prevalence (Parts 1–3).** State classes U0–U6 applied to 30 days of
+human demand (seerr 216 reqs/52 media + playback-object 26 reqs/8 media):
+- **41/57 distinct media playable now (72%).**
+- 4 unaired future episodes (MobLand S2E7–10; E7 airs Oct 30 — supply
+  timing, not a gap; anticipation scheduler requesting unaired episodes
+  is a scheduler note, out of scope).
+- 3 identity-mismatch U6 (The View daily-episodic matching, When They
+  See Us requested-as-movie vs series releases, Mogul wrong-show
+  matches) — explicitly not execution gap.
+- **Confirmed execution gap (U3/U4): Rear Window** (17 direct plays,
+  13 candidates × all paths: TorBox uncached everywhere — 375 skip
+  entries, every torboxState uncached; RD add 29 hard + 96 transient, 0
+  successes) **and The Lowdown movie-play** (1 eligible candidate,
+  uncached, RD transient, ranks 2–50 correctly ineligible as episodes).
+- Unknown-outcome (predate decision observability or died silently):
+  Black Gunn (17 eligible, never attempted), Slow Horses S6E6 (5
+  eligible, never attempted), Lowdown S2E3 (1 eligible) — labeled
+  unknown, NOT counted as failures.
+- Direct-press success: 3/8 distinct media; the 5 failures decompose to
+  2 confirmed-gap + 3 U6 (wrong-typed requests).
+- Bottom line: confirmed gap ≈ 4–7% of human demand; incl. unknowns up
+  to ~25%. NOT 99.5%-fine. Fail-fast-only would enshrine this band.
+
+**3. Acceptable-alternative result (Parts 4/23): 0% on the confirmed
+set.** RW: no executable candidate at any of 13 ranks/any quality.
+Lowdown: the single eligible candidate was the whole set. Fallback is
+dead here — and note the ecosystem hides dead streams with the same
+empty result (ElfHosted patch), so HashSucker is not behind competitors
+on RW; everybody's answer is acquire-or-fail.
+
+**4. TorBox acquisition (Parts 5–7): ACCEPTS, DOWNLOADS, DELETES.**
+Live bounded probe, 106 MB trailer hash, magnet, `add_only_if_cached=false`,
+`seed=3` (no-seed), 10-min cap, immediate delete:
+- create ACCEPTED (+5.9 s, torrent_id minted);
+- metadata resolved ≤36 s (metaDL observed);
+- `completed`, 6 files visible, at ≤5.6 min (≈320 KB/s floor — mylist
+  600 s read granularity makes this an UPPER bound; intermediates
+  unresolvable retrospectively);
+- delete via `controltorrent` lowercase `delete` works (docs prose says
+  `Delete` — that 400s; re-delete 500s consistently = write model
+  dropped it, listing stale — TorBox read-model staleness noted);
+- probe row lingered visibly ~35 min+ with `active:false`; final
+  re-verification at close.
+- Semantics from official docs: NO file selection (whole torrent always;
+  season packs = whole-pack download), no progressive-streaming endpoint
+  (assume full-download-required), 60 uncached/hour cap, mylist statuses
+  downloading/stalled/metaDL/completed/cached. Account: paid plan
+  (plan=1), 258 GB lifetime downloads.
+- Latency class: minutes-scale ⇒ **Background-only for press-Play**,
+  viable for prepare. n=1 + docs; tails (multi-GB/obscure) unmeasured.
+
+**5. RD acquisition (Parts 5–7, 15): REFUSED at account level.**
+addMagnet on the same benign 106 MB hash → **403 permission_denied
+(error_code 9)** in 5.7 s, nothing created, nothing to clean. Per RD
+docs 403 = "account locked, not premium". Not content-specific: this
+account cannot add OR unrestrict (consistent with the route-health
+slice's dual-route 403s and the May-2026 filter-gate context). The 96
+RW transient add-failures are likely rate-limit noise atop the same
+wall. **Multi-provider acquisition collapses to TorBox-only on this
+appliance.** Existing code already does bounded RD add+select+cleanup
+(`ensure.js`, hygienic); the provider says no.
+
+**6. Multi-provider overlap (Part 15):** no help available — RD adds
+nothing. TorBox is the only acquisition-capable provider here.
+
+**7. Season-pack/new-episode (Parts 9–10, 20):** TorBox = whole-pack
+download, file tree via mylist once metadata resolves (pre-completion
+tree timing unknown). RD = selective via selectFiles (docs + ensure
+code) but account-refused. Slow Horses S6E6 (aired Oct 21): 2× 1080p
+options cached on TorBox TODAY (CAKES 756 MB, MeGusta 1 GB) — U3-then
+vs pipeline-gap at air time unresolvable retrospectively. Lowdown S2E3
+(aired Oct 22): 1 eligible, outcome unknown. MobLand S2E7 (airs Oct 30):
+pending natural experiment, noted not run.
+
+**8. Requested-season preparation (Part 19):** the machinery EXISTS —
+anticipation scheduler (1180 requests), `future_intents` table, bounded
+retry/backoff (`future-intents.js`), Mogul S1 failing daily through it
+as designed. Uncached failures split BOTH shapes: immediate presses
+(RW ×17, Lowdown ×2) and future intent (Mogul, MobLand unaired). So:
+prepare-framing fits future intent; immediate presses need
+fail-typed-now + demand-linked prepare + notify (plex/jellyfin
+notifiers exist). No broad background enrichment required.
+
+**9. Competitor behavior (Parts 10–11):** Torrentio shows uncached links
+as "[.. Download]" — clicking sends the torrent to YOUR debrid to
+download, retry later (user-triggered acquisition + manual retry; "Don't
+show download links" is discouraged by the community exactly because
+uncached links often play). Comet does NOT cache-to-debrid (worse).
+ElfHosted/comet/aiostreams/mediafusion hide dead/infringing streams.
+Baseline: manual download-then-retry (Torrentio) or hide (filtered
+stacks). HashSucker has NO user-triggered download path — that is the
+concrete UX gap, and prepare+notify beats Torrentio's friction (no
+manual retry) without new backends.
+
+**10. Direct swarm (Parts 16–17): unnecessary + privacy-blocked.**
+Technically fittable (provider-agnostic `runtime_url` seam; rqbit-style
+HTTP-range engine conceivable) but: unbounded tails, breaker would
+misclassify stalls, no VPN egress on appliance (only tailscale0 mesh;
+torrent traffic = home IP), user explicitly rejects commercial-VPN
+dependency, upload-by-default exposure, operational burden — all for a
+gap TorBox already covers. Not built, not recommended.
+
+**11. Authority/cancellation fit (Parts 12–14, 25):** acquisition maps
+cleanly onto existing types (Release → Placement → ProviderFile →
+Capability); RD ensure already follows intent→candidate→acquire→map→bind
+order with finally-grade cleanup — the PATTERN exists, TorBox needs the
+same shape (readiness poll + lowercase-delete + single-flight +
+restart-orphan note). No representation weakening if candidate-first
+order is kept. Abandonment waste bounded by: small-content preference,
+single-flight dedupe, immediate cleanup (both providers' deletes
+verified), 60/hr TorBox cap as natural throttle.
+
+**12. Strategy decision table (Part 24 + required table):**
+
+| Strategy | Coverage gained | Typical latency | Tail latency | User actions | Reliability | New complexity | Privacy/ops burden |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Fail fast | 0 (enshrines ~5–25% fail band) | instant | — | 0, but Play fails | certain failure | none | none |
+| Acceptable cached fallback | 0% on confirmed set | — | — | 0 | n/a | none | none |
+| TorBox acquisition (sync Play) | bounded by cache misses | minutes (≤5.6 min/106 MB obs.) | hours for GBs/obscure | 0 | moderate (seeds/slots) | readiness poll + lifecycle | quota (60/hr), storage transient |
+| TorBox acquisition (prepare/async) | same | hidden (notify on ready) | same | 0 (notify, no picker) | same | scheduler hookup + single-flight + notify | same, amortized |
+| RD acquisition | 0 on this appliance (403) | n/a | n/a | — | refused | none | none |
+| Multi-provider acquisition | = TorBox-only here | — | — | — | — | — | — |
+| Demand-linked pre-acquisition | future-intent subset | hidden | hidden | 0 | scheduler-dependent | reuse anticipation/future_intents | same as TorBox |
+| Direct torrent | unneeded (TorBox covers) | unbounded tails | unbounded | 0 | poor | large (client, netns, breaker, testing) | HIGH (home-IP exposure, no VPN) |
+
+Latencies marked unknown where unmeasured (multi-GB TorBox tails,
+pre-completion file-tree timing, requestdl-on-incomplete).
+
+**13. Product right-to-exist conclusion (Part 27):** the gap is real
+(~5% confirmed, new-episode-shaped, recurring) but bounded and closable
+with ONE existing provider + EXISTING scheduler shapes + NO picker + NO
+swarm. Resolver-first survives iff prepare is built; without it the
+product keeps a typed-failure hole on exactly the "new/rare thing I want
+tonight" cases. Architecture sophistication scores zero; Play-success
+rate is the metric and prepare moves it.
+
+**14. Falsifiers (Part 28), answered:** frequent? low-single-digit
+confirmed (not frequent, not rare) → action justified, hysteria not.
+>30–60 s acquisition? TRUE for sync — which is why the verdict is
+prepare-framed, not sync. Reliability poor? TorBox accept+complete
+observed; RD refused (scoped out). Alt providers help? No (RD dead).
+Swarm required? No. Swarm burden acceptable? No (privacy-blocked).
+Picker needed? No (candidate pre-chosen). Stremio still faster? Only
+via manual download+retry — prepare+notify matches with less friction.
+
+**15. Smallest earned next experiment (not started):** flag-gated,
+size-capped, single-flight demand-linked TorBox prepare
+(failed-Play/anticipation → acquire → poll → bind → notify-on-ready),
+first run on sub-500 MB content, with the delete-verified hygiene loop.
+No magnets automatically, no policy change, no swarm, no scheduler.
+
+### WHAT REMAINS UNPROVEN
+
+- Multi-GB/obscure TorBox acquisition tails; pre-completion file-tree
+  timing; requestdl-on-incomplete behavior (assumed full-required).
+- TorBox concurrent-slot/quota numbers beyond the 60/hr cap.
+- Whether Slow Horses S6E6 / Black Gunn were U3-at-the-time (cache state
+  is not time-travelable; checkcached is point-in-time).
+- MobLand S2E7 (airs Oct 30) as a natural prospective cohort.
+- Final TorBox probe-row purge confirmation (stale-listed, active:false;
+  re-delete 500s).
+
+### WHAT WAS LEARNED
+
+- The "uncached gap" as stated was ~60% misclassified demand: unaired
+  episodes, wrong-typed requests, and title-mismatch identity failures
+  are not execution gaps. Taxonomy before measurement.
+- The RD path is not "slow", it is REFUSED — stop modeling it as latency.
+- TorBox's whole-torrent-no-select + no-progressive-streaming shape is
+  what makes sync acquisition hopeless and prepare the only shape.
+- Torrentio already proved the user-acceptance model ([Download] +
+  retry); HashSucker's edge is removing the retry via notify + keeping
+  exact-file identity at bind time.
+- `controltorrent` delete is lowercase-sensitive; re-delete 500s while
+  mylist stays stale — verify hygiene by state+age, not by re-delete.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- "Acquisition is unbuilt" → bounded RD acquisition exists and is
+  refused; TorBox acquisition is one flag + poll + lifecycle away.
+- "Multi-provider covers gaps" → false here; TorBox-only.
+- "Swarm is the fallback" → unnecessary and privacy-blocked.
+
+### WHAT SHOULD BE UPDATED (list files)
+
+- Done in-slice: this log,
+  `docs/retrospectives/2026-10-24-uncached-execution.md`, `PLANS.md`
+  (slice entry), `handoff/CURRENT.md` (session section).
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing. (Noted: the unaired-episode anticipation attempts — MobLand
+  E7–10 requested before air — suggest scheduler restraint for unaired
+  coordinates, but that is a separate small slice if wanted.)
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. The earned candidate is the §15
+flag-gated demand-linked TorBox prepare experiment above. Explicitly
+NOT started: uncached-execution implementation, cache-policy redesign,
+direct swarm, ranking/selection changes.
+
+### VERDICT
+
+**UNCACHED EXECUTION — PREPARE, DON'T WAIT.** Synchronous acquisition
+is Background-only latency and must not block Play (keep today's typed
+fast failure); demand-linked TorBox preparation (failed-Play +
+anticipation/future-intent → acquire → poll → bind → notify, no picker,
+no swarm) is the viable, bounded, evidence-backed shape. RD is out on
+this appliance. Resolver-first keeps its right to exist iff prepare is
+built — the gap is real, recurring, and closable without new backends.
