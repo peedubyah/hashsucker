@@ -346,7 +346,7 @@ look in `git fsck --unreachable` before assuming a loss.
 in-memory per-chunk ledger (`chunk_value` in data-plane `/metrics`)
 joins each fetch to later consumer use by source
 (DemandServe/DemandBackfill/Prefetch/PostDisconnect/Preexisting).
-Production cohort (~40 min, natural plays + ambient): 0% demand-fill
+Production cohort (~11 min, natural plays + ambient): 0% demand-fill
 waste, ~20% background unused-evicted (post-disconnect tails only),
 GB-scale redemptions (0-API full replay, 27 GB resume window), reuse
 imminent (le10s) + minutes (le5m); no harm. Verdict KEEP, no behavior

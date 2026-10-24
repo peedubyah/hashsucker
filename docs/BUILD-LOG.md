@@ -6280,7 +6280,7 @@ serve-layer join integration test (fetch/deliver/replay/merge math).
 Full Rust suite green: 164 lib + 14 adversarial + 20 recovery + 9
 coalescing. Node untouched.
 
-Production cohort (natural playback only, ~40 min window, fresh-process
+Production cohort (natural playback only, ~11 min window, fresh-process
 ledger; ambient household traffic interleaved and labeled as such):
 legs A/B movie abandon + replay (30 s each), C episode with scripted
 +600 s / back-to-30 s seeks (both landed), D resume at 1200 s, E
@@ -6294,7 +6294,7 @@ Byte accounting, process totals:
   (**20.3%** of background fetched); used-evicted 7.4 GB.
 - demand fills fetched 13.4 GB, delivered 13.6 GB, evicted-unused **0**.
 - reuse distance (distinct chunks): le10s 1752, le60s 255, le5m 513;
-  le30m+ structurally unobservable in a 40 min window.
+  le30m+ structurally unobservable in an 11 min window.
 - global window: 28.2 GB upstream / 41.6 GB local / 108.9 GB requested /
   27.7 GB evicted / 1.1 GB grid overfetch.
 
