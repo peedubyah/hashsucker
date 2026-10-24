@@ -212,6 +212,12 @@ pub struct Metrics {
     // ---- Slice 4 cache metrics ----
     pub cache: CacheMetrics,
 
+    // ---- Cache-value ledger (per-chunk fetch→use join) ----
+    // Bounded in-memory observational join: which fetched chunks later
+    // served real demand before eviction. See chunk_value module docs.
+    // Restart clears it; chunks already durable attribute Preexisting.
+    pub chunk_value: crate::chunk_value::ChunkValueLedger,
+
     // ---- Slice 4.5 ----
     /// Per-fetch decision log. Drives proof G: every upstream request must be
     /// attributable to a captured reason, so the raw decision facts are recorded

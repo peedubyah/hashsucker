@@ -58,6 +58,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::cache::{CacheEngine, ChunkGrid, ChunkPlan, RunKind, TorrentFileId};
 use crate::capability::{ApiKeys, CapabilityStatus};
+use crate::chunk_value::ChunkSource;
 use crate::control::fetch_control;
 use crate::metrics::{CacheDecision, Metrics, MetricsExt, StageClock, StageReport, WorkClass};
 use crate::playback_intel::{PlaybackIntelligence, PrefetchMode};
@@ -1287,6 +1288,9 @@ async fn stripe_worker(
             Some(stage.clone()),
             cold,
             Some(cap),
+            // Stripe workers drain demand runs (streaming head or
+            // stage-only-for-demand); never prefetch.
+            FillKind::Demand,
         )
         .await;
         // Cache authority decides the outcome (present == success), exactly
@@ -1968,6 +1972,10 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                         None,
                         false,
                         Some(cap),
+                        // P9 speculative prefetch: never streams, cap freed
+                        // on drop. Its chunks' later delivery (if any) is
+                        // the prefetch reuse signal.
+                        FillKind::Prefetch,
                     )
                     .await;
                     let ok = c.is_present(&t.cache_key(), idx).unwrap_or(false);
@@ -2080,7 +2088,10 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                     )
                     .await
                     {
-                        None => {}
+                        None => {
+                            // Value hook: this pread range reached the client.
+                            record_client_range(&metrics, &grid, &key, run.start, run.end);
+                        }
                         Some(ResponseOutcome::Cancelled) => {
                             metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
                             outcome = ResponseOutcome::Cancelled;
@@ -2497,6 +2508,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                     Some(stage.clone()),
                                     cold,
                                     fr,
+                                    FillKind::Demand,
                                 ));
                                 tokio::spawn(fill_chunk_run(
                                     cache.clone(),
@@ -2515,6 +2527,7 @@ pub async fn get_file(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                                     Some(stage.clone()),
                                     cold,
                                     Some(bres),
+                                    FillKind::Demand,
                                 ));
                                 ordered.push((sub_start, FetchItem::Owned { rx: arx }));
                                 // The existing ascending emitter needs no
@@ -2799,6 +2812,7 @@ else if stripe_wanted(sub.len())
                                 Some(stage.clone()),
                                 cold,
                                 fr,
+                                FillKind::Demand,
                             ));
                             ordered.push((sub_start, FetchItem::Owned { rx: srx }));
                             k = j + 1;
@@ -2857,6 +2871,7 @@ else if stripe_wanted(sub.len())
                                         // watchdog clock on success, records
                                         // cancellation, or trips the stall
                                         // terminator on zero progress.
+                                        let send_before = delivered;
                                         match send_body_bounded(
                                             &tx,
                                             b,
@@ -2865,7 +2880,22 @@ else if stripe_wanted(sub.len())
                                         )
                                         .await
                                         {
-                                            None => {}
+                                            None => {
+                                                // Value hook: map the streamed
+                                                // slice back to absolute
+                                                // offsets via the demand's
+                                                // delivered counter (items
+                                                // serve the window in order).
+                                                if delivered > send_before {
+                                                    record_client_range(
+                                                        &metrics,
+                                                        &grid,
+                                                        &key,
+                                                        start + send_before,
+                                                        start + delivered - 1,
+                                                    );
+                                                }
+                                            }
                                             Some(ResponseOutcome::Cancelled) => {
                                                 metrics
                                                     .client_cancellations
@@ -3022,6 +3052,8 @@ else if stripe_wanted(sub.len())
                                             Some(stage.clone()),
                                             cold,
                                             None,
+                                            // Takeover refetch of one demand chunk.
+                                            FillKind::Demand,
                                         )
                                         .await;
                                     }
@@ -3087,7 +3119,11 @@ else if stripe_wanted(sub.len())
                                 )
                                 .await
                                 {
-                                    None => {}
+                                    None => {
+                                        // Value hook: joined-fill bytes reached
+                                        // the client from durable storage.
+                                        record_client_range(&metrics, &grid, &key, s, e);
+                                    }
                                     Some(ResponseOutcome::Cancelled) => {
                                         metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
                                         outcome = ResponseOutcome::Cancelled;
@@ -3179,7 +3215,11 @@ else if stripe_wanted(sub.len())
                                 )
                                 .await
                                 {
-                                    None => {}
+                                    None => {
+                                        // Value hook: staged-fill bytes reached
+                                        // the client from durable storage.
+                                        record_client_range(&metrics, &grid, &key, s, e);
+                                    }
                                     Some(ResponseOutcome::Cancelled) => {
                                         metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
                                         outcome = ResponseOutcome::Cancelled;
@@ -3230,11 +3270,15 @@ else if stripe_wanted(sub.len())
                                 )
                                 .await
                                 {
-                                    None => {}
+                                    None => {
+                                        // Value hook: prefetch-completed bytes
+                                        // reached the client — the reuse
+                                        // signal for speculative warming.
+                                        record_client_range(&metrics, &grid, &key, s, e);
+                                    }
                                     Some(ResponseOutcome::Cancelled) => {
                                         metrics
-                                            .client_cancellations
-                                            .fetch_add(1, Ordering::SeqCst);
+                                            .client_cancellations.fetch_add(1, Ordering::SeqCst);
                                         outcome = ResponseOutcome::Cancelled;
                                         break 'consume;
                                     }
@@ -3413,6 +3457,45 @@ async fn send_body_bounded(
         }
         Ok(Err(_)) => Some(ResponseOutcome::Cancelled),
         Err(_) => Some(ResponseOutcome::DownstreamStall),
+    }
+}
+
+/// Cache-value hook: record which chunks' bytes actually reached the client.
+///
+/// Called after every successful consume-loop send with the ABSOLUTE
+/// delivered range `[abs_start..=abs_end]` — the exact bytes the client
+/// received. Plan-time `touch()` is explicitly NOT delivery: it fires for
+/// requested ranges whether or not any byte is delivered. Fill-streamed
+/// slices (which carry no absolute offset) are mapped by the caller from
+/// the demand's delivered counter; the consume loop serves items in
+/// ascending order covering the demand window, so that mapping is exact.
+fn record_client_range(
+    metrics: &Metrics,
+    grid: &ChunkGrid,
+    key: &str,
+    abs_start: u64,
+    abs_end: u64,
+) {
+    if abs_end < abs_start {
+        return;
+    }
+    let mut pos = abs_start;
+    let mut pos = abs_start;
+    let end_excl = abs_end.saturating_add(1);
+    while pos < end_excl {
+        let idx = grid.index_of(pos);
+        let len = grid.chunk_len(idx);
+        if len == 0 {
+            break;
+        }
+        let seg_end = end_excl.min(grid.chunk_start(idx).saturating_add(len));
+        if seg_end <= pos {
+            break;
+        }
+        metrics
+            .chunk_value
+            .record_deliver(key, idx, len, seg_end - pos);
+        pos = seg_end;
     }
 }
 
@@ -3630,6 +3713,18 @@ fn backfill_under_pressure(
     false
 }
 
+/// Why a fill's bytes are being fetched. Pinned at fill construction so
+/// the value ledger attributes each published chunk honestly: demand fills
+/// (streaming or stage-only) serve a real consumer window; P9 prefetch is
+/// explicitly speculative. Serve-vs-backfill spans refine Demand further
+/// inside the fill; post-disconnect is latched dynamically.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FillKind {
+    Demand,
+    Prefetch,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn fill_chunk_run(
     cache: Arc<CacheEngine>,
     metrics: Arc<Metrics>,
@@ -3650,6 +3745,8 @@ pub async fn fill_chunk_run(
     // `Some`, the byte stream reuses it instead of re-acquiring (no double
     // acquire / maxInFlight=1 limiter loss). Later spans get `None`.
     existing_cap: Option<manager::ReservedCapability>,
+    // Cache-value attribution for this fill's published chunks.
+    fill_kind: FillKind,
     // T12 (proven as HY4 P2P on m3-north-db): returns the fill's final
     // reservation (post any in-fill replacement) so a stripe worker can
     // thread the same warm lane across chunk fills with zero acquisition;
@@ -3673,6 +3770,7 @@ pub async fn fill_chunk_run(
         stage,
         cold,
         existing_cap.map(ReaderCapability::Owned),
+        fill_kind,
     )
     .await
 }
@@ -3718,6 +3816,8 @@ pub async fn fill_chunk_run_shared_child(
         stage,
         cold,
         Some(ReaderCapability::Shared(child)),
+        // Shared children drive demand spans (hedge/stripe); never prefetch.
+        FillKind::Demand,
     )
     .await;
 }
@@ -3745,6 +3845,7 @@ async fn fill_chunk_run_inner(
     stage: Option<StageClock>,
     cold: bool,
     cap: Option<ReaderCapability>,
+    fill_kind: FillKind,
 ) -> Option<manager::ReservedCapability> {
 
     let key = tf.cache_key();
@@ -3853,6 +3954,14 @@ async fn fill_chunk_run_inner(
         })
     };
 
+    // Cache-value attribution: the base source for this fill's promotions.
+    // Refined per span below (serve vs backfill); the post-disconnect latch
+    // overrides at publish time.
+    stager.set_source(match fill_kind {
+        FillKind::Demand => ChunkSource::DemandServe,
+        FillKind::Prefetch => ChunkSource::Prefetch,
+    });
+
     // ---- Serve-window-first (seek-latency optimization) ----
     //
     // A mid-chunk seek window [w_start..] inside a chunk-start fetch span
@@ -3928,6 +4037,12 @@ async fn fill_chunk_run_inner(
         // a later 429 attributes to foreground vs optional work.
         if let Some(s) = stage.as_ref() {
             s.set_span_kind(if first_span { "serve" } else { "backfill" });
+        }
+        if !first_span {
+            // Prefix backfill spans stage optional warming, not foreground
+            // bytes. (Only demand fills have a second span: the split
+            // requires a sink, which prefetch never has.)
+            stager.set_source(ChunkSource::DemandBackfill);
         }
         // ---- Slice 4.5 T1: capability acquisition requested. ----
         // The SAME Slice 3 scheduling entry point the no-cache path uses. That is
@@ -4200,6 +4315,9 @@ async fn fill_chunk_run_inner(
                                 // still worth having, and waiters depend on
                                 // these records being resolved.
                                 client_gone = true;
+                                // Value attribution: chunks promoted from here
+                                // on were fetched with no attached demand.
+                                stager.set_post_disconnect();
                                 metrics.client_cancellations.fetch_add(1, Ordering::SeqCst);
                             }
                         }
@@ -5038,6 +5156,11 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response<Bod
             "scheduler_work_steals": m.cache.scheduler_work_steals.load(Ordering::SeqCst),
             "inflight_joiners": m.cache.inflight_joiners.load(Ordering::SeqCst),
         },
+        // Cache value: per-chunk fetch→consumer-use join. Answers "of the
+        // bytes fetched in the background, how many later made playback
+        // better before eviction" — the right-to-exist question for
+        // whole-file/background fill. Bounded in-memory; restart clears it.
+        "chunk_value": m.chunk_value.snapshot(),
         // Slice 4.5 G: every upstream fetch decision, with the present coverage
         // the planner actually saw. This is the evidence for "no unexplained
         // warm CDN traffic" — attribution reads these, it does not guess.

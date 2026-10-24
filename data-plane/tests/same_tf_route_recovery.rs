@@ -503,6 +503,7 @@ impl Stack {
             None,
             false,
             Some(cap),
+            data_plane::serve::FillKind::Demand,
         )
         .await
         .is_some()
@@ -933,6 +934,68 @@ async fn r2k_recovered_chunk_is_authoritative_cache_content() {
         expected(CHUNK, CHUNK as usize),
         "durable cache content is the complete recovered chunk"
     );
+}
+
+// ===========================================================================
+// T-value — the ledger joins fills to client deliveries end to end
+// ===========================================================================
+
+/// The value-ledger contract through the real serve layer: bytes a fill
+/// fetches are fetch-credited at publish, and bytes the client receives
+/// are delivery-credited per chunk — including across a chunk boundary.
+/// A second identical read replays delivery volume without refetching.
+#[tokio::test]
+async fn t_value_ledger_joins_fill_to_delivery() {
+    let st = build_stack(FILE_SIZE, None).await;
+    // Two whole chunks across one boundary: 0..2*CHUNK-1.
+    let (status, body, _p) = read(&st, 0, 2 * CHUNK - 1).await;
+    assert_eq!(status, 206);
+    assert_eq!(body, expected(0, 2 * CHUNK as usize));
+    st.wait_present(0).await;
+    st.wait_present(1).await;
+
+    let by_source = |snap: &serde_json::Value, source: &str| -> serde_json::Value {
+        snap["by_source"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["source"] == source)
+            .cloned()
+            .unwrap()
+    };
+    let snap = st.metrics.chunk_value.snapshot();
+    let demand = by_source(&snap, "demand_serve");
+    assert_eq!(
+        demand["fetched_bytes"], 2 * CHUNK,
+        "both chunks fetch-credited once at publish"
+    );
+    assert_eq!(
+        demand["delivered_bytes"], 2 * CHUNK,
+        "every client-received byte delivery-credited across the boundary"
+    );
+
+    // Replay: same read again. Delivery volume grows; fetch credit does not.
+    let (status, body, _p) = read(&st, 0, 2 * CHUNK - 1).await;
+    assert_eq!(status, 206);
+    assert_eq!(body, expected(0, 2 * CHUNK as usize));
+    let snap = st.metrics.chunk_value.snapshot();
+    let demand = by_source(&snap, "demand_serve");
+    assert_eq!(demand["fetched_bytes"], 2 * CHUNK, "no refetch on replay");
+    assert_eq!(demand["delivered_bytes"], 4 * CHUNK, "replay counts delivery volume");
+    // Streaming delivers bytes before their chunk publishes; the publish
+    // merges (not drops) that early history into the known source.
+    let preexisting = by_source(&snap, "preexisting");
+    assert_eq!(
+        preexisting["delivered_bytes"], 0,
+        "early-delivery volume moved into the known source, not duplicated"
+    );
+    let total_lat: u64 = snap["reuse_latency_chunks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["chunks"].as_u64().unwrap())
+        .sum();
+    assert_eq!(total_lat, 2, "one first-use bucketing per chunk, exactly once");
 }
 
 // ===========================================================================

@@ -51,6 +51,7 @@ use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
+use crate::chunk_value::ChunkSource;
 use crate::metrics::Metrics;
 
 /// Durable cache format version. Slice 4 used the arbitrary-extent layout with
@@ -917,6 +918,11 @@ impl CacheEngine {
             cur: Mutex::new(None),
             promoted: Mutex::new(Vec::new()),
             pending: Mutex::new(std::collections::HashMap::new()),
+            // Default is refined by the fill driver per span (serve vs
+            // backfill) and per fill kind (demand vs prefetch) before any
+            // promotion can happen, so the default never misattributes.
+            source: Mutex::new(ChunkSource::DemandServe),
+            post_disconnect: AtomicBool::new(false),
         }))
     }
 
@@ -1045,6 +1051,7 @@ impl CacheEngine {
         let _ = fs::remove_file(self.chunk_path(key, idx));
         self.sub_current_bytes(size);
         self.metrics.cache.evictions.fetch_add(1, Ordering::SeqCst);
+        self.metrics.chunk_value.record_evict(key, idx, size);
         Ok(())
     }
 
@@ -1114,9 +1121,49 @@ pub struct ChunkStager {
     cur: Mutex<Option<OpenChunk>>,
     promoted: Mutex<Vec<u64>>,
     pending: Mutex<std::collections::HashMap<u64, u64>>,
+    /// Why this fill's bytes are being fetched. Set by the fill driver per
+    /// span (serve vs backfill) and at fill kind (demand vs prefetch); read
+    /// at each promotion so the value ledger attributes the fetch honestly.
+    /// Spans within one fill are sequential, so a settable source is exact.
+    source: Mutex<ChunkSource>,
+    /// Latched by the fill driver when its consumer is proven gone. A chunk
+    /// promoted after the latch was fetched with no attached demand; its
+    /// later delivery (if any) redeems it in the PostDisconnect bucket.
+    post_disconnect: AtomicBool,
 }
 
 impl ChunkStager {
+    /// Set the fetch source for subsequently promoted chunks (per-span).
+    pub fn set_source(&self, source: ChunkSource) {
+        *self.source.lock() = source;
+    }
+
+    /// Latch that the consumer is gone; later promotions count PostDisconnect.
+    pub fn set_post_disconnect(&self) {
+        self.post_disconnect.store(true, Ordering::SeqCst);
+    }
+
+    fn resolved_source(&self) -> ChunkSource {
+        if self.post_disconnect.load(Ordering::SeqCst) {
+            ChunkSource::PostDisconnect
+        } else {
+            *self.source.lock()
+        }
+    }
+
+    /// Publish one complete chunk and record it in the value ledger.
+    /// Returns true iff this promotion newly published the chunk.
+    fn publish(&self, idx: u64, expected: u64) -> rusqlite::Result<bool> {
+        let source = self.resolved_source();
+        let published = self.engine.publish_chunk(&self.key, idx, expected)?;
+        if published {
+            self.engine
+                .metrics
+                .chunk_value
+                .record_populate(&self.key, idx, expected, source);
+        }
+        Ok(published)
+    }
     /// Stage `data` at absolute file offset `offset`, crossing chunk boundaries
     /// as needed. Returns the chunk indices promoted by THIS call (usually 0 or
     /// 1; more only if `data` spans several whole chunks at once).
@@ -1195,10 +1242,7 @@ impl ChunkStager {
                 if let Ok(d) = File::open(self.engine.chunk_dir(&self.key)) {
                     let _ = d.sync_data();
                 }
-                if self
-                    .engine
-                    .publish_chunk(&self.key, idx_done, expected_done)?
-                {
+                if self.publish(idx_done, expected_done)? {
                     self.promoted.lock().push(idx_done);
                     self.pending.lock().remove(&idx_done);
                     promoted_here.push(idx_done);
@@ -1272,7 +1316,7 @@ impl ChunkStager {
                     if let Ok(d) = File::open(self.engine.chunk_dir(&self.key)) {
                         let _ = d.sync_data();
                     }
-                    if let Ok(true) = self.engine.publish_chunk(&self.key, idx, expected) {
+                    if let Ok(true) = self.publish(idx, expected) {
                         self.promoted.lock().push(idx);
                     }
                 }
@@ -1461,6 +1505,91 @@ mod tests {
         let other = map.join_or_claim("other", 10);
         assert!(other.owned);
         assert_eq!(map.len(), 4);
+    }
+
+    // ---- cache value ledger ----
+
+    fn value_by_source(e: &Arc<CacheEngine>, source: &str) -> serde_json::Value {
+        e.metrics.chunk_value.snapshot()["by_source"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["source"] == source)
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn value_publish_records_fill_source() {
+        let (e, tf) = mk();
+        let grid = e.grid_for(&tf);
+        let len = grid.chunk_len(0) as usize;
+        // Default (no set_source call): demand serve.
+        let st = e.begin_stage(tf.clone()).unwrap();
+        st.stage(0, &vec![0xAA; len]).unwrap();
+        st.finish();
+        // Explicit prefetch source.
+        let st2 = e.begin_stage(tf.clone()).unwrap();
+        st2.set_source(crate::chunk_value::ChunkSource::Prefetch);
+        let s1 = grid.chunk_start(1);
+        st2.stage(s1, &vec![0xBB; len]).unwrap();
+        st2.finish();
+
+        let demand = value_by_source(&e, "demand_serve");
+        let pf = value_by_source(&e, "prefetch");
+        assert_eq!(demand["fetched_bytes"], 8 * MIB);
+        assert_eq!(pf["fetched_bytes"], 8 * MIB);
+        assert_eq!(demand["delivered_bytes"], 0);
+        assert_eq!(pf["delivered_bytes"], 0, "fetch credit is not delivery");
+    }
+
+    #[test]
+    fn value_post_disconnect_overrides_fill_source() {
+        let (e, tf) = mk();
+        let grid = e.grid_for(&tf);
+        let len = grid.chunk_len(0) as usize;
+        let st = e.begin_stage(tf.clone()).unwrap();
+        st.set_source(crate::chunk_value::ChunkSource::DemandServe);
+        st.set_post_disconnect();
+        st.stage(0, &vec![0xAA; len]).unwrap();
+        st.finish();
+
+        let pd = value_by_source(&e, "post_disconnect");
+        let demand = value_by_source(&e, "demand_serve");
+        assert_eq!(pd["fetched_bytes"], 8 * MIB);
+        assert_eq!(demand["fetched_bytes"], 0);
+    }
+
+    #[test]
+    fn value_evict_unused_folds_and_drops_record() {
+        // mk() budget is 4096 bytes: publishing one 8 MiB chunk already
+        // overflows it, so maybe_evict must drop an undelivered chunk.
+        let (e, tf) = mk();
+        fill_chunk(&e, &tf, 0);
+        assert!(e.is_present(&tf.cache_key(), 0).unwrap());
+        e.maybe_evict().unwrap();
+        assert!(!e.is_present(&tf.cache_key(), 0).unwrap());
+
+        let demand = value_by_source(&e, "demand_serve");
+        assert_eq!(demand["fetched_bytes"], 8 * MIB);
+        assert_eq!(demand["evicted_unused_bytes"], 8 * MIB);
+        assert_eq!(demand["evicted_used_bytes"], 0);
+        assert_eq!(
+            e.metrics.chunk_value.snapshot()["live_chunks_tracked"],
+            0,
+            "evicted records must not linger"
+        );
+    }
+
+    #[test]
+    fn value_delivered_chunk_evicts_used() {
+        let (e, tf) = mk();
+        fill_chunk(&e, &tf, 0);
+        e.metrics.chunk_value.record_deliver(&tf.cache_key(), 0, 8 * MIB, 8 * MIB);
+        e.maybe_evict().unwrap();
+        let demand = value_by_source(&e, "demand_serve");
+        assert_eq!(demand["evicted_used_bytes"], 8 * MIB);
+        assert_eq!(demand["evicted_unused_bytes"], 0);
     }
 
     // ---- staging / publication ----

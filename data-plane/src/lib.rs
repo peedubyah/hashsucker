@@ -27,6 +27,7 @@
 
 pub mod cache;
 pub mod capability;
+pub mod chunk_value;
 pub mod control;
 pub mod manager;
 pub mod metrics;

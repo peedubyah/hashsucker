@@ -486,6 +486,7 @@ impl Handles {
             None,
             false,
             cap,
+            data_plane::serve::FillKind::Demand,
         )
         .await;
         let key = self.tf.cache_key();
@@ -786,6 +787,7 @@ async fn r13_two_torrent_files_never_cross_read_bytes() {
         None,
         false,
         Some(cap2),
+        data_plane::serve::FillKind::Demand,
     )
     .await;
     assert_eq!(
