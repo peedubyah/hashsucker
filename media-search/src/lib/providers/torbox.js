@@ -40,6 +40,81 @@ const BATCH_SIZE = 10;
 const REQUEST_TIMEOUT_MS = 2000;
 const DEFAULT_CACHE_OBSERVATION_TTL_MS = 5 * 60 * 1000;
 
+/**
+ * Fetch one account torrent by id (readiness polling for preparation).
+ * Returns the raw torrent object, or null when the account does not
+ * contain it (HTTP 404 ITEM_NOT_FOUND — absence proven, not an error).
+ * Throws classified errors for anything else.
+ */
+export async function getTorBoxTorrent(torrentId, { apiKey, fetchFn = fetch, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  if (!apiKey) throw new TypeError('getTorBoxTorrent requires apiKey');
+  const id = String(torrentId ?? '').trim();
+  if (!id) throw new TypeError('getTorBoxTorrent requires torrentId');
+  const startedAt = Date.now();
+  try {
+    const response = await fetchFn(`${API_BASE}/torrents/mylist?id=${encodeURIComponent(id)}&bypass_cache=true`, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+        'User-Agent': 'media-search/0.0.1',
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const error = new Error(`TorBox torrent fetch failed: HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    const payload = await response.json();
+    if (payload?.success !== true || !payload.data || typeof payload.data !== 'object' || Array.isArray(payload.data)) {
+      throw Object.assign(new Error('TorBox torrent fetch malformed'), { code: 'MALFORMED_RESPONSE' });
+    }
+    perfTrace('provider.http', { provider: 'torbox', endpoint: 'mylist-torrent', action: 'poll', origin: 'remote', ms: Date.now() - startedAt, status: 200 });
+    return payload.data;
+  } catch (error) {
+    if (error instanceof ProviderOperationError) throw error;
+    throw classifyProviderError(error, { provider: 'torbox', operation: 'mylist-torrent' });
+  }
+}
+
+/**
+ * Control one account torrent (preparation cleanup). Currently only
+ * `delete` is used: preparation abandons a resource it created.
+ * Returns true when the provider accepted the operation.
+ */
+export async function controlTorBoxTorrent(torrentId, operation, { apiKey, fetchFn = fetch, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  if (!apiKey) throw new TypeError('controlTorBoxTorrent requires apiKey');
+  const id = String(torrentId ?? '').trim();
+  if (!id) throw new TypeError('controlTorBoxTorrent requires torrentId');
+  if (operation !== 'delete') throw new TypeError(`unsupported TorBox control operation ${operation}`);
+  const startedAt = Date.now();
+  try {
+    const response = await fetchFn(`${API_BASE}/torrents/controltorrent`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'media-search/0.0.1',
+      },
+      body: JSON.stringify({ torrent_id: id, operation: 'delete' }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) {
+      const error = new Error(`TorBox control torrent failed: HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    const payload = await response.json();
+    perfTrace('provider.http', { provider: 'torbox', endpoint: 'controltorrent', action: 'delete', origin: 'remote', ms: Date.now() - startedAt, status: 200 });
+    return payload?.success === true;
+  } catch (error) {
+    if (error instanceof ProviderOperationError) throw error;
+    throw classifyProviderError(error, { provider: 'torbox', operation: 'controltorrent' });
+  }
+}
+
 function chunk(array, size) {
   const chunks = [];
 
