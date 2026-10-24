@@ -3,6 +3,18 @@
 Active phase: **Core playback reliability & recovery — CLOSED**.
 → [`docs/phases/phase-core-playback-reliability.md`](docs/phases/phase-core-playback-reliability.md)
 
+**Cache value slice (2026-10-24) — DONE. VERDICT: CACHE VALUE — KEEP
+WHOLE-FILE FILL.** Right-to-exist test for whole-file/background fill via
+a new bounded in-memory per-chunk ledger (source, fetch→use join,
+eviction folds, reuse-latency buckets; observational only, in
+`/metrics`). Production cohort: 0% demand-fill waste, ~20% background
+unused-evicted (post-disconnect tails only), GB-scale redemptions
+(0-API full replay, 27 GB resume window), reuse heavily imminent
+(le10s) + minutes (le5m); no harm (no starvation, LRU-fair evictions,
+sub-second refetch). No behavior change earned or made. Evidence:
+`docs/BUILD-LOG.md` 2026-10-24; retrospective
+`docs/retrospectives/2026-10-24-cache-value.md`.
+
 **Route health + fill ownership slice (2026-10-23) — DONE. VERDICTS:
 ROUTE HEALTH — KNOWN-DEAD TAX FIXED / FILL OWNERSHIP — HEALTHY.**
 The ~540 ms dead-route tax was reproduced live (~963 ms: RD info 398 +

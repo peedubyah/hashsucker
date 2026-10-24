@@ -6244,3 +6244,134 @@ preference removes the repeated failed first attempt; eligibility and
 freshness policy unchanged).
 **FILL OWNERSHIP — HEALTHY** (long holds are active/useful; no measurable
 harm; cancellation-after-disconnect intentional; churn is cache policy).
+
+## 2026-10-24 — CACHE VALUE, NOT CACHE THEATER — CLOSED
+
+### WHAT CHANGED
+
+Observational instrumentation only — no behavior change, no policy change:
+
+- New `data-plane/src/chunk_value.rs`: bounded in-memory per-chunk ledger
+  joining each fetch to its later consumer use. One record per PRESENT
+  chunk (source, size, populate time, delivered bytes, first/last use);
+  eviction folds into per-source aggregates; fill→first-use latency
+  accrues into fixed buckets. Restart clears it.
+- Sources: `DemandServe` / `DemandBackfill` (serve-first split) /
+  `Prefetch` / `PostDisconnect` (latched when the consumer is proven
+  gone) / `Preexisting` (durable before boot; delivery counted, fetch
+  never credited, latency never bucketed).
+- `fill_chunk_run` family takes an explicit `FillKind` (Demand everywhere
+  except the one P9 prefetch site); stager source set per span; publish
+  funnel records source; eviction funnel folds aggregates.
+- Delivery hooks at all five consume-loop send sites with absolute ranges.
+  Plan-time `touch()` is explicitly NOT delivery.
+- Key correctness find during testing: fills stream bytes BEFORE the chunk
+  completes, so `record_populate` MERGES early-delivery history into the
+  known source (moved exactly once) instead of dropping it. The failing
+  integration test caught this; without the merge, ~50% of streamed bytes
+  vanished from the ledger.
+- Exposed as `chunk_value` in `/metrics`. Deployed to production
+  (data-plane rebuilt + recreated).
+
+### WHAT WAS PROVEN (tests + production evidence + measurements)
+
+Tests: 5 ledger unit tests + 4 cache source/eviction tests + 1
+serve-layer join integration test (fetch/deliver/replay/merge math).
+Full Rust suite green: 164 lib + 14 adversarial + 20 recovery + 9
+coalescing. Node untouched.
+
+Production cohort (natural playback only, ~40 min window, fresh-process
+ledger; ambient household traffic interleaved and labeled as such):
+legs A/B movie abandon + replay (30 s each), C episode with scripted
++600 s / back-to-30 s seeks (both landed), D resume at 1200 s, E
+cross-media movie, F head-replay probe. All plays 0 manual actions,
+clean exits (quit-by-IPC for the seek leg), no provider URL leak.
+
+Byte accounting, process totals:
+- background fetched 14.3 GB (post-disconnect 14.3 GB; backfill 10 MB;
+  prefetch 0 — P9 disabled in prod by `PREFETCH_ENABLED=0`);
+  delivered 14.6 GB volume (replay re-delivers); evicted-unused 2.9 GB
+  (**20.3%** of background fetched); used-evicted 7.4 GB.
+- demand fills fetched 13.4 GB, delivered 13.6 GB, evicted-unused **0**.
+- reuse distance (distinct chunks): le10s 1752, le60s 255, le5m 513;
+  le30m+ structurally unobservable in a 40 min window.
+- global window: 28.2 GB upstream / 41.6 GB local / 108.9 GB requested /
+  27.7 GB evicted / 1.1 GB grid overfetch.
+
+Concrete examples:
+1. HIGH VALUE — Leg B replay served the whole 4.39 GB movie with 0 API
+   calls and ~1 CDN request; 501 chunks redeemed at le5m (~4 GB,
+   post-disconnect-fetched → replay-delivered); resume leg 27 GB local
+   vs 2.4 GB upstream.
+2. WASTE — 2.9 GB post-disconnect tails evicted unused (20.3%); demand
+   fills 0 unused.
+3. CROSS-MEDIA — Leg F head-replay was a FULL MISS ~15 min after full
+   presence (Leg E + ambient churned it out), yet refetch cost 0 API +
+   2 CDN + 1.7 s first frame: warming's second-session value has a
+   minutes-scale half-life under load, but refetch is cheap.
+
+Seek value: seeks landed exactly and playback continued; partial-hit
+growth across seek windows. Failover×cache: no route deaths in window
+(unobserved live; deterministic suites unchanged and green). Provider
+impact: acquisitions rare (reuse-dominated), no throttling observed;
+post-disconnect fills add bounded provider concurrency only.
+
+### WHAT REMAINS UNPROVEN
+
+- Reuse tail beyond 5 min (needs a longer-lived process; the ledger keeps
+  accruing — a future session can read the le30m+ buckets).
+- Per-TF split of aggregates (snapshot is process-global; cohort windows
+  + TF isolation in keys bound the confounding but don't eliminate it).
+- True eyeball consumption vs server→client handoff (ledger boundary is
+  the handoff, stated everywhere).
+
+### WHAT WAS LEARNED
+
+- The 451/448 GB headline decomposes into: first-play cold fills of a
+  growing 4K library + ~25 MB/s sustained household watching +
+  revolving-door 8 GiB cache + abandonment tails. Not a leak; mostly the
+  product working as designed at 4K bitrates.
+- Delivery-before-publish is the NORMAL path (streaming), not an edge —
+  any fetch→use join must merge, or it undercounts by ~half.
+- `touch()`/last_access measures REQUESTS, not consumption; prior
+  reasoning treating it as reuse evidence would have lied.
+- Whole-file fill's second-session value is real but fragile (minutes
+  under concurrent load); refetch cost is simultaneously tiny — both
+  facts matter and they point in opposite directions.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- "Background fill is probably waste" → measured: 0% demand waste,
+  ~20% background unused-evicted, redemptions concrete and large.
+- "Prefetch warms the cache" → P9 is disabled in production; background
+  is demand-overfetch + post-disconnect + backfill only.
+
+### WHAT SHOULD BE UPDATED (list files)
+
+- Done in-slice: this log,
+  `docs/retrospectives/2026-10-24-cache-value.md`, `PLANS.md` (slice
+  entry), `handoff/CURRENT.md` (session section).
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing. (Noted: `DATA_PLANE_FORCE_SLOT_ORDER`-style single-purpose
+  knobs are fine; no new knob was added — ledger is always-on,
+  negligible cost.)
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. Evidence-backed future dimensions ONLY
+if pressure grows (none earned now): stop-after-disconnect grace period
+(not immediate — waiters + imminent replay redeem); head/tail
+startup-chunk pinning against churn (Leg F refetch was cheap but
+avoidable); longer-window le30m+ bucket read. Explicitly NOT started:
+uncached-execution work, cache-policy redesign.
+
+### VERDICT
+
+**CACHE VALUE — KEEP WHOLE-FILE FILL.** Measured waste is bounded
+(~20% of background fetch, ~10% of total fetch, zero in demand fills),
+redemptions are concrete (0-API full replays, GB-scale resume/seek
+service), and no harm was demonstrated (no starvation, no failover
+interaction, LRU-fair evictions, sub-second refetch). Nothing
+overwhelmingly earned a behavior change.

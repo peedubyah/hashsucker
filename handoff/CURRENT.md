@@ -340,6 +340,22 @@ recovered from the dropped stash's untracked commit (`b4d12bd`) and restored
 untracked. A dropped stash is still recoverable while its object survives —
 look in `git fsck --unreachable` before assuming a loss.
 
+## Live session state (2026-10-24, cache value — CLOSED)
+
+**What is now true.** Whole-file fill earned its keep: new bounded
+in-memory per-chunk ledger (`chunk_value` in data-plane `/metrics`)
+joins each fetch to later consumer use by source
+(DemandServe/DemandBackfill/Prefetch/PostDisconnect/Preexisting).
+Production cohort (~40 min, natural plays + ambient): 0% demand-fill
+waste, ~20% background unused-evicted (post-disconnect tails only),
+GB-scale redemptions (0-API full replay, 27 GB resume window), reuse
+imminent (le10s) + minutes (le5m); no harm. Verdict KEEP, no behavior
+change. Deployed: data-plane rebuilt + recreated (media-search
+untouched). Evidence: `docs/BUILD-LOG.md` 2026-10-24;
+`docs/retrospectives/2026-10-24-cache-value.md`. Longer reuse tail
+(le30m+) accrues in the live ledger for a future read. Explicitly NOT
+started afterward: uncached-execution work, cache-policy redesign.
+
 ## Live session state (2026-10-23, route health + fill ownership — CLOSED)
 
 **What is now true.** Dual-route cold acquisitions no longer pay a failed
