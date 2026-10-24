@@ -51,6 +51,10 @@ Options:
   --json            print the measurement as JSON
   --server URL      the HashSucker base URL (default http://localhost:8080)
   --keep-open       leave mpv running after the measurement
+  --wait SECONDS    max time to wait for preparation when Play returns
+                    PREPARING before launching the player (default 900);
+                    the client polls, then plays automatically on READY
+  --no-wait         return immediately after PREPARING is acknowledged
 `;
 
 /** A media identity names itself: tt0903747, tmdb1396, imdb0903747. */
@@ -60,6 +64,7 @@ function parseArgs(argv) {
   const args = {
     command: null, target: null, season: null, episode: null, resume: null,
     measure: null, json: false, server: null, keepOpen: false,
+    wait: 900, noWait: false,
   };
   const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -68,6 +73,8 @@ function parseArgs(argv) {
     else if (a === '--episode') args.episode = Number.parseInt(argv[++i], 10);
     else if (a === '--resume') args.resume = Number.parseFloat(argv[++i]);
     else if (a === '--measure') args.measure = Number.parseFloat(argv[++i]);
+    else if (a === '--wait') args.wait = Number.parseFloat(argv[++i]);
+    else if (a === '--no-wait') args.noWait = true;
     else if (a === '--json') args.json = true;
     else if (a === '--server') args.server = argv[++i];
     else if (a === '--keep-open') args.keepOpen = true;
@@ -155,12 +162,86 @@ async function resolveIntent(base, args, measurement, sessionId = null) {
     }, sessionId);
   }
   if (response.status !== 200) {
+    // PREPARING is not a failure: the server started bounded work and the
+    // client waits for READY, then plays automatically. No second command,
+    // no manual retry, no provider choice — one Press Play end to end.
+    if (response.status === 202 && response.json?.outcome === 'preparing'
+      && response.json?.preparationId != null) {
+      return waitForPreparation(base, response.json, args, measurement, sessionId);
+    }
     const error = new Error(`${response.json?.code ?? `HTTP_${response.status}`}: ${response.json?.error ?? 'the intent could not be resolved'}`);
     error.code = response.json?.code ?? `HTTP_${response.status}`;
     error.status = response.status;
     throw error;
   }
   return { result: response.json, resolveMs: response.elapsedMs };
+}
+
+/**
+ * Poll one preparation until READY (then play), terminal failure, or the
+ * wait budget. Progress lines go to stderr so --json stays parseable.
+ */
+async function waitForPreparation(base, preparing, args, measurement, sessionId) {
+  const id = preparing.preparationId;
+  measurement.preparationId = id;
+  measurement.preparationProvider = preparing.provider ?? null;
+  measurement.preparationJoined = preparing.joined === true;
+  if (args.noWait) {
+    const error = new Error(`PREPARING: preparation ${id} acknowledged; --no-wait skips the wait`);
+    error.code = 'PREPARING_ACKNOWLEDGED';
+    error.preparation = preparing;
+    throw error;
+  }
+  const budgetMs = (Number.isFinite(args.wait) && args.wait > 0 ? args.wait : 900) * 1000;
+  const started = nowMs();
+  process.stderr.write(`preparing ${preparing.provider ?? 'provider'} (id ${id})${preparing.joined ? ' — joining existing work' : ''}…\n`);
+  for (;;) {
+    if (nowMs() - started > budgetMs) {
+      const error = new Error(`PREPARE_TIMEOUT: preparation ${id} not ready after ${Math.round((nowMs() - started) / 1000)}s`);
+      error.code = 'PREPARE_TIMEOUT';
+      error.preparationId = id;
+      throw error;
+    }
+    await new Promise((r) => setTimeout(r, 5000));
+    let status;
+    try {
+      const res = await fetch(`${base}/api/playback-preparations/${id}`, {
+        headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(30_000),
+      });
+      status = await res.json();
+    } catch (err) {
+      process.stderr.write(`preparation status unreadable (${err?.message ?? err}); retrying…\n`);
+      continue;
+    }
+    if (status?.state === 'ready' && status?.bound && status?.playbackUrl) {
+      measurement.preparationWaitMs = nowMs() - started;
+      process.stderr.write(`ready in ${Math.round(measurement.preparationWaitMs / 1000)}s — playing\n`);
+      return {
+        result: {
+          mediaId: status.media?.mediaId ?? preparing.mediaId ?? null,
+          mediaType: status.media?.mediaType ?? preparing.mediaType ?? null,
+          season: status.media?.season ?? preparing.season ?? null,
+          episode: status.media?.episode ?? preparing.episode ?? null,
+          title: status.media?.title ?? preparing.title ?? null,
+          torrentFileId: status.torrentFileId,
+          playbackUrl: status.playbackUrl,
+          warm: false,
+          prepared: true,
+        },
+        resolveMs: nowMs() - started,
+      };
+    }
+    if (status?.state === 'ready') continue; // bound pending; keep polling
+    if (['failed_temporary', 'failed_policy', 'failed_terminal', 'cancelled', 'expired'].includes(status?.state)) {
+      const error = new Error(`PREPARATION_FAILED: preparation ${id} ended ${status.state}${status.lastError ? `: ${status.lastError}` : ''}`);
+      error.code = 'PREPARATION_FAILED';
+      error.preparationId = id;
+      throw error;
+    }
+    const elapsed = Math.round((nowMs() - started) / 1000);
+    if (elapsed % 30 < 5) process.stderr.write(`still preparing (${status?.state ?? 'unknown'}) — ${elapsed}s…\n`);
+  }
 }
 
 /**
@@ -359,6 +440,10 @@ async function main() {
     firstSourceSuccess: false,
     startedAt: new Date().toISOString(),
     sessionId,
+    preparationId: null,
+    preparationProvider: null,
+    preparationJoined: false,
+    preparationWaitMs: null,
   };
 
   try {
@@ -427,6 +512,10 @@ async function main() {
       const title = resolved.result.title ? `${resolved.result.title} ` : '';
       process.stdout.write(`${title}(${resolved.result.mediaId}) — ${resolved.result.mediaType}\n`);
       process.stdout.write(`  resolved in ${resolved.resolveMs} ms (${resolved.result.warm ? 'warm' : 'cold'})\n`);
+      if (measurement.preparationId != null) {
+        process.stdout.write(`  prepared via ${measurement.preparationProvider ?? 'provider'}`
+          + ` in ${measurement.preparationWaitMs ?? '?'} ms${measurement.preparationJoined ? ' (joined)' : ''}\n`);
+      }
       if (marks.mediaLoadedMs != null) process.stdout.write(`  player loaded in ${marks.mediaLoadedMs} ms\n`);
       if (marks.firstFrameMs != null) process.stdout.write(`  first frame in ${marks.firstFrameMs} ms\n`);
       if (measurement.error) process.stdout.write(`  player error: ${measurement.error}\n`);
