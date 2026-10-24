@@ -190,7 +190,15 @@ export async function resolvePlayback(args = {}) {
       title: candidate.title ?? candidate.filename ?? null,
       candidate: {
         filename: candidate.filename ?? candidate.title ?? null,
-        size: Number.isSafeInteger(Number(candidate.selectedFileSize)) ? Number(candidate.selectedFileSize) : null,
+        // selectedFileSize is null for corpus rows (no per-file exact size
+        // — see pipeline comments). Null stays null: a coerced 0 would
+        // fail exact-size checks against every real file. Only a positive
+        // integer is an exact size.
+        size: (candidate.selectedFileSize != null
+          && Number.isSafeInteger(Number(candidate.selectedFileSize))
+          && Number(candidate.selectedFileSize) > 0)
+          ? Number(candidate.selectedFileSize)
+          : null,
         rank: candidate.rank ?? null,
       },
       providers: Array.isArray(deps.eligibleProviders) ? deps.eligibleProviders : [],
