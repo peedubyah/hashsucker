@@ -340,6 +340,18 @@ recovered from the dropped stash's untracked commit (`b4d12bd`) and restored
 untracked. A dropped stash is still recoverable while its object survives —
 look in `git fsck --unreachable` before assuming a loss.
 
+## Live session state (2026-10-24, RD expiry audit — CLOSED)
+
+**What is now true.** 48 h of adapter/provider work audited against the
+expired-RD window: verdict MODERATE — docs/measurements distorted
+(annotated at all live surfaces), every production change verified
+independent, durability needs no repair (zero live evidence rows; 403s
+provably map to non-suppressing classes), no new bias, no reactive
+changes, unrestrict re-proven working under premium. No code or policy
+changed. Evidence: `docs/BUILD-LOG.md` 2026-10-24;
+`docs/retrospectives/2026-10-24-rd-expiry-audit.md`. Explicitly NOT
+started afterward: prepare implementation, torrent streamer.
+
 ## Live session state (2026-10-24, RD recheck — CLOSED)
 
 **What is now true.** RD acquisition works again under premium (expires
@@ -376,9 +388,10 @@ RD add 0/125; Lowdown), ~60% of apparent demand reclassified
 non-execution (unaired MobLand E7–10, wrong-typed plays, U6 identity).
 Live probes: TorBox accepts/downloads/deletes (106 MB ≤5.6 min;
 whole-torrent, no file-select); RD addMagnet refused 403 account-wide
-(TorBox-only appliance). Fallback covers 0%; sync is Background-only;
+[2026-10-24 audit: expired-account observation — works under premium;
+see RD recheck section]. Fallback covers 0%; sync is Background-only;
 swarm unnecessary + privacy-blocked (no VPN egress). Earned next step
-(NOT started): flag-gated demand-linked TorBox prepare
+(NOT started): flag-gated demand-linked provider-neutral prepare
 (acquire→poll→bind→notify, no picker). TorBox probe row lingered
 visibly post-delete (`active:false`, re-delete 500s — stale read model;
 final check at close). Evidence: `docs/BUILD-LOG.md` 2026-10-24;

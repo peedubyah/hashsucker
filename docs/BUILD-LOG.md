@@ -6395,6 +6395,15 @@ probe, one RD acquisition probe.
 **1. Executive verdict: `UNCACHED EXECUTION — PREPARE, DON'T WAIT`** (TorBox-only; RD dead on this appliance; no swarm; no picker). Rationale
 in §12 below; falsifiers answered in §13.
 
+> [Superseded in part 2026-10-24 (RD recheck + expiry audit): the
+> "TorBox-only" / "RD dead" qualifiers below were expired-account
+> observations, not standing facts. Under premium RD acquisition works
+> (add 201, 2.7 GB downloaded, selective select, verified cleanup); the
+> binding constraint is now RD's content filter (451/code 35), and the
+> historical 29+96 were account-expiry fallout with zero premium
+> information. The PREPARE, DON'T WAIT verdict itself stands. See the
+> "RD ACQUISITION RECHECK" entry.]
+
 **2. Prevalence (Parts 1–3).** State classes U0–U6 applied to 30 days of
 human demand (seerr 216 reqs/52 media + playback-object 26 reqs/8 media):
 - **41/57 distinct media playable now (72%).**
@@ -6454,7 +6463,9 @@ account cannot add OR unrestrict (consistent with the route-health
 slice's dual-route 403s and the May-2026 filter-gate context). The 96
 RW transient add-failures are likely rate-limit noise atop the same
 wall. **Multi-provider acquisition collapses to TorBox-only on this
-appliance.** Existing code already does bounded RD add+select+cleanup
+appliance.** [2026-10-24 audit: expired-account observation; withdrawn.
+Under premium both providers acquire; TorBox-only scoped to the expiry
+window.] Existing code already does bounded RD add+select+cleanup
 (`ensure.js`, hygienic); the provider says no.
 
 **6. Multi-provider overlap (Part 15):** no help available — RD adds
@@ -6515,8 +6526,8 @@ verified), 60/hr TorBox cap as natural throttle.
 | Acceptable cached fallback | 0% on confirmed set | — | — | 0 | n/a | none | none |
 | TorBox acquisition (sync Play) | bounded by cache misses | minutes (≤5.6 min/106 MB obs.) | hours for GBs/obscure | 0 | moderate (seeds/slots) | readiness poll + lifecycle | quota (60/hr), storage transient |
 | TorBox acquisition (prepare/async) | same | hidden (notify on ready) | same | 0 (notify, no picker) | same | scheduler hookup + single-flight + notify | same, amortized |
-| RD acquisition | 0 on this appliance (403) | n/a | n/a | — | refused | none | none |
-| Multi-provider acquisition | = TorBox-only here | — | — | — | — | — | — |
+| RD acquisition | 0 on this appliance (403) [2026-10-24: expired-account reading; works under premium — see recheck] | n/a | n/a | — | refused | none | none |
+| Multi-provider acquisition | = TorBox-only here [2026-10-24: withdrawn; both viable under premium] | — | — | — | — | — | — |
 | Demand-linked pre-acquisition | future-intent subset | hidden | hidden | 0 | scheduler-dependent | reuse anticipation/future_intents | same as TorBox |
 | Direct torrent | unneeded (TorBox covers) | unbounded tails | unbounded | 0 | poor | large (client, netns, breaker, testing) | HIGH (home-IP exposure, no VPN) |
 
@@ -6535,7 +6546,9 @@ rate is the metric and prepare moves it.
 confirmed (not frequent, not rare) → action justified, hysteria not.
 >30–60 s acquisition? TRUE for sync — which is why the verdict is
 prepare-framed, not sync. Reliability poor? TorBox accept+complete
-observed; RD refused (scoped out). Alt providers help? No (RD dead).
+observed; RD refused (scoped out) [2026-10-24: that scoping was the
+expired account; RD reliability under premium unmeasured by those
+failures]. Alt providers help? No (RD dead) [2026-10-24: withdrawn].
 Swarm required? No. Swarm burden acceptable? No (privacy-blocked).
 Picker needed? No (candidate pre-chosen). Stremio still faster? Only
 via manual download+retry — prepare+notify matches with less friction.
@@ -6575,7 +6588,8 @@ No magnets automatically, no policy change, no swarm, no scheduler.
 
 - "Acquisition is unbuilt" → bounded RD acquisition exists and is
   refused; TorBox acquisition is one flag + poll + lifecycle away.
-- "Multi-provider covers gaps" → false here; TorBox-only.
+- "Multi-provider covers gaps" → false here; TorBox-only. [2026-10-24:
+  both halves withdrawn to the expiry window; see annotation at §1.]
 - "Swarm is the fallback" → unnecessary and privacy-blocked.
 
 ### WHAT SHOULD BE UPDATED (list files)
@@ -6873,3 +6887,139 @@ verified cleanup; helper path proven through mapping/cleanup with zero
 production writes. Residual scope: content-filter (451/code 35) blocks
 5/5 tested media hashes — real catalog acquisitions will hit it; the
 filter, not the account, is now the binding constraint on RD.
+
+## 2026-10-24 — RD EXPIRY AUDIT (48H ADAPTER/PROVIDER WORK) — CLOSED
+
+Forensic audit, no product code changed, no policy changed, nothing
+deployed. Question: did an expired RD subscription cause incorrect
+architectural or production decisions in the last ~48 h?
+
+### WHAT CHANGED
+
+Stale-guidance annotations only (history preserved, dated tags):
+- `docs/BUILD-LOG.md` uncached entry: 5 annotations marking
+  "TorBox-only / RD dead / multi-provider collapses" as expired-account
+  observations withdrawn by the recheck.
+- `PLANS.md` uncached entry + `handoff/CURRENT.md` uncached section:
+  same correction on the two live-guidance duplicates.
+- Retrospective bodies left as dated history (the recheck retrospective
+  already carries the correction; falsifying old logs would rewrite
+  history deceptively).
+
+### WHAT WAS PROVEN
+
+**Timeline.** Commits Oct 21 14:51 → Oct 24 12:37 CDT all in scope.
+Expiry bounds: already-free by Oct 21 (START FAST recon states free-tier
+as fact; RW 403 storm Oct 22 04:00 UTC consistent); renewed between Oct
+23 PM (last live 403 observation, route-health session) and Oct 24
+midday recheck (premium → 2026-11-23). Exact expiry timestamp
+unavailable from any data source — stated as bounded interval, not
+approximated.
+
+**Route health: CLEAN.** The fix keys on TorBox *usable* evidence, never
+on RD failure; it is provider-symmetric by construction and test
+("whichever route proved itself sorts first"; no-evidence order byte-
+identical to before). Would absolutely be remade under premium — where
+it works *better* ( both providers can earn preference). Durability
+audit: RD acquisition 403 → `no_capability(terminal:false)` →
+'temporary' (5-min TTL, never suppresses); delivery 403s stay in-memory
+(mark_dead/breaker/failover); durable terminal requires 404/410/
+protocol-invalid. The design provably cannot persist account-global
+failure as route death. Live table: 7 RD usable rows, ALL expired; 2
+TorBox rows from Sept, expired; **zero live rows of any kind** — natural
+TTL sufficient, no repair.
+
+**Ordering: no new TorBox bias.** Only "TorBox-first" references predate
+the window (selection PATH C traversal, fallback-chain default — Oct 19
+or earlier, untouched, documented architecture). SQL default is provider
+ASC (RD first). Rust slot order follows S-1. Verified, not assumed.
+
+**Classification: CLEAN.** Account-global → non-durable classes;
+route-local (404/410) → terminal; content-policy (451) → hard-per-
+request/transient-durable-never; 429 → RateLimited (never death).
+`recordTerminal` call sites are TorBox-only + protocol-invalid-gated.
+
+**Retry storm: no reactive changes exist.** No breaker/cooldown/backoff/
+fallback/acquisition-disable diff in window (verified via -S log
+searches; the two retry-touching commits are the unrelated truncated-
+failover fix and a test-harness seam). The waste mechanism (unmemoized
+transients across decisions) predates the storm; the account-guard memo
+remains reported-but-unimplemented, correctly per bounds.
+
+**Uncached conclusions: annotated, verdict intact.** PREPARE, DON'T WAIT
+never depended on RD being dead — it depended on sync latency being
+minutes-scale (TorBox-measured, still true) and fallback covering 0%
+(RW all-uncached on TorBox side, still true). Only the provider-scope
+qualifiers changed, and they are now annotated at every live surface.
+
+**Adapter matrix re-verified under premium:** /user 200 premium,
+list/info 200, **unrestrict on existing downloaded link 200 + download
+URL** (closes the recheck's open nuance; route-health-era unrestrict
+403s reclassified as expiry fallout alongside addMagnet). No new adds
+created (none needed — recheck proved add/select/delete).
+
+**Tests: CLEAN.** Failover suites bind mock 127.0.0.1 origins (zero live
+dependence); no test encodes 403/refusal/unavailable-RD expectations
+(sweep: rd-ensure, realdebrid-provider, provider-contracts,
+route-coordinate-order 35/35 green; coverage-escalation/route-
+reconciler use mocked seam statuses).
+
+**Prod config: CLEAN.** No TorBox-only/RD-disable flags anywhere;
+STREAM_BYTE_ROUTE=playback (expected); single RD credential path;
+breakers in-memory only.
+
+**Durable state: CLEAN.** Nothing live to repair (see evidence table).
+Failed adds create no placements (ensure cleans up pre-persist).
+
+**Reruns:** none mandatory. Deferred-if-needed: RD healthy latency
+distribution (only if prepare timing models need it — owned by future
+prepare slice, not this audit).
+
+### WHAT REMAINS UNPROVEN
+
+- Exact expiry/renewal timestamps (bounded, not pinpointed).
+- Transient-storm message breakdown (records keep classes only).
+- Premium-period RD unrestrict... now PROVEN (200, this audit).
+
+### WHAT WAS LEARNED
+
+- Count unique failure units (8 hashes), not log entries (125) — the
+  autopsy already did this; the audit confirms no decision depended on
+  the inflated count.
+- Resolver-safe 429s are log-invisible by design; "zero cooldown lines"
+  does not exonerate rate limiting in that mode. Stated, not solved.
+- Attribution-based usable evidence (`route-delivered` on serving
+  headers) cannot bound account-state windows — it proves bytes flowed,
+  not which tier authorized them.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- "TorBox-only / RD dead" as standing claims → withdrawn to the expiry
+  window at every live surface (this slice).
+- START FAST "provider API 170–992 ms across TorBox, RealDebrid" →
+  qualified: RD portion is failure latency, not healthy latency. The
+  conclusion it supported (waits were permit waits) is unaffected.
+
+### WHAT SHOULD BE UPDATED (list files)
+
+- Done in-slice: this log (5 annotations), `PLANS.md`, `handoff/CURRENT.md`,
+  `docs/retrospectives/2026-10-24-rd-expiry-audit.md`.
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. Unchanged: flag-gated demand-linked
+prepare experiment (now genuinely provider-neutral with evidence).
+
+### VERDICT
+
+**RD EXPIRY CONTAMINATION — MODERATE.** Several measurements and docs
+were distorted (uncached provider-scope verdicts, RD latency-number
+qualification, storm interpretation, tax framing) but every production
+code change in the window is verified independent of RD account state,
+durable state needs no repair, and no rerun is mandatory. No incorrect
+architectural or production decision found; the closest item (account-
+guard memo) was already correctly reported-but-unimplemented.

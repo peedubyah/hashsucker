@@ -3,6 +3,18 @@
 Active phase: **Core playback reliability & recovery — CLOSED**.
 → [`docs/phases/phase-core-playback-reliability.md`](docs/phases/phase-core-playback-reliability.md)
 
+**RD expiry audit slice (2026-10-24) — DONE. VERDICT: RD EXPIRY
+CONTAMINATION — MODERATE.** Forensic, no code changed. Every production
+change in window verified independent of RD account state (permit, cache,
+failover, ordering mechanism, attribution, ledger); durability layer
+provably cannot persist account-global failure as route death
+(403→temporary, 5-min TTL; zero live evidence rows); no TorBox bias
+introduced (pre-existing defaults untouched); storm caused no reactive
+changes; superseded "TorBox-only/RD-dead" claims annotated at all live
+surfaces; unrestrict re-proven 200 under premium. No repair needed, no
+rerun mandatory. Evidence: `docs/BUILD-LOG.md` 2026-10-24; retrospective
+`docs/retrospectives/2026-10-24-rd-expiry-audit.md`.
+
 **RD recheck slice (2026-10-24) — DONE. VERDICT: RD ACQUISITION —
 RESTORED.** Premium active (expires 2026-11-23); raw addMagnet 201 on
 Ubuntu ISO, downloaded 2.7 GB in 7.1 min with live tree + selective
@@ -34,10 +46,12 @@ product code changed. Confirmed execution gap ≈ 4–7% of human demand
 identity). Acceptable-fallback covers 0% of the confirmed set. Live
 probes: TorBox accepts+downloads+deletes (106 MB, ≤5.6 min upper bound;
 whole-torrent, no file-select, no progressive streaming); RD addMagnet
-refused 403 at account level (multi-provider collapses to TorBox-only).
-Sync acquisition is Background-only latency; demand-linked TorBox
-prepare (failed-Play/anticipation → acquire → poll → bind → notify, no
-picker, no swarm) is the earned shape — explicitly NOT started. No
+refused 403 at account level [2026-10-24 audit: expired-account
+observation — under premium RD acquires; see RD recheck entry].
+Sync acquisition is Background-only latency; demand-linked
+provider-neutral prepare (failed-Play/anticipation → acquire → poll →
+bind → notify, no picker, no swarm) is the earned shape — explicitly
+NOT started. No
 direct swarm (unnecessary + home-IP privacy-blocked). Evidence:
 `docs/BUILD-LOG.md` 2026-10-24; retrospective
 `docs/retrospectives/2026-10-24-uncached-execution.md`.
