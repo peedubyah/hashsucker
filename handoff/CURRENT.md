@@ -340,6 +340,19 @@ recovered from the dropped stash's untracked commit (`b4d12bd`) and restored
 untracked. A dropped stash is still recoverable while its object survives —
 look in `git fsck --unreachable` before assuming a loss.
 
+## Live session state (2026-10-24, RD recheck — CLOSED)
+
+**What is now true.** RD acquisition works again under premium (expires
+2026-11-23): raw add 201, Ubuntu ISO 2.7 GB downloaded in 7.1 min with
+select + verified delete; helper proven through mapping/cleanup with no
+prod writes. 403→451 across renewal = entitlement fixed, content filter
+visible: 5/5 media hashes infringing-blocked, so the filter binds RD
+catalog acquisition next. "TorBox-only" withdrawn; history reclassified
+as expiry fallout. Prepare genuinely provider-neutral now. No code or
+policy changed. Evidence: `docs/BUILD-LOG.md` 2026-10-24;
+`docs/retrospectives/2026-10-24-rd-recheck.md`. Explicitly NOT started
+afterward: prepare implementation, torrent streamer.
+
 ## Live session state (2026-10-24, RD acquisition autopsy — CLOSED)
 
 **What is now true.** RD acquisition is proven account-blocked, not

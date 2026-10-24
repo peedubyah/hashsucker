@@ -3,6 +3,17 @@
 Active phase: **Core playback reliability & recovery — CLOSED**.
 → [`docs/phases/phase-core-playback-reliability.md`](docs/phases/phase-core-playback-reliability.md)
 
+**RD recheck slice (2026-10-24) — DONE. VERDICT: RD ACQUISITION —
+RESTORED.** Premium active (expires 2026-11-23); raw addMagnet 201 on
+Ubuntu ISO, downloaded 2.7 GB in 7.1 min with live tree + selective
+select + verified delete; helper path proven (mapping correctly refused
+non-video ISO, full cleanup, zero prod writes). 5/5 media hashes
+451/code-35 filter-blocked — the filter, not the account, now binds RD
+catalog acquisition. "TorBox-only" withdrawn to the expired window;
+historical failures reclassified as expiry fallout. Evidence:
+`docs/BUILD-LOG.md` 2026-10-24; retrospective
+`docs/retrospectives/2026-10-24-rd-recheck.md`.
+
 **RD acquisition autopsy slice (2026-10-24) — DONE. VERDICT: RD
 ACQUISITION — ACCOUNT CAPABILITY BLOCKED.** Forensic, no code changed.
 `GET /user` → free tier, premium 0: addMagnet 403/permission_denied/9

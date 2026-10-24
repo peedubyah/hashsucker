@@ -6755,3 +6755,121 @@ separation prove it at every seam. Prepare stays provider-neutral
 (TorBox path viable; RD seam remains wired for premium accounts).
 Torrent-streamer escalation NOT earned (TorBox covers; privacy-blocked
 anyway).
+
+## 2026-10-24 — RD ACQUISITION RECHECK AFTER PREMIUM RENEWAL — CLOSED
+
+### WHAT CHANGED
+
+Nothing in product code. Scratch-only observers under
+`/var/tmp/patrick/hashsucker/rd-recheck/` (key chmod-600, all deleted at
+close). Prior verdict it re-tests: ACCOUNT CAPABILITY BLOCKED (free tier,
+addMagnet 403/permission_denied/9).
+
+### WHAT WAS PROVEN
+
+**1. Account state.** `GET /user` → 200, `type:"premium"`, expires
+2026-11-23 (~30 days). Token valid. Proceed criterion met.
+
+**2. Raw control addMagnet — account gate GONE, content filter VISIBLE.**
+Same sanitized shape, benign 106 MB hash: **451 `infringing_file`,
+error_code 35, 0.6 s, nothing created** (was: 403/permission_denied/9).
+Premium fixed entitlement; a different, content-hash-based refusal
+appeared underneath. 4 further small hashes (documentary/classic,
+106–466 MB): all 451/code 35 in <1 s each. No resources created by any
+refusal.
+
+**3. Bounded acquisition, Ubuntu 24.04.1 ISO (2.7 GB, corpus hash).**
+add 201 + id in 0.6 s → file tree (1 file) +16.2 s → selectFiles 204 →
+`downloading` (22–48 seeds, ~22–44 MB/s peak) → **`downloaded` +428 s
+(~7.1 min)** → delete 204, verify 404 (RD delete is clean — contrast
+TorBox's stale listing). Full workflow observed live; account left with
+zero probe residue (42 pre-existing items, unchanged).
+
+**4. HashSucker path.** Real `createRdEnsure` + real client + scratch
+in-memory store on the Ubuntu hash: probe created → tree read → mapping
+step returned `absent` → `selectFiles` never reached → hygienic cleanup
+(`cleaned:true`, 0 scratch placements, 0 account residue, 3 API calls,
+2.4 s). Follow-up isolated the cause: RD reports the single file as
+`/ubuntu-…-server-amd64.iso`, and the classifier's playable-video
+extension set (`.mkv .mp4 .avi .mov .wmv .flv .webm .m4v .mpg .mpeg .ts`)
+correctly excludes `.iso` — fail-closed working as designed, not a bug.
+(Adjacent note, untouched: `.m2ts` is also absent from that set.)
+Construction identical to raw control (same `client.addMagnet`); mapping
++ persistence semantics verified; cleanup verified. The downloaded-persist
+branch needs no separate proof (pure local DB writes, unit-covered).
+
+**5. Narrow TorBox comparison (single-sample each, no global winner).**
+
+| | TorBox (prior slice) | RD (now) |
+|---|---|---|
+| add accept | +5.9 s | +0.6 s |
+| metadata/tree | ≤36 s (metaDL seen) | +16.2 s, exact path+bytes |
+| file select | none (whole torrent always) | 204, single-file proven live; multi-file selective by contract+code, unobserved live |
+| to playable | ≤5.6 min/106 MB upper bound (mylist-600 s caveat) | 7.1 min/2.7 GB measured (~22–48 seeds) |
+| cleanup | lowercase-delete works; listing stale 35 min+ | delete 204 + verify 404, immediate |
+| API calls | ~23 | ~45 (15 s poll cadence) |
+
+**Provider-neutral prepare: genuinely viable.** Both backends accept,
+download, expose trees, and clean up; selectivity favors RD on paper,
+whole-torrent simplicity favors TorBox. Neither requires new backends,
+pickers, or swarm.
+
+**6. Retry-storm reinterpretation.** The 29 hard + 96 transient were
+free-tier fallout (8 unique hashes + resolver-safe cascade), NOT
+evidence about RD reliability under premium. Under premium, acceptable
+content succeeds first try; infringing content fails hard immediately
+(memoized, no retry). Separately reported (not implemented): a cheap
+account-state guard (one `/user` read → skip addMagnet probes while
+non-premium) would convert future expiry windows from ~8–16 doomed
+calls/decision to one clear failure. Bounds respected: reported only.
+
+### WHAT REMAINS UNPROVEN
+
+- Multi-GB/obscure TorBox tails; multi-file RD selective download live;
+  requestdl/progressive behavior on either (still assume full-required).
+- Premium-period RD unrestrict behavior (delivery seam was 403/code-20
+  under free; unretested — acquisition scope).
+
+### WHAT WAS LEARNED
+
+- 403 → 451 across the renewal boundary is the cleanest possible
+  entitlement-vs-content separation: same request, same account, only
+  the tier changed, and the refusal class moved exactly one layer down.
+- Fail-closed mapping correctly refused a non-video file with full
+  cleanup — the "absent" outcome was the system working, and chasing it
+  as a bug would have been wrong.
+- RD delete verifies immediately (404); TorBox delete does not (stale
+  reads) — hygiene verification must be provider-specific.
+
+### WHAT ASSUMPTIONS CHANGED
+
+- "TorBox-only" (prior slice) → withdrawn as a standing claim: scoped
+  to the expired-account window only. Both providers are acquisition-
+  capable today; RD adds selectivity + clean deletes.
+- Historical RD failures reclassified: account-expiry fallout, zero
+  information about premium reliability.
+
+### WHAT SHOULD BE UPDATED (list files)
+
+- Done in-slice: this log,
+  `docs/retrospectives/2026-10-24-rd-recheck.md`, `PLANS.md` (slice
+  entry), `handoff/CURRENT.md` (session section).
+
+### WHAT SHOULD BE DELETED OR SIMPLIFIED
+
+- Nothing.
+
+### NEXT SMALLEST EARNED SLICE
+
+Not selected — a human disposes. Unchanged candidate: flag-gated
+demand-linked prepare experiment (now provider-neutral with evidence).
+Explicitly NOT started: prepare implementation, torrent streamer.
+
+### VERDICT
+
+**RD ACQUISITION — RESTORED.** Premium active; add accepted (201);
+2.7 GB downloaded in 7.1 min with live file tree + selective select +
+verified cleanup; helper path proven through mapping/cleanup with zero
+production writes. Residual scope: content-filter (451/code 35) blocks
+5/5 tested media hashes — real catalog acquisitions will hit it; the
+filter, not the account, is now the binding constraint on RD.
