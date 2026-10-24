@@ -51,7 +51,26 @@ function authFailure(err) {
   return status === 401 || status === 403 || category === 'authentication' || category === 'authorization';
 }
 
-export function createTorBoxPrepareAdapter({ apiKey, fetchFn = fetch, timeoutMs, createPlacementFn = null, now = () => Date.now(), log = () => {} } = {}) {
+/**
+ * Full inventory rows for persistence. TorBox downloads whole torrents
+ * (no file selection exists), so every listed file is materialized and
+ * the mapped file is flagged — stated honestly, never invented.
+ */
+function buildInventory(files, mappedId) {
+  return (Array.isArray(files) ? files : []).map((f) => {
+    const id = String(f?.id ?? f?.file_id ?? '');
+    const p = String(f?.name ?? f?.path ?? '');
+    return {
+      providerFileId: id,
+      path: p,
+      name: p.split('/').filter(Boolean).pop() || 'file',
+      size: Number(f?.size ?? f?.bytes ?? NaN),
+      selected: id !== '' && id === String(mappedId),
+    };
+  }).filter((f) => f.providerFileId && Number.isSafeInteger(f.size) && f.size > 0);
+}
+
+export function createTorBoxPrepareAdapter({ apiKey, fetchFn = fetch, timeoutMs, createPlacementFn = null, store = null, now = () => Date.now(), log = () => {} } = {}) {
   // Placement creation goes through the ONE existing construction path
   // (provider surface → PLACEMENT_CREATE capability), only with acquisition
   // allowed. Injectable for tests; production passes the real surface.
@@ -131,8 +150,29 @@ export function createTorBoxPrepareAdapter({ apiKey, fetchFn = fetch, timeoutMs,
     const hash = String(infoHash).toLowerCase();
     const mg = magnet || `magnet:?xt=urn:btih:${hash}`;
 
-    // 1. Durable-first is the driver's job (existing placement check
-    // before adapter selection). This adapter always mints.
+    // 1. Durable-first: an existing placement for this exact Release needs
+    // no provider work. Verify usability with one bounded snapshot read.
+    try {
+      const known = (store && typeof store.findPlacementByInfoHash === 'function')
+        ? store.findPlacementByInfoHash('torbox', hash)
+        : null;
+      const knownId = known?.providerResourceId;
+      if (typeof knownId === 'string' && knownId.trim() !== '') {
+        apiCalls += 1;
+        const t = await getTorBoxTorrent(knownId.trim(), { apiKey, fetchFn, timeoutMs });
+        if (t && readyState(t.download_state ?? t.state ?? t.status) === 'ready') {
+          const mapped = mapTargetFile(t.files, { filename, size, season, episode });
+          if (!mapped.error) {
+            return {
+              ready: true, accepted: true, providerResourceId: knownId.trim(),
+              status: 'ready', files: t.files, mapped,
+              inventoryFiles: buildInventory(t.files, mapped.providerFileId),
+              apiCalls, source: 'durable',
+            };
+          }
+        }
+      }
+    } catch { /* fall through: a stale placement is not proof */ }
     // 2. Create with acquisition allowed (NOT cache-only).
     let torrentId = null;
     try {
@@ -159,15 +199,20 @@ export function createTorBoxPrepareAdapter({ apiKey, fetchFn = fetch, timeoutMs,
       const state = readyState(t.download_state ?? t.state ?? t.status);
       const mapped = mapTargetFile(t.files, { filename, size, season, episode });
       if (mapped.error) {
-        if (state === 'pending' && (t.files ?? []).length === 0) {
-          // Tree not resolved yet — poll path re-maps until deadline.
-          return { accepted: true, providerResourceId: String(torrentId), status: state, files: [], apiCalls };
+        // An unresolved tree (no mappable files yet) on a live resource is
+        // not a verdict no matter which non-error state label TorBox reports
+        // immediately post-add (pending, checking, queued, …): the poll path
+        // re-maps on every observation until the deadline. Only a
+        // concretely-wrong RESOLVED tree (size mismatch, ambiguity, episode
+        // mismatch) or an error state fails closed with cleanup.
+        if ((mapped.error === 'tb-no-files' || mapped.error === 'tb-no-mappable-files') && state !== 'error') {
+          return { accepted: true, providerResourceId: String(torrentId), status: state, files: t.files ?? [], apiCalls };
         }
         await cleanupQuietly(torrentId, true);
         return { retryable: false, apiCalls, cleaned: true, detail: mapped.error };
       }
       if (state === 'ready') {
-        return { ready: true, accepted: true, providerResourceId: String(torrentId), status: state, files: t.files, mapped, apiCalls };
+        return { ready: true, accepted: true, providerResourceId: String(torrentId), status: state, files: t.files, mapped, inventoryFiles: buildInventory(t.files, mapped.providerFileId), apiCalls };
       }
       if (state === 'error') {
         await cleanupQuietly(torrentId, true);
@@ -192,7 +237,7 @@ export function createTorBoxPrepareAdapter({ apiKey, fetchFn = fetch, timeoutMs,
       if (state === 'ready') {
         const mapped = mapTargetFile(t.files, { filename, size, season, episode });
         if (mapped.error) return { retryable: false, apiCalls, detail: mapped.error };
-        return { ready: true, accepted: true, status: state, files: t.files, mapped, apiCalls };
+        return { ready: true, accepted: true, status: state, files: t.files, mapped, inventoryFiles: buildInventory(t.files, mapped.providerFileId), apiCalls };
       }
       if (state === 'error') return { retryable: false, apiCalls, detail: 'tb-status-error' };
       const mapped = mapTargetFile(t.files, { filename, size, season, episode });

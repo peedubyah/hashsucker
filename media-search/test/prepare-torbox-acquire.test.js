@@ -61,6 +61,24 @@ test('acquire returns accepted while downloading (whole torrent, stated)', async
   assert.ok(r.mapped, 'tree mapped even before ready');
 });
 
+test('acquire keeps the resource when the tree is unresolved in a non-pending state', async () => {
+  // Live TorBox reports checking/queued/downloading with an empty tree
+  // immediately post-add when metadata has not resolved yet. That is not a
+  // verdict: the poll path re-maps until the deadline. Only a resolved but
+  // wrong tree (or an error state) deletes. Regression: the adapter used to
+  // delete here and storm create/delete until attempts exhausted.
+  const { fetchFn, calls } = fakeFetch({ steps: [snapshot('checking', [])] });
+  const adapter = createTorBoxPrepareAdapter({
+    apiKey: 'k',
+    fetchFn,
+    createPlacementFn: async () => ({ providerResourceId: '99' }),
+  });
+  const r = await adapter.acquire({ infoHash: HASH, ...CAND });
+  assert.equal(toPrepareOutcome(r), PREPARE_OUTCOME.ACCEPTED);
+  assert.equal(r.providerResourceId, '99', 'resource kept for the poll path');
+  assert.ok(!calls.some((c) => String(c.url).includes('controltorrent')), 'nothing deleted');
+});
+
 test('acquire cleans up on unmappable tree', async () => {
   const { fetchFn, calls } = fakeFetch({
     steps: [snapshot('cached', [{ id: 1, name: 'other.mkv', size: 5 }]), { json: { success: true } }],
